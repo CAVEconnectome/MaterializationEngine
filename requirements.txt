@@ -1,4 +1,4 @@
--e git+git://github.com/seung-lab/PyChunkedGraph.git@vminnie-90#egg=pychunkedgraph
+-e git+git://github.com/seung-lab/PyChunkedGraph.git@v1.9.7#egg=pychunkedgraph
 dynamicannotationdb>=2.0.1
 emannotationschemas>=3.1.4
 annotationframeworkclient==2.4.0
