@@ -52,8 +52,7 @@ def remove_expired_databases(delete_threshold: int=5) -> str:
             # get number of expired dbs that are ready for deletion
             try:
                 expired_results = session.query(AnalysisVersion).\
-                    filter(AnalysisVersion.expires_on <= current_time).\
-                    filter(AnalysisVersion.valid == True).all()
+                    filter(AnalysisVersion.expires_on <= current_time).all()
                 expired_versions = [str(expired_db) for expired_db in expired_results]
 
             except Exception as sql_error:
