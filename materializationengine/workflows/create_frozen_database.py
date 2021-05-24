@@ -1,4 +1,6 @@
 import datetime
+import json
+import os
 from collections import OrderedDict
 from typing import List
 
@@ -10,6 +12,7 @@ from emannotationschemas import get_schema
 from emannotationschemas.flatten import create_flattened_schema
 from emannotationschemas.models import create_table_dict, make_flat_model
 from materializationengine.celery_init import celery
+from materializationengine.blueprints.materialize.api import get_datastack_info
 from materializationengine.database import (create_session,
                                             dynamic_annotation_cache,
                                             sqlalchemy_cache)
@@ -17,8 +20,9 @@ from materializationengine.errors import IndexMatchError
 from materializationengine.index_manager import index_cache
 from materializationengine.models import (AnalysisTable, AnalysisVersion, Base,
                                           MaterializedMetadata)
-from materializationengine.shared_tasks import (fin, get_materialization_info,
-                                                query_id_range, add_index)
+from materializationengine.shared_tasks import (add_index, fin,
+                                                get_materialization_info,
+                                                query_id_range)
 from materializationengine.utils import (create_annotation_model,
                                          create_segmentation_model,
                                          get_config_param)
@@ -28,8 +32,31 @@ from sqlalchemy.engine import reflection
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import OperationalError
 
-
 celery_logger = get_task_logger(__name__)
+
+@celery.task(name="process:run_periodic_materialize_database")
+def run_periodic_materialize_database(days_to_expire:int=5) -> None:
+    """
+    Run update database workflow. Steps are as follows:
+    1. Find missing segmentation data in a given datastack and lookup.
+    2. Update expired root ids
+
+    """
+    try:
+        datastacks = json.loads(os.environ['DATASTACKS'])
+    except:
+        datastacks = get_config_param('DATASTACKS')
+
+    for datastack in datastacks:
+        try:
+            celery_logger.info(f"Materializing {datastack} database")
+            datastack_info = get_datastack_info(datastack)  
+            task = create_versioned_materialization_workflow.s(datastack_info, days_to_expire)
+            task.apply_async()
+        except Exception as e:
+            celery_logger.error(e)
+            raise e
+    return True
 
 
 @celery.task(name="process:create_versioned_materialization_workflow")
