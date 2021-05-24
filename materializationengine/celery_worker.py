@@ -84,7 +84,7 @@ def setup_periodic_tasks(sender, **kwargs):
             days_to_expire=30
         ),
         "remove_expired_databases": remove_expired_databases.s(delete_threshold=5),
-        "update_live_database_workflow": run_periodic_database_update.s(),
+        "run_periodic_database_update": run_periodic_database_update.s(),
     }
 
     # remove expired task results in redis broker
