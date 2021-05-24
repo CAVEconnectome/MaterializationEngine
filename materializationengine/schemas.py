@@ -18,7 +18,7 @@ class AnalysisTableSchema(SQLAlchemyAutoSchema):
 
 class CronField(fields.Field):
     def _deserialize(self, value, attr, data, **kwargs):
-        if isinstance(value, str) or isinstance(value, int) or isinstance(value, list):
+        if isinstance(value, (str, int, list)):
             return value
         else:
             raise ValidationError('Field should be str, int or list')

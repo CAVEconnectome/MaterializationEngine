@@ -18,7 +18,7 @@ def make_root_id_column_name(column_name: str):
     return f"{pos}_{pos_type}_root_id"
 
 
-def build_materailized_table_id(aligned_volume: str, table_name: str) -> str:
+def build_materialized_table_id(aligned_volume: str, table_name: str) -> str:
     return f"mat__{aligned_volume}__{table_name}"
 
 

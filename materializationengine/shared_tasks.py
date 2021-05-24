@@ -214,6 +214,7 @@ def update_metadata(self, mat_metadata: dict):
 @celery.task(name="process:add_index",
              bind=True,
              acks_late=True,
+             task_reject_on_worker_lost=True,
              autoretry_for=(Exception,),
              max_retries=3)
 def add_index(self, database: dict, command: str):

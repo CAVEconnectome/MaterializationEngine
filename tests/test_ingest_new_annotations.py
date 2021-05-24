@@ -3,10 +3,9 @@
 # the tasks
 import sys
 import logging
-from unittest.mock import MagicMock
-
-sys.modules['materializationengine.chunkedgraph_gateway'] = MagicMock()
-sys.modules['cloudvolume'] = MagicMock()
+from unittest import mock
+sys.modules['materializationengine.chunkedgraph_gateway'] = mock.MagicMock()
+sys.modules['cloudvolume'] = mock.MagicMock()
 
 import numpy as np
 from materializationengine.workflows.ingest_new_annotations import (
@@ -17,7 +16,7 @@ from materializationengine.workflows.ingest_new_annotations import (
 from numpy import nan
 
 
-missing_segmentations_data = {'post_pt_supervoxel_id': [nan],
+missing_segmentation_data = {'post_pt_supervoxel_id': [nan],
                               'pre_pt_supervoxel_id': [nan],
                               'post_pt_position': [
                                   [73000, 83000, 93000],
@@ -72,26 +71,25 @@ def test_get_annotations_with_missing_supervoxel_ids(mat_metadata):
     id_chunk_range = [1, 5]
     annotations = get_annotations_with_missing_supervoxel_ids(
         mat_metadata, id_chunk_range)
-    assert annotations == missing_segmentations_data
+    assert annotations == missing_segmentation_data
 
+@mock.patch('materializationengine.workflows.ingest_new_annotations.cloudvolume.CloudVolume')
+def test_get_cloudvolume_supervoxel_ids(mock_cv, mat_metadata):
+    mock_cv.return_value = True
 
-def test_get_cloudvolume_supervoxel_ids(monkeypatch, mat_metadata):
-
-    def mock_cloudvolume(*args, **kwargs):
-        return np.ndarray((1,), buffer=np.array([10000000]), dtype=int)
-    monkeypatch.setattr(
-        "materializationengine.workflows.ingest_new_annotations.get_sv_id", mock_cloudvolume)
-    supervoxel_data = get_cloudvolume_supervoxel_ids(
-        missing_segmentations_data, mat_metadata)
+    with mock.patch("materializationengine.workflows.ingest_new_annotations.get_sv_id") as mock_get_sv_id:
+        mock_get_sv_id.return_value = np.ndarray((1,), buffer=np.array([10000000]), dtype=int)
+        supervoxel_data = get_cloudvolume_supervoxel_ids(
+            missing_segmentation_data, mat_metadata)
     assert supervoxel_data == mocked_supervoxel_data
 
+@mock.patch('materializationengine.workflows.ingest_new_annotations.chunkedgraph_cache.init_pcg')
+def test_get_new_root_ids(mock_chunkgraph, mat_metadata, annotation_data):
+    mock_chunkgraph.return_value = True
 
-def test_get_new_root_ids(monkeypatch, mat_metadata, annotation_data):
-    def mock_get_roots(*args, **kwargs):
-        return np.ndarray((1,), buffer=np.array([20000000]), dtype=int)
-    monkeypatch.setattr(
-        "materializationengine.workflows.ingest_new_annotations.get_root_ids", mock_get_roots)
-    root_ids = get_new_root_ids(mocked_supervoxel_data, mat_metadata)
+    with mock.patch("materializationengine.workflows.ingest_new_annotations.get_root_ids") as mock_get_roots:
+        mock_get_roots.return_value = np.ndarray((1,), buffer=np.array([20000000]), dtype=int)
+        root_ids = get_new_root_ids(mocked_supervoxel_data, mat_metadata)
     assert root_ids == [{'post_pt_supervoxel_id': 10000000,
                         'pre_pt_supervoxel_id': 10000000,
                         'post_pt_root_id': 20000000,

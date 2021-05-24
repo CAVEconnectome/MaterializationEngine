@@ -24,26 +24,10 @@ materializationengine.app module
    :undoc-members:
    :show-inheritance:
 
-materializationengine.celery\_app module
-----------------------------------------
-
-.. automodule:: materializationengine.celery_app
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 materializationengine.celery\_init module
 -----------------------------------------
 
 .. automodule:: materializationengine.celery_init
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-materializationengine.celery\_status module
--------------------------------------------
-
-.. automodule:: materializationengine.celery_status
    :members:
    :undoc-members:
    :show-inheritance:

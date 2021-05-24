@@ -1,20 +1,18 @@
+import datetime
 import json
 import logging
 import pathlib
 import time
 import uuid
-import sys
-import datetime
 
 import docker
 import psycopg2
 import pytest
+from dynamicannotationdb.annotation_client import DynamicAnnotationClient
 from dynamicannotationdb.materialization_client import \
     DynamicMaterializationClient
-from dynamicannotationdb.annotation_client import DynamicAnnotationClient
 from materializationengine.app import create_app
-from materializationengine.celery_app import create_celery
-from materializationengine.celery_init import celery as celery_instance
+from materializationengine.celery_worker import create_celery
 from materializationengine.models import Base
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -81,7 +79,7 @@ def test_app():
 @pytest.fixture(scope='session')
 def test_celery_app(test_app):
     test_logger.info(f"Starting test celery worker...")
-    celery = create_celery(test_app, celery_instance)
+    celery = create_celery(test_app)
     yield celery
 
 # Setup docker image if '--docker=True' in pytest args
@@ -91,7 +89,7 @@ def setup_docker_image(docker_mode, mat_metadata):
         postgis_docker_image = mat_metadata['postgis_docker_image']
         aligned_volume = mat_metadata['aligned_volume']
         
-        db_enviroment = [
+        db_environment = [
         f"POSTGRES_USER=postgres",
         f"POSTGRES_PASSWORD=postgres",
         f"POSTGRES_DB={aligned_volume}"
@@ -108,7 +106,7 @@ def setup_docker_image(docker_mode, mat_metadata):
                 hostname='test_postgres',
                 auto_remove=True,
                 name=container_name,
-                environment=db_enviroment,
+                environment=db_environment,
                 ports={"5432/tcp": 5432},
             )
             test_logger.info('STARTING POSTGIS DOCKER IMAGE')

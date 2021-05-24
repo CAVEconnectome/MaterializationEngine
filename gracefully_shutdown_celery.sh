@@ -25,7 +25,7 @@ while : ; do
 
 done
 echo "*** EVENT: Sending kill signal to sidecars..."
-touch /tmp/shutdown/kill_sidecar
+touch /home/nginx/tmp/shutdown/kill_sidecar
 
 
 

@@ -4,13 +4,12 @@ import os
 from werkzeug.serving import WSGIRequestHandler
 
 from materializationengine.app import create_app
-from materializationengine.celery_init import celery
 from materializationengine.celery_worker import create_celery
 
 HOME = os.path.expanduser("~")
 
 application = create_app()
-celery = create_celery(application, celery)
+celery = create_celery(application)
 
 if __name__ == "__main__":
 

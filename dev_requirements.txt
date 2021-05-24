@@ -4,7 +4,7 @@ emannotationschemas>=3.1.1
 annotationframeworkclient==2.4.0
 cloud-volume==1.21.1
 cloud-files==0.12.1
-pandas==1.0.3
+pandas>=1.2.4
 Flask==1.1.2
 SQLAlchemy<1.4
 Flask-SQLAlchemy==2.4.4
@@ -22,7 +22,7 @@ alembic==1.4.2
 celery==4.4.7
 cachetools==4.1.1
 gevent==20.6.2
-gcsfs==0.7.1
+gcsfs>=0.8.0
 pyarrow>=2.0.0
 flask_cors
 numpy>=1.20
