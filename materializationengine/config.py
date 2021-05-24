@@ -50,7 +50,7 @@ class BaseConfig:
             1, 5], 'task': 'run_weekly_periodic_materialization'},
         {"name": "Long Term Support Materialized Database (30 days)", "minute": 10, "hour": 8,
          'day_of_week': 3, 'day_of_month': '1-7,15-21', 'task': 'run_lts_periodic_materialization'},
-        {"name": "Update Live Database", "hour": 9-17, 'day_of_week': '1-5', 'task': 'run_periodic_database_update'},         
+        {"name": "Update Live Database", "hour": '9-17', 'day_of_week': '1-5', 'task': 'run_periodic_database_update'},         
         {"name": "Remove Expired Databases (Midnight)", "minute": 0,
          "hour": 8, 'task': 'remove_expired_databases'},
     ]
