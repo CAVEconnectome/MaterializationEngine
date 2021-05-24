@@ -1,7 +1,7 @@
 import logging
 import sys
 
-from celery.app import builtins
+from celery.app.builtins import add_backend_cleanup_task
 from celery.schedules import crontab
 from celery.signals import after_setup_logger
 from celery.utils.log import get_task_logger
@@ -32,8 +32,11 @@ def create_celery(app=None):
             "result_serializer": "pickle",
             "accept_content": ["pickle"],
             "optimization": "fair",
+            "task_send_sent_event": True,
+            "worker_send_task_events": True,
             "worker_prefetch_multiplier": 1,
-            "result_expires": 86400, # results expire in broker after 1 day
+            "result_expires": 86400,  # results expire in broker after 1 day
+            "visibility_timeout": 8000 # timeout (s) for tasks to be sent back to broker queue
         }
     )  
 
@@ -84,7 +87,7 @@ def setup_periodic_tasks(sender, **kwargs):
     # remove expired task results in redis broker
     sender.add_periodic_task(
         crontab(hour=0, minute=0, day_of_week="*", day_of_month="*", month_of_year="*"),
-        builtins.add_backend_cleanup_task(celery),
+        add_backend_cleanup_task(celery),
         name="Clean up back end results",
     )
 
