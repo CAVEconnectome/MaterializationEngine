@@ -148,10 +148,13 @@ def get_expired_root_ids(mat_metadata: dict, expired_chunk_size: int = 100):
 
 def lookup_expired_root_ids(pcg_table_name, last_updated_ts, materialization_time_stamp):
     cg = chunkedgraph_cache.init_pcg(pcg_table_name)
-
-    old_roots, __ = cg.get_proofread_root_ids(
-        last_updated_ts, materialization_time_stamp)
-    return old_roots
+    try:
+        old_roots, __ = cg.get_proofread_root_ids(
+            last_updated_ts, materialization_time_stamp)
+        return old_roots
+    except ValueError as e:
+        celery_logger.info(f"No expired root ids found between {last_updated_ts} and {materialization_time_stamp}: {e}")
+        return None
 
 
 def get_supervoxel_ids(root_id_chunk: list, mat_metadata: dict):
