@@ -68,25 +68,31 @@ def update_database_workflow(datastack_info: dict):
     for mat_metadata in mat_info:
         annotation_chunks = chunk_annotation_ids(mat_metadata)
         chunked_roots = get_expired_root_ids(mat_metadata)
+        if chunked_roots:
+            update_expired_roots_workflow = update_root_ids_workflow(
+                                                mat_metadata, chunked_roots)
+
         if mat_metadata['row_count'] < 1_000_000: 
             new_annotations = True
             new_annotation_workflow = ingest_new_annotations_workflow(
                 mat_metadata, annotation_chunks)
-
         else:
-            new_annotations = False
+            new_annotations = None
 
-        update_expired_roots_workflow = update_root_ids_workflow(
-            mat_metadata, chunked_roots)
 
-        # if there are missing annotations
-        if new_annotations:
-            ingest_and_freeze_workflow = chain(
+        if chunked_roots:
+            if new_annotations:
+                ingest_and_update_root_ids_workflow = chain(
                 new_annotation_workflow, update_expired_roots_workflow)
-            update_live_database_workflow.append(ingest_and_freeze_workflow)
+                update_live_database_workflow.append(ingest_and_update_root_ids_workflow)
+            else:
+                update_live_database_workflow.append(update_expired_roots_workflow)
         else:
-            update_live_database_workflow.append(update_expired_roots_workflow)
-    
+            if new_annotations:
+                update_live_database_workflow.append(new_annotation_workflow)
+            else:
+                return "Nothing to update"
+
     run_update_database_workflow = chain(
          chord(update_live_database_workflow, fin.si()),
     )
