@@ -85,9 +85,9 @@ def get_materialization_info(datastack_info: dict,
             row_count = db._get_table_row_count(
                 annotation_table, filter_valid=True)
             md = db.get_table_metadata(annotation_table)
-            vx = md['voxel_resolution_x']
-            vy = md['voxel_resolution_y']
-            vz = md['voxel_resolution_z']
+            vx = md.get('voxel_resolution_x', None)
+            vy = md.get('voxel_resolution_y', None)
+            vz = md.get('voxel_resolution_z', None)
             vx = vx if vx else 1.0
             vy = vy if vy else 1.0
             vz = vz if vz else 1.0
