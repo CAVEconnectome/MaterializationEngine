@@ -19,7 +19,6 @@ from materializationengine.utils import (create_annotation_model,
 celery_logger = get_task_logger(__name__)
 
 
-
 def chunk_annotation_ids(mat_metadata: dict) -> List[List]:
     """Creates list of chunks with start:end index for chunking queries for materialziation.
 
@@ -36,7 +35,7 @@ def chunk_annotation_ids(mat_metadata: dict) -> List[List]:
     celery_logger.info("Chunking supervoxel ids")
     AnnotationModel = create_annotation_model(mat_metadata)
     chunk_size = mat_metadata.get('chunk_size', None)
-    
+
     if not chunk_size:
         ROW_CHUNK_SIZE = get_config_param("MATERIALIZATION_ROW_CHUNK_SIZE")
         chunk_size = ROW_CHUNK_SIZE
@@ -45,15 +44,17 @@ def chunk_annotation_ids(mat_metadata: dict) -> List[List]:
 
     return [chunk for chunk in chunked_ids]
 
+
 @celery.task(name="process:fin", acks_late=True, bind=True)
 def fin(self, *args, **kwargs):
     return True
 
+
 def get_materialization_info(datastack_info: dict,
-                             analysis_version: int=None,
-                             materialization_time_stamp: datetime.datetime.utcnow=None,
-                             skip_table:bool=False,
-                             row_size:int=1_000_000) -> List[dict]:
+                             analysis_version: int = None,
+                             materialization_time_stamp: datetime.datetime.utcnow = None,
+                             skip_table: bool = False,
+                             row_size: int = 1_000_000) -> List[dict]:
     """Initialize materialization by an aligned volume name. Iterates thorugh all
     tables in a aligned volume database and gathers metadata for each table. The list
     of tables are passed to workers for materialization. 
@@ -71,17 +72,27 @@ def get_materialization_info(datastack_info: dict,
     aligned_volume_name = datastack_info['aligned_volume']['name']
     pcg_table_name = datastack_info['segmentation_source'].split("/")[-1]
     segmentation_source = datastack_info.get('segmentation_source')
-    
+
     if not materialization_time_stamp:
         materialization_time_stamp = datetime.datetime.utcnow()
-    
+
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    
+
     try:
         annotation_tables = db.get_valid_table_names()
         metadata = []
         for annotation_table in annotation_tables:
-            row_count = db._get_table_row_count(annotation_table, filter_valid=True)
+            row_count = db._get_table_row_count(
+                annotation_table, filter_valid=True)
+            md = db.get_table_metadata(annotation_table)
+            vx = md['voxel_resolution_x']
+            vy = md['voxel_resolution_y']
+            vz = md['voxel_resolution_z']
+            vx = vx if vx else 1.0
+            vy = vy if vy else 1.0
+            vz = vz if vz else 1.0
+            voxel_resolution = [vx, vy, vz]
+
             if row_count >= row_size and skip_table:
                 continue
             else:
@@ -95,16 +106,17 @@ def get_materialization_info(datastack_info: dict,
                                                                                    pcg_table_name)
                         create_segmentation_table = False
                     except AttributeError as e:
-                        celery_logger.warning(f"SEGMENTATION TABLE DOES NOT EXIST: {e}")
+                        celery_logger.warning(
+                            f"SEGMENTATION TABLE DOES NOT EXIST: {e}")
                         segmentation_metadata = {'last_updated': None}
                         create_segmentation_table = True
-                    last_updated_time_stamp = segmentation_metadata.get('last_updated', None)
+                    last_updated_time_stamp = segmentation_metadata.get(
+                        'last_updated', None)
 
                     if not last_updated_time_stamp:
                         last_updated_time_stamp = None
                     else:
                         last_updated_time_stamp = str(last_updated_time_stamp)
-
 
                     table_metadata = {
                         'datastack': datastack_info['datastack'],
@@ -120,7 +132,7 @@ def get_materialization_info(datastack_info: dict,
                         'temp_mat_table_name': f"temp__{annotation_table}",
                         'pcg_table_name': pcg_table_name,
                         'segmentation_source': segmentation_source,
-                        'coord_resolution': [4,4,40],
+                        'coord_resolution':  voxel_resolution,
                         'materialization_time_stamp': str(materialization_time_stamp),
                         'last_updated_time_stamp': last_updated_time_stamp,
                         'chunk_size': 100000,
@@ -142,6 +154,7 @@ def get_materialization_info(datastack_info: dict,
 @celery.task(name="process:collect_data", acks_late=True)
 def collect_data(*args, **kwargs):
     return args, kwargs
+
 
 def query_id_range(column, start_id: int, end_id: int):
     if end_id:
@@ -180,7 +193,7 @@ def chunk_ids(mat_metadata, model, chunk_size: int):
 def update_metadata(self, mat_metadata: dict):
     """Update 'last_updated' column in the segmentation 
     metadata table for a given segmentation table.
-    
+
 
     Args:
         mat_metadata (dict): materialziation metadata
@@ -192,12 +205,14 @@ def update_metadata(self, mat_metadata: dict):
     segmentation_table_name = mat_metadata['segmentation_table_name']
 
     session = sqlalchemy_cache.get(aligned_volume)
-    
+
     materialization_time_stamp = mat_metadata['materialization_time_stamp']
     try:
-        last_updated_time_stamp = datetime.datetime.strptime(materialization_time_stamp, '%Y-%m-%d %H:%M:%S.%f')
+        last_updated_time_stamp = datetime.datetime.strptime(
+            materialization_time_stamp, '%Y-%m-%d %H:%M:%S.%f')
     except ValueError:
-        last_updated_time_stamp = datetime.datetime.strptime(materialization_time_stamp, '%Y-%m-%dT%H:%M:%S.%f')
+        last_updated_time_stamp = datetime.datetime.strptime(
+            materialization_time_stamp, '%Y-%m-%dT%H:%M:%S.%f')
 
     try:
         seg_metadata = session.query(SegmentationMetadata).filter(
@@ -210,6 +225,7 @@ def update_metadata(self, mat_metadata: dict):
     finally:
         session.close()
     return {f"Table: {segmentation_table_name}": f"Time stamp {materialization_time_stamp}"}
+
 
 @celery.task(name="process:add_index",
              bind=True,
@@ -249,6 +265,6 @@ def add_index(self, database: dict, command: str):
         return "Index already exists"
     except Exception as e:
         celery_logger.error(f"Index creation failed: {e}")
-        raise self.retry(exc=e, countdown=3)        
-    
+        raise self.retry(exc=e, countdown=3)
+
     return f"Index {command} added to table"
