@@ -49,6 +49,11 @@ def chunk_annotation_ids(mat_metadata: dict) -> List[List]:
 def fin(self, *args, **kwargs):
     return True
 
+
+@celery.task(name="process:workflow_complete", acks_late=True, bind=True)
+def workflow_complete(self, workflow_name):
+    return f"{workflow_name} completed successfully"
+
 def get_materialization_info(datastack_info: dict,
                              analysis_version: int=None,
                              materialization_time_stamp: datetime.datetime.utcnow=None,
