@@ -7,6 +7,7 @@ from celery.utils.log import get_task_logger
 from materializationengine.blueprints.materialize.api import get_datastack_info
 from materializationengine.celery_init import celery
 from materializationengine.shared_tasks import (chunk_annotation_ids, fin,
+                                                workflow_complete,
                                                 get_materialization_info)
 from materializationengine.utils import get_config_param
 from materializationengine.workflows.ingest_new_annotations import \
@@ -72,13 +73,12 @@ def update_database_workflow(datastack_info: dict):
             update_expired_roots_workflow = update_root_ids_workflow(
                                                 mat_metadata, chunked_roots)
 
-        if mat_metadata['row_count'] < 1_000_000: 
+        if mat_metadata['row_count'] < 1_000_000:
             new_annotations = True
             new_annotation_workflow = ingest_new_annotations_workflow(
                 mat_metadata, annotation_chunks)
         else:
             new_annotations = None
-
 
         if chunked_roots:
             if new_annotations:
@@ -94,6 +94,6 @@ def update_database_workflow(datastack_info: dict):
                 return "Nothing to update"
 
     run_update_database_workflow = chain(
-         chord(update_live_database_workflow, fin.si()),
+         chord(update_live_database_workflow, workflow_complete.si("update_root_ids")),
     )
     run_update_database_workflow.apply_async()
