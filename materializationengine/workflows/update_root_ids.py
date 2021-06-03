@@ -31,11 +31,16 @@ def expired_root_id_workflow(datastack_info: dict):
     workflow = []
     for mat_metadata in mat_info:
         chunked_roots = get_expired_root_ids(mat_metadata)
-        process_root_ids = update_root_ids_workflow(mat_metadata, chunked_roots)  # final task which will process a return status/timing etc...
-        workflow.append(process_root_ids)
+        if chunked_roots:
+            process_root_ids = update_root_ids_workflow(mat_metadata, chunked_roots)  # final task which will process a return status/timing etc...
+            workflow.append(process_root_ids)
+        else:
+            continue
+    if len(workflow) <= 1:
+        return "No root ids to update"
+
     workflow = chord(workflow, fin.s())
-    status = workflow.apply_async()
-    return status
+    return workflow.apply_async()
 
 
 def update_root_ids_workflow(mat_metadata: dict, chunked_roots: List[int]):
@@ -132,9 +137,13 @@ def get_expired_root_ids(mat_metadata: dict, expired_chunk_size: int = 100):
     old_roots = lookup_expired_root_ids(pcg_table_name, last_updated_ts, materialization_time_stamp)
     is_empty = np.all((old_roots == []))
 
-    if is_empty:
+    if is_empty or old_roots is None:
         return None
+    else:
+        return generate_chunked_root_ids(old_roots, expired_chunk_size)
 
+
+def generate_chunked_root_ids(old_roots, expired_chunk_size):
     if len(old_roots) < expired_chunk_size:
         chunks = len(old_roots)
     else:
