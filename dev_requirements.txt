@@ -15,7 +15,7 @@ middle-auth-client==3.2.5
 marshmallow-sqlalchemy==0.23.1
 flask-marshmallow==0.13.0
 Flask-Admin==1.5.6
-Flask-Cors==3.0.8
+Flask-Cors==3.0.9
 flask-restx==0.2.0
 flask-accepts==0.17.3
 alembic==1.4.2
