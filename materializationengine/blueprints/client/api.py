@@ -31,7 +31,7 @@ from middle_auth_client import (auth_required, auth_requires_admin,
 from sqlalchemy.engine.url import make_url
 from flask_restx import inputs
 import time
-__version__ = "1.5.0"
+__version__ = "2.0.0"
 
 
 authorizations = {
