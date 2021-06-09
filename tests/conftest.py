@@ -25,14 +25,18 @@ def pytest_addoption(parser):
         "--docker", action="store", default=False, help="Use docker for postgres testing"
     )
 
+
 @pytest.fixture(scope='session')
 def docker_mode(request):
     return request.config.getoption("--docker")
+
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "docker: use postgres in docker")
 
 # Get testing metadata
+
+
 @pytest.fixture(scope='session')
 def mat_metadata():
     p = pathlib.Path('tests/test_data', 'mat_metadata.json')
@@ -83,18 +87,20 @@ def test_celery_app(test_app):
     yield celery
 
 # Setup docker image if '--docker=True' in pytest args
+
+
 @pytest.fixture(scope="session")
 def setup_docker_image(docker_mode, mat_metadata):
     if docker_mode:
         postgis_docker_image = mat_metadata['postgis_docker_image']
         aligned_volume = mat_metadata['aligned_volume']
-        
+
         db_environment = [
-        f"POSTGRES_USER=postgres",
-        f"POSTGRES_PASSWORD=postgres",
-        f"POSTGRES_DB={aligned_volume}"
+            f"POSTGRES_USER=postgres",
+            f"POSTGRES_PASSWORD=postgres",
+            f"POSTGRES_DB={aligned_volume}"
         ]
-        
+
         try:
             test_logger.info(f"PULLING {postgis_docker_image} IMAGE")
             container_name = f"test_postgis_server_{uuid.uuid4()}"
@@ -112,9 +118,10 @@ def setup_docker_image(docker_mode, mat_metadata):
             test_logger.info('STARTING POSTGIS DOCKER IMAGE')
             time.sleep(10)
         except Exception as e:
-            test_logger.exception(f"Failed to pull {postgis_docker_image} image. Error: {e}")  
-    yield 
-               
+            test_logger.exception(
+                f"Failed to pull {postgis_docker_image} image. Error: {e}")
+    yield
+
     if docker_mode:
         container = docker_client.containers.get(container_name)
         container.stop()
@@ -126,17 +133,17 @@ def setup_postgis_database(setup_docker_image, mat_metadata, annotation_data) ->
 
     aligned_volume = mat_metadata['aligned_volume']
     sql_uri = mat_metadata["sql_uri"]
-    
+
     try:
         is_connected = check_database(sql_uri)
-        
+
         is_setup = setup_database(aligned_volume, sql_uri)
-        
+
         test_logger.info(
             f"DATABASE CAN BE REACHED: {is_connected}, DATABASE IS SETUP: {is_setup}")
         test_logger.info(
             f"{aligned_volume} DATABASE IS NOW SETUP FOR TESTING...")
-        
+
         table_info = add_annotation_table(mat_metadata)
         test_logger.info(
             f"ANNOTATION TABLE {table_info} CREATED")
@@ -165,7 +172,7 @@ def mat_client(aligned_volume_name, database_uri):
         aligned_volume_name, database_uri)
     return mat_client
 
-    
+
 def check_database(sql_uri: str) -> None:  # pragma: no cover
     try:
         test_logger.info("ATTEMPT TO CONNECT DB")
@@ -200,11 +207,17 @@ def add_annotation_table(mat_metadata: dict):
     schema_type = mat_metadata["schema_type"]
     description = "Test synapse table"
     user_id = "foo@bar.com"
+    vx = mat_metadata["voxel_resolution_x"]
+    vy = mat_metadata["voxel_resolution_y"]
+    vz = mat_metadata["voxel_resolution_z"]
 
     table_info = anno_client.create_annotation_table(table_name,
                                                      schema_type,
                                                      description,
-                                                     user_id)
+                                                     user_id,
+                                                     voxel_resolution_x=vx,
+                                                     voxel_resolution_y=vy,
+                                                     voxel_resolution_z=vz)
     return table_info
 
 
@@ -219,11 +232,11 @@ def insert_test_data(mat_metadata: dict, annotation_data: dict):
 
     anno_client = DynamicAnnotationClient(
         aligned_volume_name, database_uri)
-    
+
     anno_client.insert_annotations(annotation_table_name, synapse_data)
 
     mat_client = DynamicMaterializationClient(
         aligned_volume_name, database_uri)
-    is_created = mat_client.create_and_attach_seg_table(annotation_table_name, pcg_name)
-    return mat_client.insert_linked_segmentation(annotation_table_name, pcg_name, segmentation_data)    
-    
+    is_created = mat_client.create_and_attach_seg_table(
+        annotation_table_name, pcg_name)
+    return mat_client.insert_linked_segmentation(annotation_table_name, pcg_name, segmentation_data)

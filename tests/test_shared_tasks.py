@@ -12,6 +12,7 @@ from emannotationschemas.models import make_annotation_model
 
 index_client = IndexCache()
 
+
 def test_chunk_annotation_ids(mat_metadata):
     anno_id_chunks = chunk_annotation_ids(mat_metadata)
     assert anno_id_chunks == [[1, 3], [3, None]]
@@ -47,7 +48,7 @@ def test_get_materialization_info():
          'temp_mat_table_name': 'temp__test_synapse_table',
          'pcg_table_name': 'test_pcg',
          'segmentation_source': 'graphene://https://fake-daf.com/segmentation/table/test_pcg',
-         'coord_resolution': [4, 4, 40],
+         'coord_resolution': [4.0, 4.0, 40.0],
          'materialization_time_stamp': str(materialization_time_stamp),
          'last_updated_time_stamp': None,
          'chunk_size': 100000,
@@ -85,15 +86,14 @@ def test_add_index(mat_metadata, db_client):
     table_name = mat_metadata['annotation_table_name']
     schema = mat_metadata['schema_type']
 
-    __, engine= db_client
+    __, engine = db_client
 
     is_dropped = index_client.drop_table_indices(table_name, engine)
     assert is_dropped == True
-    
+
     model = make_annotation_model(table_name, schema, with_crud_columns=False)
 
     indexs = index_client.add_indices_sql_commands(table_name, model, engine)
     for index in indexs:
         index = add_index.s(database_name, index).apply()
-        assert "Index" or "Alter" in index.get() 
-    
+        assert "Index" or "Alter" in index.get()
