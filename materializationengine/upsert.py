@@ -4,7 +4,7 @@ from functools import partial
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 
-def chunk_rows(data, chunksize: int=None):
+def chunk_rows(data, chunksize: int = None):
     if chunksize:
         i = iter(data)
         generator = (list(islice(i, chunksize)) for _ in repeat(None))
@@ -14,25 +14,26 @@ def chunk_rows(data, chunksize: int=None):
 
 
 def create_sql_rows(session, data_dict: dict, model):
-    """Yields a dictionary if the record's id already exists, a row object 
+    """Yields a dictionary if the record's id already exists, a row object
     otherwise.
-    
+
     TODO: strip uneeded if else statements
     """
     ids = {item[0] for item in session.query(model.id)}
     for data in data_dict:
-        is_row = hasattr(data, 'to_dict')
-        if is_row and data.get('id') in ids:
+        is_row = hasattr(data, "to_dict")
+        if is_row and data.get("id") in ids:
             yield data.to_dict(), True
         elif is_row:
             yield data, False
-        elif data.get('id') in ids:
+        elif data.get("id") in ids:
             yield data, True
         else:
             yield model(**data), False
 
+
 def upsert(session, data, model, chunksize=None):
-    
+
     for records in chunk_rows(data, chunksize):
         resources = create_sql_rows(session, records, model)
         sorted_resources = sorted(resources, key=itemgetter(1))
