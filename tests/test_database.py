@@ -1,9 +1,11 @@
-from materializationengine.database import (create_session,
-                                            dynamic_annotation_cache,
-                                            get_sql_url_params,
-                                            ping_connection,
-                                            reflect_tables,
-                                            sqlalchemy_cache)
+from materializationengine.database import (
+    create_session,
+    dynamic_annotation_cache,
+    get_sql_url_params,
+    ping_connection,
+    reflect_tables,
+    sqlalchemy_cache,
+)
 from sqlalchemy.orm import scoped_session
 from sqlalchemy.engine.base import Engine
 from dynamicannotationdb.materialization_client import DynamicMaterializationClient
@@ -14,11 +16,11 @@ import pytest
 def test_get_sql_url_params(database_uri):
     url_mapping = get_sql_url_params(database_uri)
 
-    assert url_mapping['user'] == 'postgres'
-    assert url_mapping['password'] == 'postgres'
-    assert url_mapping['dbname'] == 'test_aligned_volume'
-    assert url_mapping['host'] == 'localhost'
-    assert url_mapping['port'] == 5432
+    assert url_mapping["user"] == "postgres"
+    assert url_mapping["password"] == "postgres"
+    assert url_mapping["dbname"] == "test_aligned_volume"
+    assert url_mapping["host"] == "localhost"
+    assert url_mapping["port"] == 5432
 
 
 def test_reflect_tables(database_uri):
@@ -26,21 +28,24 @@ def test_reflect_tables(database_uri):
     database_name = database_uri.rpartition("/")[-1]
     tables = reflect_tables(sql_base, database_name)
     logging.info(tables)
-    assert set(tables) == set(['spatial_ref_sys',
-                               'annotation_table_metadata',
-                               'segmentation_table_metadata',
-                               'analysisversion',
-                               'analysistables',
-                               'geography_columns',
-                               'geometry_columns',
-                               'raster_columns',
-                               'raster_overviews',
-                               'test_synapse_table',
-                               'test_synapse_table__test_pcg'])
+    assert set(tables) == set(
+        [
+            "spatial_ref_sys",
+            "annotation_table_metadata",
+            "segmentation_table_metadata",
+            "analysisversion",
+            "analysistables",
+            "geography_columns",
+            "geometry_columns",
+            "raster_columns",
+            "raster_overviews",
+            "test_synapse_table",
+            "test_synapse_table__test_pcg",
+        ]
+    )
 
 
 class TestCreateSession:
-
     @pytest.fixture(autouse=True)
     def setup_method(self, database_uri):
         self.session, self.engine = create_session(database_uri)
@@ -54,10 +59,7 @@ class TestCreateSession:
         self.engine.dispose()
 
 
-
-
 class TestSqlAlchemyCache:
-
     def test_get_session(self, test_app, aligned_volume_name):
         self.cached_session = sqlalchemy_cache.get(aligned_volume_name)
         assert isinstance(self.cached_session, scoped_session)
@@ -68,7 +70,6 @@ class TestSqlAlchemyCache:
 
 
 class TestDynamicMaterializationCache:
-
     def test_get_mat_client(self, test_app, aligned_volume_name):
         self.mat_client = dynamic_annotation_cache.get_db(aligned_volume_name)
         assert isinstance(self.mat_client, DynamicMaterializationClient)
