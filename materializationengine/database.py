@@ -1,7 +1,6 @@
 from urllib.parse import urlparse
 
-from dynamicannotationdb.materialization_client import \
-    DynamicMaterializationClient
+from dynamicannotationdb.materialization_client import DynamicMaterializationClient
 from flask import current_app
 from sqlalchemy import MetaData, create_engine
 from sqlalchemy.engine.url import make_url
@@ -11,10 +10,12 @@ from materializationengine.utils import get_config_param
 
 
 def create_session(sql_uri: str = None):
-    engine = create_engine(sql_uri, pool_recycle=3600,
-                           pool_size=20, max_overflow=50, pool_pre_ping=True)
-    Session = scoped_session(sessionmaker(
-        bind=engine, autocommit=False, autoflush=False))
+    engine = create_engine(
+        sql_uri, pool_recycle=3600, pool_size=20, max_overflow=50, pool_pre_ping=True
+    )
+    Session = scoped_session(
+        sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    )
     session = Session()
     return session, engine
 
@@ -24,12 +25,11 @@ def get_sql_url_params(sql_url):
         sql_url = str(sql_url)
     result = urlparse(sql_url)
     url_mapping = {
-        'user': result.username,
-        'password': result.password,
-        'dbname': result.path[1:],
-        'host': result.hostname,
-        'port': result.port
-
+        "user": result.username,
+        "password": result.password,
+        "dbname": result.path[1:],
+        "host": result.hostname,
+        "port": result.port,
     }
     return url_mapping
 
@@ -48,14 +48,13 @@ def ping_connection(session):
     is_database_working = True
     try:
         # to check database we will execute raw query
-        session.execute('SELECT 1')
+        session.execute("SELECT 1")
     except Exception as e:
         is_database_working = False
     return is_database_working
 
 
 class SqlAlchemyCache:
-
     def __init__(self):
         self._engines = {}
         self._sessions = {}
@@ -65,11 +64,13 @@ class SqlAlchemyCache:
             SQL_URI_CONFIG = current_app.config["SQLALCHEMY_DATABASE_URI"]
             sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
             sql_uri = make_url(f"{sql_base_uri}/{aligned_volume}")
-            self._engines[aligned_volume] = create_engine(sql_uri,
-                                                          pool_recycle=3600,
-                                                          pool_size=20,
-                                                          max_overflow=50,
-                                                          pool_pre_ping=True)
+            self._engines[aligned_volume] = create_engine(
+                sql_uri,
+                pool_recycle=3600,
+                pool_size=20,
+                max_overflow=50,
+                pool_pre_ping=True,
+            )
         return self._engines[aligned_volume]
 
     def get(self, aligned_volume: str):
@@ -94,7 +95,6 @@ class SqlAlchemyCache:
 
 
 class DynamicMaterializationCache:
-
     def __init__(self):
         self._clients = {}
 
@@ -112,8 +112,7 @@ class DynamicMaterializationCache:
 
     def _get_mat_client(self, database: str):
         sql_uri_config = get_config_param("SQLALCHEMY_DATABASE_URI")
-        mat_client = DynamicMaterializationClient(
-            database, sql_uri_config)
+        mat_client = DynamicMaterializationClient(database, sql_uri_config)
         self._clients[database] = mat_client
         return self._clients[database]
 

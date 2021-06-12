@@ -4,8 +4,6 @@ from sqlalchemy.engine import reflection
 
 
 class IndexCache:
-
-
     def get_table_indices(self, table_name: str, engine: engine):
         """Reflect current indices, primary key(s) and foreign keys
          on given target table using SQLAlchemy inspector method.
@@ -27,48 +25,38 @@ class IndexCache:
             return None
         index_map = {}
         if pk_columns:
-            pk_name = {'primary_key_name': pk_columns.get('name')}
-            if pk_name['primary_key_name']:
-                pk = {
-                    'index_name': f"{pk_columns['name']}",
-                    'type': 'primary_key'
-                }
-                index_map.update({
-                    pk_columns['constrained_columns'][0]: pk
-                })
+            pk_name = {"primary_key_name": pk_columns.get("name")}
+            if pk_name["primary_key_name"]:
+                pk = {"index_name": f"{pk_columns['name']}", "type": "primary_key"}
+                index_map.update({pk_columns["constrained_columns"][0]: pk})
 
         if indexed_columns:
             for index in indexed_columns:
-                dialect_options = index.get('dialect_options', None)
+                dialect_options = index.get("dialect_options", None)
 
-                indx_map = {
-                    'index_name': index["name"]
-                }
+                indx_map = {"index_name": index["name"]}
                 if dialect_options:
-                    if 'gist' in dialect_options.values():
-                        indx_map.update({
-                            'type': 'spatial_index',
-                            'dialect_options': index.get('dialect_options')}
+                    if "gist" in dialect_options.values():
+                        indx_map.update(
+                            {
+                                "type": "spatial_index",
+                                "dialect_options": index.get("dialect_options"),
+                            }
                         )
                 else:
-                    indx_map.update({
-                        'type': 'index',
-                        'dialect_options': None})
+                    indx_map.update({"type": "index", "dialect_options": None})
 
-                index_map.update({
-                    index["column_names"][0]: indx_map
-                })
+                index_map.update({index["column_names"][0]: indx_map})
         if foreign_keys:
             for foreign_key in foreign_keys:
-                foreign_key_name = foreign_key['name']
+                foreign_key_name = foreign_key["name"]
                 fk_data = {
-                    'type': 'foreign_key',
-                    'foreign_key_name': foreign_key_name,
-                    'foreign_key_table': foreign_key['referred_table'],
-                    'foreign_key_column': foreign_key["referred_columns"][0]
+                    "type": "foreign_key",
+                    "foreign_key_name": foreign_key_name,
+                    "foreign_key_table": foreign_key["referred_table"],
+                    "foreign_key_column": foreign_key["referred_columns"][0],
                 }
-                index_map.update({
-                    foreign_key_name: fk_data})
+                index_map.update({foreign_key_name: fk_data})
         return index_map
 
     def get_index_from_model(self, model):
@@ -85,44 +73,33 @@ class IndexCache:
         index_map = {}
         for column in model.columns:
             if column.primary_key:
-                pk = {
-                    'index_name': f"{model.name}_pkey",
-                    'type': 'primary_key'
-                }
-                index_map.update({
-                    column.name: pk
-                })
+                pk = {"index_name": f"{model.name}_pkey", "type": "primary_key"}
+                index_map.update({column.name: pk})
             if column.index:
                 indx_map = {
-                    'index_name': f"ix_{model.name}_{column.name}",
-                    'type': 'index',
-                    'dialect_options': None
-
+                    "index_name": f"ix_{model.name}_{column.name}",
+                    "type": "index",
+                    "dialect_options": None,
                 }
-                index_map.update({
-                    column.name: indx_map
-                })
+                index_map.update({column.name: indx_map})
             if isinstance(column.type, Geometry):
                 spatial_index_map = {
-                    'index_name': f"idx_{model.name}_{column.name}",
-                    'type': 'spatial_index',
-                    'dialect_options': {'postgresql_using': 'gist'}
+                    "index_name": f"idx_{model.name}_{column.name}",
+                    "type": "spatial_index",
+                    "dialect_options": {"postgresql_using": "gist"},
                 }
-                index_map.update({
-                    column.name: spatial_index_map
-                })
+                index_map.update({column.name: spatial_index_map})
             if column.foreign_keys:
                 foreign_keys = list(column.foreign_keys)
                 for foreign_key in foreign_keys:
                     foreign_key_name = f"{foreign_key.column.table.name}_{foreign_key.column.name}_fkey"
                     forigen_key_map = {
-                        'type': 'foreign_key',
-                        'foreign_key_name': foreign_key_name,
-                        'foreign_key_table': f'{foreign_key.column.table.name}',
-                        'foreign_key_column': f'{foreign_key.column.name}'
+                        "type": "foreign_key",
+                        "foreign_key_name": foreign_key_name,
+                        "foreign_key_table": f"{foreign_key.column.table.name}",
+                        "foreign_key_column": f"{foreign_key.column.name}",
                     }
-                    index_map.update({
-                        foreign_key_name: forigen_key_map})
+                    index_map.update({foreign_key_name: forigen_key_map})
         return index_map
 
     def drop_table_indices(self, table_name: str, engine):
@@ -144,24 +121,27 @@ class IndexCache:
         connection = engine.connect()
         contraints_list = []
         for column_info in indices.values():
-            if 'foreign_key' in column_info['type']:
+            if "foreign_key" in column_info["type"]:
                 contraints_list.append(
-                    f"{command} DROP CONSTRAINT IF EXISTS {column_info['foreign_key_name']}")
-            if 'primary_key' in column_info['type']:
+                    f"{command} DROP CONSTRAINT IF EXISTS {column_info['foreign_key_name']}"
+                )
+            if "primary_key" in column_info["type"]:
                 contraints_list.append(
-                    f"{command} DROP CONSTRAINT IF EXISTS {column_info['index_name']}")
+                    f"{command} DROP CONSTRAINT IF EXISTS {column_info['index_name']}"
+                )
 
         drop_contstraint = f"{'; '.join(contraints_list)} CASCADE"
         command = f"{drop_contstraint};"
-        index_list = [col['index_name']
-                      for col in indices.values() if 'index' in col['type']]
+        index_list = [
+            col["index_name"] for col in indices.values() if "index" in col["type"]
+        ]
         if index_list:
             drop_index = f"DROP INDEX {', '.join(index_list)}"
             command = f"{command} {drop_index};"
         try:
             connection.execute(command)
         except Exception as e:
-            raise(e)
+            raise (e)
         return True
 
     def add_indices_sql_commands(self, table_name: str, model, engine):
@@ -181,17 +161,17 @@ class IndexCache:
         missing_indices = set(model_indices) - set(current_indices)
         commands = []
         for column_name in missing_indices:
-            index_type = model_indices[column_name]['type']
-            if index_type == 'primary_key':
-                command = f'ALTER TABLE {table_name} add primary key({column_name});'
-            if index_type == 'index':
+            index_type = model_indices[column_name]["type"]
+            if index_type == "primary_key":
+                command = f"ALTER TABLE {table_name} add primary key({column_name});"
+            if index_type == "index":
                 command = f"CREATE INDEX IF NOT EXISTS ix_{table_name}_{column_name} ON {table_name} ({column_name});"
-            if index_type == 'spatial_index':
+            if index_type == "spatial_index":
                 command = f"CREATE INDEX IF NOT EXISTS idx_{table_name}_{column_name} ON {table_name} USING GIST ({column_name} gist_geometry_ops_nd);"
-            if index_type == 'foreign_key':
-                foreign_key_name = model_indices[column_name]['foreign_key_name']
-                foreign_key_table = model_indices[column_name]['foreign_key_table']
-                foreign_key_column = model_indices[column_name]['foreign_key_column']
+            if index_type == "foreign_key":
+                foreign_key_name = model_indices[column_name]["foreign_key_name"]
+                foreign_key_table = model_indices[column_name]["foreign_key_table"]
+                foreign_key_column = model_indices[column_name]["foreign_key_column"]
                 command = f"""ALTER TABLE {table_name} 
                               ADD CONSTRAINT {foreign_key_name}
                               FOREIGN KEY ({foreign_key_column}) 

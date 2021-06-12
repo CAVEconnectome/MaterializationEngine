@@ -36,9 +36,9 @@ def create_celery(app=None):
             "worker_send_task_events": True,
             "worker_prefetch_multiplier": 1,
             "result_expires": 86400,  # results expire in broker after 1 day
-            "visibility_timeout": 8000 # timeout (s) for tasks to be sent back to broker queue
+            "visibility_timeout": 8000,  # timeout (s) for tasks to be sent back to broker queue
         }
-    )  
+    )
 
     celery.conf.update(app.config)
     TaskBase = celery.Task
@@ -66,10 +66,12 @@ def celery_loggers(logger, *args, **kwargs):
 
 @celery.on_after_configure.connect
 def setup_periodic_tasks(sender, **kwargs):
-    from materializationengine.workflows.periodic_database_removal import \
-        remove_expired_databases
-    from materializationengine.workflows.periodic_materialization import \
-        run_periodic_materialization
+    from materializationengine.workflows.periodic_database_removal import (
+        remove_expired_databases,
+    )
+    from materializationengine.workflows.periodic_materialization import (
+        run_periodic_materialization,
+    )
 
     periodic_tasks = {
         "run_daily_periodic_materialization": run_periodic_materialization.s(
@@ -121,11 +123,11 @@ def get_celery_worker_status():
     active_tasks = i.active()
     scheduled_tasks = i.scheduled()
     result = {
-        'availability': availability,
-        'stats': stats,
-        'registered_tasks': registered_tasks,
-        'active_tasks': active_tasks,
-        'scheduled_tasks': scheduled_tasks
+        "availability": availability,
+        "stats": stats,
+        "registered_tasks": registered_tasks,
+        "active_tasks": active_tasks,
+        "scheduled_tasks": scheduled_tasks,
     }
     return result
 
@@ -133,5 +135,5 @@ def get_celery_worker_status():
 def get_celery_queue_items(queue_name: str):
     with celery.connection_or_acquire() as conn:
         return conn.default_channel.queue_declare(
-            queue=queue_name, passive=True).message_count
-    
+            queue=queue_name, passive=True
+        ).message_count

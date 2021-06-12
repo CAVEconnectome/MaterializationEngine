@@ -42,16 +42,42 @@ class BaseConfig:
         AUTH_TOKEN = ""
 
     BEAT_SCHEDULES = [
-        {"name": "Materialized Database Daily (2 Days)", "minute": 10, "hour": 8, 'day_of_week': [
-            0, 2, 4, 6], 'task': 'run_daily_periodic_materialization'},
-        {"name": "Materialized Database Daily (2 Days) (Wednesdays)", "minute": 10, "hour": 8,
-         'day_of_week': 3, 'day_of_month': '8-14,22-31', 'task': 'run_daily_periodic_materialization'},
-        {"name": "Materialized Database Weekly (7 Days)", "minute": 10, "hour": 8, 'day_of_week': [
-            1, 5], 'task': 'run_weekly_periodic_materialization'},
-        {"name": "Long Term Support Materialized Database (30 days)", "minute": 10, "hour": 8,
-         'day_of_week': 3, 'day_of_month': '1-7,15-21', 'task': 'run_lts_periodic_materialization'},
-        {"name": "Remove Expired Databases (Midnight)", "minute": 0,
-         "hour": 8, 'task': 'remove_expired_databases'},
+        {
+            "name": "Materialized Database Daily (2 Days)",
+            "minute": 10,
+            "hour": 8,
+            "day_of_week": [0, 2, 4, 6],
+            "task": "run_daily_periodic_materialization",
+        },
+        {
+            "name": "Materialized Database Daily (2 Days) (Wednesdays)",
+            "minute": 10,
+            "hour": 8,
+            "day_of_week": 3,
+            "day_of_month": "8-14,22-31",
+            "task": "run_daily_periodic_materialization",
+        },
+        {
+            "name": "Materialized Database Weekly (7 Days)",
+            "minute": 10,
+            "hour": 8,
+            "day_of_week": [1, 5],
+            "task": "run_weekly_periodic_materialization",
+        },
+        {
+            "name": "Long Term Support Materialized Database (30 days)",
+            "minute": 10,
+            "hour": 8,
+            "day_of_week": 3,
+            "day_of_month": "1-7,15-21",
+            "task": "run_lts_periodic_materialization",
+        },
+        {
+            "name": "Remove Expired Databases (Midnight)",
+            "minute": 0,
+            "hour": 8,
+            "task": "remove_expired_databases",
+        },
     ]
 
 
@@ -66,13 +92,17 @@ class DevConfig(BaseConfig):
     CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND")
     USE_SENTINEL = os.environ.get("USE_SENTINEL", False)
 
+
 class TestConfig(BaseConfig):
     ENV = "testing"
     TESTING = True
-    SQLALCHEMY_DATABASE_URI = "postgresql://postgres:postgres@localhost:5432/test_aligned_volume"
+    SQLALCHEMY_DATABASE_URI = (
+        "postgresql://postgres:postgres@localhost:5432/test_aligned_volume"
+    )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     CELERY_BROKER_URL = "memory://"
     CELERY_RESULT_BACKEND = "redis://"
+
 
 class ProductionConfig(BaseConfig):
     ENV = "production"

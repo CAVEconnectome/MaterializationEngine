@@ -17,7 +17,9 @@ class SegmentationTableSchema(SegmentationInfoSchema):
 
 
 class CreateTableSchema(SegmentationTableSchema):
-    metadata = fields.Nested(Metadata, required=True, example={"description": "my description"})
+    metadata = fields.Nested(
+        Metadata, required=True, example={"description": "my description"}
+    )
 
 
 class GetDeleteAnnotationSchema(SegmentationInfoSchema):
@@ -33,7 +35,6 @@ class SegmentationDataSchema(Schema):
     segmentations = fields.List(fields.Dict, required=True)
 
 
-
 class SimpleQuerySchema(Schema):
     filter_in_dict = fields.Dict()
     filter_notin_dict = fields.Dict()
@@ -42,12 +43,15 @@ class SimpleQuerySchema(Schema):
     offset = fields.Integer()
     limit = fields.Integer()
 
+
 class ComplexQuerySchema(Schema):
-    tables = fields.List(fields.List(fields.Str, validate=Length(equal=2)), required=True)
+    tables = fields.List(
+        fields.List(fields.Str, validate=Length(equal=2)), required=True
+    )
     filter_in_dict = fields.Dict()
     filter_notin_dict = fields.Dict()
     filter_equal_dict = fields.Dict()
     select_columns = fields.List(fields.Str)
     offset = fields.Integer()
     limit = fields.Integer()
-    suffixes =  fields.List(fields.Str)
+    suffixes = fields.List(fields.Str)

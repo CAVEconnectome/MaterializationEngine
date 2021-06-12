@@ -5,6 +5,7 @@ from dynamicannotationdb.models import Base
 
 MatBase = declarative_base()
 
+
 class AnalysisVersion(Base):
     __tablename__ = "analysisversion"
     id = Column(Integer, primary_key=True)
@@ -13,7 +14,7 @@ class AnalysisVersion(Base):
     time_stamp = Column(DateTime, nullable=False)
     valid = Column(Boolean)
     expires_on = Column(DateTime, nullable=True)
-    
+
     def __repr__(self):
         return "{}__mat{}".format(self.datastack, self.version)
 
@@ -29,6 +30,7 @@ class AnalysisTable(Base):
     analysisversion_id = Column(Integer, ForeignKey("analysisversion.id"))
     analysisversion = relationship("AnalysisVersion")
 
+
 class MaterializedMetadata(MatBase):
     __tablename__ = "materializedmetadata"
     id = Column(Integer, primary_key=True)
@@ -36,5 +38,3 @@ class MaterializedMetadata(MatBase):
     table_name = Column(String(100), nullable=False)
     row_count = Column(Integer, nullable=False)
     materialized_timestamp = Column(DateTime, nullable=False)
-    
-    
