@@ -314,6 +314,7 @@ class FrozenTableVersions(Resource):
         response = (
             session.query(AnalysisTable)
             .filter(AnalysisTable.analysisversion_id == av.id)
+            .filter(AnalysisTable.valid==True)
             .all()
         )
 
