@@ -83,7 +83,7 @@ class BaseConfig:
             "hour": "0-1,17-23",
             "day_of_week": '1-5',
             "task": "run_periodic_database_update"
-        },         
+        },
     ]
 
 

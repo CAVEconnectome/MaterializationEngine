@@ -61,12 +61,14 @@ def run_complete_workflow(datastack_info: dict, days_to_expire: int = 5):
 
         if chunked_roots:
             update_expired_roots_workflow = update_root_ids_workflow(
-                mat_metadata, chunked_roots)
+                mat_metadata, chunked_roots
+            )
 
-        if mat_metadata['row_count'] < 1_000_000: 
+        if mat_metadata["row_count"] < 1_000_000:
             new_annotations = True
             new_annotation_workflow = ingest_new_annotations_workflow(
-                mat_metadata, annotation_chunks)
+                mat_metadata, annotation_chunks
+            )
 
         else:
             new_annotations = None
@@ -74,15 +76,17 @@ def run_complete_workflow(datastack_info: dict, days_to_expire: int = 5):
         if chunked_roots:
             if new_annotations:
                 ingest_and_update_root_ids_workflow = chain(
-                new_annotation_workflow, update_expired_roots_workflow)
-                update_live_database_workflow.append(ingest_and_update_root_ids_workflow)
+                    new_annotation_workflow, update_expired_roots_workflow
+                )
+                update_live_database_workflow.append(
+                    ingest_and_update_root_ids_workflow
+                )
             else:
                 update_live_database_workflow.append(update_expired_roots_workflow)
+        elif new_annotations:
+            update_live_database_workflow.append(new_annotation_workflow)
         else:
-            if new_annotations:
-                update_live_database_workflow.append(new_annotation_workflow)
-            else:
-                update_live_database_workflow.append(fin.si()) 
+            update_live_database_workflow.append(fin.si())
 
     # copy live database as a materialized version and drop unneeded tables
     setup_versioned_database_workflow = create_materializied_database_workflow(

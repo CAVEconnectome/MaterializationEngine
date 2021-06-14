@@ -38,7 +38,9 @@ def expired_root_id_workflow(datastack_info: dict):
     for mat_metadata in mat_info:
         chunked_roots = get_expired_root_ids(mat_metadata)
         if chunked_roots:
-            process_root_ids = update_root_ids_workflow(mat_metadata, chunked_roots)  # final task which will process a return status/timing etc...
+            process_root_ids = update_root_ids_workflow(
+                mat_metadata, chunked_roots
+            )  # final task which will process a return status/timing etc...
             workflow.append(process_root_ids)
         else:
             continue
@@ -177,10 +179,13 @@ def lookup_expired_root_ids(
     cg = chunkedgraph_cache.init_pcg(pcg_table_name)
     try:
         old_roots, __ = cg.get_proofread_root_ids(
-            last_updated_ts, materialization_time_stamp)
+            last_updated_ts, materialization_time_stamp
+        )
         return old_roots
     except ValueError as e:
-        celery_logger.info(f"No expired root ids found between {last_updated_ts} and {materialization_time_stamp}: {e}")
+        celery_logger.info(
+            f"No expired root ids found between {last_updated_ts} and {materialization_time_stamp}: {e}"
+        )
         return None
 
 
