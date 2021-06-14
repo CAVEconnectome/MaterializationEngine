@@ -66,25 +66,27 @@ def celery_loggers(logger, *args, **kwargs):
 
 @celery.on_after_configure.connect
 def setup_periodic_tasks(sender, **kwargs):
-    from materializationengine.workflows.periodic_database_removal import \
-        remove_expired_databases
-    from materializationengine.workflows.update_database_workflow import \
-        run_periodic_database_update
-    from materializationengine.workflows.periodic_materialization import (
-        run_periodic_materialization,
+    from materializationengine.workflows.periodic_database_removal import (
+        remove_expired_databases,
     )
-    
+    from materializationengine.workflows.update_database_workflow import (
+        run_periodic_database_update,
+    )
+    from materializationengine.workflows.complete_workflow import run_complete_workflow
+
     periodic_tasks = {
-        "run_daily_periodic_materialization": run_periodic_materialize_database.s(
+        "run_daily_periodic_materialization": run_complete_workflow.s(
             days_to_expire=2
-        ),
-        "run_weekly_periodic_materialization": run_periodic_materialize_database.s(
+            ),
+        "run_weekly_periodic_materialization": run_complete_workflow.s(
             days_to_expire=7
-        ),
-        "run_lts_periodic_materialization": run_periodic_materialize_database.s(
+            ),
+        "run_lts_periodic_materialization": run_complete_workflow.s(
             days_to_expire=30
-        ),
-        "remove_expired_databases": remove_expired_databases.s(delete_threshold=5),
+            ),
+        "remove_expired_databases": remove_expired_databases.s(
+            delete_threshold=5
+            ),
         "run_periodic_database_update": run_periodic_database_update.s(),
     }
 
