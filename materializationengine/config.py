@@ -80,6 +80,7 @@ class BaseConfig:
         },
         {
             "name": "Update Live Database",
+            "minute": 0,
             "hour": "0-1,17-23",
             "day_of_week": '1-5',
             "task": "run_periodic_database_update"
