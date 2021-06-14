@@ -9,7 +9,7 @@ def get_app_base_path():
 
 
 def get_instance_folder_path():
-    return os.path.join(get_app_base_path(), 'instance')
+    return os.path.join(get_app_base_path(), "instance")
 
 
 def make_root_id_column_name(column_name: str):
@@ -23,27 +23,26 @@ def build_materialized_table_id(aligned_volume: str, table_name: str) -> str:
 
 
 def get_query_columns_by_suffix(AnnotationModel, SegmentationModel, suffix):
-    seg_columns = [
-        column.name for column in SegmentationModel.__table__.columns]
-    anno_columns = [
-        column.name for column in AnnotationModel.__table__.columns]
+    seg_columns = [column.name for column in SegmentationModel.__table__.columns]
+    anno_columns = [column.name for column in AnnotationModel.__table__.columns]
 
     matched_columns = set()
     for column in seg_columns:
-        prefix = (column.split("_")[0])
+        prefix = column.split("_")[0]
         for anno_col in anno_columns:
             if anno_col.startswith(prefix):
                 matched_columns.add(anno_col)
-    matched_columns.remove('id')
+    matched_columns.remove("id")
 
     supervoxel_columns = [
-        f"{col.rsplit('_', 1)[0]}_{suffix}" for col in matched_columns if col != 'annotation_id']
+        f"{col.rsplit('_', 1)[0]}_{suffix}"
+        for col in matched_columns
+        if col != "annotation_id"
+    ]
     # # create model columns for querying
-    anno_model_cols = [getattr(AnnotationModel, name)
-                       for name in matched_columns]
+    anno_model_cols = [getattr(AnnotationModel, name) for name in matched_columns]
     anno_model_cols.append(AnnotationModel.id)
-    seg_model_cols = [getattr(SegmentationModel, name)
-                      for name in supervoxel_columns]
+    seg_model_cols = [getattr(SegmentationModel, name) for name in supervoxel_columns]
 
     # add id columns to lookup
     seg_model_cols.extend([SegmentationModel.id])
@@ -53,25 +52,31 @@ def get_query_columns_by_suffix(AnnotationModel, SegmentationModel, suffix):
 def get_geom_from_wkb(wkb):
     wkb_element = to_shape(wkb)
     if wkb_element.has_z:
-        return [int(wkb_element.xy[0][0]), int(wkb_element.xy[1][0]), int(wkb_element.z)]
+        return [
+            int(wkb_element.xy[0][0]),
+            int(wkb_element.xy[1][0]),
+            int(wkb_element.z),
+        ]
 
 
 def create_segmentation_model(mat_metadata):
-    annotation_table_name = mat_metadata.get('annotation_table_name')
+    annotation_table_name = mat_metadata.get("annotation_table_name")
     schema_type = mat_metadata.get("schema")
     pcg_table_name = mat_metadata.get("pcg_table_name")
 
     SegmentationModel = em_models.make_segmentation_model(
-        annotation_table_name, schema_type, pcg_table_name)
+        annotation_table_name, schema_type, pcg_table_name
+    )
     return SegmentationModel
 
 
 def create_annotation_model(mat_metadata, with_crud_columns: bool = True):
-    annotation_table_name = mat_metadata.get('annotation_table_name')
+    annotation_table_name = mat_metadata.get("annotation_table_name")
     schema_type = mat_metadata.get("schema")
 
     AnnotationModel = em_models.make_annotation_model(
-        annotation_table_name, schema_type, with_crud_columns)
+        annotation_table_name, schema_type, with_crud_columns
+    )
     return AnnotationModel
 
 

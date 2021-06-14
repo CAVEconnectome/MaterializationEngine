@@ -5,87 +5,107 @@ import pyarrow as pa
 from cachetools import LRUCache, TTLCache, cached
 from emannotationschemas import get_schema
 from emannotationschemas.flatten import create_flattened_schema
-from emannotationschemas.models import (Base, annotation_models,
-                                        create_table_dict)
+from emannotationschemas.models import Base, annotation_models, create_table_dict
 from flask import Response, abort, current_app, request, stream_with_context
 from flask_accepts import accepts, responds
 from flask_restx import Namespace, Resource, reqparse
-from materializationengine.blueprints.client.query import (_execute_query,
-                                                           specific_query)
+from materializationengine.blueprints.client.query import _execute_query, specific_query
 from materializationengine.blueprints.client.schemas import (
-    ComplexQuerySchema, CreateTableSchema, GetDeleteAnnotationSchema, Metadata,
-    PostPutAnnotationSchema, SegmentationDataSchema, SegmentationTableSchema,
-    SimpleQuerySchema)
+    ComplexQuerySchema,
+    CreateTableSchema,
+    GetDeleteAnnotationSchema,
+    Metadata,
+    PostPutAnnotationSchema,
+    SegmentationDataSchema,
+    SegmentationTableSchema,
+    SimpleQuerySchema,
+)
 from materializationengine.blueprints.reset_auth import reset_auth
-from materializationengine.database import (create_session,
-                                            dynamic_annotation_cache,
-                                            sqlalchemy_cache)
-from materializationengine.info_client import (get_aligned_volumes,
-                                               get_datastack_info,
-                                               get_datastacks)
+from materializationengine.database import (
+    create_session,
+    dynamic_annotation_cache,
+    sqlalchemy_cache,
+)
+from materializationengine.info_client import (
+    get_aligned_volumes,
+    get_datastack_info,
+    get_datastacks,
+)
 from materializationengine.models import AnalysisTable, AnalysisVersion
-from materializationengine.schemas import (AnalysisTableSchema,
-                                           AnalysisVersionSchema)
-from middle_auth_client import (auth_required, auth_requires_admin,
-                                auth_requires_permission)
+from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
+from middle_auth_client import (
+    auth_required,
+    auth_requires_admin,
+    auth_requires_permission,
+)
 from sqlalchemy.engine.url import make_url
 from flask_restx import inputs
 import time
-__version__ = "1.4.1"
+
+__version__ = "2.0.0"
 
 
 authorizations = {
-    'apikey': {
-        'type': 'apiKey',
-        'in': 'query',
-        'name': 'middle_auth_token'
-    }
+    "apikey": {"type": "apiKey", "in": "query", "name": "middle_auth_token"}
 }
 
-client_bp = Namespace("Materialization Client",
-                      authorizations=authorizations,
-                      description="Materialization Client")
+client_bp = Namespace(
+    "Materialization Client",
+    authorizations=authorizations,
+    description="Materialization Client",
+)
 
 annotation_parser = reqparse.RequestParser()
-annotation_parser.add_argument('annotation_ids', type=int, action='split', help='list of annotation ids')    
-annotation_parser.add_argument('pcg_table_name', type=str, help='name of pcg segmentation table')    
+annotation_parser.add_argument(
+    "annotation_ids", type=int, action="split", help="list of annotation ids"
+)
+annotation_parser.add_argument(
+    "pcg_table_name", type=str, help="name of pcg segmentation table"
+)
 
 
 query_parser = reqparse.RequestParser()
-query_parser.add_argument('return_pyarrow', type=inputs.boolean,
-                          default=True,
-                          required=False,
-                          location='args',
-                          help='whether to return query in pyarrow compatible binary format (faster), false returns json')    
-query_parser.add_argument('split_positions', type=inputs.boolean,
-                          default=False,
-                          required=False,
-                          location='args',
-                          help='whether to return position columns as seperate x,y,z columns (faster)')    
+query_parser.add_argument(
+    "return_pyarrow",
+    type=inputs.boolean,
+    default=True,
+    required=False,
+    location="args",
+    help="whether to return query in pyarrow compatible binary format (faster), false returns json",
+)
+query_parser.add_argument(
+    "split_positions",
+    type=inputs.boolean,
+    default=False,
+    required=False,
+    location="args",
+    help="whether to return position columns as seperate x,y,z columns (faster)",
+)
 
 
 def after_request(response):
 
-    accept_encoding = request.headers.get('Accept-Encoding', '')
+    accept_encoding = request.headers.get("Accept-Encoding", "")
 
-    if 'gzip' not in accept_encoding.lower():
+    if "gzip" not in accept_encoding.lower():
         return response
 
     response.direct_passthrough = False
 
-    if (response.status_code < 200 or
-            response.status_code >= 300 or
-            'Content-Encoding' in response.headers):
+    if (
+        response.status_code < 200
+        or response.status_code >= 300
+        or "Content-Encoding" in response.headers
+    ):
         return response
 
     response.data = compression.gzip_compress(response.data)
 
-    response.headers['Content-Encoding'] = 'gzip'
-    response.headers['Vary'] = 'Accept-Encoding'
-    response.headers['Content-Length'] = len(response.data)
+    response.headers["Content-Encoding"] = "gzip"
+    response.headers["Vary"] = "Accept-Encoding"
+    response.headers["Content-Length"] = len(response.data)
 
     return response
-
 
 
 def check_aligned_volume(aligned_volume):
@@ -93,16 +113,20 @@ def check_aligned_volume(aligned_volume):
     if aligned_volume not in aligned_volumes:
         abort(400, f"aligned volume: {aligned_volume} not valid")
 
+
 @cached(cache=TTLCache(maxsize=64, ttl=600))
 def get_relevant_datastack_info(datastack_name):
     ds_info = get_datastack_info(datastack_name=datastack_name)
-    seg_source = ds_info['segmentation_source']
-    pcg_table_name = seg_source.split('/')[-1]
-    aligned_volume_name = ds_info['aligned_volume']['name']
+    seg_source = ds_info["segmentation_source"]
+    pcg_table_name = seg_source.split("/")[-1]
+    aligned_volume_name = ds_info["aligned_volume"]["name"]
     return aligned_volume_name, pcg_table_name
 
+
 @cached(cache=LRUCache(maxsize=64))
-def get_analysis_version_and_table(datastack_name:str, table_name:str, version:int, Session):
+def get_analysis_version_and_table(
+    datastack_name: str, table_name: str, version: int, Session
+):
     """query database for the analysis version and table name
 
     Args:
@@ -115,23 +139,28 @@ def get_analysis_version_and_table(datastack_name:str, table_name:str, version:i
         AnalysisVersion, AnalysisTable: tuple of instances of AnalysisVersion and AnalysisTable
     """
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
- 
-    analysis_version = Session.query(AnalysisVersion)\
-        .filter(AnalysisVersion.datastack == datastack_name)\
-        .filter(AnalysisVersion.version == version)\
+
+    analysis_version = (
+        Session.query(AnalysisVersion)
+        .filter(AnalysisVersion.datastack == datastack_name)
+        .filter(AnalysisVersion.version == version)
         .first()
+    )
     if analysis_version is None:
         return None, None
-    analysis_table = Session.query(AnalysisTable)\
-        .filter(AnalysisTable.analysisversion_id==AnalysisVersion.id)\
-        .filter(AnalysisTable.table_name == table_name)\
+    analysis_table = (
+        Session.query(AnalysisTable)
+        .filter(AnalysisTable.analysisversion_id == AnalysisVersion.id)
+        .filter(AnalysisTable.table_name == table_name)
         .first()
+    )
     if analysis_version is None:
         return analysis_version, None
     return analysis_version, analysis_table
 
+
 @cached(cache=LRUCache(maxsize=32))
-def get_flat_model(datastack_name:str, table_name:str, version:int, Session):
+def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
     """get a flat model for a frozen table
 
     Args:
@@ -143,10 +172,9 @@ def get_flat_model(datastack_name:str, table_name:str, version:int, Session):
     Returns:
         sqlalchemy.Model: model of table
     """
-    analysis_version, analysis_table = get_analysis_version_and_table(datastack_name,
-                                                                      table_name,
-                                                                      version,
-                                                                      Session)
+    analysis_version, analysis_table = get_analysis_version_and_table(
+        datastack_name, table_name, version, Session
+    )
     if analysis_table is None:
         return None
     anno_schema = get_schema(analysis_table.schema)
@@ -165,6 +193,7 @@ def get_flat_model(datastack_name:str, table_name:str, version:int, Session):
         annotation_models.set_model(table_name, Model, flat=True)
     return Model
 
+
 @client_bp.route("/datastack/<string:datastack_name>/versions")
 class DatastackVersions(Resource):
     @reset_auth
@@ -179,7 +208,9 @@ class DatastackVersions(Resource):
         Returns:
             list(int): list of versions that are available
         """
-        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
         session = sqlalchemy_cache.get(aligned_volume_name)
 
         response = (
@@ -192,9 +223,10 @@ class DatastackVersions(Resource):
         versions = [av.version for av in response]
         return versions, 200
 
+
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>")
 class DatastackVersion(Resource):
-    @reset_auth    
+    @reset_auth
     @auth_required
     @client_bp.doc("version metadata", security="apikey")
     def get(self, datastack_name: str, version: int):
@@ -207,7 +239,9 @@ class DatastackVersion(Resource):
         Returns:
             dict: metadata dictionary for this version
         """
-        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
         session = sqlalchemy_cache.get(aligned_volume_name)
 
         response = (
@@ -221,9 +255,10 @@ class DatastackVersion(Resource):
         schema = AnalysisVersionSchema()
         return schema.dump(response), 200
 
+
 @client_bp.route("/datastack/<string:datastack_name>/metadata")
 class DatastackMetadata(Resource):
-    @reset_auth    
+    @reset_auth
     @auth_required
     @client_bp.doc("all valid version metadata", security="apikey")
     def get(self, datastack_name: str):
@@ -233,7 +268,9 @@ class DatastackMetadata(Resource):
         Returns:
             list: list of metadata dictionaries
         """
-        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
         session = sqlalchemy_cache.get(aligned_volume_name)
         response = (
             session.query(AnalysisVersion)
@@ -246,12 +283,13 @@ class DatastackMetadata(Resource):
         schema = AnalysisVersionSchema()
         return schema.dump(response, many=True), 200
 
+
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/tables")
 class FrozenTableVersions(Resource):
     @reset_auth
     @auth_required
     @client_bp.doc("get_frozen_tables", security="apikey")
-    def get(self, datastack_name: str, version:int):
+    def get(self, datastack_name: str, version: int):
         """get frozen tables
 
         Args:
@@ -261,10 +299,13 @@ class FrozenTableVersions(Resource):
         Returns:
             list(str): list of frozen tables in this version
         """
-        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
         session = sqlalchemy_cache.get(aligned_volume_name)
 
-        av = (session.query(AnalysisVersion)
+        av = (
+            session.query(AnalysisVersion)
             .filter(AnalysisVersion.version == version)
             .first()
         )
@@ -273,19 +314,23 @@ class FrozenTableVersions(Resource):
         response = (
             session.query(AnalysisTable)
             .filter(AnalysisTable.analysisversion_id == av.id)
+            .filter(AnalysisTable.valid==True)
             .all()
         )
-        
+
         if response is None:
             return None, 404
         return [r.table_name for r in response], 200
 
-@client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/metadata")
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/metadata"
+)
 class FrozenTableMetadata(Resource):
     @reset_auth
     @auth_required
     @client_bp.doc("get_frozen_table_metadata", security="apikey")
-    def get(self, datastack_name: str, version:int, table_name: str):
+    def get(self, datastack_name: str, version: int, table_name: str):
         """get frozen table metadata
 
         Args:
@@ -296,52 +341,59 @@ class FrozenTableMetadata(Resource):
         Returns:
             dict: dictionary of table metadata
         """
-        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
         session = sqlalchemy_cache.get(aligned_volume_name)
-        analysis_version, analysis_table = get_analysis_version_and_table(datastack_name,
-                                                                      table_name,
-                                                                      version,
-                                                                      session)
-       
+        analysis_version, analysis_table = get_analysis_version_and_table(
+            datastack_name, table_name, version, session
+        )
+
         schema = AnalysisTableSchema()
         tables = schema.dump(analysis_table)
 
         return tables, 200
 
 
-
-@client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/count")
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/count"
+)
 class FrozenTableCount(Resource):
-    @reset_auth    
+    @reset_auth
     @auth_required
     @client_bp.doc("simple_query", security="apikey")
-    def get(self, datastack_name:str, version:int, table_name:str):
+    def get(self, datastack_name: str, version: int, table_name: str):
         """get annotation count in table
 
         Args:
             datastack_name (str): datastack name of table
             version (int): version of table
-            table_name (str): table name 
+            table_name (str): table name
 
         Returns:
             int: number of rows in this table
         """
-        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
-        
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+
         Session = sqlalchemy_cache.get(aligned_volume_name)
         Model = get_flat_model(datastack_name, table_name, version, Session)
 
         Session = sqlalchemy_cache.get("{}__mat{}".format(datastack_name, version))
         return Session().query(Model).count(), 200
 
+
 @client_bp.expect(query_parser)
-@client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/query")
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/query"
+)
 class FrozenTableQuery(Resource):
     @reset_auth
-    @auth_requires_permission('view', dataset=os.environ['AUTH_DATABASE_NAME'])    
+    @auth_requires_permission("view", dataset=os.environ["AUTH_DATABASE_NAME"])
     @client_bp.doc("simple_query", security="apikey")
     @accepts("SimpleQuerySchema", schema=SimpleQuerySchema, api=client_bp)
-    def post(self, datastack_name:str, version:int, table_name:str):
+    def post(self, datastack_name: str, version: int, table_name: str):
         """endpoint for doing a query with filters
 
         Args:
@@ -377,83 +429,94 @@ class FrozenTableQuery(Resource):
         Returns:
             pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
         """
-        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
         args = query_parser.parse_args()
         Session = sqlalchemy_cache.get(aligned_volume_name)
-        time_d={}
+        time_d = {}
         now = time.time()
 
         data = request.parsed_obj
         Model = get_flat_model(datastack_name, table_name, version, Session)
-        time_d['get Model']=time.time()-now
+        time_d["get Model"] = time.time() - now
         now = time.time()
         if Model is None:
-            return "Cannot find table {} in datastack {} at version {}".format(table_name, datastack_name, version), 404
-
+            return (
+                "Cannot find table {} in datastack {} at version {}".format(
+                    table_name, datastack_name, version
+                ),
+                404,
+            )
 
         Session = sqlalchemy_cache.get("{}__mat{}".format(datastack_name, version))
-        time_d['get Session']=time.time()-now
+        time_d["get Session"] = time.time() - now
         now = time.time()
 
-        engine = sqlalchemy_cache.get_engine("{}__mat{}".format(datastack_name, version))
-        time_d['get engine']=time.time()-now
+        engine = sqlalchemy_cache.get_engine(
+            "{}__mat{}".format(datastack_name, version)
+        )
+        time_d["get engine"] = time.time() - now
         now = time.time()
-        max_limit = current_app.config.get('QUERY_LIMIT_SIZE', 200000)
+        max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
 
         data = request.parsed_obj
-        time_d['get data']=time.time()-now
+        time_d["get data"] = time.time() - now
         now = time.time()
-        limit = data.get('limit', max_limit)
-        
-        if limit>max_limit:
+        limit = data.get("limit", max_limit)
+
+        if limit > max_limit:
             limit = max_limit
 
-        logging.info('query {}'.format(data))
-        logging.info('args - {}'.format(args))
-        
-        time_d['setup query']=time.time()-now
+        logging.info("query {}".format(data))
+        logging.info("args - {}".format(args))
+
+        time_d["setup query"] = time.time() - now
         now = time.time()
 
-        df = specific_query(Session, engine, {table_name: Model}, [table_name],
-                      filter_in_dict=data.get('filter_in_dict', {}),
-                      filter_notin_dict=data.get('filter_notin_dict', {}),
-                      filter_equal_dict=data.get('filter_equal_dict', {}),
-                      select_columns=data.get('select_columns', None),
-                      consolidate_positions=not args['split_positions'],
-                      offset=data.get('offset', None),
-                      limit = limit)
-        time_d['execute query']=time.time()-now
+        df = specific_query(
+            Session,
+            engine,
+            {table_name: Model},
+            [table_name],
+            filter_in_dict=data.get("filter_in_dict", {}),
+            filter_notin_dict=data.get("filter_notin_dict", {}),
+            filter_equal_dict=data.get("filter_equal_dict", {}),
+            select_columns=data.get("select_columns", None),
+            consolidate_positions=not args["split_positions"],
+            offset=data.get("offset", None),
+            limit=limit,
+        )
+        time_d["execute query"] = time.time() - now
         now = time.time()
-        headers=None
+        headers = None
         if len(df) == limit:
-            headers={'Warning':f'201 - "Limited query to {max_limit} rows'}
+            headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
 
-
-        if args['return_pyarrow']:
+        if args["return_pyarrow"]:
             context = pa.default_serialization_context()
             serialized = context.serialize(df).to_buffer().to_pybytes()
-            time_d['serialize']=time.time()-now
+            time_d["serialize"] = time.time() - now
             logging.info(time_d)
-            return Response(serialized,
-                        headers=headers,
-                        mimetype='x-application/pyarrow')
+            return Response(
+                serialized, headers=headers, mimetype="x-application/pyarrow"
+            )
         else:
-            dfjson = df.to_json(orient='records')
-            time_d['serialize']=time.time()-now
+            dfjson = df.to_json(orient="records")
+            time_d["serialize"] = time.time() - now
             logging.info(time_d)
-            response = Response(dfjson,
-                        headers=headers,
-                        mimetype='application/json')
+            response = Response(dfjson, headers=headers, mimetype="application/json")
             return after_request(response)
+
 
 @client_bp.expect(query_parser)
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/query")
 class FrozenQuery(Resource):
     @reset_auth
-    @auth_requires_permission('view', dataset=os.environ['AUTH_DATABASE_NAME'])    
+    @auth_requires_permission("view", dataset=os.environ["AUTH_DATABASE_NAME"])
     @client_bp.doc("complex_query", security="apikey")
     @accepts("ComplexQuerySchema", schema=ComplexQuerySchema, api=client_bp)
-    def post(self, datastack_name:str, version:int):
+    def post(self, datastack_name: str, version: int):
         """endpoint for doing a query with filters and joins
 
         Args:
@@ -490,55 +553,66 @@ class FrozenQuery(Resource):
         Returns:
             pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
         """
-        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
-        
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+
         Session = sqlalchemy_cache.get(aligned_volume_name)
         args = query_parser.parse_args()
         data = request.parsed_obj
         model_dict = {}
-        for table_desc in data['tables']:
-            table_name=table_desc[0]
+        for table_desc in data["tables"]:
+            table_name = table_desc[0]
             Model = get_flat_model(datastack_name, table_name, version, Session)
             if Model is None:
-                return "Cannot find table {} in datastack {} at version {}".format(table_name, datastack_name, version), 404
-            model_dict[table_name]=Model
+                return (
+                    "Cannot find table {} in datastack {} at version {}".format(
+                        table_name, datastack_name, version
+                    ),
+                    404,
+                )
+            model_dict[table_name] = Model
 
-        db_name = "{}__mat{}".format(datastack_name, version) 
+        db_name = "{}__mat{}".format(datastack_name, version)
         Session = sqlalchemy_cache.get(db_name)
         engine = sqlalchemy_cache.get_engine(db_name)
-        max_limit = current_app.config.get('QUERY_LIMIT_SIZE', 200000)
+        max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
 
         data = request.parsed_obj
-        limit = data.get('limit', max_limit)
-        if limit>max_limit:
+        limit = data.get("limit", max_limit)
+        if limit > max_limit:
             limit = max_limit
-        logging.info('query {}'.format(data))
-        df = specific_query(Session, engine, model_dict, data['tables'],
-                      filter_in_dict=data.get('filter_in_dict', {}),
-                      filter_notin_dict=data.get('filter_notin_dict', {}),
-                      filter_equal_dict=data.get('filter_equal_dict', {}),
-                      select_columns=data.get('select_columns', None),
-                      consolidate_positions=not args['split_positions'],
-                      offset=data.get('offset', None),
-                      limit = limit,
-                      suffixes=data.get('suffixes', None))
-        headers=None
+        logging.info("query {}".format(data))
+        df = specific_query(
+            Session,
+            engine,
+            model_dict,
+            data["tables"],
+            filter_in_dict=data.get("filter_in_dict", {}),
+            filter_notin_dict=data.get("filter_notin_dict", {}),
+            filter_equal_dict=data.get("filter_equal_dict", {}),
+            select_columns=data.get("select_columns", None),
+            consolidate_positions=not args["split_positions"],
+            offset=data.get("offset", None),
+            limit=limit,
+            suffixes=data.get("suffixes", None),
+        )
+        headers = None
         if len(df) == limit:
-            headers={'Warning':f'201 - "Limited query to {max_limit} rows'}
-               
-        if args['return_pyarrow']:
+            headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
+
+        if args["return_pyarrow"]:
             context = pa.default_serialization_context()
             serialized = context.serialize(df).to_buffer().to_pybytes()
-            return Response(serialized,
-                        headers=headers,
-                        mimetype='x-application/pyarrow')
+            return Response(
+                serialized, headers=headers, mimetype="x-application/pyarrow"
+            )
         else:
-            dfjson = df.to_json(orient='records')
-            response = Response(dfjson,
-                        headers=headers,
-                        mimetype='application/json')
+            dfjson = df.to_json(orient="records")
+            response = Response(dfjson, headers=headers, mimetype="application/json")
             return after_request(response)
-            
+
+
 # @client_bp.route("/aligned_volume/<string:aligned_volume_name>/table")
 # class SegmentationTable(Resource):
 #     @auth_required

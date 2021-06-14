@@ -1,4 +1,7 @@
-from materializationengine.errors import AlignedVolumeNotFoundException, DataStackNotFoundException
+from materializationengine.errors import (
+    AlignedVolumeNotFoundException,
+    DataStackNotFoundException,
+)
 from materializationengine.utils import get_config_param
 from flask import current_app
 import requests
@@ -28,9 +31,12 @@ def get_aligned_volume(aligned_volume):
     url = os.path.join(infoservice, f"api/v2/aligned_volume/{aligned_volume}")
     r = requests.get(url)
     if r.status_code != 200:
-        raise AlignedVolumeNotFoundException(f"aligned_volume {aligned_volume} not found")
+        raise AlignedVolumeNotFoundException(
+            f"aligned_volume {aligned_volume} not found"
+        )
     else:
         return r.json()
+
 
 @cachetools.func.ttl_cache(maxsize=2, ttl=5 * 60)
 def get_datastacks():
@@ -57,4 +63,6 @@ def get_datastack_info(datastack_name):
     try:
         return infoclient.get_datastack_info(datastack_name=datastack_name)
     except requests.HTTPError:
-        raise DataStackNotFoundException(f"datastack {datastack_name} info not returned")
+        raise DataStackNotFoundException(
+            f"datastack {datastack_name} info not returned"
+        )
