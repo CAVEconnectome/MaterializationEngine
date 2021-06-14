@@ -703,10 +703,9 @@ def insert_chunked_data(
     next_key: int,
     batch_size: int = 100_000,
 ):
-
-    pagination_query = f"""AND 
-                {annotation_table_name}.id > {next_key} 
-            ORDER BY {annotation_table_name}.id ASC 
+    pagination_query = f"""AND
+                {annotation_table_name}.id > {next_key}
+            ORDER BY {annotation_table_name}.id ASC
             LIMIT {batch_size} RETURNING  {annotation_table_name}.id"""
     insert_statement = sql.SQL(sql_statement + pagination_query)
 
@@ -774,8 +773,13 @@ def check_tables(self, mat_info: list, analysis_version: int):
             .one()
         )
         mat_row_count = mat_client._get_table_row_count(annotation_table_name)
-
         celery_logger.info(f"ROW COUNTS: {live_table_row_count[0]} {mat_row_count}")
+
+        if mat_row_count == 0:
+            celery_logger.warning(
+                f"{annotation_table_name} has {mat_row_count} rows, skipping."
+            )
+            continue
 
         if live_table_row_count[0] == mat_row_count:
             celery_logger.info(f"{annotation_table_name} row counts match")
@@ -786,32 +790,30 @@ def check_tables(self, mat_info: list, analysis_version: int):
                 annotation_table_name, mat_engine
             )
 
-            if live_mapped_indexes == mat_mapped_indexes:
-
-                celery_logger.info(
-                    f"Indexes matches: {live_mapped_indexes} {mat_mapped_indexes}"
-                )
-
-                table_validity = (
-                    session.query(AnalysisTable)
-                    .filter(AnalysisTable.analysisversion_id == versioned_database.id)
-                    .filter(AnalysisTable.table_name == annotation_table_name)
-                    .one()
-                )
-                table_validity.valid = True
-                valid_row_counts += 1
-            else:
+            if live_mapped_indexes != mat_mapped_indexes:
                 raise IndexMatchError(
-                    f"Indexes did not match: annotation indexes {live_mapped_indexes}; materialzied indexes {mat_mapped_indexes}"
+                    f"Indexes did not match: annotation indexes {live_mapped_indexes}; materialized indexes {mat_mapped_indexes}"
                 )
 
+            celery_logger.info(
+                f"Indexes matches: {live_mapped_indexes} {mat_mapped_indexes}"
+            )
+
+            table_validity = (
+                session.query(AnalysisTable)
+                .filter(AnalysisTable.analysisversion_id == versioned_database.id)
+                .filter(AnalysisTable.table_name == annotation_table_name)
+                .one()
+            )
+            table_validity.valid = True
+            valid_row_counts += 1
     celery_logger.info(f"Valid tables {valid_row_counts}, Mat tables {table_count}")
 
     if valid_row_counts == table_count:
         versioned_database.valid = True
     try:
         session.commit()
-        return f"All materialized tables match valid row number from live tables"
+        return "All materialized tables match valid row number from live tables"
     except Exception as e:
         session.rollback()
         celery_logger.error(e)
