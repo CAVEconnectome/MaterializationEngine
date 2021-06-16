@@ -57,7 +57,6 @@ def test_get_materialization_info():
             "materialization_time_stamp": str(materialization_time_stamp),
             "last_updated_time_stamp": None,
             "chunk_size": 100000,
-            "table_count": 1,
             "find_all_expired_roots": False,
             "analysis_version": 1,
             "analysis_database": "test_datastack__mat1",
