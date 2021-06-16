@@ -86,6 +86,14 @@ def get_materialization_info(
         metadata = []
         for annotation_table in annotation_tables:
             row_count = db._get_table_row_count(annotation_table, filter_valid=True)
+            max_id = db.get_max_id_value(annotation_table)
+            min_id = db.get_min_id_value(annotation_table)
+            if row_count == 0:
+                continue
+
+            if row_count >= row_size and skip_table:
+                continue
+
             md = db.get_table_metadata(annotation_table)
             vx = md.get("voxel_resolution_x", None)
             vy = md.get("voxel_resolution_y", None)
@@ -95,10 +103,6 @@ def get_materialization_info(
             vz = vz or 1.0
             voxel_resolution = [vx, vy, vz]
 
-            if row_count >= row_size and skip_table:
-                continue
-            max_id = db.get_max_id_value(annotation_table)
-            min_id = db.get_min_id_value(annotation_table)
             if max_id:
                 segmentation_table_name = build_segmentation_table_name(
                     annotation_table, pcg_table_name
@@ -137,7 +141,6 @@ def get_materialization_info(
                     "materialization_time_stamp": str(materialization_time_stamp),
                     "last_updated_time_stamp": last_updated_time_stamp,
                     "chunk_size": 100000,
-                    "table_count": len(annotation_tables),
                     "find_all_expired_roots": datastack_info.get(
                         "find_all_expired_roots", False
                     ),

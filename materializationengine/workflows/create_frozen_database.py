@@ -112,7 +112,7 @@ def create_materializied_database_workflow(
     datastack_info: dict,
     new_version_number: int,
     materialization_time_stamp: datetime.datetime.utcnow,
-    mat_info: dict,
+    mat_info: List[dict],
 ):
     """Celery workflow to create a materializied database.
 
@@ -137,12 +137,12 @@ def create_materializied_database_workflow(
             datastack_info, new_version_number, materialization_time_stamp
         ),
         update_table_metadata.si(mat_info),
-        drop_tables.si(datastack_info, new_version_number),
+        drop_tables.si(mat_info, new_version_number),
     )
     return setup_versioned_database
 
 
-def format_materialization_database_workflow(mat_info: dict):
+def format_materialization_database_workflow(mat_info: List[dict]):
     """Celery workflow to format the materialized database.
 
     Workflow:
@@ -380,6 +380,9 @@ def create_materialized_metadata(
                     table_name, filter_valid=True
                 )
                 celery_logger.info(f"Row count {valid_row_count}")
+                if valid_row_count == 0:
+                    continue
+
                 mat_metadata = MaterializedMetadata(
                     schema=schema_type[0],
                     table_name=table_name,
@@ -453,7 +456,7 @@ def update_table_metadata(self, mat_info: List[dict]):
     bind=True,
     acks_late=True,
 )
-def drop_tables(self, datastack_info: dict, analysis_version: int):
+def drop_tables(self, mat_info: List[dict], analysis_version: int):
     """Drop all tables that don't match valid in the live 'aligned_volume' database
     as well as tables that were copied from the live table that are not needed in
     the frozen version (e.g. metadata tables).
@@ -468,17 +471,12 @@ def drop_tables(self, datastack_info: dict, analysis_version: int):
     Returns:
         str: tables that have been dropped
     """
-    aligned_volume = datastack_info["aligned_volume"]["name"]
-    datastack = datastack_info["datastack"]
-    pcg_table_name = datastack_info["segmentation_source"].split("/")[-1]
+    datastack = mat_info[0]["datastack"]
 
     SQL_URI_CONFIG = get_config_param("SQLALCHEMY_DATABASE_URI")
     analysis_sql_uri = create_analysis_sql_uri(
         SQL_URI_CONFIG, datastack, analysis_version
     )
-
-    session = sqlalchemy_cache.get(aligned_volume)
-    engine = sqlalchemy_cache.get_engine(aligned_volume)
 
     mat_engine = create_engine(analysis_sql_uri)
 
@@ -486,12 +484,8 @@ def drop_tables(self, datastack_info: dict, analysis_version: int):
     mat_table_names = mat_inspector.get_table_names()
     mat_table_names.remove("materializedmetadata")
 
-    anno_tables = session.query(AnnoMetadata).filter(AnnoMetadata.valid == True).all()
-
-    annotation_tables = [table.__dict__["table_name"] for table in anno_tables]
-    segmentation_tables = [
-        f"{anno_table}__{pcg_table_name}" for anno_table in annotation_tables
-    ]
+    annotation_tables = [table["annotation_table_name"] for table in mat_info]
+    segmentation_tables = [table["segmentation_table_name"] for table in mat_info]
 
     filtered_tables = annotation_tables + segmentation_tables
 
@@ -508,8 +502,6 @@ def drop_tables(self, datastack_info: dict, analysis_version: int):
         raise e
     finally:
         connection.close()
-        session.close()
-        engine.dispose()
         mat_engine.dispose()
 
     return {f"Tables dropped {tables_to_drop}"}
@@ -570,10 +562,10 @@ def insert_annotation_data(self, chunk: List[int], mat_metadata: dict):
     mat_df = pd.DataFrame(data)
     mat_df = mat_df.to_dict(orient="records")
     SQL_URI_CONFIG = get_config_param("SQLALCHEMY_DATABASE_URI")
-    analysys_sql_uri = create_analysis_sql_uri(
+    analysis_sql_uri = create_analysis_sql_uri(
         SQL_URI_CONFIG, datastack, analysis_version
     )
-    analysis_session, analysis_engine = create_session(analysys_sql_uri)
+    analysis_session, analysis_engine = create_session(analysis_sql_uri)
 
     try:
         analysis_engine.execute(analysis_table.insert(), [data for data in mat_df])
@@ -749,7 +741,7 @@ def check_tables(self, mat_info: list, analysis_version: int):
     aligned_volume = mat_info[0][
         "aligned_volume"
     ]  # get aligned_volume name from datastack
-    table_count = mat_info[0]["table_count"]
+    table_count = len(mat_info)
     analysis_database = mat_info[0]["analysis_database"]
 
     session = sqlalchemy_cache.get(aligned_volume)
@@ -763,7 +755,7 @@ def check_tables(self, mat_info: list, analysis_version: int):
         .one()
     )
 
-    valid_row_counts = 0
+    valid_table_count = 0
     for mat_metadata in mat_info:
         annotation_table_name = mat_metadata["annotation_table_name"]
 
@@ -806,10 +798,10 @@ def check_tables(self, mat_info: list, analysis_version: int):
                 .one()
             )
             table_validity.valid = True
-            valid_row_counts += 1
-    celery_logger.info(f"Valid tables {valid_row_counts}, Mat tables {table_count}")
+            valid_table_count += 1
+    celery_logger.info(f"Valid tables {valid_table_count}, Mat tables {table_count}")
 
-    if valid_row_counts == table_count:
+    if valid_table_count == table_count:
         versioned_database.valid = True
     try:
         session.commit()
