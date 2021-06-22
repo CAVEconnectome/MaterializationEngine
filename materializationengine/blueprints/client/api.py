@@ -138,7 +138,8 @@ def get_analysis_version_and_table(
     Returns:
         AnalysisVersion, AnalysisTable: tuple of instances of AnalysisVersion and AnalysisTable
     """
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+        datastack_name)
 
     analysis_version = (
         Session.query(AnalysisVersion)
@@ -307,6 +308,7 @@ class FrozenTableVersions(Resource):
         av = (
             session.query(AnalysisVersion)
             .filter(AnalysisVersion.version == version)
+            .filter(AnalysisVersion.datastack == datastack_name)
             .first()
         )
         if av is None:
@@ -314,7 +316,7 @@ class FrozenTableVersions(Resource):
         response = (
             session.query(AnalysisTable)
             .filter(AnalysisTable.analysisversion_id == av.id)
-            .filter(AnalysisTable.valid==True)
+            .filter(AnalysisTable.valid == True)
             .all()
         )
 
@@ -380,7 +382,8 @@ class FrozenTableCount(Resource):
         Session = sqlalchemy_cache.get(aligned_volume_name)
         Model = get_flat_model(datastack_name, table_name, version, Session)
 
-        Session = sqlalchemy_cache.get("{}__mat{}".format(datastack_name, version))
+        Session = sqlalchemy_cache.get(
+            "{}__mat{}".format(datastack_name, version))
         return Session().query(Model).count(), 200
 
 
@@ -449,7 +452,8 @@ class FrozenTableQuery(Resource):
                 404,
             )
 
-        Session = sqlalchemy_cache.get("{}__mat{}".format(datastack_name, version))
+        Session = sqlalchemy_cache.get(
+            "{}__mat{}".format(datastack_name, version))
         time_d["get Session"] = time.time() - now
         now = time.time()
 
@@ -505,7 +509,8 @@ class FrozenTableQuery(Resource):
             dfjson = df.to_json(orient="records")
             time_d["serialize"] = time.time() - now
             logging.info(time_d)
-            response = Response(dfjson, headers=headers, mimetype="application/json")
+            response = Response(dfjson, headers=headers,
+                                mimetype="application/json")
             return after_request(response)
 
 
@@ -563,7 +568,8 @@ class FrozenQuery(Resource):
         model_dict = {}
         for table_desc in data["tables"]:
             table_name = table_desc[0]
-            Model = get_flat_model(datastack_name, table_name, version, Session)
+            Model = get_flat_model(
+                datastack_name, table_name, version, Session)
             if Model is None:
                 return (
                     "Cannot find table {} in datastack {} at version {}".format(
@@ -609,7 +615,8 @@ class FrozenQuery(Resource):
             )
         else:
             dfjson = df.to_json(orient="records")
-            response = Response(dfjson, headers=headers, mimetype="application/json")
+            response = Response(dfjson, headers=headers,
+                                mimetype="application/json")
             return after_request(response)
 
 
