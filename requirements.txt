@@ -104,7 +104,7 @@ dracopy==0.0.19
     # via cloud-volume
 dynamicannotationdb==3.0.0
     # via -r requirements.txt
-emannotationschemas==3.1.7
+emannotationschemas==3.2.0
     # via
     #   -r requirements.txt
     #   dynamicannotationdb
