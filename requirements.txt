@@ -16,7 +16,7 @@ amqp==2.6.1
     # via kombu
 aniso8601==9.0.1
     # via flask-restx
-annotationframeworkclient==2.4.0
+annotationframeworkclient==3.2.0
     # via -r requirements.txt
 async-timeout==3.0.1
     # via aiohttp
