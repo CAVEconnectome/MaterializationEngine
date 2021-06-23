@@ -273,7 +273,7 @@ marshmallow==3.5.1
     #   flask-marshmallow
     #   marshmallow-jsonschema
     #   marshmallow-sqlalchemy
-middle-auth-client==3.3.0
+middle-auth-client==3.4.0
     # via
     #   -r requirements.txt
     #   emannotationschemas
