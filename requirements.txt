@@ -4,8 +4,6 @@
 #
 #    pip-compile /app/requirements.in
 #
--e git+git://github.com/seung-lab/PyChunkedGraph.git@req_bump#egg=pychunkedgraph
-    # via -r /app/requirements.in
 aiohttp==3.7.4.post0
     # via gcsfs
 alembic==1.4.2
@@ -16,8 +14,6 @@ amqp==2.6.1
     # via kombu
 aniso8601==9.0.1
     # via flask-restx
-annotationframeworkclient==2.4.0
-    # via -r /app/requirements.in
 async-timeout==3.0.1
     # via aiohttp
 attrs==21.2.0
@@ -25,6 +21,8 @@ attrs==21.2.0
     #   aiohttp
     #   jsonschema
     #   pytest
+backcall==0.2.0
+    # via ipython
 billiard==3.6.4.0
     # via celery
 boto3==1.17.87
@@ -39,17 +37,18 @@ brotli==1.0.9
     # via cloud-files
 brotlipy==0.7.0
     # via urllib3
-cachetools==4.1.1
+cachetools==4.2.2
     # via
     #   -r /app/requirements.in
+    #   caveclient
     #   google-auth
     #   middle-auth-client
-    #   pychunkedgraph
+caveclient==4.0.0
+    # via -r /app/requirements.in
 celery==4.4.7
     # via -r /app/requirements.in
 certifi==2021.5.30
     # via
-    #   pychunkedgraph
     #   requests
     #   urllib3
 cffi==1.14.5
@@ -67,23 +66,14 @@ click==8.0.1
     # via
     #   cloud-files
     #   flask
-    #   rq
 cloud-files==1.28.1
     # via
     #   -r /app/requirements.in
     #   cloud-volume
-    #   pychunkedgraph
 cloud-volume==3.14.0
-    # via
-    #   -r /app/requirements.in
-    #   pychunkedgraph
-    #   task-queue
-codecov==2.1.11
-    # via pychunkedgraph
+    # via -r /app/requirements.in
 compressed-segmentation==2.0.1
     # via cloud-volume
-coverage==5.5
-    # via codecov
 crc32c==2.2
     # via cloud-files
 cryptography==3.4.7
@@ -93,6 +83,7 @@ cryptography==3.4.7
 decorator==5.0.9
     # via
     #   gcsfs
+    #   ipython
     #   networkx
 deflate==0.3.0
     # via cloud-files
@@ -103,15 +94,13 @@ dill==0.3.3
 dracopy==0.0.19
     # via cloud-volume
 dynamicannotationdb==3.0.0
-    # via -r requirements.txt
+    # via -r /app/requirements.in
 emannotationschemas==3.2.1
     # via
     #   -r /app/requirements.in
     #   dynamicannotationdb
 fastremap==1.12.2
-    # via
-    #   cloud-volume
-    #   pychunkedgraph
+    # via cloud-volume
 flask==1.1.2
     # via
     #   -r /app/requirements.in
@@ -122,7 +111,6 @@ flask==1.1.2
     #   flask-restx
     #   flask-sqlalchemy
     #   middle-auth-client
-    #   pychunkedgraph
 flask-accepts==0.17.3
     # via
     #   -r /app/requirements.in
@@ -135,7 +123,6 @@ flask-cors==3.0.8
     # via
     #   -r /app/requirements.in
     #   emannotationschemas
-    #   pychunkedgraph
 flask-marshmallow==0.13.0
     # via -r /app/requirements.in
 flask-restx==0.2.0
@@ -162,12 +149,8 @@ gevent==20.6.2
     #   -r /app/requirements.in
     #   cloud-files
     #   cloud-volume
-    #   task-queue
-google-api-core[grpc]==1.29.0
-    # via
-    #   google-cloud-bigtable
-    #   google-cloud-core
-    #   google-cloud-datastore
+google-api-core==1.29.0
+    # via google-cloud-core
 google-auth==1.30.1
     # via
     #   cloud-files
@@ -179,17 +162,11 @@ google-auth==1.30.1
     #   google-cloud-storage
 google-auth-oauthlib==0.4.4
     # via gcsfs
-google-cloud-bigtable==2.2.0
-    # via pychunkedgraph
 google-cloud-core==1.6.0
     # via
     #   cloud-files
     #   cloud-volume
-    #   google-cloud-bigtable
-    #   google-cloud-datastore
     #   google-cloud-storage
-google-cloud-datastore==2.1.3
-    # via pychunkedgraph
 google-cloud-storage==1.38.0
     # via
     #   cloud-files
@@ -200,20 +177,10 @@ google-crc32c==1.1.2
     #   google-resumable-media
 google-resumable-media==1.3.0
     # via google-cloud-storage
-googleapis-common-protos[grpc]==1.53.0
-    # via
-    #   google-api-core
-    #   grpc-google-iam-v1
+googleapis-common-protos==1.53.0
+    # via google-api-core
 greenlet==1.1.0
     # via gevent
-grpc-google-iam-v1==0.12.3
-    # via google-cloud-bigtable
-grpcio==1.38.0
-    # via
-    #   google-api-core
-    #   googleapis-common-protos
-    #   grpc-google-iam-v1
-    #   pychunkedgraph
 idna==2.10
     # via
     #   requests
@@ -231,8 +198,14 @@ inflection==0.5.1
     # via python-jsonschema-objects
 iniconfig==1.1.1
     # via pytest
+ipython==7.24.1
+    # via caveclient
+ipython-genutils==0.2.0
+    # via traitlets
 itsdangerous==2.0.1
     # via flask
+jedi==0.18.0
+    # via ipython
 jinja2==3.0.1
     # via flask
 jmespath==0.10.0
@@ -248,10 +221,6 @@ jsonschema==3.2.0
     #   python-jsonschema-objects
 kombu==4.6.11
     # via celery
-libcst==0.3.19
-    # via
-    #   google-cloud-bigtable
-    #   google-cloud-datastore
 mako==1.1.4
     # via alembic
 markdown==3.3.4
@@ -273,11 +242,12 @@ marshmallow-jsonschema==0.10.0
     # via emannotationschemas
 marshmallow-sqlalchemy==0.23.1
     # via -r /app/requirements.in
+matplotlib-inline==0.1.2
+    # via ipython
 middle-auth-client==3.4.1
     # via
     #   -r /app/requirements.in
     #   emannotationschemas
-    #   pychunkedgraph
 multidict==5.1.0
     # via
     #   aiohttp
@@ -285,17 +255,13 @@ multidict==5.1.0
 multiprocess==0.70.11.1
     # via pathos
 multiwrapper==0.1.1
-    # via
-    #   -r /app/requirements.in
-    #   pychunkedgraph
-mypy-extensions==0.4.3
-    # via typing-inspect
+    # via -r /app/requirements.in
 networkx==2.1
-    # via pychunkedgraph
+    # via caveclient
 numpy==1.20.3
     # via
     #   -r /app/requirements.in
-    #   annotationframeworkclient
+    #   caveclient
     #   cloud-volume
     #   compressed-segmentation
     #   emannotationschemas
@@ -304,10 +270,7 @@ numpy==1.20.3
     #   multiwrapper
     #   pandas
     #   pyarrow
-    #   pychunkedgraph
     #   simplejpeg
-    #   task-queue
-    #   zmesh
 oauthlib==3.1.1
     # via requests-oauthlib
 orderedmultidict==1.0.1
@@ -321,14 +284,16 @@ packaging==20.9
 pandas==1.2.4
     # via
     #   -r /app/requirements.in
+    #   caveclient
     #   emannotationschemas
-    #   pychunkedgraph
+parso==0.8.2
+    # via jedi
 pathos==0.2.7
-    # via
-    #   cloud-files
-    #   task-queue
-pbr==5.6.0
-    # via task-queue
+    # via cloud-files
+pexpect==4.8.0
+    # via ipython
+pickleshare==0.7.5
+    # via ipython
 pillow==8.2.0
     # via cloud-volume
 pluggy==0.13.1
@@ -339,29 +304,28 @@ pox==0.2.9
     # via pathos
 ppft==1.6.6.3
     # via pathos
-proto-plus==1.18.1
-    # via
-    #   google-cloud-bigtable
-    #   google-cloud-datastore
+prompt-toolkit==3.0.19
+    # via ipython
 protobuf==3.17.2
     # via
     #   cloud-files
     #   cloud-volume
     #   google-api-core
     #   googleapis-common-protos
-    #   proto-plus
 psutil==5.4.3
     # via cloud-volume
 psycopg2-binary==2.8.5
     # via
     #   dynamicannotationdb
     #   emannotationschemas
+ptyprocess==0.7.0
+    # via pexpect
 py==1.10.0
     # via pytest
 pyarrow==3.0.0
     # via
     #   -r /app/requirements.in
-    #   annotationframeworkclient
+    #   caveclient
 pyasn1==0.4.8
     # via
     #   pyasn1-modules
@@ -370,6 +334,8 @@ pyasn1-modules==0.2.8
     # via google-auth
 pycparser==2.20
     # via cffi
+pygments==2.9.0
+    # via ipython
 pyopenssl==20.0.1
     # via urllib3
 pyparsing==2.4.7
@@ -382,7 +348,6 @@ pytest==6.2.4
     # via
     #   compressed-segmentation
     #   dracopy
-    #   task-queue
 python-dateutil==2.8.1
     # via
     #   alembic
@@ -392,8 +357,6 @@ python-dateutil==2.8.1
     #   pandas
 python-editor==1.0.4
     # via alembic
-python-json-logger==2.0.1
-    # via pychunkedgraph
 python-jsonschema-objects==0.4.0
     # via cloud-volume
 pytz==2020.1
@@ -404,33 +367,21 @@ pytz==2020.1
     #   flask-restx
     #   google-api-core
     #   pandas
-pyyaml==5.4.1
-    # via
-    #   libcst
-    #   pychunkedgraph
 redis==3.5.3
-    # via
-    #   middle-auth-client
-    #   pychunkedgraph
-    #   rq
+    # via middle-auth-client
 requests==2.25.0
     # via
     #   -r /app/requirements.in
-    #   annotationframeworkclient
+    #   caveclient
     #   cloud-files
     #   cloud-volume
-    #   codecov
     #   gcsfs
     #   google-api-core
     #   google-cloud-storage
     #   middle-auth-client
-    #   pychunkedgraph
     #   requests-oauthlib
-    #   task-queue
 requests-oauthlib==1.3.0
     # via google-auth-oauthlib
-rq==1.8.1
-    # via pychunkedgraph
 rsa==4.7.2
     # via
     #   cloud-files
@@ -455,7 +406,6 @@ six==1.16.0
     #   google-auth
     #   google-cloud-core
     #   google-resumable-media
-    #   grpcio
     #   jsonschema
     #   orderedmultidict
     #   ppft
@@ -473,8 +423,6 @@ sqlalchemy==1.3.24
     #   flask-sqlalchemy
     #   geoalchemy2
     #   marshmallow-sqlalchemy
-task-queue==1.0.0
-    # via pychunkedgraph
 tenacity==7.0.0
     # via
     #   cloud-files
@@ -485,27 +433,27 @@ tqdm==4.61.0
     # via
     #   cloud-files
     #   cloud-volume
-    #   task-queue
+traitlets==5.0.5
+    # via
+    #   ipython
+    #   matplotlib-inline
 typing-extensions==3.10.0.0
     # via
     #   aiohttp
     #   importlib-metadata
-    #   libcst
-    #   typing-inspect
     #   yarl
-typing-inspect==0.6.0
-    # via libcst
 urllib3[brotli,secure]==1.26.5
     # via
     #   botocore
     #   cloud-files
     #   cloud-volume
-    #   pychunkedgraph
     #   requests
 vine==1.3.0
     # via
     #   amqp
     #   celery
+wcwidth==0.2.5
+    # via prompt-toolkit
 werkzeug==2.0.1
     # via
     #   flask
@@ -517,16 +465,12 @@ yarl==1.6.3
     # via aiohttp
 zipp==3.4.1
     # via importlib-metadata
-zmesh==0.5.0
-    # via pychunkedgraph
 zope.event==4.5.0
     # via gevent
 zope.interface==5.4.0
     # via gevent
 zstandard==0.15.2
-    # via
-    #   cloud-files
-    #   pychunkedgraph
+    # via cloud-files
 
 # The following packages are considered to be unsafe in a requirements file:
 # setuptools

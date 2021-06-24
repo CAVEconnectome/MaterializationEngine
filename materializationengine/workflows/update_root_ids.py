@@ -168,9 +168,9 @@ def get_expired_root_ids(mat_metadata: dict, expired_chunk_size: int = 100):
 def lookup_expired_root_ids(
     pcg_table_name, last_updated_ts, materialization_time_stamp
 ):
-    cg = chunkedgraph_cache.init_pcg(pcg_table_name)
+    cg_client = chunkedgraph_cache.init_pcg(pcg_table_name)
 
-    old_roots, __ = cg.get_proofread_root_ids(
+    old_roots, __ = cg_client.get_delta_roots(
         last_updated_ts, materialization_time_stamp
     )
     return old_roots
@@ -289,5 +289,5 @@ def get_new_roots(self, supervoxel_chunk: list, mat_metadata: dict):
 
 
 def lookup_new_root_ids(pcg_table_name, supervoxel_data, formatted_mat_ts):
-    cg = chunkedgraph_cache.init_pcg(pcg_table_name)
-    return np.squeeze(cg.get_roots(supervoxel_data, time_stamp=formatted_mat_ts))
+    cg_client = chunkedgraph_cache.init_pcg(pcg_table_name)
+    return np.squeeze(cg_client.get_roots(supervoxel_data, time_stamp=formatted_mat_ts))
