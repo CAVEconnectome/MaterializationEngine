@@ -6,8 +6,8 @@ from materializationengine.utils import get_config_param
 from flask import current_app
 import requests
 import os
-from annotationframeworkclient.infoservice import InfoServiceClient
-from annotationframeworkclient.auth import AuthClient
+from caveclient.infoservice import InfoServiceClient
+from caveclient.auth import AuthClient
 import cachetools.func
 
 
