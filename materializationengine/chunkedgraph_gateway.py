@@ -29,5 +29,5 @@ class ChunkedGraphGateway:
 
 
 chunkedgraph_cache = ChunkedGraphGateway(
-    auth_token=os.environ.get("DAF_CREDENTIALS", None)
+    token_file=os.environ.get("DAF_CREDENTIALS", None)
 )
