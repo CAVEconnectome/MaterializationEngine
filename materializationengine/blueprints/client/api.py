@@ -354,6 +354,11 @@ class FrozenTableMetadata(Resource):
         schema = AnalysisTableSchema()
         tables = schema.dump(analysis_table)
 
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        ann_md = db.get_table_metadata(table_name)
+        ann_md.pop('id')
+        ann_md.pop('deleted')
+        tables.update(ann_md)
         return tables, 200
 
 
