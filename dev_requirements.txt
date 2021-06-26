@@ -20,7 +20,7 @@ flask-restx==0.2.0
 flask-accepts==0.17.3
 alembic==1.4.2
 celery==4.4.7
-cachetools==4.1.1
+cachetools
 gevent==20.6.2
 gcsfs>=0.8.0
 pyarrow>=2.0.0
