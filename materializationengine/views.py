@@ -20,7 +20,7 @@ from materializationengine.info_client import get_datastack_info, get_datastacks
 from materializationengine.models import AnalysisTable, AnalysisVersion
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 
-__version__ = "2.2.1"
+__version__ = "2.3.0"
 
 views_bp = Blueprint("views", __name__, url_prefix="/materialize/views")
 
