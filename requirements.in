@@ -1,5 +1,5 @@
 emannotationschemas==3.2.2
-annotationframeworkclient==3.2.0
+caveclient==4.0.0
 cloud-volume==3.14.0
 cloud-files==1.28.1
 pandas

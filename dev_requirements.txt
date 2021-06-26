@@ -1,7 +1,7 @@
 git+git://github.com/seung-lab/PyChunkedGraph.git@vminnie-90#egg=pychunkedgraph
 dynamicannotationdb>=2.0.1
 emannotationschemas>=3.2.2
-annotationframeworkclient==2.4.0
+caveclient==4.0.0
 cloud-volume==1.21.1
 cloud-files==0.12.1
 pandas>=1.2.4
