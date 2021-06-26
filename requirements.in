@@ -1,5 +1,5 @@
 emannotationschemas>=3.2.2
-caveclient>4.0.0
+caveclient>=4.0.0
 cloud-volume
 cloud-files
 pandas
