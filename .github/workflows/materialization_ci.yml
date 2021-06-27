@@ -45,11 +45,6 @@ jobs:
           auto-update-conda: true
           auto-activate-base: true
           python-version: 3.7
-      - name: Setup paths
-        shell: bash
-        run: |
-          echo "::add-path::$HOME/miniconda3/bin"
-          echo "::add-path::$HOME/miniconda3/Scripts"
       - name: Install dependencies
         shell: bash -l {0}
         run: |
@@ -57,7 +52,6 @@ jobs:
           pip install flake8 pytest
           pip install -r dev_requirements.txt
           if [ -f test_requirements.txt ]; then pip install -r test_requirements.txt; fi
-
       - name: Lint with flake8
         shell: bash -l {0}
         run: |
