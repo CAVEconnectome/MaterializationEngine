@@ -42,7 +42,7 @@ from sqlalchemy.engine.url import make_url
 from flask_restx import inputs
 import time
 
-__version__ = "2.2.0"
+__version__ = "2.3.3"
 
 
 authorizations = {
@@ -354,6 +354,11 @@ class FrozenTableMetadata(Resource):
         schema = AnalysisTableSchema()
         tables = schema.dump(analysis_table)
 
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        ann_md = db.get_table_metadata(table_name)
+        ann_md.pop('id')
+        ann_md.pop('deleted')
+        tables.update(ann_md)
         return tables, 200
 
 
