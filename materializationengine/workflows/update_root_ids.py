@@ -88,7 +88,8 @@ def update_root_ids(root_ids: List[int], mat_metadata: dict) -> True:
         mat_metadata (dict): metadata for tasks
     """
     segmentation_table_name = mat_metadata.get("segmentation_table_name")
-    celery_logger.info(f"Starting root_id updating on {segmentation_table_name} table")
+    celery_logger.info(
+        f"Starting root_id updating on {segmentation_table_name} table")
 
     supervoxel_data = get_supervoxel_ids(root_ids, mat_metadata)
     groups = []
@@ -109,7 +110,7 @@ def create_chunks(data_list: List, chunk_size: int):
     if len(data_list) <= chunk_size:
         chunk_size = len(data_list)
     for i in range(0, len(data_list), chunk_size):
-        yield data_list[i : i + chunk_size]
+        yield data_list[i: i + chunk_size]
 
 
 def get_expired_root_ids(mat_metadata: dict, expired_chunk_size: int = 100):
@@ -129,7 +130,8 @@ def get_expired_root_ids(mat_metadata: dict, expired_chunk_size: int = 100):
     last_updated_ts = mat_metadata.get("last_updated_time_stamp", None)
     pcg_table_name = mat_metadata.get("pcg_table_name")
     find_all_expired_roots = mat_metadata.get("find_all_expired_roots", False)
-    materialization_time_stamp_str = mat_metadata.get("materialization_time_stamp")
+    materialization_time_stamp_str = mat_metadata.get(
+        "materialization_time_stamp")
     materialization_time_stamp = datetime.datetime.strptime(
         materialization_time_stamp_str, "%Y-%m-%d %H:%M:%S.%f"
     )
@@ -206,7 +208,8 @@ def get_supervoxel_ids(root_id_chunk: list, mat_metadata: dict):
                     getattr(SegmentationModel, root_id_column),
                     getattr(SegmentationModel, supervoxel_name),
                 ).filter(
-                    or_(getattr(SegmentationModel, root_id_column)).in_(root_id_chunk)
+                    or_(getattr(SegmentationModel, root_id_column)).in_(
+                        root_id_chunk)
                 )
             ]
             if supervoxels:
@@ -290,4 +293,4 @@ def get_new_roots(self, supervoxel_chunk: list, mat_metadata: dict):
 
 def lookup_new_root_ids(pcg_table_name, supervoxel_data, formatted_mat_ts):
     cg_client = chunkedgraph_cache.init_pcg(pcg_table_name)
-    return np.squeeze(cg_client.get_roots(supervoxel_data, time_stamp=formatted_mat_ts))
+    return np.squeeze(cg_client.get_roots(supervoxel_data, timestamp=formatted_mat_ts))
