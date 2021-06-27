@@ -9,6 +9,7 @@ from celery.utils.log import get_task_logger
 from materializationengine.celery_init import celery
 from materializationengine.errors import TaskNotFound
 from materializationengine.schemas import CeleryBeatSchema
+import os
 
 celery_logger = get_task_logger(__name__)
 
@@ -35,7 +36,6 @@ def create_celery(app=None):
             "task_send_sent_event": True,
             "worker_send_task_events": True,
             "worker_prefetch_multiplier": 1,
-            "min_databases": app.config.get("MINIMUM_DATABASES", 3),
             "result_expires": 86400,  # results expire in broker after 1 day
             # timeout (s) for tasks to be sent back to broker queue
             "visibility_timeout": 8000,
@@ -86,7 +86,7 @@ def setup_periodic_tasks(sender, **kwargs):
         "run_lts_periodic_materialization": run_periodic_materialization.s(
             days_to_expire=30
         ),
-        "remove_expired_databases": remove_expired_databases.s(delete_threshold=celery.conf.min_databasess),
+        "remove_expired_databases": remove_expired_databases.s(delete_threshold=os.environ.get('MIN_DATABASES', 3)),
     }
 
     # remove expired task results in redis broker
