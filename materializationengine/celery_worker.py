@@ -86,7 +86,7 @@ def setup_periodic_tasks(sender, **kwargs):
         "run_lts_periodic_materialization": run_periodic_materialization.s(
             days_to_expire=30
         ),
-        "remove_expired_databases": remove_expired_databases.s(delete_threshold=celery.conf.min_databasess),
+        "remove_expired_databases": remove_expired_databases.s(delete_threshold=celery.conf.min_databases),
     }
 
     # remove expired task results in redis broker
