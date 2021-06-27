@@ -4,6 +4,8 @@
 #
 #    pip-compile /app/requirements.in
 #
+-e git+git://github.com/seung-lab/CAVEclient.git#egg=pychunkedgraph
+    # via -r /app/requirements.in
 aiohttp==3.7.4.post0
     # via gcsfs
 alembic==1.4.2
@@ -43,8 +45,6 @@ cachetools==4.2.2
     #   caveclient
     #   google-auth
     #   middle-auth-client
-caveclient==4.0.0
-    # via -r /app/requirements.in
 celery==4.4.7
     # via -r /app/requirements.in
 certifi==2021.5.30
