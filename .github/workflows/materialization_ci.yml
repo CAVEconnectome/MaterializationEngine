@@ -5,11 +5,11 @@ name: Materialization Engine
 
 on:
   push:
-    branches: 
-     - master
+    branches:
+      - master
     paths:
-    - 'materializationengine/**'
-    - 'tests/**'  
+      - "materializationengine/**"
+      - "tests/**"
   pull_request:
     branches: master
 
@@ -17,45 +17,50 @@ jobs:
   test:
     name: Test against different Python versions
     runs-on: ubuntu-latest
-    
+
     services:
       postgres:
         image: postgis/postgis:9.6-2.5
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: test_aligned_volume           
+          POSTGRES_DB: test_aligned_volume
         ports:
           - 5432:5432
-        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5        
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
-    - uses: actions/checkout@v2
-    - name: Set up Python 3.7
-      uses: actions/setup-python@v2
-      with:
-        python-version: 3.7
+      - uses: actions/checkout@v2
+      - name: Set up Python 3.7
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.7
+      - uses: actions/cache@v2
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/test_requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      - uses: conda-incubator/setup-miniconda@v2
+        with:
+          auto-update-conda: true
+          auto-activate-base: true
+          python-version: 3.7
+      - name: Install dependencies
+        shell: bash -l {0}
+        run: |
+          conda install -c conda-forge graph-tool pip
+          pip install flake8 pytest
+          pip install -r dev_requirements.txt
+          if [ -f test_requirements.txt ]; then pip install -r test_requirements.txt; fi
+      - name: Lint with flake8
+        shell: bash -l {0}
+        run: |
+          # stop the build if there are Python syntax errors or undefined names
+          # flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
-    - uses: actions/cache@v2
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/test_requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-    
-          
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install flake8 pytest
-        pip install -r dev_requirements.txt
-        if [ -f test_requirements.txt ]; then pip install -r test_requirements.txt; fi
-        
-    - name: Lint with flake8
-      run: |
-        # stop the build if there are Python syntax errors or undefined names
-        # flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-        
-    - name: Test with pytest
-      run: |
-        pytest
+      - name: Test with pytest
+        shell: bash -l {0}
+        run: |
+          pytest

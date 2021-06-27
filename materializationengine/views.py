@@ -25,7 +25,7 @@ from middle_auth_client import (
     auth_requires_permission,
 )
 
-__version__ = "2.2.1"
+__version__ = "2.3.5"
 
 views_bp = Blueprint("views", __name__, url_prefix="/materialize/views")
 
