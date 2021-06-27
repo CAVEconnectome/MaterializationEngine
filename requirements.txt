@@ -4,7 +4,7 @@
 #
 #    pip-compile /app/requirements.in
 #
--e git+git://github.com/seung-lab/CAVEclient.git#egg=pychunkedgraph
+-e git+git://github.com/seung-lab/CAVEclient.git#egg=caveclient
     # via -r /app/requirements.in
 aiohttp==3.7.4.post0
     # via gcsfs

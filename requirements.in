@@ -1,5 +1,5 @@
 emannotationschemas>=3.2.2
--e git+git://github.com/seung-lab/CAVEclient.git#egg=pychunkedgraph
+-e git+git://github.com/seung-lab/CAVEclient.git#egg=caveclient
 cloud-volume
 cloud-files
 pandas
