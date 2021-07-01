@@ -54,8 +54,7 @@ def process_new_annotations_workflow(datastack_info: dict):
 
     mat_info = get_materialization_info(
         datastack_info=datastack_info,
-        materialization_time_stamp=materialization_time_stamp,
-        skip_table=True,
+        materialization_time_stamp=materialization_time_stamp
     )
 
     for mat_metadata in mat_info:
