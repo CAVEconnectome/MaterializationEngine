@@ -136,7 +136,7 @@ def get_materialization_info(
                         "coord_resolution": voxel_resolution,
                         "materialization_time_stamp": str(materialization_time_stamp),
                         "last_updated_time_stamp": last_updated_time_stamp,
-                        "chunk_size": 100000,
+                        "chunk_size": 1000,
                         "table_count": len(annotation_tables),
                         "find_all_expired_roots": datastack_info.get(
                             "find_all_expired_roots", False
