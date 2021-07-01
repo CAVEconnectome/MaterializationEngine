@@ -59,25 +59,22 @@ def process_new_annotations_workflow(datastack_info: dict):
     )
 
     for mat_metadata in mat_info:
-        if mat_metadata["row_count"] < 1_000_000:
-            annotation_chunks = chunk_annotation_ids(mat_metadata)
-            process_chunks_workflow = chain(
-                ingest_new_annotations_workflow(
-                    mat_metadata, annotation_chunks
-                ),  # return here is required for chords
-                update_metadata.s(mat_metadata),
-            )  # final task which will process a return status/timing etc...
+        annotation_chunks = chunk_annotation_ids(mat_metadata)
+        process_chunks_workflow = chain(
+            create_missing_segmentation_table.s(mat_metadata),
+            ingest_new_annotations_workflow(
+                mat_metadata, annotation_chunks
+            ),  # return here is required for chords
+            update_metadata.s(mat_metadata),
+        )  # final task which will process a return status/timing etc...
 
-            process_chunks_workflow.apply_async()
+        process_chunks_workflow.apply_async()
 
 
 def ingest_new_annotations_workflow(mat_metadata: dict, annotation_chunks: List[int]):
-    """Celery workflow to ingest new annotations. In addition, it will
-    create missing segmentation data table if it does not exist.
-    Returns celery chain primitive.
+    """Celery workflow to ingest new annotations. Returns celery chain primitive.
 
     Workflow:
-        - Create linked segmentation table if not exists
         - Find annotation data with missing segmentation data:
             - Lookup supervoxel id(s)
             - Get root ids from supervoxels
@@ -91,7 +88,6 @@ def ingest_new_annotations_workflow(mat_metadata: dict, annotation_chunks: List[
         chain: chain of celery tasks
     """
 
-    result = create_missing_segmentation_table(mat_metadata)
     new_annotation_workflow = chain(
         chord(
             [
