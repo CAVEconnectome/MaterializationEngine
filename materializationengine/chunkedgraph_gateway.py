@@ -5,7 +5,12 @@ except:
 
 # TODO: put this in the infoservice
 
-chunkedgraph_version_mapping = {"minnie3_v1": 2, "fly_v26": 1, "fly_v31": 1}
+chunkedgraph_version_mapping = {
+    "minnie3_v1": 2,
+    "minnie35_p3_v1": 2,
+    "fly_v26": 1,
+    "fly_v31": 1,
+}
 
 
 class ChunkedGraphGateway:
@@ -13,7 +18,7 @@ class ChunkedGraphGateway:
         self._cg = {}
 
     def init_pcg(self, table_id: str):
-        if not table_id in chunkedgraph_version_mapping:
+        if table_id not in chunkedgraph_version_mapping:
             raise KeyError(
                 f"Table ID '{table_id}' must be one of {chunkedgraph_version_mapping.keys()}"
             )
