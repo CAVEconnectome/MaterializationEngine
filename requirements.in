@@ -20,9 +20,9 @@ alembic
 celery
 cachetools
 gevent
-gcsfs
-pyarrow==3.0.0
+gcsfs>=0.8.0
+pyarrow
 flask_cors
-numpy
--e git+git://github.com/seung-lab/PyChunkedGraph.git@vminnie-108#egg=pychunkedgraph
+numpy>=1.20
+-e git+git://github.com/seung-lab/PyChunkedGraph.git@vminnie-118#egg=pychunkedgraph
 dynamicannotationdb>=3.0.0
