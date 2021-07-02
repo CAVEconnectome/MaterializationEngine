@@ -1,5 +1,5 @@
-emannotationschemas>=3.2.2
-caveclient>=4.0.0
+emannotationschemas>=3.2.3
+caveclient
 cloud-volume
 cloud-files
 pandas
