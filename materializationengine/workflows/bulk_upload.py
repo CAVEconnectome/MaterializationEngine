@@ -78,7 +78,7 @@ def get_gcs_file_info(
     annotation_table_name = bulk_upload_params["annotation_table_name"]
     segmentation_source = bulk_upload_params["segmentation_source"]
 
-    # convert unix epich time to datetime object
+    # convert unix epoch time to datetime object
     materialized_ts = bulk_upload_params.get("materialized_ts", None)
     if materialized_ts:
         last_updated_ts = datetime.datetime.utcfromtimestamp(materialized_ts).strftime(

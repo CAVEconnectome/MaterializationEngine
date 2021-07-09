@@ -93,13 +93,13 @@ class IndexCache:
                 foreign_keys = list(column.foreign_keys)
                 for foreign_key in foreign_keys:
                     foreign_key_name = f"{foreign_key.column.table.name}_{foreign_key.column.name}_fkey"
-                    forigen_key_map = {
+                    foreign_key_map = {
                         "type": "foreign_key",
                         "foreign_key_name": foreign_key_name,
                         "foreign_key_table": f"{foreign_key.column.table.name}",
                         "foreign_key_column": f"{foreign_key.column.name}",
                     }
-                    index_map.update({foreign_key_name: forigen_key_map})
+                    index_map.update({foreign_key_name: foreign_key_map})
         return index_map
 
     def drop_table_indices(self, table_name: str, engine):
@@ -119,19 +119,19 @@ class IndexCache:
         command = f"ALTER TABLE {table_name}"
 
         connection = engine.connect()
-        contraints_list = []
+        constraints_list = []
         for column_info in indices.values():
             if "foreign_key" in column_info["type"]:
-                contraints_list.append(
+                constraints_list.append(
                     f"{command} DROP CONSTRAINT IF EXISTS {column_info['foreign_key_name']}"
                 )
             if "primary_key" in column_info["type"]:
-                contraints_list.append(
+                constraints_list.append(
                     f"{command} DROP CONSTRAINT IF EXISTS {column_info['index_name']}"
                 )
 
-        drop_contstraint = f"{'; '.join(contraints_list)} CASCADE"
-        command = f"{drop_contstraint};"
+        drop_constraint = f"{'; '.join(constraints_list)} CASCADE"
+        command = f"{drop_constraint};"
         index_list = [
             col["index_name"] for col in indices.values() if "index" in col["type"]
         ]
