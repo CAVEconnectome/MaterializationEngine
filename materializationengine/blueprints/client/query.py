@@ -1,34 +1,23 @@
-import numpy as np
-import pandas as pd
-from sqlalchemy.orm import Query
-from geoalchemy2.elements import WKBElement
-from geoalchemy2.types import Geometry
-from geoalchemy2.functions import ST_X, ST_Y, ST_Z
-from sqlalchemy.sql.sqltypes import Boolean, Integer
-from decimal import Decimal
-from multiwrapper import multiprocessing_utils as mu
-from geoalchemy2.shape import to_shape
-from datetime import date, timedelta
-from datetime import datetime
-from functools import partial
-import shapely
-
-from sqlalchemy.orm import Query
-from geoalchemy2.elements import WKBElement
-from geoalchemy2.types import Geometry
-from sqlalchemy.sql.sqltypes import Boolean
-from sqlalchemy import not_
-from decimal import Decimal
-from multiwrapper import multiprocessing_utils as mu
-import numpy as np
-from geoalchemy2.shape import to_shape
-from datetime import date, timedelta
-from datetime import datetime
-from functools import partial
-import shapely
 import itertools
 import logging
 import tempfile
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from functools import partial
+from typing import List
+
+import numpy as np
+import pandas as pd
+import shapely
+from geoalchemy2.elements import WKBElement
+from geoalchemy2.functions import ST_X, ST_Y, ST_Z
+from geoalchemy2.shape import to_shape
+from geoalchemy2.types import Geometry
+from multiwrapper import multiprocessing_utils as mu
+from sqlalchemy import func, not_
+from sqlalchemy.orm import Query, Session
+from sqlalchemy.sql.sqltypes import Boolean, Integer
+from sqlalchemy.ext.declarative import DeclarativeMeta
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
 
@@ -285,17 +274,15 @@ def specific_query(
                         column.ST_Z().cast(Integer).label(column.key + "_z"),
                     ]
                 query_args += column_args
-                if select_columns is not None:
-                    if column.key in select_columns:
-                        column_index = select_columns.index(column.key)
-                        select_columns.pop(column_index)
-                        select_columns += column_args
+                if select_columns is not None and column.key in select_columns:
+                    column_index = select_columns.index(column.key)
+                    select_columns.pop(column_index)
+                    select_columns += column_args
 
+            elif column.key in dup_cols:
+                query_args.append(column.label(column.key + "_{}".format(suffix)))
             else:
-                if column.key in dup_cols:
-                    query_args.append(column.label(column.key + "_{}".format(suffix)))
-                else:
-                    query_args.append(column)
+                query_args.append(column)
 
     if len(tables) == 2:
         join_args = (
@@ -494,3 +481,32 @@ def _query(
     )
 
     return df
+
+
+def make_spatial_query(
+    session: Session,
+    model: DeclarativeMeta,
+    column_name: str,
+    bounding_box: List[List[int]]
+    ) -> Query:
+    """Generate spatial query that finds annotations within a bounding box.
+    
+    Args:
+        session (Session): sqlalchemy session
+        model (DeclarativeMeta): sqlalchemy model
+        column_name (str): name of column to query
+        bounding_box (List[List[int]]): Bounding box in the form of [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+
+    Returns:
+        Query: [description]
+    """
+    spatial_column = getattr(model, column_name)
+
+    coord_array = np.array(bounding_box)
+    start_coord = np.array2string(coord_array[0]).strip('[]')
+    end_coord = np.array2string(coord_array[1]).strip('[]')
+
+    return session.query(model).filter(
+        spatial_column.intersects_nd(
+            func.ST_3DMakeBox(
+                f"POINTZ({start_coord})", f"POINTZ({end_coord})")))
