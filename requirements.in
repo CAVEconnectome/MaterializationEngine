@@ -18,7 +18,7 @@ flask-restx
 flask-accepts
 geoalchemy2>=0.9.2
 alembic
-celery
+celery==4.4.7
 cachetools
 gevent
 gcsfs>=0.8.0
