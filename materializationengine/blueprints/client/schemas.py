@@ -35,11 +35,25 @@ class SegmentationDataSchema(Schema):
     segmentations = fields.List(fields.Dict, required=True)
 
 
+class SpatialFilterSchema(Schema):
+    tablename = fields.Str()
+    column = fields.Str()
+    bounding_box = fields.List(fields.List(fields.Float))
+
+
+class ColumnSchema(Schema):
+    column_name = fields.Dict()
+
+
+class FilterSchema(Schema):
+    tablename = fields.Nested(ColumnSchema)
+
+
 class SimpleQuerySchema(Schema):
-    filter_in_dict = fields.Dict()
-    filter_notin_dict = fields.Dict()
-    filter_equal_dict = fields.Dict()
-    filter_spatial_dict = fields.Dict()
+    filter_in_dict = fields.Nested(FilterSchema)
+    filter_notin_dict = fields.Nested(FilterSchema)
+    filter_equal_dict = fields.Nested(FilterSchema)
+    filter_spatial_dict = fields.Nested(SpatialFilterSchema)
     select_columns = fields.List(fields.Str)
     offset = fields.Integer()
     limit = fields.Integer()
@@ -49,9 +63,9 @@ class ComplexQuerySchema(Schema):
     tables = fields.List(
         fields.List(fields.Str, validate=Length(equal=2)), required=True
     )
-    filter_in_dict = fields.Dict()
-    filter_notin_dict = fields.Dict()
-    filter_equal_dict = fields.Dict()
+    filter_in_dict = fields.Nested(FilterSchema)
+    filter_notin_dict = fields.Nested(FilterSchema)
+    filter_equal_dict = fields.Nested(FilterSchema)
     select_columns = fields.List(fields.Str)
     offset = fields.Integer()
     limit = fields.Integer()
