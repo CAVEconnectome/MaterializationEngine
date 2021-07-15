@@ -487,10 +487,10 @@ def make_spatial_query(
     session: Session,
     model: DeclarativeMeta,
     column_name: str,
-    bounding_box: List[List[int]]
-    ) -> Query:
+    bounding_box: List[List[int]],
+) -> Query:
     """Generate spatial query that finds annotations within a bounding box.
-    
+
     Args:
         session (Session): sqlalchemy session
         model (DeclarativeMeta): sqlalchemy model
@@ -503,10 +503,16 @@ def make_spatial_query(
     spatial_column = getattr(model, column_name)
 
     coord_array = np.array(bounding_box)
-    start_coord = np.array2string(coord_array[0]).strip('[]')
-    end_coord = np.array2string(coord_array[1]).strip('[]')
+    if not (coord_array[0] < coord_array[1]).all():
+        raise Exception(
+            f"min bounds: {coord_array[0]} must be less than max bounds: {coord_array[1]}"
+        )
+
+    start_coord = np.array2string(coord_array[0]).strip("[]")
+    end_coord = np.array2string(coord_array[1]).strip("[]")
 
     return session.query(model).filter(
         spatial_column.intersects_nd(
-            func.ST_3DMakeBox(
-                f"POINTZ({start_coord})", f"POINTZ({end_coord})")))
+            func.ST_3DMakeBox(f"POINTZ({start_coord})", f"POINTZ({end_coord})")
+        )
+    )
