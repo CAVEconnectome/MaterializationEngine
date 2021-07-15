@@ -4,7 +4,7 @@
 #
 #    pip-compile --output-file=dev_requirements.txt
 #
--e git+git://github.com/seung-lab/PyChunkedGraph.git@vminnie-118#egg=pychunkedgraph
+git+git://github.com/seung-lab/PyChunkedGraph.git@vminnie-118#egg=pychunkedgraph
     # via -r requirements.in
 aiohttp==3.7.4.post0
     # via gcsfs
@@ -281,7 +281,7 @@ marshmallow-sqlalchemy==0.26.1
     # via -r requirements.in
 matplotlib-inline==0.1.2
     # via ipython
-middle-auth-client==3.6.0
+middle-auth-client==3.6.4
     # via
     #   -r requirements.in
     #   emannotationschemas

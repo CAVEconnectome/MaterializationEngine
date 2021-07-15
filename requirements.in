@@ -9,7 +9,7 @@ Flask-SQLAlchemy==2.4.4
 jsonschema
 multiwrapper
 requests
-middle-auth-client==3.6.0
+middle-auth-client==3.6.4
 marshmallow-sqlalchemy
 flask-marshmallow
 Flask-Admin
