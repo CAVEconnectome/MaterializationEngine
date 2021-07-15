@@ -419,6 +419,10 @@ class FrozenTableQuery(Resource):
                 "tablename":{
                     "column_name":value
                 }
+            "filter_spatial_dict": {
+                "tablename": "table",
+                "column": "column",
+                "bounding_box": [[min_x, min_y, min_z], [max_x, max_y, max_z]]                
             }
         }
         Returns:
