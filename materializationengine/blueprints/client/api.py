@@ -177,8 +177,7 @@ def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
     )
     if analysis_table is None:
         return None
-    anno_schema = get_schema(analysis_table.schema)
-    return make_flat_model(table_name, anno_schema)
+    return make_flat_model(table_name, analysis_table.schema)
 
 
 
