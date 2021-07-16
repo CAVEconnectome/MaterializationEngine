@@ -334,17 +334,17 @@ def specific_query(
             filter_args.append(
                 (model_dict[filter_table].__dict__[column_name] == filter_value,)
             )
-
-    spatial_args = filter_spatial.copy()
-    for key, value in filter_spatial.items():
-        for tablename, model in model_dict.items():
-            if tablename is value:
-                spatial_args.update(
-                    {
-                        "model": model,
-                        "tablename": tablename,
-                    }
-                )
+    if filter_spatial:
+        spatial_args = filter_spatial.copy()
+        for key, value in filter_spatial.items():
+            for tablename, model in model_dict.items():
+                if tablename is value:
+                    spatial_args.update(
+                        {
+                            "model": model,
+                            "tablename": tablename,
+                        }
+                    )
 
     df = _query(
         sqlalchemy_session,
