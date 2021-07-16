@@ -1,34 +1,23 @@
-import numpy as np
-import pandas as pd
-from sqlalchemy.orm import Query
-from geoalchemy2.elements import WKBElement
-from geoalchemy2.types import Geometry
-from geoalchemy2.functions import ST_X, ST_Y, ST_Z
-from sqlalchemy.sql.sqltypes import Boolean, Integer
-from decimal import Decimal
-from multiwrapper import multiprocessing_utils as mu
-from geoalchemy2.shape import to_shape
-from datetime import date, timedelta
-from datetime import datetime
-from functools import partial
-import shapely
-
-from sqlalchemy.orm import Query
-from geoalchemy2.elements import WKBElement
-from geoalchemy2.types import Geometry
-from sqlalchemy.sql.sqltypes import Boolean
-from sqlalchemy import not_
-from decimal import Decimal
-from multiwrapper import multiprocessing_utils as mu
-import numpy as np
-from geoalchemy2.shape import to_shape
-from datetime import date, timedelta
-from datetime import datetime
-from functools import partial
-import shapely
 import itertools
 import logging
 import tempfile
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from functools import partial
+from typing import List
+
+import numpy as np
+import pandas as pd
+import shapely
+from geoalchemy2.elements import WKBElement
+from geoalchemy2.functions import ST_X, ST_Y, ST_Z
+from geoalchemy2.shape import to_shape
+from geoalchemy2.types import Geometry
+from multiwrapper import multiprocessing_utils as mu
+from sqlalchemy import func, not_
+from sqlalchemy.orm import Query, Session
+from sqlalchemy.sql.sqltypes import Boolean, Integer
+from sqlalchemy.ext.declarative import DeclarativeMeta
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
 
@@ -219,6 +208,7 @@ def specific_query(
     filter_in_dict={},
     filter_notin_dict={},
     filter_equal_dict={},
+    filter_spatial={},
     select_columns=None,
     consolidate_positions=True,
     return_wkb=False,
@@ -241,6 +231,13 @@ def specific_query(
         inner layer: keys are column names, values are entries to filter by
     filter_notin_dict: dict of dicts
         inverse to filter_in_dict
+    filter_spatial: dict: keys table_name, column name,bounding box
+                    values: string, string, (min,max) as list of list
+                    ex: {
+                    'table': 'sometable'
+                    'columns': 'pt_position'
+                    'bounding_box': [[0,0,0], [1,1,1]]
+                    }
     select_columns: list of str
     consolidate_positions: whether to make the position columns arrays of x,y,z
     offset: int
@@ -285,17 +282,15 @@ def specific_query(
                         column.ST_Z().cast(Integer).label(column.key + "_z"),
                     ]
                 query_args += column_args
-                if select_columns is not None:
-                    if column.key in select_columns:
-                        column_index = select_columns.index(column.key)
-                        select_columns.pop(column_index)
-                        select_columns += column_args
+                if select_columns is not None and column.key in select_columns:
+                    column_index = select_columns.index(column.key)
+                    select_columns.pop(column_index)
+                    select_columns += column_args
 
+            elif column.key in dup_cols:
+                query_args.append(column.label(column.key + "_{}".format(suffix)))
             else:
-                if column.key in dup_cols:
-                    query_args.append(column.label(column.key + "_{}".format(suffix)))
-                else:
-                    query_args.append(column)
+                query_args.append(column)
 
     if len(tables) == 2:
         join_args = (
@@ -340,11 +335,23 @@ def specific_query(
                 (model_dict[filter_table].__dict__[column_name] == filter_value,)
             )
 
+    spatial_args = filter_spatial.copy()
+    for key, value in filter_spatial.items():
+        for tablename, model in model_dict.items():
+            if tablename is value:
+                spatial_args.update(
+                    {
+                        "model": model,
+                        "tablename": tablename,
+                    }
+                )
+
     df = _query(
         sqlalchemy_session,
         engine,
         query_args=query_args,
         filter_args=filter_args,
+        spatial_args=spatial_args,
         join_args=join_args,
         select_columns=select_columns,
         fix_wkb=~return_wkb,
@@ -375,6 +382,7 @@ def _make_query(
     query_args,
     join_args=None,
     filter_args=None,
+    spatial_args=None,
     select_columns=None,
     offset=None,
     limit=None,
@@ -403,6 +411,9 @@ def _make_query(
 
     if select_columns is not None:
         query = query.with_entities(*select_columns)
+
+    if spatial_args is not None:
+        query = make_spatial_query(spatial_args, query)
     if offset is not None:
         query = query.offset(offset)
     if limit is not None:
@@ -449,6 +460,7 @@ def _query(
     query_args,
     join_args=None,
     filter_args=None,
+    spatial_args=None,
     select_columns=None,
     fix_wkb=True,
     index_col=None,
@@ -480,6 +492,7 @@ def _query(
         query_args=query_args,
         join_args=join_args,
         filter_args=filter_args,
+        spatial_args=spatial_args,
         select_columns=select_columns,
         offset=offset,
         limit=limit,
@@ -494,3 +507,40 @@ def _query(
     )
 
     return df
+
+
+def make_spatial_query(
+    spatial_args: dict,
+    query: Query,
+) -> Query:
+    """Generate spatial query that finds annotations within a bounding box.
+
+    Args:
+        session (Session): sqlalchemy session
+        model (DeclarativeMeta): sqlalchemy model
+        column_name (str): name of column to query
+        bounding_box (List[List[int]]): Bounding box in the form of [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+
+    Returns:
+        Query: [description]
+    """
+    column_name = spatial_args.get("column")
+    bounding_box = spatial_args.get("bounding_box")
+    model = spatial_args.get("model")
+
+    spatial_column = getattr(model, column_name)
+
+    coord_array = np.array(bounding_box)
+    if not (coord_array[0] < coord_array[1]).all():
+        raise Exception(
+            f"min bounds: {coord_array[0]} must be less than max bounds: {coord_array[1]}"
+        )
+
+    start_coord = np.array2string(coord_array[0]).strip("[]")
+    end_coord = np.array2string(coord_array[1]).strip("[]")
+
+    return query.filter(
+        spatial_column.intersects_nd(
+            func.ST_3DMakeBox(f"POINTZ({start_coord})", f"POINTZ({end_coord})")
+        )
+    )

@@ -4,8 +4,7 @@ from cloudfiles import compression
 import pyarrow as pa
 from cachetools import LRUCache, TTLCache, cached
 from emannotationschemas import get_schema
-from emannotationschemas.flatten import create_flattened_schema
-from emannotationschemas.models import Base, annotation_models, create_table_dict
+from emannotationschemas.models import Base, annotation_models, create_table_dict, make_flat_model
 from flask import Response, abort, current_app, request, stream_with_context
 from flask_accepts import accepts, responds
 from flask_restx import Namespace, Resource, reqparse
@@ -179,20 +178,8 @@ def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
     if analysis_table is None:
         return None
     anno_schema = get_schema(analysis_table.schema)
-    FlatSchema = create_flattened_schema(anno_schema)
-    if annotation_models.contains_model(table_name, flat=True):
-        Model = annotation_models.get_model(table_name, flat=True)
-    else:
-        annotation_dict = create_table_dict(
-            table_name=table_name,
-            Schema=FlatSchema,
-            segmentation_source=None,
-            table_metadata=None,
-            with_crud_columns=False,
-        )
-        Model = type(table_name, (Base,), annotation_dict)
-        annotation_models.set_model(table_name, Model, flat=True)
-    return Model
+    return make_flat_model(table_name, anno_schema)
+
 
 
 @client_bp.route("/datastack/<string:datastack_name>/versions")
@@ -432,6 +419,10 @@ class FrozenTableQuery(Resource):
                 "tablename":{
                     "column_name":value
                 }
+            "filter_spatial_dict": {
+                "tablename": "table",
+                "column": "column",
+                "bounding_box": [[min_x, min_y, min_z], [max_x, max_y, max_z]]                
             }
         }
         Returns:
