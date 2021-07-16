@@ -135,7 +135,8 @@ def _wkb_hex_point_to_numpy(wkbstr, wkb_data_start_ind=2):
 
 
 def _fix_wkb_hex_point_column(df_col, wkb_data_start_ind=2, n_threads=None):
-    func = partial(_wkb_hex_point_to_numpy, wkb_data_start_ind=wkb_data_start_ind)
+    func = partial(_wkb_hex_point_to_numpy,
+                   wkb_data_start_ind=wkb_data_start_ind)
     if n_threads != 1:
         xyz = mu.multiprocess_func(func, df_col.tolist(), n_threads)
     else:
@@ -192,7 +193,8 @@ def render_query(statement, dialect=None):
             elif isinstance(value, list):
                 return "'{%s}'" % (
                     ",".join(
-                        [self.render_array_value(x, type_.item_type) for x in value]
+                        [self.render_array_value(x, type_.item_type)
+                         for x in value]
                     )
                 )
             return super(LiteralCompiler, self).render_literal_value(value, type_)
@@ -205,10 +207,10 @@ def specific_query(
     engine,
     model_dict,
     tables,
-    filter_in_dict={},
-    filter_notin_dict={},
-    filter_equal_dict={},
-    filter_spatial={},
+    filter_in_dict=None,
+    filter_notin_dict=None,
+    filter_equal_dict=None,
+    filter_spatial=None,
     select_columns=None,
     consolidate_positions=True,
     return_wkb=False,
@@ -246,12 +248,15 @@ def specific_query(
     -------
     sqlalchemy query object:
     """
-    tables = [[table] if not isinstance(table, list) else table for table in tables]
+    tables = [[table] if not isinstance(
+        table, list) else table for table in tables]
     models = [model_dict[table[0]] for table in tables]
 
-    column_lists = [[m.key for m in model.__table__.columns] for model in models]
+    column_lists = [[m.key for m in model.__table__.columns]
+                    for model in models]
 
-    col_names, col_counts = np.unique(np.concatenate(column_lists), return_counts=True)
+    col_names, col_counts = np.unique(
+        np.concatenate(column_lists), return_counts=True)
     dup_cols = col_names[col_counts > 1]
     # if there are duplicate columns we need to redname
     if suffixes is None:
@@ -288,7 +293,8 @@ def specific_query(
                     select_columns += column_args
 
             elif column.key in dup_cols:
-                query_args.append(column.label(column.key + "_{}".format(suffix)))
+                query_args.append(column.label(
+                    column.key + "_{}".format(suffix)))
             else:
                 query_args.append(column)
 
@@ -304,37 +310,40 @@ def specific_query(
         join_args = None
 
     filter_args = []
+    if filter_args is not None:
+        for filter_table, filter_table_dict in filter_in_dict.items():
+            for column_name in filter_table_dict.keys():
+                filter_values = filter_table_dict[column_name]
+                filter_values = np.array(filter_values, dtype="O")
 
-    for filter_table, filter_table_dict in filter_in_dict.items():
-        for column_name in filter_table_dict.keys():
-            filter_values = filter_table_dict[column_name]
-            filter_values = np.array(filter_values, dtype="O")
-
-            filter_args.append(
-                (model_dict[filter_table].__dict__[column_name].in_(filter_values),)
-            )
-
-    for filter_table, filter_table_dict in filter_notin_dict.items():
-        for column_name in filter_table_dict.keys():
-            filter_values = filter_table_dict[column_name]
-            filter_values = np.array(filter_values, dtype="O")
-            filter_args.append(
-                (
-                    not_(
-                        model_dict[filter_table]
-                        .__dict__[column_name]
-                        .in_(filter_values)
-                    ),
+                filter_args.append(
+                    (model_dict[filter_table].__dict__[
+                     column_name].in_(filter_values),)
                 )
-            )
-
-    for filter_table, filter_table_dict in filter_equal_dict.items():
-        for column_name in filter_table_dict.keys():
-            filter_value = filter_table_dict[column_name]
-            filter_args.append(
-                (model_dict[filter_table].__dict__[column_name] == filter_value,)
-            )
-    if filter_spatial:
+    if filter_notin_dict is not None:
+        for filter_table, filter_table_dict in filter_notin_dict.items():
+            for column_name in filter_table_dict.keys():
+                filter_values = filter_table_dict[column_name]
+                filter_values = np.array(filter_values, dtype="O")
+                filter_args.append(
+                    (
+                        not_(
+                            model_dict[filter_table]
+                            .__dict__[column_name]
+                            .in_(filter_values)
+                        ),
+                    )
+                )
+    if filter_equal_dict is not None:
+        for filter_table, filter_table_dict in filter_equal_dict.items():
+            for column_name in filter_table_dict.keys():
+                filter_value = filter_table_dict[column_name]
+                filter_args.append(
+                    (model_dict[filter_table].__dict__[
+                     column_name] == filter_value,)
+                )
+    spatial_args = None
+    if filter_spatial is not None:
         spatial_args = filter_spatial.copy()
         for key, value in filter_spatial.items():
             for tablename, model in model_dict.items():
@@ -442,7 +451,8 @@ def _execute_query(
     """
     # logging.info(query.statement)
     df = read_sql_tmpfile(
-        query.statement.compile(engine, compile_kwargs={"literal_binds": True}), engine
+        query.statement.compile(engine, compile_kwargs={
+                                "literal_binds": True}), engine
     )
     # df = pd.read_sql(query.statement, engine,
     #                     coerce_float=False, index_col=index_col)
