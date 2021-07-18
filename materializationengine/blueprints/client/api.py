@@ -548,6 +548,11 @@ class FrozenQuery(Resource):
                     "column_name":value
                 }
             }
+            "filter_spatial_dict": {
+                "tablename":{
+                    "column_name":[[min_x,min_y,minz], [max_x_max_y_max_z]]
+                }
+            }
         }
         Returns:
             pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
@@ -591,6 +596,7 @@ class FrozenQuery(Resource):
             filter_in_dict=data.get("filter_in_dict", None),
             filter_notin_dict=data.get("filter_notin_dict", None),
             filter_equal_dict=data.get("filter_equal_dict", None),
+            filter_spatial_dict=data.get("filter_spatial_dict", None),
             select_columns=data.get("select_columns", None),
             consolidate_positions=not args["split_positions"],
             offset=data.get("offset", None),
