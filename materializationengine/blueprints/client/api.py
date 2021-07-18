@@ -180,7 +180,6 @@ def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
     return make_flat_model(table_name, analysis_table.schema)
 
 
-
 @client_bp.route("/datastack/<string:datastack_name>/versions")
 class DatastackVersions(Resource):
     @reset_auth
@@ -419,9 +418,8 @@ class FrozenTableQuery(Resource):
                     "column_name":value
                 }
             "filter_spatial_dict": {
-                "tablename": "table",
-                "column": "column",
-                "bounding_box": [[min_x, min_y, min_z], [max_x, max_y, max_z]]                
+                "tablename": {
+                "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]                
             }
         }
         Returns:
@@ -478,9 +476,10 @@ class FrozenTableQuery(Resource):
             engine,
             {table_name: Model},
             [table_name],
-            filter_in_dict=data.get("filter_in_dict", {}),
-            filter_notin_dict=data.get("filter_notin_dict", {}),
-            filter_equal_dict=data.get("filter_equal_dict", {}),
+            filter_in_dict=data.get("filter_in_dict", None),
+            filter_notin_dict=data.get("filter_notin_dict", None),
+            filter_equal_dict=data.get("filter_equal_dict", None),
+            filter_spatial=data.get("filter_spatial_dict", None),
             select_columns=data.get("select_columns", None),
             consolidate_positions=not args["split_positions"],
             offset=data.get("offset", None),
@@ -589,9 +588,9 @@ class FrozenQuery(Resource):
             engine,
             model_dict,
             data["tables"],
-            filter_in_dict=data.get("filter_in_dict", {}),
-            filter_notin_dict=data.get("filter_notin_dict", {}),
-            filter_equal_dict=data.get("filter_equal_dict", {}),
+            filter_in_dict=data.get("filter_in_dict", None),
+            filter_notin_dict=data.get("filter_notin_dict", None),
+            filter_equal_dict=data.get("filter_equal_dict", None),
             select_columns=data.get("select_columns", None),
             consolidate_positions=not args["split_positions"],
             offset=data.get("offset", None),
