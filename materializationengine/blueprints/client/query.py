@@ -157,6 +157,39 @@ def _fix_decimal_column(df_col):
         return df_col.apply(np.float)
 
 
+def make_spatial_filter(
+    model,
+    column_name,
+    bounding_box
+) -> Query:
+    """Generate spatial query that finds annotations within a bounding box.
+
+    Args:
+
+        model (DeclarativeMeta): sqlalchemy model
+        column_name (str): name of column to query
+        bounding_box (List[List[int]]): Bounding box in the form of [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+
+    Returns:
+        Query: [description]
+    """
+
+    spatial_column = getattr(model, column_name)
+
+    coord_array = np.array(bounding_box)
+    if not (coord_array[0] < coord_array[1]).all():
+        raise Exception(
+            f"min bounds: {coord_array[0]} must be less than max bounds: {coord_array[1]}"
+        )
+
+    start_coord = np.array2string(coord_array[0]).strip("[]")
+    end_coord = np.array2string(coord_array[1]).strip("[]")
+
+    return spatial_column.intersects_nd(
+        func.ST_3DMakeBox(f"POINTZ({start_coord})", f"POINTZ({end_coord})")
+    )
+
+
 def render_query(statement, dialect=None):
     """
     Based on https://stackoverflow.com/questions/5631078/sqlalchemy-print-the-actual-query#comment39255415_23835766
@@ -233,13 +266,13 @@ def specific_query(
         inner layer: keys are column names, values are entries to filter by
     filter_notin_dict: dict of dicts
         inverse to filter_in_dict
-    filter_spatial: dict: keys table_name, column name,bounding box
-                    values: string, string, (min,max) as list of list
-                    ex: {
-                    'table': 'sometable'
-                    'columns': 'pt_position'
-                    'bounding_box': [[0,0,0], [1,1,1]]
-                    }
+    filter_equal_dict: dict of dicts
+        outer layer: keys are table names
+        inner layer: keys are column names, values are entries to be equal
+    filter_spatial: dict of dicts
+        outer layer: keys are table_namess
+        inner layer: keys are column names, values are [min,max] as list of lists
+                    e.g. [[0,0,0], [1,1,1]]
     select_columns: list of str
     consolidate_positions: whether to make the position columns arrays of x,y,z
     offset: int
@@ -310,7 +343,7 @@ def specific_query(
         join_args = None
 
     filter_args = []
-    if filter_args is not None:
+    if filter_in_dict is not None:
         for filter_table, filter_table_dict in filter_in_dict.items():
             for column_name in filter_table_dict.keys():
                 filter_values = filter_table_dict[column_name]
@@ -342,25 +375,19 @@ def specific_query(
                     (model_dict[filter_table].__dict__[
                      column_name] == filter_value,)
                 )
-    spatial_args = None
+
     if filter_spatial is not None:
-        spatial_args = filter_spatial.copy()
-        for key, value in filter_spatial.items():
-            for tablename, model in model_dict.items():
-                if tablename is value:
-                    spatial_args.update(
-                        {
-                            "model": model,
-                            "tablename": tablename,
-                        }
-                    )
+        for filter_table, filter_table_dict in filter_spatial.items():
+            for column_name in filter_table_dict.keys():
+                bounding_box = filter_table_dict[column_name]
+                filter = make_spatial_filter(model, column_name, bounding_box)
+                filter_args.append((filter,))
 
     df = _query(
         sqlalchemy_session,
         engine,
         query_args=query_args,
         filter_args=filter_args,
-        spatial_args=spatial_args,
         join_args=join_args,
         select_columns=select_columns,
         fix_wkb=~return_wkb,
@@ -391,7 +418,6 @@ def _make_query(
     query_args,
     join_args=None,
     filter_args=None,
-    spatial_args=None,
     select_columns=None,
     offset=None,
     limit=None,
@@ -421,8 +447,6 @@ def _make_query(
     if select_columns is not None:
         query = query.with_entities(*select_columns)
 
-    if spatial_args is not None:
-        query = make_spatial_query(spatial_args, query)
     if offset is not None:
         query = query.offset(offset)
     if limit is not None:
@@ -470,7 +494,6 @@ def _query(
     query_args,
     join_args=None,
     filter_args=None,
-    spatial_args=None,
     select_columns=None,
     fix_wkb=True,
     index_col=None,
@@ -496,13 +519,12 @@ def _query(
     :param index_col:
     :return:
     """
-
+    print(filter_args)
     query = _make_query(
         this_sqlalchemy_session,
         query_args=query_args,
         join_args=join_args,
         filter_args=filter_args,
-        spatial_args=spatial_args,
         select_columns=select_columns,
         offset=offset,
         limit=limit,
