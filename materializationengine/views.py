@@ -19,15 +19,22 @@ from materializationengine.database import sqlalchemy_cache
 from materializationengine.info_client import get_datastack_info, get_datastacks
 from materializationengine.models import AnalysisTable, AnalysisVersion
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
+from materializationengine.blueprints.reset_auth import reset_auth
 from middle_auth_client import (
     auth_required,
     auth_requires_admin,
-    auth_requires_permission,
+    auth_requires_permission
 )
 
 __version__ = "2.5.2"
 
 views_bp = Blueprint("views", __name__, url_prefix="/materialize/views")
+
+
+@views_bp.before_request
+@reset_auth
+def before_request():
+    pass
 
 
 @views_bp.route("/")
