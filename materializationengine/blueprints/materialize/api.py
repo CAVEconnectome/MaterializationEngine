@@ -17,7 +17,7 @@ from sqlalchemy import MetaData, Table
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoSuchTableError
 
-__version__ = "2.5.5"
+__version__ = "2.5.6"
 
 
 bulk_upload_parser = reqparse.RequestParser()
