@@ -85,3 +85,7 @@ def get_config_param(config_param: str):
         return current_app.config[config_param]
     except Exception:
         return os.environ[config_param]
+
+
+def version_tuple(version: str) -> tuple:
+    return tuple(map(int, (version.split("."))))
