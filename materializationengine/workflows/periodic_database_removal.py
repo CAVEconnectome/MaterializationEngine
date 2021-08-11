@@ -104,11 +104,11 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                         if result:
 
                             drop_connections = f"""
-                            SELECT 
-                                pg_terminate_backend(pid) 
-                            FROM 
+                            SELECT
+                                pg_terminate_backend(pid)
+                            FROM
                                 pg_stat_activity
-                            WHERE 
+                            WHERE
                                 datname = '{database}'
                             AND pid <> pg_backend_pid()
                             """
