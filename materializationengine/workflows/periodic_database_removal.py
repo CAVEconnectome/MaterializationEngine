@@ -9,7 +9,7 @@ from materializationengine.celery_init import celery
 from materializationengine.database import create_session
 from materializationengine.info_client import get_aligned_volumes, get_datastack_info
 from materializationengine.models import AnalysisVersion
-from materializationengine.utils import get_config_param
+from materializationengine.utils import get_config_param, version_tuple
 from sqlalchemy import create_engine
 from sqlalchemy.engine.url import make_url
 
@@ -87,6 +87,8 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
             if len(databases) > delete_threshold:
                 with engine.connect() as conn:
                     conn.execution_options(isolation_level="AUTOCOMMIT")
+                    get_version_sql = "SHOW server_version;"
+                    database_version = conn.execute(get_version_sql)                       
                     for database in databases_to_delete:
                         try:
                             sql = (
@@ -95,29 +97,42 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                             )
                             result_proxy = conn.execute(sql)
                             result = result_proxy.scalar()
-                            if result:
-                                sql = "DROP DATABASE %s" % database
-                                result_proxy = conn.execute(sql)
-
-                                # strip version from database string
-                                database_version = database.rsplit("__mat")[-1]
-
-                                expired_database = (
-                                    session.query(AnalysisVersion)
-                                    .filter(AnalysisVersion.version == database_version)
-                                    .one()
-                                )
-                                expired_database.valid = False
-                                session.commit()
-                                celery_logger.info(
-                                    f"Database '{expired_database}' dropped"
-                                )
-                                dropped_dbs.append(expired_database)
-                                dropped_dbs_info["dropped_databases"] = dropped_dbs
                         except Exception as e:
                             celery_logger.error(
                                 f"ERROR: {e}: {database} does not exist"
                             )
+                        if result:
+
+                            drop_connections = f"""
+                            SELECT 
+                                pg_terminate_backend(pid) 
+                            FROM 
+                                pg_stat_activity
+                            WHERE 
+                                datname = '{database}'
+                            AND pid <> pg_backend_pid()
+                            """
+                            conn.execute(drop_connections)
+
+                            sql = "DROP DATABASE %s" % database
+                            result_proxy = conn.execute(sql)
+
+                            # strip version from database string
+                            database_version = database.rsplit("__mat")[-1]
+
+                            expired_database = (
+                                session.query(AnalysisVersion)
+                                .filter(AnalysisVersion.version == database_version)
+                                .one()
+                            )
+                            expired_database.valid = False
+                            session.commit()
+                            celery_logger.info(
+                                f"Database '{expired_database}' dropped"
+                            )
+                            dropped_dbs.append(expired_database)
+                            dropped_dbs_info["dropped_databases"] = dropped_dbs
+
             remove_db_cron_info.append(dropped_dbs_info)
             session.close()
     return remove_db_cron_info
