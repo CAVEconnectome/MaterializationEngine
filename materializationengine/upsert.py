@@ -17,7 +17,7 @@ def create_sql_rows(session, data_dict: dict, model):
     """Yields a dictionary if the record's id already exists, a row object
     otherwise.
 
-    TODO: strip uneeded if else statements
+    TODO: strip unneeded if else statements
     """
     ids = {item[0] for item in session.query(model.id)}
     for data in data_dict:

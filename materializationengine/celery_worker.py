@@ -9,6 +9,7 @@ from celery.utils.log import get_task_logger
 from materializationengine.celery_init import celery
 from materializationengine.errors import TaskNotFound
 from materializationengine.schemas import CeleryBeatSchema
+import os
 
 celery_logger = get_task_logger(__name__)
 
@@ -36,7 +37,8 @@ def create_celery(app=None):
             "worker_send_task_events": True,
             "worker_prefetch_multiplier": 1,
             "result_expires": 86400,  # results expire in broker after 1 day
-            "visibility_timeout": 8000,  # timeout (s) for tasks to be sent back to broker queue
+            # timeout (s) for tasks to be sent back to broker queue
+            "visibility_timeout": 8000,
         }
     )
 
@@ -60,7 +62,8 @@ def celery_loggers(logger, *args, **kwargs):
     Display the Celery banner appears in the log output.
     https://www.distributedpython.com/2018/10/01/celery-docker-startup/
     """
-    logger.info(f"Customize Celery logger, default handler: {logger.handlers[0]}")
+    logger.info(
+        f"Customize Celery logger, default handler: {logger.handlers[0]}")
     logger.addHandler(logging.StreamHandler(sys.stdout))
 
 
@@ -83,17 +86,15 @@ def setup_periodic_tasks(sender, **kwargs):
             days_to_expire=7
             ),
         "run_lts_periodic_materialization": run_periodic_materialization.s(
-            days_to_expire=30
-            ),
-        "remove_expired_databases": remove_expired_databases.s(
-            delete_threshold=5
-            ),
+            days_to_expire=30),
         "run_periodic_database_update": run_periodic_database_update.s(),
+        "remove_expired_databases": remove_expired_databases.s(delete_threshold=os.environ.get('MIN_DATABASES', 3)),
     }
 
     # remove expired task results in redis broker
     sender.add_periodic_task(
-        crontab(hour=0, minute=0, day_of_week="*", day_of_month="*", month_of_year="*"),
+        crontab(hour=0, minute=0, day_of_week="*",
+                day_of_month="*", month_of_year="*"),
         add_backend_cleanup_task(celery),
         name="Clean up back end results",
     )

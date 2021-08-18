@@ -1,34 +1,23 @@
-import numpy as np
-import pandas as pd
-from sqlalchemy.orm import Query
-from geoalchemy2.elements import WKBElement
-from geoalchemy2.types import Geometry
-from geoalchemy2.functions import ST_X, ST_Y, ST_Z
-from sqlalchemy.sql.sqltypes import Boolean, Integer
-from decimal import Decimal
-from multiwrapper import multiprocessing_utils as mu
-from geoalchemy2.shape import to_shape
-from datetime import date, timedelta
-from datetime import datetime
-from functools import partial
-import shapely
-
-from sqlalchemy.orm import Query
-from geoalchemy2.elements import WKBElement
-from geoalchemy2.types import Geometry
-from sqlalchemy.sql.sqltypes import Boolean
-from sqlalchemy import not_
-from decimal import Decimal
-from multiwrapper import multiprocessing_utils as mu
-import numpy as np
-from geoalchemy2.shape import to_shape
-from datetime import date, timedelta
-from datetime import datetime
-from functools import partial
-import shapely
 import itertools
 import logging
 import tempfile
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from functools import partial
+from typing import List
+
+import numpy as np
+import pandas as pd
+import shapely
+from geoalchemy2.elements import WKBElement
+from geoalchemy2.functions import ST_X, ST_Y, ST_Z
+from geoalchemy2.shape import to_shape
+from geoalchemy2.types import Geometry
+from multiwrapper import multiprocessing_utils as mu
+from sqlalchemy import func, not_
+from sqlalchemy.orm import Query, Session
+from sqlalchemy.sql.sqltypes import Boolean, Integer
+from sqlalchemy.ext.declarative import DeclarativeMeta
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
 
@@ -146,7 +135,8 @@ def _wkb_hex_point_to_numpy(wkbstr, wkb_data_start_ind=2):
 
 
 def _fix_wkb_hex_point_column(df_col, wkb_data_start_ind=2, n_threads=None):
-    func = partial(_wkb_hex_point_to_numpy, wkb_data_start_ind=wkb_data_start_ind)
+    func = partial(_wkb_hex_point_to_numpy,
+                   wkb_data_start_ind=wkb_data_start_ind)
     if n_threads != 1:
         xyz = mu.multiprocess_func(func, df_col.tolist(), n_threads)
     else:
@@ -165,6 +155,39 @@ def _fix_decimal_column(df_col):
         return df_col.apply(int)
     else:
         return df_col.apply(np.float)
+
+
+def make_spatial_filter(
+    model,
+    column_name,
+    bounding_box
+) -> Query:
+    """Generate spatial query that finds annotations within a bounding box.
+
+    Args:
+
+        model (DeclarativeMeta): sqlalchemy model
+        column_name (str): name of column to query
+        bounding_box (List[List[int]]): Bounding box in the form of [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+
+    Returns:
+        Query: [description]
+    """
+
+    spatial_column = getattr(model, column_name)
+
+    coord_array = np.array(bounding_box)
+    if not (coord_array[0] < coord_array[1]).all():
+        raise Exception(
+            f"min bounds: {coord_array[0]} must be less than max bounds: {coord_array[1]}"
+        )
+
+    start_coord = np.array2string(coord_array[0]).strip("[]")
+    end_coord = np.array2string(coord_array[1]).strip("[]")
+
+    return spatial_column.intersects_nd(
+        func.ST_3DMakeBox(f"POINTZ({start_coord})", f"POINTZ({end_coord})")
+    )
 
 
 def render_query(statement, dialect=None):
@@ -203,7 +226,8 @@ def render_query(statement, dialect=None):
             elif isinstance(value, list):
                 return "'{%s}'" % (
                     ",".join(
-                        [self.render_array_value(x, type_.item_type) for x in value]
+                        [self.render_array_value(x, type_.item_type)
+                         for x in value]
                     )
                 )
             return super(LiteralCompiler, self).render_literal_value(value, type_)
@@ -216,9 +240,10 @@ def specific_query(
     engine,
     model_dict,
     tables,
-    filter_in_dict={},
-    filter_notin_dict={},
-    filter_equal_dict={},
+    filter_in_dict=None,
+    filter_notin_dict=None,
+    filter_equal_dict=None,
+    filter_spatial=None,
     select_columns=None,
     consolidate_positions=True,
     return_wkb=False,
@@ -241,6 +266,13 @@ def specific_query(
         inner layer: keys are column names, values are entries to filter by
     filter_notin_dict: dict of dicts
         inverse to filter_in_dict
+    filter_equal_dict: dict of dicts
+        outer layer: keys are table names
+        inner layer: keys are column names, values are entries to be equal
+    filter_spatial: dict of dicts
+        outer layer: keys are table_namess
+        inner layer: keys are column names, values are [min,max] as list of lists
+                    e.g. [[0,0,0], [1,1,1]]
     select_columns: list of str
     consolidate_positions: whether to make the position columns arrays of x,y,z
     offset: int
@@ -249,12 +281,15 @@ def specific_query(
     -------
     sqlalchemy query object:
     """
-    tables = [[table] if not isinstance(table, list) else table for table in tables]
+    tables = [[table] if not isinstance(
+        table, list) else table for table in tables]
     models = [model_dict[table[0]] for table in tables]
 
-    column_lists = [[m.key for m in model.__table__.columns] for model in models]
+    column_lists = [[m.key for m in model.__table__.columns]
+                    for model in models]
 
-    col_names, col_counts = np.unique(np.concatenate(column_lists), return_counts=True)
+    col_names, col_counts = np.unique(
+        np.concatenate(column_lists), return_counts=True)
     dup_cols = col_names[col_counts > 1]
     # if there are duplicate columns we need to redname
     if suffixes is None:
@@ -285,17 +320,16 @@ def specific_query(
                         column.ST_Z().cast(Integer).label(column.key + "_z"),
                     ]
                 query_args += column_args
-                if select_columns is not None:
-                    if column.key in select_columns:
-                        column_index = select_columns.index(column.key)
-                        select_columns.pop(column_index)
-                        select_columns += column_args
+                if select_columns is not None and column.key in select_columns:
+                    column_index = select_columns.index(column.key)
+                    select_columns.pop(column_index)
+                    select_columns += column_args
 
+            elif column.key in dup_cols:
+                query_args.append(column.label(
+                    column.key + "_{}".format(suffix)))
             else:
-                if column.key in dup_cols:
-                    query_args.append(column.label(column.key + "_{}".format(suffix)))
-                else:
-                    query_args.append(column)
+                query_args.append(column)
 
     if len(tables) == 2:
         join_args = (
@@ -309,36 +343,45 @@ def specific_query(
         join_args = None
 
     filter_args = []
+    if filter_in_dict is not None:
+        for filter_table, filter_table_dict in filter_in_dict.items():
+            for column_name in filter_table_dict.keys():
+                filter_values = filter_table_dict[column_name]
+                filter_values = np.array(filter_values, dtype="O")
 
-    for filter_table, filter_table_dict in filter_in_dict.items():
-        for column_name in filter_table_dict.keys():
-            filter_values = filter_table_dict[column_name]
-            filter_values = np.array(filter_values, dtype="O")
-
-            filter_args.append(
-                (model_dict[filter_table].__dict__[column_name].in_(filter_values),)
-            )
-
-    for filter_table, filter_table_dict in filter_notin_dict.items():
-        for column_name in filter_table_dict.keys():
-            filter_values = filter_table_dict[column_name]
-            filter_values = np.array(filter_values, dtype="O")
-            filter_args.append(
-                (
-                    not_(
-                        model_dict[filter_table]
-                        .__dict__[column_name]
-                        .in_(filter_values)
-                    ),
+                filter_args.append(
+                    (model_dict[filter_table].__dict__[
+                     column_name].in_(filter_values),)
                 )
-            )
+    if filter_notin_dict is not None:
+        for filter_table, filter_table_dict in filter_notin_dict.items():
+            for column_name in filter_table_dict.keys():
+                filter_values = filter_table_dict[column_name]
+                filter_values = np.array(filter_values, dtype="O")
+                filter_args.append(
+                    (
+                        not_(
+                            model_dict[filter_table]
+                            .__dict__[column_name]
+                            .in_(filter_values)
+                        ),
+                    )
+                )
+    if filter_equal_dict is not None:
+        for filter_table, filter_table_dict in filter_equal_dict.items():
+            for column_name in filter_table_dict.keys():
+                filter_value = filter_table_dict[column_name]
+                filter_args.append(
+                    (model_dict[filter_table].__dict__[
+                     column_name] == filter_value,)
+                )
 
-    for filter_table, filter_table_dict in filter_equal_dict.items():
-        for column_name in filter_table_dict.keys():
-            filter_value = filter_table_dict[column_name]
-            filter_args.append(
-                (model_dict[filter_table].__dict__[column_name] == filter_value,)
-            )
+    if filter_spatial is not None:
+        for filter_table, filter_table_dict in filter_spatial.items():
+            for column_name in filter_table_dict.keys():
+                bounding_box = filter_table_dict[column_name]
+                filter = make_spatial_filter(model, column_name, bounding_box)
+                filter_args.append((filter,))
 
     df = _query(
         sqlalchemy_session,
@@ -403,6 +446,7 @@ def _make_query(
 
     if select_columns is not None:
         query = query.with_entities(*select_columns)
+
     if offset is not None:
         query = query.offset(offset)
     if limit is not None:
@@ -431,7 +475,8 @@ def _execute_query(
     """
     # logging.info(query.statement)
     df = read_sql_tmpfile(
-        query.statement.compile(engine, compile_kwargs={"literal_binds": True}), engine
+        query.statement.compile(engine, compile_kwargs={
+                                "literal_binds": True}), engine
     )
     # df = pd.read_sql(query.statement, engine,
     #                     coerce_float=False, index_col=index_col)
@@ -474,7 +519,7 @@ def _query(
     :param index_col:
     :return:
     """
-
+    print(filter_args)
     query = _make_query(
         this_sqlalchemy_session,
         query_args=query_args,
@@ -494,3 +539,40 @@ def _query(
     )
 
     return df
+
+
+def make_spatial_query(
+    spatial_args: dict,
+    query: Query,
+) -> Query:
+    """Generate spatial query that finds annotations within a bounding box.
+
+    Args:
+        session (Session): sqlalchemy session
+        model (DeclarativeMeta): sqlalchemy model
+        column_name (str): name of column to query
+        bounding_box (List[List[int]]): Bounding box in the form of [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+
+    Returns:
+        Query: [description]
+    """
+    column_name = spatial_args.get("column")
+    bounding_box = spatial_args.get("bounding_box")
+    model = spatial_args.get("model")
+
+    spatial_column = getattr(model, column_name)
+
+    coord_array = np.array(bounding_box)
+    if not (coord_array[0] < coord_array[1]).all():
+        raise Exception(
+            f"min bounds: {coord_array[0]} must be less than max bounds: {coord_array[1]}"
+        )
+
+    start_coord = np.array2string(coord_array[0]).strip("[]")
+    end_coord = np.array2string(coord_array[1]).strip("[]")
+
+    return query.filter(
+        spatial_column.intersects_nd(
+            func.ST_3DMakeBox(f"POINTZ({start_coord})", f"POINTZ({end_coord})")
+        )
+    )

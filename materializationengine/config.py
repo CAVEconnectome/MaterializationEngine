@@ -34,7 +34,7 @@ class BaseConfig:
     DAYS_TO_EXPIRE = 7
     LTS_DAYS_TO_EXPIRE = 30
     INFO_API_VERSION = 2
-    AUTH_DATABASE_NAME = "minnie65"
+    AUTH_SERVICE_NAMESPACE = "datastack"
     if os.environ.get("DAF_CREDENTIALS", None) is not None:
         with open(os.environ.get("DAF_CREDENTIALS"), "r") as f:
             AUTH_TOKEN = json.load(f)["token"]

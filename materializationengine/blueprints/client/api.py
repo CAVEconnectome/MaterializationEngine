@@ -4,8 +4,7 @@ from cloudfiles import compression
 import pyarrow as pa
 from cachetools import LRUCache, TTLCache, cached
 from emannotationschemas import get_schema
-from emannotationschemas.flatten import create_flattened_schema
-from emannotationschemas.models import Base, annotation_models, create_table_dict
+from emannotationschemas.models import Base, annotation_models, create_table_dict, make_flat_model
 from flask import Response, abort, current_app, request, stream_with_context
 from flask_accepts import accepts, responds
 from flask_restx import Namespace, Resource, reqparse
@@ -42,7 +41,7 @@ from sqlalchemy.engine.url import make_url
 from flask_restx import inputs
 import time
 
-__version__ = "2.0.0"
+__version__ = "2.5.6"
 
 
 authorizations = {
@@ -138,7 +137,8 @@ def get_analysis_version_and_table(
     Returns:
         AnalysisVersion, AnalysisTable: tuple of instances of AnalysisVersion and AnalysisTable
     """
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+        datastack_name)
 
     analysis_version = (
         Session.query(AnalysisVersion)
@@ -177,27 +177,13 @@ def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
     )
     if analysis_table is None:
         return None
-    anno_schema = get_schema(analysis_table.schema)
-    FlatSchema = create_flattened_schema(anno_schema)
-    if annotation_models.contains_model(table_name, flat=True):
-        Model = annotation_models.get_model(table_name, flat=True)
-    else:
-        annotation_dict = create_table_dict(
-            table_name=table_name,
-            Schema=FlatSchema,
-            segmentation_source=None,
-            table_metadata=None,
-            with_crud_columns=False,
-        )
-        Model = type(table_name, (Base,), annotation_dict)
-        annotation_models.set_model(table_name, Model, flat=True)
-    return Model
+    return make_flat_model(table_name, analysis_table.schema)
 
 
 @client_bp.route("/datastack/<string:datastack_name>/versions")
 class DatastackVersions(Resource):
     @reset_auth
-    @auth_required
+    @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("datastack_versions", security="apikey")
     def get(self, datastack_name: str):
         """get available versions
@@ -227,7 +213,7 @@ class DatastackVersions(Resource):
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>")
 class DatastackVersion(Resource):
     @reset_auth
-    @auth_required
+    @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("version metadata", security="apikey")
     def get(self, datastack_name: str, version: int):
         """get version metadata
@@ -259,7 +245,7 @@ class DatastackVersion(Resource):
 @client_bp.route("/datastack/<string:datastack_name>/metadata")
 class DatastackMetadata(Resource):
     @reset_auth
-    @auth_required
+    @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("all valid version metadata", security="apikey")
     def get(self, datastack_name: str):
         """get materialized metadata for all valid versions
@@ -287,7 +273,7 @@ class DatastackMetadata(Resource):
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/tables")
 class FrozenTableVersions(Resource):
     @reset_auth
-    @auth_required
+    @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("get_frozen_tables", security="apikey")
     def get(self, datastack_name: str, version: int):
         """get frozen tables
@@ -307,6 +293,7 @@ class FrozenTableVersions(Resource):
         av = (
             session.query(AnalysisVersion)
             .filter(AnalysisVersion.version == version)
+            .filter(AnalysisVersion.datastack == datastack_name)
             .first()
         )
         if av is None:
@@ -314,7 +301,7 @@ class FrozenTableVersions(Resource):
         response = (
             session.query(AnalysisTable)
             .filter(AnalysisTable.analysisversion_id == av.id)
-            .filter(AnalysisTable.valid==True)
+            .filter(AnalysisTable.valid == True)
             .all()
         )
 
@@ -328,7 +315,7 @@ class FrozenTableVersions(Resource):
 )
 class FrozenTableMetadata(Resource):
     @reset_auth
-    @auth_required
+    @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("get_frozen_table_metadata", security="apikey")
     def get(self, datastack_name: str, version: int, table_name: str):
         """get frozen table metadata
@@ -352,6 +339,11 @@ class FrozenTableMetadata(Resource):
         schema = AnalysisTableSchema()
         tables = schema.dump(analysis_table)
 
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        ann_md = db.get_table_metadata(table_name)
+        ann_md.pop('id')
+        ann_md.pop('deleted')
+        tables.update(ann_md)
         return tables, 200
 
 
@@ -360,7 +352,7 @@ class FrozenTableMetadata(Resource):
 )
 class FrozenTableCount(Resource):
     @reset_auth
-    @auth_required
+    @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("simple_query", security="apikey")
     def get(self, datastack_name: str, version: int, table_name: str):
         """get annotation count in table
@@ -380,7 +372,8 @@ class FrozenTableCount(Resource):
         Session = sqlalchemy_cache.get(aligned_volume_name)
         Model = get_flat_model(datastack_name, table_name, version, Session)
 
-        Session = sqlalchemy_cache.get("{}__mat{}".format(datastack_name, version))
+        Session = sqlalchemy_cache.get(
+            "{}__mat{}".format(datastack_name, version))
         return Session().query(Model).count(), 200
 
 
@@ -390,7 +383,7 @@ class FrozenTableCount(Resource):
 )
 class FrozenTableQuery(Resource):
     @reset_auth
-    @auth_requires_permission("view", dataset=os.environ["AUTH_DATABASE_NAME"])
+    @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("simple_query", security="apikey")
     @accepts("SimpleQuerySchema", schema=SimpleQuerySchema, api=client_bp)
     def post(self, datastack_name: str, version: int, table_name: str):
@@ -424,6 +417,9 @@ class FrozenTableQuery(Resource):
                 "tablename":{
                     "column_name":value
                 }
+            "filter_spatial_dict": {
+                "tablename": {
+                "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]                
             }
         }
         Returns:
@@ -449,7 +445,8 @@ class FrozenTableQuery(Resource):
                 404,
             )
 
-        Session = sqlalchemy_cache.get("{}__mat{}".format(datastack_name, version))
+        Session = sqlalchemy_cache.get(
+            "{}__mat{}".format(datastack_name, version))
         time_d["get Session"] = time.time() - now
         now = time.time()
 
@@ -479,9 +476,10 @@ class FrozenTableQuery(Resource):
             engine,
             {table_name: Model},
             [table_name],
-            filter_in_dict=data.get("filter_in_dict", {}),
-            filter_notin_dict=data.get("filter_notin_dict", {}),
-            filter_equal_dict=data.get("filter_equal_dict", {}),
+            filter_in_dict=data.get("filter_in_dict", None),
+            filter_notin_dict=data.get("filter_notin_dict", None),
+            filter_equal_dict=data.get("filter_equal_dict", None),
+            filter_spatial=data.get("filter_spatial_dict", None),
             select_columns=data.get("select_columns", None),
             consolidate_positions=not args["split_positions"],
             offset=data.get("offset", None),
@@ -505,7 +503,8 @@ class FrozenTableQuery(Resource):
             dfjson = df.to_json(orient="records")
             time_d["serialize"] = time.time() - now
             logging.info(time_d)
-            response = Response(dfjson, headers=headers, mimetype="application/json")
+            response = Response(dfjson, headers=headers,
+                                mimetype="application/json")
             return after_request(response)
 
 
@@ -513,7 +512,7 @@ class FrozenTableQuery(Resource):
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/query")
 class FrozenQuery(Resource):
     @reset_auth
-    @auth_requires_permission("view", dataset=os.environ["AUTH_DATABASE_NAME"])
+    @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("complex_query", security="apikey")
     @accepts("ComplexQuerySchema", schema=ComplexQuerySchema, api=client_bp)
     def post(self, datastack_name: str, version: int):
@@ -549,6 +548,11 @@ class FrozenQuery(Resource):
                     "column_name":value
                 }
             }
+            "filter_spatial_dict": {
+                "tablename":{
+                    "column_name":[[min_x,min_y,minz], [max_x_max_y_max_z]]
+                }
+            }
         }
         Returns:
             pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
@@ -563,7 +567,8 @@ class FrozenQuery(Resource):
         model_dict = {}
         for table_desc in data["tables"]:
             table_name = table_desc[0]
-            Model = get_flat_model(datastack_name, table_name, version, Session)
+            Model = get_flat_model(
+                datastack_name, table_name, version, Session)
             if Model is None:
                 return (
                     "Cannot find table {} in datastack {} at version {}".format(
@@ -588,9 +593,10 @@ class FrozenQuery(Resource):
             engine,
             model_dict,
             data["tables"],
-            filter_in_dict=data.get("filter_in_dict", {}),
-            filter_notin_dict=data.get("filter_notin_dict", {}),
-            filter_equal_dict=data.get("filter_equal_dict", {}),
+            filter_in_dict=data.get("filter_in_dict", None),
+            filter_notin_dict=data.get("filter_notin_dict", None),
+            filter_equal_dict=data.get("filter_equal_dict", None),
+            filter_spatial=data.get("filter_spatial_dict", None),
             select_columns=data.get("select_columns", None),
             consolidate_positions=not args["split_positions"],
             offset=data.get("offset", None),
@@ -609,7 +615,8 @@ class FrozenQuery(Resource):
             )
         else:
             dfjson = df.to_json(orient="records")
-            response = Response(dfjson, headers=headers, mimetype="application/json")
+            response = Response(dfjson, headers=headers,
+                                mimetype="application/json")
             return after_request(response)
 
 
