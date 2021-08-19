@@ -41,7 +41,7 @@ from sqlalchemy.engine.url import make_url
 from flask_restx import inputs
 import time
 
-__version__ = "2.5.12"
+__version__ = "2.5.13"
 
 
 authorizations = {
