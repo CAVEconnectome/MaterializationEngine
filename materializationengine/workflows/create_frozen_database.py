@@ -636,7 +636,7 @@ def merge_tables(self, mat_metadata: dict):
         FROM 
             {AnnotationModel.__table__.name}
         JOIN 
-            {SegmentationModel.__table__.name}
+            "{SegmentationModel.__table__.name}"
             ON {AnnotationModel.id} = {SegmentationModel.id}
         WHERE
             {AnnotationModel.id} = {SegmentationModel.id}
