@@ -626,13 +626,13 @@ def merge_tables(self, mat_metadata: dict):
         ]
     )
     sorted_columns_list = list(sorted_columns.values())
-    columns = [f"{col.table}.{col.name}" for col in sorted_columns_list]
+    columns = [f'"{col.table}".{col.name}' for col in sorted_columns_list]
 
     mat_session, mat_engine = create_session(analysis_sql_uri)
 
     query = f"""
         SELECT 
-            {', '.join('"'+str(col) + '"' for col in columns)}
+            {', '.join(columns)}
         FROM 
             {AnnotationModel.__table__.name}
         JOIN 
