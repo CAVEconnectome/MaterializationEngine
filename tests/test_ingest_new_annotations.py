@@ -142,4 +142,8 @@ def test_get_sql_supervoxel_ids(test_app, mat_metadata):
     id_chunk_range = [1, 4]
     supervoxel_ids = get_sql_supervoxel_ids(id_chunk_range, mat_metadata)
     logging.info(supervoxel_ids)
-    assert True
+    assert supervoxel_ids == {
+        "id": [1, 2, 3, 4],
+        "pre_pt_supervoxel_id": [10000000, 30000000, 50000000, 10000000],
+        "post_pt_supervoxel_id": [20000000, 40000000, 60000000, 20000000],
+    }

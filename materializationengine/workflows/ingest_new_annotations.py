@@ -26,6 +26,7 @@ from materializationengine.utils import (
 )
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql import or_
+from sqlalchemy.sql import column
 
 celery_logger = get_task_logger(__name__)
 
@@ -434,26 +435,29 @@ def get_sql_supervoxel_ids(chunks: List[int], mat_metadata: dict) -> List[int]:
     SegmentationModel = create_segmentation_model(mat_metadata)
     aligned_volume = mat_metadata.get("aligned_volume")
     session = sqlalchemy_cache.get(aligned_volume)
+
+    columns = [
+        model_column.name for model_column in SegmentationModel.__table__.columns
+    ]
+    supervoxel_id_columns = [
+        model_column for model_column in columns if "supervoxel_id" in model_column
+    ]
+    mapped_columns = [
+        getattr(SegmentationModel, supervoxel_id_column)
+        for supervoxel_id_column in supervoxel_id_columns
+    ]
     try:
-        columns = [column.name for column in SegmentationModel.__table__.columns]
-        supervoxel_id_columns = [
-            column for column in columns if "supervoxel_id" in column
-        ]
-        supervoxel_id_data = {}
-        for supervoxel_id_column in supervoxel_id_columns:
-            supervoxel_id_data[supervoxel_id_column] = [
-                data
-                for data in session.query(
-                    SegmentationModel.id,
-                    getattr(SegmentationModel, supervoxel_id_column),
-                ).filter(
-                    or_(SegmentationModel.id).between(int(chunks[0]), int(chunks[1]))
-                )
-            ]
-        session.close()
-        return supervoxel_id_data
+        query = session.query(SegmentationModel.id, *mapped_columns).filter(
+            or_(SegmentationModel.id).between(int(chunks[0]), int(chunks[1]))
+        )
+        data = query.all()
+        df = pd.DataFrame(data)
+        return df.to_dict(orient="list")
     except Exception as e:
         celery_logger.error(e)
+        session.rollback()
+    finally:
+        session.close()
 
 
 def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
