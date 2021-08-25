@@ -146,6 +146,27 @@ class ProcessNewAnnotationsResource(Resource):
         return 200
 
 
+
+@mat_bp.route("/materialize/run/lookup_root_ids/datastack/<string:datastack_name>")
+class LookupMissingRootIdsResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("process new annotations workflow", security="apikey")
+    def post(self, datastack_name: str):
+        """Run workflow to lookup missing root ids and insert into database
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+        """
+        from materializationengine.workflows.ingest_new_annotations import (
+            process_missing_roots_workflow,
+        )
+
+        datastack_info = get_datastack_info(datastack_name)
+        process_missing_roots_workflow.s(datastack_info).apply_async()
+        return 200
+
+
 @mat_bp.route("/materialize/run/complete_workflow/datastack/<string:datastack_name>")
 class CompleteWorkflowResource(Resource):
     @reset_auth

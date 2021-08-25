@@ -71,6 +71,111 @@ def process_new_annotations_workflow(datastack_info: dict):
             process_chunks_workflow.apply_async()
 
 
+@celery.task(name="process:process_missing_roots_workflow")
+def process_missing_roots_workflow(datastack_info: dict):
+    """Chunk supervoxel ids and lookup root ids in batches
+
+
+    -> workflow :
+        find missing root_ids >
+        lookup supervoxel ids from sql >
+        get root_ids >
+        merge root_ids list >
+        insert root_ids
+
+
+    Parameters
+    ----------
+    aligned_volume_name : str
+        [description]
+    segmentation_source : dict
+        [description]
+    """
+    materialization_time_stamp = datetime.datetime.utcnow()
+
+    mat_info = get_materialization_info(
+        datastack_info=datastack_info,
+        materialization_time_stamp=materialization_time_stamp,
+    )
+
+    for mat_metadata in mat_info:
+        annotation_chunks = generate_chunked_model_ids(
+            mat_metadata, use_segmentation_model=True
+        )
+        process_chunks_workflow = chain(
+            lookup_missing_root_ids_workflow(
+                mat_metadata, annotation_chunks
+            ),  # return here is required for chords
+            update_metadata.s(mat_metadata),
+        )  # final task which will process a return status/timing etc...
+
+        process_chunks_workflow.apply_async()
+
+
+def lookup_missing_root_ids_workflow(mat_metadata: dict, annotation_chunks: List[int]):
+    """Celery workflow that finds and looks up missing root ids.
+    Workflow:
+            - Lookup supervoxel id(s)
+            - Get root ids from supervoxels
+            - insert into segmentation table
+
+    Args:
+        mat_metadata (dict): datastack info for the aligned_volume derived from the infoservice
+        annotation_chunks (List[int]): list of annotation primary key ids
+
+    Returns:
+        chain: chain of celery tasks
+    """
+
+    return chain(
+        chord(
+            [
+                chain(
+                    lookup_root_ids.si(mat_metadata, annotation_chunk),
+                )
+                for annotation_chunk in annotation_chunks
+            ],
+            fin.si(),
+        )
+    )
+
+
+@celery.task(
+    name="process:lookup_root_ids",
+    acks_late=True,
+    bind=True,
+    autoretry_for=(Exception,),
+    max_retries=6,
+)
+def lookup_root_ids(self, mat_metadata: dict, chunk: List[int]):
+    """Get supervoxel ids with in chunk range. Lookup root_ids
+    and insert into database.
+
+    Args:
+        mat_metadata (dict): metadata associated with the materialization
+        chunk (List[int]): list of annotation ids
+
+    Raises:
+        self.retry: re-queue the tasks if failed. Retries 6 times.
+
+    Returns:
+        str: Name of table and runtime of task.
+    """
+    try:
+        start_time = time.time()
+
+        supervoxel_data = get_sql_supervoxel_ids(chunk, mat_metadata)
+        root_id_data = get_new_root_ids(supervoxel_data, mat_metadata)
+        result = insert_segmentation_data(root_id_data, mat_metadata)
+        celery_logger.info(result)
+        run_time = time.time() - start_time
+        table_name = mat_metadata["annotation_table_name"]
+    except Exception as e:
+        celery_logger.error(e)
+        raise self.retry(exc=e, countdown=3)
+    return {"Table name": f"{table_name}", "Run time": f"{run_time}"}
+
+
 def ingest_new_annotations_workflow(mat_metadata: dict, annotation_chunks: List[int]):
     """Celery workflow to ingest new annotations. In addition, it will
     create missing segmentation data table if it does not exist.
