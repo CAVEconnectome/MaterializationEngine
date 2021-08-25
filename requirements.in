@@ -1,4 +1,4 @@
-emannotationschemas>=3.2.3
+emannotationschemas>=3.2.5
 caveclient
 cloud-volume>=5.3.0
 cloud-files
@@ -26,4 +26,4 @@ pyarrow
 flask_cors
 numpy>=1.20
 -e git+git://github.com/seung-lab/PyChunkedGraph.git@vminnie-118#egg=pychunkedgraph
-dynamicannotationdb>=3.0.0
+dynamicannotationdb>=3.0.1
