@@ -167,7 +167,7 @@ def lookup_root_ids(self, mat_metadata: dict, chunk: List[int]):
 
         supervoxel_data = get_sql_supervoxel_ids(chunk, mat_metadata)
         root_id_data = get_new_root_ids(supervoxel_data, mat_metadata)
-        result = insert_segmentation_data(root_id_data, mat_metadata)
+        result = update_segmentation_data(root_id_data, mat_metadata)
         celery_logger.info(result)
         run_time = time.time() - start_time
         table_name = mat_metadata["annotation_table_name"]
@@ -554,6 +554,27 @@ def get_root_ids(cg, data, materialization_time_stamp):
         cg.get_roots(data.to_list(), time_stamp=materialization_time_stamp)
     )
     return root_id_array
+
+
+def update_segmentation_data(materialization_data: dict, mat_metadata: dict) -> dict:
+    if not materialization_data:
+        return {"status": "empty"}
+
+    SegmentationModel = create_segmentation_model(mat_metadata)
+    aligned_volume = mat_metadata.get("aligned_volume")
+
+    session = sqlalchemy_cache.get(aligned_volume)
+
+    try:
+        session.bulk_update_mappings(SegmentationModel, materialization_data)
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        celery_logger.error(f"ERROR: {e}")
+        raise (e)
+    finally:
+        session.close()
+    return f"Number of rows updated: {len(materialization_data)}"
 
 
 def insert_segmentation_data(materialization_data: dict, mat_metadata: dict) -> dict:
