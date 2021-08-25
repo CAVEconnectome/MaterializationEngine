@@ -12,13 +12,13 @@ from sqlalchemy.sql.expression import except_
 
 from materializationengine.celery_init import celery
 from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
-from materializationengine.utils import create_annotation_model, get_config_param
+from materializationengine.utils import create_annotation_model, get_config_param, create_segmentation_model
 
 celery_logger = get_task_logger(__name__)
 
 
-def chunk_annotation_ids(mat_metadata: dict) -> List[List]:
-    """Creates list of chunks with start:end index for chunking queries for materialziation.
+def generate_chunked_model_ids(mat_metadata: dict, use_segmentation_model=False) -> List[List]:
+    """Creates list of chunks with start:end index for chunking queries for materialization.
 
     Parameters
     ----------
@@ -28,11 +28,14 @@ def chunk_annotation_ids(mat_metadata: dict) -> List[List]:
     Returns
     -------
     List[List]
-        list of list containg start and end indices
+        list of list containing start and end indices
     """
     celery_logger.info("Chunking supervoxel ids")
-    AnnotationModel = create_annotation_model(mat_metadata)
-    chunk_size = mat_metadata.get("chunk_size", None)
+    if use_segmentation_model:
+        AnnotationModel = create_segmentation_model(mat_metadata)
+    else:
+        AnnotationModel = create_annotation_model(mat_metadata)
+    chunk_size = mat_metadata.get("chunk_size")
 
     if not chunk_size:
         ROW_CHUNK_SIZE = get_config_param("MATERIALIZATION_ROW_CHUNK_SIZE")
@@ -136,7 +139,7 @@ def get_materialization_info(
                         "coord_resolution": voxel_resolution,
                         "materialization_time_stamp": str(materialization_time_stamp),
                         "last_updated_time_stamp": last_updated_time_stamp,
-                        "chunk_size": 100000,
+                        "chunk_size": get_config_param("MATERIALIZATION_ROW_CHUNK_SIZE"),
                         "table_count": len(annotation_tables),
                         "find_all_expired_roots": datastack_info.get(
                             "find_all_expired_roots", False
