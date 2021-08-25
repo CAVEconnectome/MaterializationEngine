@@ -48,6 +48,9 @@ def get_datastacks():
         api_version=current_app.config.get("INFO_API_VERSION", 2),
     )
     datastack_names = infoclient.get_datastacks()
+    datastack_names = [
+        ds for ds in datastack_names if ds in current_app.config["DATASTACKS"]
+    ]
     return datastack_names
 
 
