@@ -12,7 +12,7 @@ from materializationengine.celery_init import celery
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import sqlalchemy_cache
 from materializationengine.shared_tasks import (
-    chunk_annotation_ids,
+    generate_chunked_model_ids,
     fin,
     query_id_range,
     update_metadata,
@@ -60,7 +60,7 @@ def process_new_annotations_workflow(datastack_info: dict):
 
     for mat_metadata in mat_info:
         if mat_metadata["row_count"] < 1_000_000:
-            annotation_chunks = chunk_annotation_ids(mat_metadata)
+            annotation_chunks = generate_chunked_model_ids(mat_metadata)
             process_chunks_workflow = chain(
                 ingest_new_annotations_workflow(
                     mat_metadata, annotation_chunks

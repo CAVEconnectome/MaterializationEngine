@@ -2,7 +2,7 @@ import datetime
 import logging
 from materializationengine.models import AnalysisVersion
 from materializationengine.shared_tasks import (
-    chunk_annotation_ids,
+    generate_chunked_model_ids,
     chunk_ids,
     collect_data,
     fin,
@@ -17,8 +17,8 @@ from emannotationschemas.models import make_annotation_model
 index_client = IndexCache()
 
 
-def test_chunk_annotation_ids(mat_metadata):
-    anno_id_chunks = chunk_annotation_ids(mat_metadata)
+def test_generate_chunked_model_ids(mat_metadata):
+    anno_id_chunks = generate_chunked_model_ids(mat_metadata)
     assert anno_id_chunks == [[1, 3], [3, None]]
 
 
@@ -56,7 +56,7 @@ def test_get_materialization_info():
             "coord_resolution": [4.0, 4.0, 40.0],
             "materialization_time_stamp": str(materialization_time_stamp),
             "last_updated_time_stamp": None,
-            "chunk_size": 100000,
+            "chunk_size": 2,
             "table_count": 1,
             "find_all_expired_roots": False,
             "analysis_version": 1,
