@@ -104,14 +104,20 @@ def process_missing_roots_workflow(datastack_info: dict):
         missing_root_id_chunks = get_ids_with_missing_roots(
             mat_metadata, use_segmentation_model=True
         )
-        process_chunks_workflow = chain(
-            lookup_missing_root_ids_workflow(
-                mat_metadata, missing_root_id_chunks
-            ),  # return here is required for chords
-            update_metadata.s(mat_metadata),
-        )  # final task which will process a return status/timing etc...
+        seg_table = mat_metadata.get("segmentation_table_name")
+        if missing_root_id_chunks:
+            process_chunks_workflow = chain(
+                lookup_missing_root_ids_workflow(
+                    mat_metadata, missing_root_id_chunks
+                ),  # return here is required for chords
+                update_metadata.s(mat_metadata),
+            )  # final task which will process a return status/timing etc...
 
-        process_chunks_workflow.apply_async()
+            process_chunks_workflow.apply_async()
+        else:
+            celery_logger.info(
+                f"Skipped missing root id lookup for '{seg_table}', no missing root ids found"
+            )
 
 
 def get_ids_with_missing_roots(mat_metadata: dict) -> List:
@@ -147,9 +153,14 @@ def get_ids_with_missing_roots(mat_metadata: dict) -> List:
         .filter(or_(*query_columns))
         .scalar()
     )
-    return list(
-        create_chunks(range(min_id, max_id + 1), mat_metadata.get("chunk_size", 500))
-    )
+    if min_id and max_id:
+        if min_id < max_id:
+            id_range = range(min_id, max_id + 1)
+            return list(create_chunks(id_range, mat_metadata.get("chunk_size", 500)))
+        elif min_id == max_id:
+            return [min_id]
+
+    return f"No missing root_ids found in '{SegmentationModel.__table__.name}'"
 
 
 def lookup_missing_root_ids_workflow(
@@ -487,9 +498,16 @@ def get_sql_supervoxel_ids(chunks: List[int], mat_metadata: dict) -> List[int]:
         for supervoxel_id_column in supervoxel_id_columns
     ]
     try:
-        query = session.query(SegmentationModel.id, *mapped_columns).filter(
-            or_(SegmentationModel.id).between(int(chunks[0]), int(chunks[1]))
+        filter_query = session.query(SegmentationModel.id, *columns).filter(
+            or_(*mapped_columns)
         )
+        if len(chunks) > 1:
+            query = filter_query.filter(
+                or_(SegmentationModel.id).between(int(chunks[0]), int(chunks[1]))
+            )
+        elif len(chunks) == 1:
+            query = filter_query.filter(SegmentationModel.id == chunks[0])
+
         data = query.all()
         df = pd.DataFrame(data)
         return df.to_dict(orient="list")
