@@ -15,6 +15,7 @@ from materializationengine.shared_tasks import (
     generate_chunked_model_ids,
     fin,
     query_id_range,
+    create_chunks,
     update_metadata,
     get_materialization_info,
 )
@@ -26,7 +27,7 @@ from materializationengine.utils import (
 )
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql import or_
-from sqlalchemy.sql import column
+from sqlalchemy.sql import column, func
 
 celery_logger = get_task_logger(__name__)
 
@@ -98,14 +99,14 @@ def process_missing_roots_workflow(datastack_info: dict):
         datastack_info=datastack_info,
         materialization_time_stamp=materialization_time_stamp,
     )
-
+    # filter for missing root ids (min/max ids)
     for mat_metadata in mat_info:
-        annotation_chunks = generate_chunked_model_ids(
+        missing_root_id_chunks = get_ids_with_missing_roots(
             mat_metadata, use_segmentation_model=True
         )
         process_chunks_workflow = chain(
             lookup_missing_root_ids_workflow(
-                mat_metadata, annotation_chunks
+                mat_metadata, missing_root_id_chunks
             ),  # return here is required for chords
             update_metadata.s(mat_metadata),
         )  # final task which will process a return status/timing etc...
@@ -113,7 +114,47 @@ def process_missing_roots_workflow(datastack_info: dict):
         process_chunks_workflow.apply_async()
 
 
-def lookup_missing_root_ids_workflow(mat_metadata: dict, annotation_chunks: List[int]):
+def get_ids_with_missing_roots(mat_metadata: dict) -> List:
+    """Get a chunk generator of the primary key ids for rows that contain
+    at least one missing root id. Finds the min and max primary key id values
+    globally across the table where a missing root id is present in a column.
+
+    Args:
+        mat_metadata (dict): materialization metadata
+
+    Returns:
+        List: generator of chunked primary key ids.
+    """
+    SegmentationModel = create_segmentation_model(mat_metadata)
+    aligned_volume = mat_metadata.get("aligned_volume")
+    session = sqlalchemy_cache.get(aligned_volume)
+
+    columns = [seg_column.name for seg_column in SegmentationModel.__table__.columns]
+    root_id_columns = [
+        root_column for root_column in columns if "root_id" in root_column
+    ]
+    query_columns = [
+        getattr(SegmentationModel, root_id_column).is_(None)
+        for root_id_column in root_id_columns
+    ]
+    max_id = (
+        session.query(func.max(SegmentationModel.id))
+        .filter(or_(*query_columns))
+        .scalar()
+    )
+    min_id = (
+        session.query(func.min(SegmentationModel.id))
+        .filter(or_(*query_columns))
+        .scalar()
+    )
+    return list(
+        create_chunks(range(min_id, max_id + 1), mat_metadata.get("chunk_size", 500))
+    )
+
+
+def lookup_missing_root_ids_workflow(
+    mat_metadata: dict, missing_root_id_chunks: List[int]
+):
     """Celery workflow that finds and looks up missing root ids.
     Workflow:
             - Lookup supervoxel id(s)
@@ -122,7 +163,7 @@ def lookup_missing_root_ids_workflow(mat_metadata: dict, annotation_chunks: List
 
     Args:
         mat_metadata (dict): datastack info for the aligned_volume derived from the infoservice
-        annotation_chunks (List[int]): list of annotation primary key ids
+        missing_root_id_chunks (List[int]): list of pk ids that have a missing root_id
 
     Returns:
         chain: chain of celery tasks
@@ -132,9 +173,9 @@ def lookup_missing_root_ids_workflow(mat_metadata: dict, annotation_chunks: List
         chord(
             [
                 chain(
-                    lookup_root_ids.si(mat_metadata, annotation_chunk),
+                    lookup_root_ids.si(mat_metadata, missing_root_id_chunk),
                 )
-                for annotation_chunk in annotation_chunks
+                for missing_root_id_chunk in missing_root_id_chunks
             ],
             fin.si(),
         )
@@ -148,13 +189,13 @@ def lookup_missing_root_ids_workflow(mat_metadata: dict, annotation_chunks: List
     autoretry_for=(Exception,),
     max_retries=6,
 )
-def lookup_root_ids(self, mat_metadata: dict, chunk: List[int]):
+def lookup_root_ids(self, mat_metadata: dict, missing_root_id_chunk: List[int]):
     """Get supervoxel ids with in chunk range. Lookup root_ids
     and insert into database.
 
     Args:
         mat_metadata (dict): metadata associated with the materialization
-        chunk (List[int]): list of annotation ids
+        missing_root_id_chunk (List[int]): list of annotation ids
 
     Raises:
         self.retry: re-queue the tasks if failed. Retries 6 times.
@@ -164,7 +205,7 @@ def lookup_root_ids(self, mat_metadata: dict, chunk: List[int]):
     """
     try:
         start_time = time.time()
-
+        chunk = [missing_root_id_chunk[0], missing_root_id_chunk[-1]]
         supervoxel_data = get_sql_supervoxel_ids(chunk, mat_metadata)
         root_id_data = get_new_root_ids(supervoxel_data, mat_metadata)
         result = update_segmentation_data(root_id_data, mat_metadata)
@@ -198,7 +239,7 @@ def ingest_new_annotations_workflow(mat_metadata: dict, annotation_chunks: List[
     """
 
     result = create_missing_segmentation_table(mat_metadata)
-    new_annotation_workflow = chain(
+    return chain(
         chord(
             [
                 chain(
@@ -208,8 +249,7 @@ def ingest_new_annotations_workflow(mat_metadata: dict, annotation_chunks: List[
             ],
             fin.si(),
         )
-    )  # return here is required for chords
-    return new_annotation_workflow
+    )
 
 
 @celery.task(
