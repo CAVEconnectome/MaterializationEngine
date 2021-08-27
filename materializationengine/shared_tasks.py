@@ -1,6 +1,6 @@
 import datetime
 import os
-from typing import List
+from typing import Generator, List
 
 from celery.utils.log import get_task_logger
 from dynamicannotationdb.key_utils import build_segmentation_table_name
@@ -11,13 +11,18 @@ from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.sql.expression import except_
 
 from materializationengine.celery_init import celery
-from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
-from materializationengine.utils import create_annotation_model, get_config_param, create_segmentation_model
+from materializationengine.database import (dynamic_annotation_cache,
+                                            sqlalchemy_cache)
+from materializationengine.utils import (create_annotation_model,
+                                         create_segmentation_model,
+                                         get_config_param)
 
 celery_logger = get_task_logger(__name__)
 
 
-def generate_chunked_model_ids(mat_metadata: dict, use_segmentation_model=False) -> List[List]:
+def generate_chunked_model_ids(
+    mat_metadata: dict, use_segmentation_model=False
+) -> List[List]:
     """Creates list of chunks with start:end index for chunking queries for materialization.
 
     Parameters
@@ -44,6 +49,22 @@ def generate_chunked_model_ids(mat_metadata: dict, use_segmentation_model=False)
     chunked_ids = chunk_ids(mat_metadata, AnnotationModel.id, chunk_size)
 
     return [chunk for chunk in chunked_ids]
+
+
+def create_chunks(data_list: List, chunk_size: int) -> Generator:
+    """Create chunks from list with fixed size
+
+    Args:
+        data_list (List): list to chunk
+        chunk_size (int): size of chunk
+
+    Yields:
+        List: generator of chunks
+    """
+    if len(data_list) <= chunk_size:
+        chunk_size = len(data_list)
+    for i in range(0, len(data_list), chunk_size):
+        yield data_list[i:i + chunk_size]
 
 
 @celery.task(name="process:fin", acks_late=True, bind=True)
@@ -139,7 +160,9 @@ def get_materialization_info(
                         "coord_resolution": voxel_resolution,
                         "materialization_time_stamp": str(materialization_time_stamp),
                         "last_updated_time_stamp": last_updated_time_stamp,
-                        "chunk_size": get_config_param("MATERIALIZATION_ROW_CHUNK_SIZE"),
+                        "chunk_size": get_config_param(
+                            "MATERIALIZATION_ROW_CHUNK_SIZE"
+                        ),
                         "table_count": len(annotation_tables),
                         "find_all_expired_roots": datastack_info.get(
                             "find_all_expired_roots", False
@@ -186,10 +209,7 @@ def chunk_ids(mat_metadata, model, chunk_size: int):
 
     while chunks:
         chunk_start = chunks.pop(0)
-        if chunks:
-            chunk_end = chunks[0]
-        else:
-            chunk_end = None
+        chunk_end = chunks[0] if chunks else None
         yield [chunk_start, chunk_end]
 
 
@@ -206,7 +226,7 @@ def update_metadata(self, mat_metadata: dict):
 
 
     Args:
-        mat_metadata (dict): materialziation metadata
+        mat_metadata (dict): materialization metadata
 
     Returns:
         str: description of table that was updated
