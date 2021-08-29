@@ -498,9 +498,7 @@ def get_sql_supervoxel_ids(chunks: List[int], mat_metadata: dict) -> List[int]:
         for supervoxel_id_column in supervoxel_id_columns
     ]
     try:
-        filter_query = session.query(SegmentationModel.id, *columns).filter(
-            or_(*mapped_columns)
-        )
+        filter_query = session.query(SegmentationModel.id, *mapped_columns)
         if len(chunks) > 1:
             query = filter_query.filter(
                 or_(SegmentationModel.id).between(int(chunks[0]), int(chunks[1]))
