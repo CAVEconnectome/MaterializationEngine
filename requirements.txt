@@ -387,7 +387,7 @@ matplotlib-inline==0.1.2
     # via
     #   -r requirements.txt
     #   ipython
-middle-auth-client==3.8.1
+middle-auth-client==3.9.0
     # via
     #   -r requirements.txt
     #   emannotationschemas
