@@ -157,38 +157,6 @@ def _fix_decimal_column(df_col):
         return df_col.apply(np.float)
 
 
-def make_spatial_filter(
-    model,
-    column_name,
-    bounding_box
-) -> Query:
-    """Generate spatial query that finds annotations within a bounding box.
-
-    Args:
-
-        model (DeclarativeMeta): sqlalchemy model
-        column_name (str): name of column to query
-        bounding_box (List[List[int]]): Bounding box in the form of [[min_x, min_y, min_z], [max_x, max_y, max_z]]
-
-    Returns:
-        Query: [description]
-    """
-
-    spatial_column = getattr(model, column_name)
-
-    coord_array = np.array(bounding_box)
-    if not (coord_array[0] < coord_array[1]).all():
-        raise Exception(
-            f"min bounds: {coord_array[0]} must be less than max bounds: {coord_array[1]}"
-        )
-
-    start_coord = np.array2string(coord_array[0]).strip("[]")
-    end_coord = np.array2string(coord_array[1]).strip("[]")
-
-    return spatial_column.intersects_nd(
-        func.ST_3DMakeBox(f"POINTZ({start_coord})", f"POINTZ({end_coord})")
-    )
-
 
 def render_query(statement, dialect=None):
     """
@@ -539,40 +507,3 @@ def _query(
     )
 
     return df
-
-
-def make_spatial_query(
-    spatial_args: dict,
-    query: Query,
-) -> Query:
-    """Generate spatial query that finds annotations within a bounding box.
-
-    Args:
-        session (Session): sqlalchemy session
-        model (DeclarativeMeta): sqlalchemy model
-        column_name (str): name of column to query
-        bounding_box (List[List[int]]): Bounding box in the form of [[min_x, min_y, min_z], [max_x, max_y, max_z]]
-
-    Returns:
-        Query: [description]
-    """
-    column_name = spatial_args.get("column")
-    bounding_box = spatial_args.get("bounding_box")
-    model = spatial_args.get("model")
-
-    spatial_column = getattr(model, column_name)
-
-    coord_array = np.array(bounding_box)
-    if not (coord_array[0] < coord_array[1]).all():
-        raise Exception(
-            f"min bounds: {coord_array[0]} must be less than max bounds: {coord_array[1]}"
-        )
-
-    start_coord = np.array2string(coord_array[0]).strip("[]")
-    end_coord = np.array2string(coord_array[1]).strip("[]")
-
-    return query.filter(
-        spatial_column.intersects_nd(
-            func.ST_3DMakeBox(f"POINTZ({start_coord})", f"POINTZ({end_coord})")
-        )
-    )
