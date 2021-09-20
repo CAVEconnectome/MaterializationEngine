@@ -134,56 +134,55 @@ def get_materialization_info(
                 segmentation_table_name = build_segmentation_table_name(
                     annotation_table, pcg_table_name
                 )
-                    try:
-                        segmentation_metadata = db.get_segmentation_table_metadata(
-                            annotation_table, pcg_table_name
-                        )
-                        create_segmentation_table = False
-                    except AttributeError as e:
-                        celery_logger.warning(f"SEGMENTATION TABLE DOES NOT EXIST: {e}")
-                        segmentation_metadata = {"last_updated": None}
-                        create_segmentation_table = True
-                    last_updated_time_stamp = segmentation_metadata.get(
-                        "last_updated", None
+                try:
+                    segmentation_metadata = db.get_segmentation_table_metadata(
+                        annotation_table, pcg_table_name
                     )
+                    create_segmentation_table = False
+                except AttributeError as e:
+                    celery_logger.warning(f"SEGMENTATION TABLE DOES NOT EXIST: {e}")
+                    segmentation_metadata = {"last_updated": None}
+                    create_segmentation_table = True
+                
+                last_updated_time_stamp = segmentation_metadata.get("last_updated")
 
-                    if not last_updated_time_stamp:
-                        last_updated_time_stamp = None
-                    else:
-                        last_updated_time_stamp = str(last_updated_time_stamp)
+                if not last_updated_time_stamp:
+                    last_updated_time_stamp = None
+                else:
+                    last_updated_time_stamp = str(last_updated_time_stamp)
 
-                    table_metadata = {
-                        "datastack": datastack_info["datastack"],
-                        "aligned_volume": str(aligned_volume_name),
-                        "schema": db.get_table_schema(annotation_table),
-                        "create_segmentation_table": create_segmentation_table,
-                        "max_id": int(max_id),
-                        "min_id": int(min_id),
-                        "row_count": row_count,
-                        "add_indices": True,
-                        "segmentation_table_name": segmentation_table_name,
-                        "annotation_table_name": annotation_table,
-                        "temp_mat_table_name": f"temp__{annotation_table}",
-                        "pcg_table_name": pcg_table_name,
-                        "segmentation_source": segmentation_source,
-                        "coord_resolution": voxel_resolution,
-                        "materialization_time_stamp": str(materialization_time_stamp),
-                        "last_updated_time_stamp": last_updated_time_stamp,
-                        "chunk_size": get_config_param(
-                            "MATERIALIZATION_ROW_CHUNK_SIZE"
-                        ),
-                        "table_count": len(annotation_tables),
-                        "find_all_expired_roots": datastack_info.get(
-                            "find_all_expired_roots", False
-                        ),
-                    }
-                    if analysis_version:
-                        table_metadata["analysis_version"] = analysis_version
-                        table_metadata[
-                            "analysis_database"
-                        ] = f"{datastack_info['datastack']}__mat{analysis_version}"
+                table_metadata = {
+                    "datastack": datastack_info["datastack"],
+                    "aligned_volume": str(aligned_volume_name),
+                    "schema": db.get_table_schema(annotation_table),
+                    "create_segmentation_table": create_segmentation_table,
+                    "max_id": int(max_id),
+                    "min_id": int(min_id),
+                    "row_count": row_count,
+                    "add_indices": True,
+                    "segmentation_table_name": segmentation_table_name,
+                    "annotation_table_name": annotation_table,
+                    "temp_mat_table_name": f"temp__{annotation_table}",
+                    "pcg_table_name": pcg_table_name,
+                    "segmentation_source": segmentation_source,
+                    "coord_resolution": voxel_resolution,
+                    "materialization_time_stamp": str(materialization_time_stamp),
+                    "last_updated_time_stamp": last_updated_time_stamp,
+                    "chunk_size": get_config_param(
+                        "MATERIALIZATION_ROW_CHUNK_SIZE"
+                    ),
+                    "table_count": len(annotation_tables),
+                    "find_all_expired_roots": datastack_info.get(
+                        "find_all_expired_roots", False
+                    ),
+                }
+                if analysis_version:
+                    table_metadata["analysis_version"] = analysis_version
+                    table_metadata[
+                        "analysis_database"
+                    ] = f"{datastack_info['datastack']}__mat{analysis_version}"
 
-                    metadata.append(table_metadata.copy())
+                metadata.append(table_metadata.copy())
         db.cached_session.close()
         return metadata
     except Exception as e:
