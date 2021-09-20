@@ -647,20 +647,20 @@ def merge_tables(self, mat_metadata: dict):
         ]
     )
     sorted_columns_list = list(sorted_columns.values())
-    columns = [f"{col.table}.{col.name}" for col in sorted_columns_list]
+    columns = [f'"{col.table}".{col.name}' for col in sorted_columns_list]
 
     mat_session, mat_engine = create_session(analysis_sql_uri)
 
     query = f"""
         SELECT 
-            {", ".join(str(col) for col in columns)}
+            {', '.join(columns)}
         FROM 
             {AnnotationModel.__table__.name}
         JOIN 
-            {SegmentationModel.__table__.name}
-            ON {AnnotationModel.id} = {SegmentationModel.id}
+            "{SegmentationModel.__table__.name}"
+            ON {AnnotationModel.id} = "{SegmentationModel.__table__.name}".id
         WHERE
-            {AnnotationModel.id} = {SegmentationModel.id}
+            {AnnotationModel.id} = "{SegmentationModel.__table__.name}".id
         AND {AnnotationModel.valid} = true
 
     """
@@ -673,7 +673,7 @@ def merge_tables(self, mat_metadata: dict):
             )
             row_count = insert_query.rowcount
             drop_query = mat_db_connection.execute(
-                f"DROP TABLE {annotation_table_name}, {segmentation_table_name};"
+                f'DROP TABLE {annotation_table_name}, "{segmentation_table_name}";'
             )
             alter_query = mat_db_connection.execute(
                 f"ALTER TABLE {temp_table_name} RENAME TO {annotation_table_name};"

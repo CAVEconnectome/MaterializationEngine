@@ -17,7 +17,8 @@ from sqlalchemy import MetaData, Table
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoSuchTableError
 
-__version__ = "2.5.6"
+
+__version__ = "2.6.5"
 
 
 bulk_upload_parser = reqparse.RequestParser()
@@ -142,6 +143,27 @@ class ProcessNewAnnotationsResource(Resource):
 
         datastack_info = get_datastack_info(datastack_name)
         process_new_annotations_workflow.s(datastack_info).apply_async()
+        return 200
+
+
+
+@mat_bp.route("/materialize/run/lookup_root_ids/datastack/<string:datastack_name>")
+class LookupMissingRootIdsResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("process new annotations workflow", security="apikey")
+    def post(self, datastack_name: str):
+        """Run workflow to lookup missing root ids and insert into database
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+        """
+        from materializationengine.workflows.ingest_new_annotations import (
+            process_missing_roots_workflow,
+        )
+
+        datastack_info = get_datastack_info(datastack_name)
+        process_missing_roots_workflow.s(datastack_info).apply_async()
         return 200
 
 

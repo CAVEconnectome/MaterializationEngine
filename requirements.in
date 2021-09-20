@@ -1,6 +1,6 @@
-emannotationschemas>=3.2.3
+emannotationschemas>=3.2.5
 caveclient
-cloud-volume
+cloud-volume>=5.3.0
 cloud-files
 pandas
 Flask==1.1.2
@@ -9,7 +9,7 @@ Flask-SQLAlchemy==2.4.4
 jsonschema
 multiwrapper
 requests
-middle-auth-client>=3.8.1
+middle-auth-client>=3.9.0
 marshmallow-sqlalchemy
 flask-marshmallow
 Flask-Admin
@@ -26,4 +26,4 @@ pyarrow
 flask_cors
 numpy>=1.20
 -e git+git://github.com/seung-lab/PyChunkedGraph.git@vminnie-118#egg=pychunkedgraph
-dynamicannotationdb>=3.0.0
+dynamicannotationdb>=3.0.1

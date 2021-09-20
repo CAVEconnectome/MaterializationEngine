@@ -4,7 +4,7 @@ from celery import chain, chord
 from celery.utils.log import get_task_logger
 from materializationengine.celery_init import celery
 from materializationengine.shared_tasks import (
-    chunk_annotation_ids,
+    generate_chunked_model_ids,
     fin,
     get_materialization_info,
 )
@@ -56,7 +56,7 @@ def run_complete_workflow(datastack_info: dict, days_to_expire: int = 5):
     # lookup missing segmentation data for new annotations and update expired root_ids
     # skip tables that are larger than 1,000,000 rows due to performance.
     for mat_metadata in mat_info:
-        annotation_chunks = chunk_annotation_ids(mat_metadata)
+        annotation_chunks = generate_chunked_model_ids(mat_metadata)
         chunked_roots = get_expired_root_ids(mat_metadata)
 
         if chunked_roots:

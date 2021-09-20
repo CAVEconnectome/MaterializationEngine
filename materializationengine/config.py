@@ -109,6 +109,7 @@ class TestConfig(BaseConfig):
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     CELERY_BROKER_URL = "memory://"
     CELERY_RESULT_BACKEND = "redis://"
+    MATERIALIZATION_ROW_CHUNK_SIZE = 2
 
 
 class ProductionConfig(BaseConfig):

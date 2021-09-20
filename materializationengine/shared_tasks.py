@@ -1,5 +1,7 @@
 import datetime
-from typing import List
+import os
+from typing import Generator, List
+
 
 from celery.utils.log import get_task_logger
 from dynamicannotationdb.key_utils import build_segmentation_table_name
@@ -8,13 +10,19 @@ from sqlalchemy import and_, func, text
 from sqlalchemy.exc import ProgrammingError
 
 from materializationengine.celery_init import celery
-from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
-from materializationengine.utils import create_annotation_model, get_config_param
+from materializationengine.database import (dynamic_annotation_cache,
+                                            sqlalchemy_cache)
+from materializationengine.utils import (create_annotation_model,
+                                         create_segmentation_model,
+                                         get_config_param)
 
 celery_logger = get_task_logger(__name__)
 
 
-def chunk_annotation_ids(mat_metadata: dict) -> List[List]:
+
+def generate_chunked_model_ids(
+    mat_metadata: dict, use_segmentation_model=False
+) -> List[List]:
     """Creates list of chunks with start:end index for chunking queries for materialization.
 
     Parameters
@@ -25,11 +33,14 @@ def chunk_annotation_ids(mat_metadata: dict) -> List[List]:
     Returns
     -------
     List[List]
-        list of list containg start and end indices
+        list of list containing start and end indices
     """
     celery_logger.info("Chunking supervoxel ids")
-    AnnotationModel = create_annotation_model(mat_metadata)
-    chunk_size = mat_metadata.get("chunk_size", None)
+    if use_segmentation_model:
+        AnnotationModel = create_segmentation_model(mat_metadata)
+    else:
+        AnnotationModel = create_annotation_model(mat_metadata)
+    chunk_size = mat_metadata.get("chunk_size")
 
     if not chunk_size:
         ROW_CHUNK_SIZE = get_config_param("MATERIALIZATION_ROW_CHUNK_SIZE")
@@ -38,6 +49,22 @@ def chunk_annotation_ids(mat_metadata: dict) -> List[List]:
     chunked_ids = chunk_ids(mat_metadata, AnnotationModel.id, chunk_size)
 
     return [chunk for chunk in chunked_ids]
+
+
+def create_chunks(data_list: List, chunk_size: int) -> Generator:
+    """Create chunks from list with fixed size
+
+    Args:
+        data_list (List): list to chunk
+        chunk_size (int): size of chunk
+
+    Yields:
+        List: generator of chunks
+    """
+    if len(data_list) <= chunk_size:
+        chunk_size = len(data_list)
+    for i in range(0, len(data_list), chunk_size):
+        yield data_list[i:i + chunk_size]
 
 
 @celery.task(name="process:fin", acks_late=True, bind=True)
@@ -107,51 +134,56 @@ def get_materialization_info(
                 segmentation_table_name = build_segmentation_table_name(
                     annotation_table, pcg_table_name
                 )
-                try:
-                    segmentation_metadata = db.get_segmentation_table_metadata(
-                        annotation_table, pcg_table_name
+                    try:
+                        segmentation_metadata = db.get_segmentation_table_metadata(
+                            annotation_table, pcg_table_name
+                        )
+                        create_segmentation_table = False
+                    except AttributeError as e:
+                        celery_logger.warning(f"SEGMENTATION TABLE DOES NOT EXIST: {e}")
+                        segmentation_metadata = {"last_updated": None}
+                        create_segmentation_table = True
+                    last_updated_time_stamp = segmentation_metadata.get(
+                        "last_updated", None
                     )
-                    create_segmentation_table = False
-                except AttributeError as e:
-                    celery_logger.warning(f"SEGMENTATION TABLE DOES NOT EXIST: {e}")
-                    segmentation_metadata = {"last_updated": None}
-                    create_segmentation_table = True
-                last_updated_time_stamp = segmentation_metadata.get("last_updated")
 
-                if not last_updated_time_stamp:
-                    last_updated_time_stamp = None
-                else:
-                    last_updated_time_stamp = str(last_updated_time_stamp)
+                    if not last_updated_time_stamp:
+                        last_updated_time_stamp = None
+                    else:
+                        last_updated_time_stamp = str(last_updated_time_stamp)
 
-                table_metadata = {
-                    "datastack": datastack_info["datastack"],
-                    "aligned_volume": str(aligned_volume_name),
-                    "schema": db.get_table_schema(annotation_table),
-                    "create_segmentation_table": create_segmentation_table,
-                    "max_id": int(max_id),
-                    "min_id": int(min_id),
-                    "row_count": row_count,
-                    "add_indices": True,
-                    "segmentation_table_name": segmentation_table_name,
-                    "annotation_table_name": annotation_table,
-                    "temp_mat_table_name": f"temp__{annotation_table}",
-                    "pcg_table_name": pcg_table_name,
-                    "segmentation_source": segmentation_source,
-                    "coord_resolution": voxel_resolution,
-                    "materialization_time_stamp": str(materialization_time_stamp),
-                    "last_updated_time_stamp": last_updated_time_stamp,
-                    "chunk_size": 100000,
-                    "find_all_expired_roots": datastack_info.get(
-                        "find_all_expired_roots", False
-                    ),
-                }
-                if analysis_version:
-                    table_metadata["analysis_version"] = analysis_version
-                    table_metadata[
-                        "analysis_database"
-                    ] = f"{datastack_info['datastack']}__mat{analysis_version}"
+                    table_metadata = {
+                        "datastack": datastack_info["datastack"],
+                        "aligned_volume": str(aligned_volume_name),
+                        "schema": db.get_table_schema(annotation_table),
+                        "create_segmentation_table": create_segmentation_table,
+                        "max_id": int(max_id),
+                        "min_id": int(min_id),
+                        "row_count": row_count,
+                        "add_indices": True,
+                        "segmentation_table_name": segmentation_table_name,
+                        "annotation_table_name": annotation_table,
+                        "temp_mat_table_name": f"temp__{annotation_table}",
+                        "pcg_table_name": pcg_table_name,
+                        "segmentation_source": segmentation_source,
+                        "coord_resolution": voxel_resolution,
+                        "materialization_time_stamp": str(materialization_time_stamp),
+                        "last_updated_time_stamp": last_updated_time_stamp,
+                        "chunk_size": get_config_param(
+                            "MATERIALIZATION_ROW_CHUNK_SIZE"
+                        ),
+                        "table_count": len(annotation_tables),
+                        "find_all_expired_roots": datastack_info.get(
+                            "find_all_expired_roots", False
+                        ),
+                    }
+                    if analysis_version:
+                        table_metadata["analysis_version"] = analysis_version
+                        table_metadata[
+                            "analysis_database"
+                        ] = f"{datastack_info['datastack']}__mat{analysis_version}"
 
-                metadata.append(table_metadata.copy())
+                    metadata.append(table_metadata.copy())
         db.cached_session.close()
         return metadata
     except Exception as e:
@@ -186,10 +218,7 @@ def chunk_ids(mat_metadata, model, chunk_size: int):
 
     while chunks:
         chunk_start = chunks.pop(0)
-        if chunks:
-            chunk_end = chunks[0]
-        else:
-            chunk_end = None
+        chunk_end = chunks[0] if chunks else None
         yield [chunk_start, chunk_end]
 
 
@@ -206,7 +235,7 @@ def update_metadata(self, mat_metadata: dict):
 
 
     Args:
-        mat_metadata (dict): materialziation metadata
+        mat_metadata (dict): materialization metadata
 
     Returns:
         str: description of table that was updated
