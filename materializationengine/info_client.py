@@ -16,6 +16,7 @@ def get_aligned_volumes():
     server = get_config_param("GLOBAL_SERVER")
     api_version = int(get_config_param("INFO_API_VERSION"))
     auth = AuthClient(server_address=server)
+    print(auth.token)
     infoclient = InfoServiceClient(
         server_address=server,
         auth_client=auth,
@@ -42,6 +43,7 @@ def get_aligned_volume(aligned_volume):
 def get_datastacks():
     server = current_app.config["GLOBAL_SERVER"]
     auth = AuthClient(server_address=server)
+    print(auth.token)
     infoclient = InfoServiceClient(
         server_address=server,
         auth_client=auth,

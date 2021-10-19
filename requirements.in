@@ -1,4 +1,4 @@
-emannotationschemas>=3.2.5
+emannotationschemas>=3.3.0
 caveclient
 cloud-volume>=5.3.0
 cloud-files
