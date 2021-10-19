@@ -2,13 +2,12 @@ import datetime
 import os
 from typing import Generator, List
 
+
 from celery.utils.log import get_task_logger
 from dynamicannotationdb.key_utils import build_segmentation_table_name
-from dynamicannotationdb.models import AnnoMetadata, SegmentationMetadata
-from flask import current_app
+from dynamicannotationdb.models import SegmentationMetadata
 from sqlalchemy import and_, func, text
 from sqlalchemy.exc import ProgrammingError
-from sqlalchemy.sql.expression import except_
 
 from materializationengine.celery_init import celery
 from materializationengine.database import (dynamic_annotation_cache,
@@ -18,6 +17,7 @@ from materializationengine.utils import (create_annotation_model,
                                          get_config_param)
 
 celery_logger = get_task_logger(__name__)
+
 
 
 def generate_chunked_model_ids(
@@ -72,6 +72,11 @@ def fin(self, *args, **kwargs):
     return True
 
 
+@celery.task(name="process:workflow_complete", acks_late=True, bind=True)
+def workflow_complete(self, workflow_name):
+    return f"{workflow_name} completed successfully"
+
+
 def get_materialization_info(
     datastack_info: dict,
     analysis_version: int = None,
@@ -79,6 +84,7 @@ def get_materialization_info(
     skip_table: bool = False,
     row_size: int = 1_000_000,
 ) -> List[dict]:
+
     """Initialize materialization by an aligned volume name. Iterates thorugh all
     tables in a aligned volume database and gathers metadata for each table. The list
     of tables are passed to workers for materialization.
@@ -107,74 +113,76 @@ def get_materialization_info(
         metadata = []
         for annotation_table in annotation_tables:
             row_count = db._get_table_row_count(annotation_table, filter_valid=True)
+            max_id = db.get_max_id_value(annotation_table)
+            min_id = db.get_min_id_value(annotation_table)
+            if row_count == 0:
+                continue
+
+            if row_count >= row_size and skip_table:
+                continue
+
             md = db.get_table_metadata(annotation_table)
             vx = md.get("voxel_resolution_x", None)
             vy = md.get("voxel_resolution_y", None)
             vz = md.get("voxel_resolution_z", None)
-            vx = vx if vx else 1.0
-            vy = vy if vy else 1.0
-            vz = vz if vz else 1.0
+            vx = vx or 1.0
+            vy = vy or 1.0
+            vz = vz or 1.0
             voxel_resolution = [vx, vy, vz]
 
-            if row_count >= row_size and skip_table:
-                continue
-            else:
-                max_id = db.get_max_id_value(annotation_table)
-                min_id = db.get_min_id_value(annotation_table)
-                if max_id:
-                    segmentation_table_name = build_segmentation_table_name(
+            if max_id:
+                segmentation_table_name = build_segmentation_table_name(
+                    annotation_table, pcg_table_name
+                )
+                try:
+                    segmentation_metadata = db.get_segmentation_table_metadata(
                         annotation_table, pcg_table_name
                     )
-                    try:
-                        segmentation_metadata = db.get_segmentation_table_metadata(
-                            annotation_table, pcg_table_name
-                        )
-                        create_segmentation_table = False
-                    except AttributeError as e:
-                        celery_logger.warning(f"SEGMENTATION TABLE DOES NOT EXIST: {e}")
-                        segmentation_metadata = {"last_updated": None}
-                        create_segmentation_table = True
-                    last_updated_time_stamp = segmentation_metadata.get(
-                        "last_updated", None
-                    )
+                    create_segmentation_table = False
+                except AttributeError as e:
+                    celery_logger.warning(f"SEGMENTATION TABLE DOES NOT EXIST: {e}")
+                    segmentation_metadata = {"last_updated": None}
+                    create_segmentation_table = True
+                
+                last_updated_time_stamp = segmentation_metadata.get("last_updated")
 
-                    if not last_updated_time_stamp:
-                        last_updated_time_stamp = None
-                    else:
-                        last_updated_time_stamp = str(last_updated_time_stamp)
+                if not last_updated_time_stamp:
+                    last_updated_time_stamp = None
+                else:
+                    last_updated_time_stamp = str(last_updated_time_stamp)
 
-                    table_metadata = {
-                        "datastack": datastack_info["datastack"],
-                        "aligned_volume": str(aligned_volume_name),
-                        "schema": db.get_table_schema(annotation_table),
-                        "create_segmentation_table": create_segmentation_table,
-                        "max_id": int(max_id),
-                        "min_id": int(min_id),
-                        "row_count": row_count,
-                        "add_indices": True,
-                        "segmentation_table_name": segmentation_table_name,
-                        "annotation_table_name": annotation_table,
-                        "temp_mat_table_name": f"temp__{annotation_table}",
-                        "pcg_table_name": pcg_table_name,
-                        "segmentation_source": segmentation_source,
-                        "coord_resolution": voxel_resolution,
-                        "materialization_time_stamp": str(materialization_time_stamp),
-                        "last_updated_time_stamp": last_updated_time_stamp,
-                        "chunk_size": get_config_param(
-                            "MATERIALIZATION_ROW_CHUNK_SIZE"
-                        ),
-                        "table_count": len(annotation_tables),
-                        "find_all_expired_roots": datastack_info.get(
-                            "find_all_expired_roots", False
-                        ),
-                    }
-                    if analysis_version:
-                        table_metadata["analysis_version"] = analysis_version
-                        table_metadata[
-                            "analysis_database"
-                        ] = f"{datastack_info['datastack']}__mat{analysis_version}"
+                table_metadata = {
+                    "datastack": datastack_info["datastack"],
+                    "aligned_volume": str(aligned_volume_name),
+                    "schema": db.get_table_schema(annotation_table),
+                    "create_segmentation_table": create_segmentation_table,
+                    "max_id": int(max_id),
+                    "min_id": int(min_id),
+                    "row_count": row_count,
+                    "add_indices": True,
+                    "segmentation_table_name": segmentation_table_name,
+                    "annotation_table_name": annotation_table,
+                    "temp_mat_table_name": f"temp__{annotation_table}",
+                    "pcg_table_name": pcg_table_name,
+                    "segmentation_source": segmentation_source,
+                    "coord_resolution": voxel_resolution,
+                    "materialization_time_stamp": str(materialization_time_stamp),
+                    "last_updated_time_stamp": last_updated_time_stamp,
+                    "chunk_size": get_config_param(
+                        "MATERIALIZATION_ROW_CHUNK_SIZE"
+                    ),
+                    "table_count": len(annotation_tables),
+                    "find_all_expired_roots": datastack_info.get(
+                        "find_all_expired_roots", False
+                    ),
+                }
+                if analysis_version:
+                    table_metadata["analysis_version"] = analysis_version
+                    table_metadata[
+                        "analysis_database"
+                    ] = f"{datastack_info['datastack']}__mat{analysis_version}"
 
-                    metadata.append(table_metadata.copy())
+                metadata.append(table_metadata.copy())
         db.cached_session.close()
         return metadata
     except Exception as e:

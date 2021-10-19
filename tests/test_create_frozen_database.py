@@ -48,8 +48,8 @@ def test_update_table_metadata(mat_metadata):
     assert tables.get() == ["test_synapse_table"]
 
 
-def test_drop_tables():
-    dropped_tables = drop_tables.s(datastack_info, analysis_version=1).apply()
+def test_drop_tables(mat_metadata):
+    dropped_tables = drop_tables.s([mat_metadata], analysis_version=1).apply()
     logging.info(dropped_tables)
     assert dropped_tables.get() != None
 
