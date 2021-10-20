@@ -6,7 +6,7 @@ from celery import chain, chord
 from celery.utils.log import get_task_logger
 from materializationengine.blueprints.materialize.api import get_datastack_info
 from materializationengine.celery_init import celery
-from materializationengine.shared_tasks import (chunk_annotation_ids, fin,
+from materializationengine.shared_tasks import (generate_chunked_model_ids, fin,
                                                 workflow_complete,
                                                 get_materialization_info)
 from materializationengine.utils import get_config_param
@@ -67,7 +67,7 @@ def update_database_workflow(datastack_info: dict):
     # lookup missing segmentation data for new annotations and update expired root_ids
     # skip tables that are larger than 1,000,000 rows due to performance.
     for mat_metadata in mat_info:
-        annotation_chunks = chunk_annotation_ids(mat_metadata)
+        annotation_chunks = generate_chunked_model_ids(mat_metadata)
         chunked_roots = get_expired_root_ids(mat_metadata)
         if chunked_roots:
             update_expired_roots_workflow = update_root_ids_workflow(
