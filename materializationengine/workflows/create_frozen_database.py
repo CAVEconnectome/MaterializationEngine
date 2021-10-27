@@ -46,12 +46,15 @@ from sqlalchemy.exc import OperationalError
 celery_logger = get_task_logger(__name__)
 
 
-@celery.task(name="process:run_periodic_materialize_database")
-def run_periodic_materialize_database(days_to_expire: int = 5) -> None:
+@celery.task(name="process:materialize_database")
+def materialize_database(days_to_expire: int = 5) -> None:
     """
-    Run update database workflow. Steps are as follows:
-    1. Find missing segmentation data in a given datastack and lookup.
-    2. Update expired root ids
+    Materialize database. Steps are as follows:
+    1. Create new versioned database.
+    2. Copy tables into versioned database
+    3. Merge annotation and semgentation tables
+    4. Re-index merged tables
+    5. Check merge tables for row count and index consistency
 
     """
     try:
@@ -157,11 +160,32 @@ def format_materialization_database_workflow(mat_info: List[dict]):
     """
     create_frozen_database_tasks = []
     for mat_metadata in mat_info:
-        create_frozen_database_workflow = chain(
-            merge_tables.si(mat_metadata), add_indices.si(mat_metadata)
-        )
-        create_frozen_database_tasks.append(create_frozen_database_workflow)
-    return create_frozen_database_tasks
+        if not mat_metadata["reference_table"]:
+            create_frozen_database_workflow = chain(
+                merge_tables.si(mat_metadata), add_indices.si(mat_metadata)
+            )
+            create_frozen_database_tasks.append(create_frozen_database_workflow)
+    return chord(create_frozen_database_tasks, rebuild_reference_tables.si(mat_info))
+
+
+@celery.task(
+    name="process:rebuild_reference_tables",
+    bind=True,
+    acks_late=True,
+    autoretry_for=(OperationalError,),
+    max_retries=3,
+)
+def rebuild_reference_tables(self, mat_info: List[dict]):
+    add_indices_tasks = [
+        add_indices.si(mat_metadata)
+        for mat_metadata in mat_info
+        if mat_metadata["reference_table"]
+    ]
+
+    if add_indices_tasks:
+        return self.replace(add_indices_tasks)
+    else:
+        return fin.si()
 
 
 def create_new_version(
@@ -169,7 +193,7 @@ def create_new_version(
     materialization_time_stamp: datetime.datetime.utcnow,
     days_to_expire: int = None,
 ):
-    """Create new versioned database row in the anaylsis_version table.
+    """Create new versioned database row in the analysis_version table.
     Sets the expiration date for the database.
 
     Args:
