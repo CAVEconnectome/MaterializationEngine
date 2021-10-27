@@ -19,8 +19,8 @@ from materializationengine.workflows.update_root_ids import (
 celery_logger = get_task_logger(__name__)
 
 
-@celery.task(name="process:run_periodic_database_update")
-def run_periodic_database_update() -> None:
+@celery.task(name="process:update_live_database")
+def update_live_database() -> None:
     """
     Run update database workflow. Steps are as follows:
     1. Find missing segmentation data in a given datastack and lookup.
@@ -69,33 +69,34 @@ def update_database_workflow(datastack_info: dict):
     # lookup missing segmentation data for new annotations and update expired root_ids
     # skip tables that are larger than 1,000,000 rows due to performance.
     for mat_metadata in mat_info:
-        annotation_chunks = generate_chunked_model_ids(mat_metadata)
-        chunked_roots = get_expired_root_ids(mat_metadata)
-        if mat_metadata["row_count"] < 1_000_000:
-            new_annotations = True
-            new_annotation_workflow = ingest_new_annotations_workflow(
-                mat_metadata, annotation_chunks
-            )
-        else:
-            new_annotations = None
-
-        if chunked_roots:
-            update_expired_roots_workflow = update_root_ids_workflow(
-                mat_metadata, chunked_roots
-            )
-            if new_annotations:
-                ingest_and_update_root_ids_workflow = chain(
-                    new_annotation_workflow, update_expired_roots_workflow
-                )
-                update_live_database_workflow.append(
-                    ingest_and_update_root_ids_workflow
+        if not mat_metadata["reference_table"]:
+            annotation_chunks = generate_chunked_model_ids(mat_metadata)
+            chunked_roots = get_expired_root_ids(mat_metadata)
+            if mat_metadata["row_count"] < 1_000_000:
+                new_annotations = True
+                new_annotation_workflow = ingest_new_annotations_workflow(
+                    mat_metadata, annotation_chunks
                 )
             else:
-                update_live_database_workflow.append(update_expired_roots_workflow)
-        elif new_annotations:
-            update_live_database_workflow.append(new_annotation_workflow)
-        else:
-            return "Nothing to update"
+                new_annotations = None
+
+            if chunked_roots:
+                update_expired_roots_workflow = update_root_ids_workflow(
+                    mat_metadata, chunked_roots
+                )
+                if new_annotations:
+                    ingest_and_update_root_ids_workflow = chain(
+                        new_annotation_workflow, update_expired_roots_workflow
+                    )
+                    update_live_database_workflow.append(
+                        ingest_and_update_root_ids_workflow
+                    )
+                else:
+                    update_live_database_workflow.append(update_expired_roots_workflow)
+            elif new_annotations:
+                update_live_database_workflow.append(new_annotation_workflow)
+            else:
+                return "Nothing to update"
 
     run_update_database_workflow = chain(
         chord(update_live_database_workflow, workflow_complete.si("update_root_ids")),

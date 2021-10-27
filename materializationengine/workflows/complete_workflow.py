@@ -56,36 +56,35 @@ def run_complete_workflow(datastack_info: dict, days_to_expire: int = 5):
     # lookup missing segmentation data for new annotations and update expired root_ids
     # skip tables that are larger than 1,000,000 rows due to performance.
     for mat_metadata in mat_info:
-        annotation_chunks = generate_chunked_model_ids(mat_metadata)
-        chunked_roots = get_expired_root_ids(mat_metadata)
-        if mat_metadata["row_count"] < 1_000_000:
-            new_annotations = True
-            new_annotation_workflow = ingest_new_annotations_workflow(
-                mat_metadata, annotation_chunks
-            )
-
-        else:
-            new_annotations = None
-
-        if chunked_roots:
-            update_expired_roots_workflow = update_root_ids_workflow(
-                mat_metadata, chunked_roots
-            )
-
-        if chunked_roots:
-            if new_annotations:
-                ingest_and_update_root_ids_workflow = chain(
-                    new_annotation_workflow, update_expired_roots_workflow
+        if not mat_metadata["reference_table"]:
+            annotation_chunks = generate_chunked_model_ids(mat_metadata)
+            chunked_roots = get_expired_root_ids(mat_metadata)
+            if mat_metadata["row_count"] < 1_000_000:
+                new_annotations = True
+                new_annotation_workflow = ingest_new_annotations_workflow(
+                    mat_metadata, annotation_chunks
                 )
-                update_live_database_workflow.append(
-                    ingest_and_update_root_ids_workflow
-                )
+
             else:
-                update_live_database_workflow.append(update_expired_roots_workflow)
-        elif new_annotations:
-            update_live_database_workflow.append(new_annotation_workflow)
-        else:
-            update_live_database_workflow.append(fin.si())
+                new_annotations = None
+
+            if chunked_roots:
+                update_expired_roots_workflow = update_root_ids_workflow(
+                    mat_metadata, chunked_roots
+                )
+                if new_annotations:
+                    ingest_and_update_root_ids_workflow = chain(
+                        new_annotation_workflow, update_expired_roots_workflow
+                    )
+                    update_live_database_workflow.append(
+                        ingest_and_update_root_ids_workflow
+                    )
+                else:
+                    update_live_database_workflow.append(update_expired_roots_workflow)
+            elif new_annotations:
+                update_live_database_workflow.append(new_annotation_workflow)
+            else:
+                update_live_database_workflow.append(fin.si())
 
     # copy live database as a materialized version and drop unneeded tables
     setup_versioned_database_workflow = create_materializied_database_workflow(

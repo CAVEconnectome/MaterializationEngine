@@ -37,14 +37,15 @@ def expired_root_id_workflow(datastack_info: dict):
     )
     workflow = []
     for mat_metadata in mat_info:
-        chunked_roots = get_expired_root_ids(mat_metadata)
-        if chunked_roots:
-            process_root_ids = update_root_ids_workflow(
-                mat_metadata, chunked_roots
-            )  # final task which will process a return status/timing etc...
-            workflow.append(process_root_ids)
-        else:
-            continue
+        if not mat_metadata["reference_table"]:
+            chunked_roots = get_expired_root_ids(mat_metadata)
+            if chunked_roots:
+                process_root_ids = update_root_ids_workflow(
+                    mat_metadata, chunked_roots
+                )  # final task which will process a return status/timing etc...
+                workflow.append(process_root_ids)
+            else:
+                continue
     if len(workflow) <= 1:
         return "No root ids to update"
     workflow = chord(workflow, fin.s())

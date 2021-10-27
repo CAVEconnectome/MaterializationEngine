@@ -61,7 +61,10 @@ def process_new_annotations_workflow(datastack_info: dict):
     )
 
     for mat_metadata in mat_info:
-        if mat_metadata["row_count"] < 1_000_000:
+        if (
+            mat_metadata["row_count"] < 1_000_000
+            and not mat_metadata["reference_table"]
+        ):
             annotation_chunks = generate_chunked_model_ids(mat_metadata)
             process_chunks_workflow = chain(
                 ingest_new_annotations_workflow(
@@ -101,23 +104,24 @@ def process_missing_roots_workflow(datastack_info: dict):
     )
     # filter for missing root ids (min/max ids)
     for mat_metadata in mat_info:
-        missing_root_id_chunks = get_ids_with_missing_roots(
-            mat_metadata, use_segmentation_model=True
-        )
-        seg_table = mat_metadata.get("segmentation_table_name")
-        if missing_root_id_chunks:
-            process_chunks_workflow = chain(
-                lookup_missing_root_ids_workflow(
-                    mat_metadata, missing_root_id_chunks
-                ),  # return here is required for chords
-                update_metadata.s(mat_metadata),
-            )  # final task which will process a return status/timing etc...
-
-            process_chunks_workflow.apply_async()
-        else:
-            celery_logger.info(
-                f"Skipped missing root id lookup for '{seg_table}', no missing root ids found"
+        if not mat_metadata["reference_table"]:
+            missing_root_id_chunks = get_ids_with_missing_roots(
+                mat_metadata, use_segmentation_model=True
             )
+            seg_table = mat_metadata.get("segmentation_table_name")
+            if missing_root_id_chunks:
+                process_chunks_workflow = chain(
+                    lookup_missing_root_ids_workflow(
+                        mat_metadata, missing_root_id_chunks
+                    ),  # return here is required for chords
+                    update_metadata.s(mat_metadata),
+                )  # final task which will process a return status/timing etc...
+
+                process_chunks_workflow.apply_async()
+            else:
+                celery_logger.info(
+                    f"Skipped missing root id lookup for '{seg_table}', no missing root ids found"
+                )
 
 
 def get_ids_with_missing_roots(mat_metadata: dict) -> List:
