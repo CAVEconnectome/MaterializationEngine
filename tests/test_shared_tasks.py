@@ -51,6 +51,7 @@ def test_get_materialization_info():
             "segmentation_table_name": "test_synapse_table__test_pcg",
             "annotation_table_name": "test_synapse_table",
             "temp_mat_table_name": "temp__test_synapse_table",
+            "reference_table": None,
             "pcg_table_name": "test_pcg",
             "segmentation_source": "graphene://https://fake-daf.com/segmentation/table/test_pcg",
             "coord_resolution": [4.0, 4.0, 40.0],
