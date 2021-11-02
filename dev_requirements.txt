@@ -4,7 +4,7 @@
 #
 #    pip-compile --output-file=dev_requirements.txt
 #
--e git+https://github.com/seung-lab/PyChunkedGraph.git@vminnie-118#egg=pychunkedgraph
+-e git+https://github.com/seung-lab/PyChunkedGraph.git@v1.13.2#egg=pychunkedgraph
     # via -r requirements.in
 aiohttp==3.7.4.post0
     # via gcsfs
