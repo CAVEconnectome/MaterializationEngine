@@ -508,8 +508,12 @@ def drop_tables(self, mat_info: List[dict], analysis_version: int):
     mat_table_names = mat_inspector.get_table_names()
     mat_table_names.remove("materializedmetadata")
 
-    annotation_tables = [table["annotation_table_name"] for table in mat_info]
-    segmentation_tables = [table["segmentation_table_name"] for table in mat_info]
+    annotation_tables = [table.get("annotation_table_name") for table in mat_info]
+    segmentation_tables = [
+        table.get("segmentation_table_name")
+        for table in mat_info
+        if table.get("segmentation_table_name") is not None
+    ]
 
     filtered_tables = annotation_tables + segmentation_tables
 
