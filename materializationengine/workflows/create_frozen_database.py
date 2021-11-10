@@ -701,7 +701,7 @@ def merge_tables(self, mat_metadata: dict):
             )
             row_count = insert_query.rowcount
             drop_query = mat_db_connection.execute(
-                f'DROP TABLE {annotation_table_name}, "{segmentation_table_name}";'
+                f'DROP TABLE {annotation_table_name}, "{segmentation_table_name}" CASCADE;'
             )
             alter_query = mat_db_connection.execute(
                 f"ALTER TABLE {temp_table_name} RENAME TO {annotation_table_name};"
