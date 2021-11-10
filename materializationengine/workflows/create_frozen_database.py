@@ -165,7 +165,7 @@ def format_materialization_database_workflow(mat_info: List[dict]):
                 merge_tables.si(mat_metadata), add_indices.si(mat_metadata)
             )
             create_frozen_database_tasks.append(create_frozen_database_workflow)
-    return chord(create_frozen_database_tasks, rebuild_reference_tables.si(mat_info))
+    return chain(create_frozen_database_tasks, rebuild_reference_tables.si(mat_info))
 
 
 @celery.task(
