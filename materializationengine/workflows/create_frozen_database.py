@@ -183,7 +183,7 @@ def rebuild_reference_tables(self, mat_info: List[dict]):
     ]
 
     if add_indices_tasks:
-        return self.replace(add_indices_tasks)
+        return self.replace(chain(add_indices_tasks))
     else:
         return fin.si()
 
