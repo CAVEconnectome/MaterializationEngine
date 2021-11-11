@@ -13,6 +13,7 @@ from materializationengine.workflows.create_frozen_database import (
     create_materializied_database_workflow,
     create_new_version,
     format_materialization_database_workflow,
+    rebuild_reference_tables,
 )
 from materializationengine.workflows.ingest_new_annotations import (
     ingest_new_annotations_workflow,
@@ -99,6 +100,7 @@ def run_complete_workflow(datastack_info: dict, days_to_expire: int = 5):
         chord(update_live_database_workflow, fin.si()),
         setup_versioned_database_workflow,
         chord(format_database_workflow, fin.si()),
+        rebuild_reference_tables.si(mat_info),
         check_tables.si(mat_info, new_version_number),
     )
     final_workflow.apply_async()
