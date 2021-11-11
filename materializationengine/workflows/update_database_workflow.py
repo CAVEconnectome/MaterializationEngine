@@ -19,8 +19,8 @@ from materializationengine.workflows.update_root_ids import (
 celery_logger = get_task_logger(__name__)
 
 
-@celery.task(name="process:update_live_database")
-def update_live_database() -> None:
+@celery.task(name="process:run_periodic_database_update")
+def run_periodic_database_update() -> None:
     """
     Run update database workflow. Steps are as follows:
     1. Find missing segmentation data in a given datastack and lookup.
