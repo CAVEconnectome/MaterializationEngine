@@ -806,7 +806,7 @@ def check_tables(self, mat_info: list, analysis_version: int):
             celery_logger.info(f"{annotation_table_name} row counts match")
             schema = mat_metadata["schema"]
             anno_model = make_flat_model(annotation_table_name, schema)
-            live_mapped_indexes = index_cache.get_index_from_model(anno_model)
+            live_mapped_indexes = index_cache.get_index_from_model(anno_model, mat_engine)
             mat_mapped_indexes = index_cache.get_table_indices(
                 annotation_table_name, mat_engine
             )
