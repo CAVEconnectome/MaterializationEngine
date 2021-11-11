@@ -105,6 +105,7 @@ def create_versioned_materialization_workflow(
     workflow = chain(
         setup_versioned_database,
         chord(format_workflow, fin.s()),
+        rebuild_reference_tables.si(mat_info),
         check_tables.si(mat_info, new_version_number),
     )
     status = workflow.apply_async()
@@ -165,7 +166,7 @@ def format_materialization_database_workflow(mat_info: List[dict]):
                 merge_tables.si(mat_metadata), add_indices.si(mat_metadata)
             )
             create_frozen_database_tasks.append(create_frozen_database_workflow)
-    return chain(create_frozen_database_tasks, rebuild_reference_tables.si(mat_info))
+    return create_frozen_database_tasks
 
 
 @celery.task(
@@ -176,14 +177,14 @@ def format_materialization_database_workflow(mat_info: List[dict]):
     max_retries=3,
 )
 def rebuild_reference_tables(self, mat_info: List[dict]):
-    add_indices_tasks = [
+    add_index_tasks = [
         add_indices.si(mat_metadata)
         for mat_metadata in mat_info
         if mat_metadata["reference_table"]
     ]
 
-    if add_indices_tasks:
-        return self.replace(chain(add_indices_tasks))
+    if add_index_tasks:
+        return self.replace(chain(add_index_tasks))
     else:
         return fin.si()
 
@@ -948,7 +949,16 @@ def add_indices(self, mat_metadata: dict):
         annotation_table_name = mat_metadata.get("annotation_table_name")
         schema = mat_metadata.get("schema")
 
-        model = make_flat_model(annotation_table_name, schema)
+        table_metadata = None
+        if mat_metadata.get("reference_table"):
+            table_metadata = {"reference_table": mat_metadata.get("reference_table")}
+
+        model = make_flat_model(
+            table_name=annotation_table_name,
+            schema_type=schema,
+            segmentation_source=None,
+            table_metadata=table_metadata,
+        )
 
         commands = index_cache.add_indices_sql_commands(
             annotation_table_name, model, analysis_engine
