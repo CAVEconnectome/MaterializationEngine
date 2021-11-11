@@ -97,7 +97,8 @@ class IndexCache:
                         "type": "foreign_key",
                         "foreign_key_name": foreign_key_name,
                         "foreign_key_table": f"{foreign_key.column.table.name}",
-                        "foreign_key_column": f"{foreign_key.column.name}",
+                        "foreign_key_column": f"{foreign_key.constraint.column_keys[0]}",
+                        "target_column": {foreign_key.column.name},
                     }
                     index_map.update({foreign_key_name: foreign_key_map})
         return index_map
@@ -157,7 +158,6 @@ class IndexCache:
         """
         current_indices = self.get_table_indices(table_name, engine)
         model_indices = self.get_index_from_model(model)
-
         missing_indices = set(model_indices) - set(current_indices)
         commands = []
         for column_name in missing_indices:
@@ -172,10 +172,11 @@ class IndexCache:
                 foreign_key_name = model_indices[column_name]["foreign_key_name"]
                 foreign_key_table = model_indices[column_name]["foreign_key_table"]
                 foreign_key_column = model_indices[column_name]["foreign_key_column"]
+                target_column = model_indices[column_name]["target_column"]
                 command = f"""ALTER TABLE {table_name} 
                               ADD CONSTRAINT {foreign_key_name}
                               FOREIGN KEY ({foreign_key_column}) 
-                              REFERENCES {foreign_key_table} ({foreign_key_column});"""
+                              REFERENCES {foreign_key_table} ({target_column});"""
                 missing_indices.add(foreign_key_name)
             commands.append(command)
         return commands
