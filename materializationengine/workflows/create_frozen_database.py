@@ -811,7 +811,12 @@ def check_tables(self, mat_info: list, analysis_version: int):
                     "reference_table": mat_metadata.get("reference_table")
                 }
 
-            anno_model = make_flat_model(annotation_table_name, schema, table_metadata)
+            anno_model = make_flat_model(
+                table_name=annotation_table_name,
+                schema_type=schema,
+                segmentation_source=None,
+                table_metadata=table_metadata,
+            )
             live_mapped_indexes = index_cache.get_index_from_model(
                 anno_model, mat_engine
             )
