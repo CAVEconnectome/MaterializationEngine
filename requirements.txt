@@ -17,6 +17,7 @@ amqp==2.6.1
 aniso8601==9.0.1
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   flask-restx
 async-timeout==3.0.1
     # via aiohttp
@@ -24,6 +25,7 @@ attrs==21.2.0
     # via
     #   aiohttp
     #   dynamicannotationdb
+    #   emannotationschemas
     #   jsonschema
     #   pytest
 backcall==0.2.0
@@ -47,6 +49,7 @@ cachetools==4.2.4
     #   -r requirements.in
     #   caveclient
     #   dynamicannotationdb
+    #   emannotationschemas
     #   google-auth
     #   middle-auth-client
     #   pychunkedgraph
@@ -57,6 +60,7 @@ celery==4.4.7
 certifi==2021.10.8
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   pychunkedgraph
     #   requests
     #   urllib3
@@ -73,12 +77,14 @@ chardet==3.0.4
 charset-normalizer==2.0.7
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   requests
 click==7.1.2
     # via
     #   cloud-files
     #   compresso
     #   dynamicannotationdb
+    #   emannotationschemas
     #   flask
     #   rq
 cloud-files==3.1.0
@@ -86,7 +92,7 @@ cloud-files==3.1.0
     #   -r requirements.in
     #   cloud-volume
     #   pychunkedgraph
-cloud-volume==5.3.0
+cloud-volume==6.0.0
     # via
     #   -r requirements.in
     #   pychunkedgraph
@@ -115,6 +121,7 @@ deflate==0.3.0
 deprecated==1.2.13
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   redis
 dill==0.3.3
     # via
@@ -122,9 +129,9 @@ dill==0.3.3
     #   pathos
 dracopy==0.0.19
     # via cloud-volume
-dynamicannotationdb==3.1.2
+dynamicannotationdb==3.1.4
     # via -r requirements.in
-emannotationschemas==3.5.1
+emannotationschemas==3.5.2
     # via
     #   -r requirements.in
     #   dynamicannotationdb
@@ -154,7 +161,7 @@ flask-admin==1.5.8
     #   -r requirements.in
     #   dynamicannotationdb
     #   emannotationschemas
-flask-cors==3.0.10
+flask_cors==3.0.10
     # via
     #   -r requirements.in
     #   dynamicannotationdb
@@ -177,6 +184,7 @@ fsspec==2021.05.0
 furl==2.1.3
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   middle-auth-client
 gcsfs==2021.5.0
     # via -r requirements.in
@@ -245,6 +253,7 @@ grpcio==1.38.0
 idna==3.3
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   requests
     #   urllib3
     #   yarl
@@ -252,6 +261,7 @@ importlib-metadata==4.8.2
     # via
     #   alembic
     #   dynamicannotationdb
+    #   emannotationschemas
     #   jsonschema
     #   kombu
     #   markdown
@@ -261,7 +271,6 @@ importlib-resources==5.4.0
     # via
     #   alembic
     #   dynamicannotationdb
-    #   jsonschema
 inflection==0.5.1
     # via python-jsonschema-objects
 iniconfig==1.1.1
@@ -273,12 +282,14 @@ ipython-genutils==0.2.0
 itsdangerous==1.1.0
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   flask
 jedi==0.18.0
     # via ipython
 jinja2==2.11.3
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   flask
 jmespath==0.10.0
     # via
@@ -286,10 +297,12 @@ jmespath==0.10.0
     #   botocore
 json5==0.9.5
     # via cloud-volume
-jsonschema==4.2.1
+jsonschema==3.2.0
     # via
     #   -r requirements.in
+    #   cloud-volume
     #   dynamicannotationdb
+    #   emannotationschemas
     #   flask-restx
     #   python-jsonschema-objects
 kombu==4.6.11
@@ -307,6 +320,7 @@ markdown==3.3.4
 markupsafe==2.0.1
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   jinja2
     #   mako
     #   wtforms
@@ -372,12 +386,14 @@ oauthlib==3.1.1
 orderedmultidict==1.0.1
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   furl
 orjson==3.5.3
     # via cloud-files
 packaging==21.2
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   geoalchemy2
     #   google-api-core
     #   pytest
@@ -453,10 +469,12 @@ pyopenssl==20.0.1
 pyparsing==2.4.7
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   packaging
 pyrsistent==0.18.0
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   jsonschema
 pysimdjson==4.0.0
     # via cloud-volume
@@ -491,6 +509,7 @@ pyyaml==5.4.1
 redis==4.0.0
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   middle-auth-client
     #   pychunkedgraph
     #   rq
@@ -502,6 +521,7 @@ requests==2.26.0
     #   cloud-volume
     #   codecov
     #   dynamicannotationdb
+    #   emannotationschemas
     #   gcsfs
     #   google-api-core
     #   google-cloud-storage
@@ -530,6 +550,7 @@ six==1.16.0
     #   cloud-files
     #   cloud-volume
     #   dynamicannotationdb
+    #   emannotationschemas
     #   flask-cors
     #   flask-marshmallow
     #   flask-restx
@@ -539,6 +560,7 @@ six==1.16.0
     #   google-cloud-core
     #   google-resumable-media
     #   grpcio
+    #   jsonschema
     #   orderedmultidict
     #   ppft
     #   protobuf
@@ -576,6 +598,7 @@ typing-extensions==4.0.0
     # via
     #   aiohttp
     #   dynamicannotationdb
+    #   emannotationschemas
     #   importlib-metadata
     #   libcst
     #   typing-inspect
@@ -588,6 +611,7 @@ urllib3[brotli,secure]==1.26.7
     #   cloud-files
     #   cloud-volume
     #   dynamicannotationdb
+    #   emannotationschemas
     #   pychunkedgraph
     #   requests
 vine==1.3.0
@@ -599,6 +623,7 @@ wcwidth==0.2.5
 werkzeug==1.0.1
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   flask
     #   flask-accepts
     #   flask-restx
@@ -606,15 +631,18 @@ wrapt==1.13.3
     # via
     #   deprecated
     #   dynamicannotationdb
+    #   emannotationschemas
 wtforms==3.0.0
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   flask-admin
 yarl==1.6.3
     # via aiohttp
 zipp==3.6.0
     # via
     #   dynamicannotationdb
+    #   emannotationschemas
     #   importlib-metadata
     #   importlib-resources
 zmesh==0.5.0

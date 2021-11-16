@@ -1,5 +1,5 @@
 caveclient
-cloud-volume>=5.3.0
+cloud-volume>=6.0.0
 cloud-files
 pandas
 Flask<2.0
@@ -24,6 +24,6 @@ gcsfs>=0.8.0
 pyarrow
 flask_cors
 numpy>=1.20
-emannotationschemas>=3.5.1
-dynamicannotationdb>=3.1.2
+dynamicannotationdb>=3.1.4
+emannotationschemas>=3.5.2
 -e git+git://github.com/seung-lab/PyChunkedGraph.git@vminnie-125#egg=pychunkedgraph
