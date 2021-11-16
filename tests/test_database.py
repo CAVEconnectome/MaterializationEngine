@@ -33,12 +33,11 @@ def test_reflect_tables(database_uri):
             "spatial_ref_sys",
             "annotation_table_metadata",
             "segmentation_table_metadata",
+            "combined_table_metadata",
             "analysisversion",
             "analysistables",
             "geography_columns",
             "geometry_columns",
-            "raster_columns",
-            "raster_overviews",
             "test_synapse_table",
             "test_synapse_table__test_pcg",
         ]
