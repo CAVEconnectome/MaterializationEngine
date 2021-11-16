@@ -100,8 +100,8 @@ def setup_docker_image(docker_mode, mat_metadata):
         aligned_volume = mat_metadata["aligned_volume"]
 
         db_environment = [
-            f"POSTGRES_USER=postgres",
-            f"POSTGRES_PASSWORD=postgres",
+            "POSTGRES_USER=postgres",
+            "POSTGRES_PASSWORD=postgres",
             f"POSTGRES_DB={aligned_volume}",
         ]
 
