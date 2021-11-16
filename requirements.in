@@ -24,6 +24,6 @@ gcsfs>=0.8.0
 pyarrow
 flask_cors
 numpy>=1.20
-emannotationschemas>=3.5.0
-dynamicannotationdb>=3.1.0
+emannotationschemas>=3.5.1
+dynamicannotationdb>=3.1.2
 -e git+git://github.com/seung-lab/PyChunkedGraph.git@vminnie-125#egg=pychunkedgraph
