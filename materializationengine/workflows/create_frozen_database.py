@@ -46,12 +46,15 @@ from sqlalchemy.exc import OperationalError
 celery_logger = get_task_logger(__name__)
 
 
-@celery.task(name="process:run_periodic_materialize_database")
-def run_periodic_materialize_database(days_to_expire: int = 5) -> None:
+@celery.task(name="process:materialize_database")
+def materialize_database(days_to_expire: int = 5) -> None:
     """
-    Run update database workflow. Steps are as follows:
-    1. Find missing segmentation data in a given datastack and lookup.
-    2. Update expired root ids
+    Materialize database. Steps are as follows:
+    1. Create new versioned database.
+    2. Copy tables into versioned database
+    3. Merge annotation and semgentation tables
+    4. Re-index merged tables
+    5. Check merge tables for row count and index consistency
 
     """
     try:
@@ -102,6 +105,7 @@ def create_versioned_materialization_workflow(
     workflow = chain(
         setup_versioned_database,
         chord(format_workflow, fin.s()),
+        rebuild_reference_tables.si(mat_info),
         check_tables.si(mat_info, new_version_number),
     )
     status = workflow.apply_async()
@@ -157,11 +161,32 @@ def format_materialization_database_workflow(mat_info: List[dict]):
     """
     create_frozen_database_tasks = []
     for mat_metadata in mat_info:
-        create_frozen_database_workflow = chain(
-            merge_tables.si(mat_metadata), add_indices.si(mat_metadata)
-        )
-        create_frozen_database_tasks.append(create_frozen_database_workflow)
+        if not mat_metadata["reference_table"]:
+            create_frozen_database_workflow = chain(
+                merge_tables.si(mat_metadata), add_indices.si(mat_metadata)
+            )
+            create_frozen_database_tasks.append(create_frozen_database_workflow)
     return create_frozen_database_tasks
+
+
+@celery.task(
+    name="process:rebuild_reference_tables",
+    bind=True,
+    acks_late=True,
+    autoretry_for=(OperationalError,),
+    max_retries=3,
+)
+def rebuild_reference_tables(self, mat_info: List[dict]):
+    add_index_tasks = [
+        add_indices.si(mat_metadata)
+        for mat_metadata in mat_info
+        if mat_metadata["reference_table"]
+    ]
+
+    if add_index_tasks:
+        return self.replace(chain(add_index_tasks))
+    else:
+        return fin.si()
 
 
 def create_new_version(
@@ -169,7 +194,7 @@ def create_new_version(
     materialization_time_stamp: datetime.datetime.utcnow,
     days_to_expire: int = None,
 ):
-    """Create new versioned database row in the anaylsis_version table.
+    """Create new versioned database row in the analysis_version table.
     Sets the expiration date for the database.
 
     Args:
@@ -484,8 +509,12 @@ def drop_tables(self, mat_info: List[dict], analysis_version: int):
     mat_table_names = mat_inspector.get_table_names()
     mat_table_names.remove("materializedmetadata")
 
-    annotation_tables = [table["annotation_table_name"] for table in mat_info]
-    segmentation_tables = [table["segmentation_table_name"] for table in mat_info]
+    annotation_tables = [table.get("annotation_table_name") for table in mat_info]
+    segmentation_tables = [
+        table.get("segmentation_table_name")
+        for table in mat_info
+        if table.get("segmentation_table_name") is not None
+    ]
 
     filtered_tables = annotation_tables + segmentation_tables
 
@@ -673,7 +702,7 @@ def merge_tables(self, mat_metadata: dict):
             )
             row_count = insert_query.rowcount
             drop_query = mat_db_connection.execute(
-                f'DROP TABLE {annotation_table_name}, "{segmentation_table_name}";'
+                f'DROP TABLE {annotation_table_name}, "{segmentation_table_name}" CASCADE;'
             )
             alter_query = mat_db_connection.execute(
                 f"ALTER TABLE {temp_table_name} RENAME TO {annotation_table_name};"
@@ -776,8 +805,21 @@ def check_tables(self, mat_info: list, analysis_version: int):
         if live_table_row_count[0] == mat_row_count:
             celery_logger.info(f"{annotation_table_name} row counts match")
             schema = mat_metadata["schema"]
-            anno_model = make_flat_model(annotation_table_name, schema)
-            live_mapped_indexes = index_cache.get_index_from_model(anno_model)
+            table_metadata = None
+            if mat_metadata.get("reference_table"):
+                table_metadata = {
+                    "reference_table": mat_metadata.get("reference_table")
+                }
+
+            anno_model = make_flat_model(
+                table_name=annotation_table_name,
+                schema_type=schema,
+                segmentation_source=None,
+                table_metadata=table_metadata,
+            )
+            live_mapped_indexes = index_cache.get_index_from_model(
+                anno_model, mat_engine
+            )
             mat_mapped_indexes = index_cache.get_table_indices(
                 annotation_table_name, mat_engine
             )
@@ -920,7 +962,16 @@ def add_indices(self, mat_metadata: dict):
         annotation_table_name = mat_metadata.get("annotation_table_name")
         schema = mat_metadata.get("schema")
 
-        model = make_flat_model(annotation_table_name, schema)
+        table_metadata = None
+        if mat_metadata.get("reference_table"):
+            table_metadata = {"reference_table": mat_metadata.get("reference_table")}
+
+        model = make_flat_model(
+            table_name=annotation_table_name,
+            schema_type=schema,
+            segmentation_source=None,
+            table_metadata=table_metadata,
+        )
 
         commands = index_cache.add_indices_sql_commands(
             annotation_table_name, model, analysis_engine
