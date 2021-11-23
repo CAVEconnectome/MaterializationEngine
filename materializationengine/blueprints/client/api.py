@@ -4,7 +4,12 @@ from cloudfiles import compression
 import pyarrow as pa
 from cachetools import LRUCache, TTLCache, cached
 from emannotationschemas import get_schema
-from emannotationschemas.models import Base, annotation_models, create_table_dict, make_flat_model
+from emannotationschemas.models import (
+    Base,
+    annotation_models,
+    create_table_dict,
+    make_flat_model,
+)
 from flask import Response, abort, current_app, request, stream_with_context
 from flask_accepts import accepts, responds
 from flask_restx import Namespace, Resource, reqparse
@@ -138,8 +143,6 @@ def get_analysis_version_and_table(
     Returns:
         AnalysisVersion, AnalysisTable: tuple of instances of AnalysisVersion and AnalysisTable
     """
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-        datastack_name)
 
     analysis_version = (
         Session.query(AnalysisVersion)
@@ -173,12 +176,26 @@ def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
     Returns:
         sqlalchemy.Model: model of table
     """
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     analysis_version, analysis_table = get_analysis_version_and_table(
         datastack_name, table_name, version, Session
     )
     if analysis_table is None:
         return None
-    return make_flat_model(table_name, analysis_table.schema)
+
+    db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    metadata = db.get_table_metadata(table_name)
+    reference_table = metadata.get("reference_table")
+    if reference_table:
+        table_metadata = {"reference_table": reference_table}
+    else:
+        table_metadata = None
+    return make_flat_model(
+        table_name=table_name,
+        schema_type=analysis_table.schema,
+        segmentation_source=None,
+        table_metadata=table_metadata,
+    )
 
 
 @client_bp.route("/datastack/<string:datastack_name>/versions")
@@ -342,8 +359,8 @@ class FrozenTableMetadata(Resource):
 
         db = dynamic_annotation_cache.get_db(aligned_volume_name)
         ann_md = db.get_table_metadata(table_name)
-        ann_md.pop('id')
-        ann_md.pop('deleted')
+        ann_md.pop("id")
+        ann_md.pop("deleted")
         tables.update(ann_md)
         return tables, 200
 
@@ -373,8 +390,7 @@ class FrozenTableCount(Resource):
         Session = sqlalchemy_cache.get(aligned_volume_name)
         Model = get_flat_model(datastack_name, table_name, version, Session)
 
-        Session = sqlalchemy_cache.get(
-            "{}__mat{}".format(datastack_name, version))
+        Session = sqlalchemy_cache.get("{}__mat{}".format(datastack_name, version))
         return Session().query(Model).count(), 200
 
 
@@ -420,7 +436,7 @@ class FrozenTableQuery(Resource):
                 }
             "filter_spatial_dict": {
                 "tablename": {
-                "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]                
+                "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
             }
         }
         Returns:
@@ -446,8 +462,7 @@ class FrozenTableQuery(Resource):
                 404,
             )
 
-        Session = sqlalchemy_cache.get(
-            "{}__mat{}".format(datastack_name, version))
+        Session = sqlalchemy_cache.get("{}__mat{}".format(datastack_name, version))
         time_d["get Session"] = time.time() - now
         now = time.time()
 
@@ -504,8 +519,7 @@ class FrozenTableQuery(Resource):
             dfjson = df.to_json(orient="records")
             time_d["serialize"] = time.time() - now
             logging.info(time_d)
-            response = Response(dfjson, headers=headers,
-                                mimetype="application/json")
+            response = Response(dfjson, headers=headers, mimetype="application/json")
             return after_request(response)
 
 
@@ -568,8 +582,7 @@ class FrozenQuery(Resource):
         model_dict = {}
         for table_desc in data["tables"]:
             table_name = table_desc[0]
-            Model = get_flat_model(
-                datastack_name, table_name, version, Session)
+            Model = get_flat_model(datastack_name, table_name, version, Session)
             if Model is None:
                 return (
                     "Cannot find table {} in datastack {} at version {}".format(
@@ -616,8 +629,7 @@ class FrozenQuery(Resource):
             )
         else:
             dfjson = df.to_json(orient="records")
-            response = Response(dfjson, headers=headers,
-                                mimetype="application/json")
+            response = Response(dfjson, headers=headers, mimetype="application/json")
             return after_request(response)
 
 
