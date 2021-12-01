@@ -7,7 +7,7 @@ from dynamicannotationdb.key_utils import build_segmentation_table_name
 from dynamicannotationdb.models import SegmentationMetadata
 from sqlalchemy import and_, func, text
 from sqlalchemy.exc import ProgrammingError
-
+from sqlalchemy.orm.exc import NoResultFound
 from materializationengine.celery_init import celery
 from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
 from materializationengine.utils import (
@@ -156,11 +156,10 @@ def get_materialization_info(
                         annotation_table, pcg_table_name
                     )
                     create_segmentation_table = False
-                except AttributeError as e:
+                except NoResultFound as e:
                     celery_logger.warning(f"SEGMENTATION TABLE DOES NOT EXIST: {e}")
                     segmentation_metadata = {"last_updated": None}
                     create_segmentation_table = True
-
                 last_updated_time_stamp = segmentation_metadata.get("last_updated")
 
                 if not last_updated_time_stamp:
