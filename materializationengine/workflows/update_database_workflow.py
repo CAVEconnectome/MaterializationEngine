@@ -65,6 +65,7 @@ def update_database_workflow(datastack_info: dict):
     celery_logger.info(mat_info)
 
     update_live_database_workflow = []
+    celery_logger.debug(mat_info)
 
     # lookup missing segmentation data for new annotations and update expired root_ids
     # skip tables that are larger than 1,000,000 rows due to performance.

@@ -105,10 +105,11 @@ def get_materialization_info(
         materialization_time_stamp = datetime.datetime.utcnow()
 
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
-
+    
     try:
         annotation_tables = db.get_valid_table_names()
         metadata = []
+        celery_logger.debug(annotation_tables)
         for annotation_table in annotation_tables:
             row_count = db._get_table_row_count(annotation_table, filter_valid=True)
             max_id = db.get_max_id_value(annotation_table)
@@ -193,6 +194,7 @@ def get_materialization_info(
                     )
 
                 metadata.append(table_metadata.copy())
+                celery_logger.debug(metadata)
         db.cached_session.close()
         return metadata
     except Exception as e:
