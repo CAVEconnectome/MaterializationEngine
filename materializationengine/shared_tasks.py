@@ -9,11 +9,12 @@ from sqlalchemy import and_, func, text
 from sqlalchemy.exc import ProgrammingError
 
 from materializationengine.celery_init import celery
-from materializationengine.database import (dynamic_annotation_cache,
-                                            sqlalchemy_cache)
-from materializationengine.utils import (create_annotation_model,
-                                         create_segmentation_model,
-                                         get_config_param)
+from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
+from materializationengine.utils import (
+    create_annotation_model,
+    create_segmentation_model,
+    get_config_param,
+)
 
 celery_logger = get_task_logger(__name__)
 
@@ -105,101 +106,96 @@ def get_materialization_info(
         materialization_time_stamp = datetime.datetime.utcnow()
 
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    
-    try:
-        annotation_tables = db.get_valid_table_names()
-        metadata = []
-        celery_logger.debug(annotation_tables)
-        for annotation_table in annotation_tables:
-            row_count = db._get_table_row_count(annotation_table, filter_valid=True)
-            max_id = db.get_max_id_value(annotation_table)
-            min_id = db.get_min_id_value(annotation_table)
-            if row_count == 0:
-                continue
 
-            if row_count >= row_size and skip_table:
-                continue
+    annotation_tables = db.get_valid_table_names()
+    metadata = []
+    celery_logger.debug(f"Annotation tables: {annotation_tables}")
+    for annotation_table in annotation_tables:
+        row_count = db._get_table_row_count(annotation_table, filter_valid=True)
+        max_id = db.get_max_id_value(annotation_table)
+        min_id = db.get_min_id_value(annotation_table)
+        if row_count == 0:
+            continue
 
-            md = db.get_table_metadata(annotation_table)
-            vx = md.get("voxel_resolution_x", None)
-            vy = md.get("voxel_resolution_y", None)
-            vz = md.get("voxel_resolution_z", None)
-            vx = vx or 1.0
-            vy = vy or 1.0
-            vz = vz or 1.0
-            voxel_resolution = [vx, vy, vz]
+        if row_count >= row_size and skip_table:
+            continue
 
-            reference_table = md.get("reference_table")
+        md = db.get_table_metadata(annotation_table)
+        vx = md.get("voxel_resolution_x", None)
+        vy = md.get("voxel_resolution_y", None)
+        vz = md.get("voxel_resolution_z", None)
+        vx = vx or 1.0
+        vy = vy or 1.0
+        vz = vz or 1.0
+        voxel_resolution = [vx, vy, vz]
 
-            if max_id and max_id > 0:
-                table_metadata = {
-                    "annotation_table_name": annotation_table,
-                    "datastack": datastack_info["datastack"],
-                    "aligned_volume": str(aligned_volume_name),
-                    "schema": db.get_table_schema(annotation_table),
-                    "max_id": int(max_id),
-                    "min_id": int(min_id),
-                    "row_count": row_count,
-                    "add_indices": True,
-                    "coord_resolution": voxel_resolution,
-                    "reference_table": reference_table,
-                    "materialization_time_stamp": str(materialization_time_stamp),
-                    "table_count": len(annotation_tables),
+        reference_table = md.get("reference_table")
 
-                }
+        if max_id and max_id > 0:
+            table_metadata = {
+                "annotation_table_name": annotation_table,
+                "datastack": datastack_info["datastack"],
+                "aligned_volume": str(aligned_volume_name),
+                "schema": db.get_table_schema(annotation_table),
+                "max_id": int(max_id),
+                "min_id": int(min_id),
+                "row_count": row_count,
+                "add_indices": True,
+                "coord_resolution": voxel_resolution,
+                "reference_table": reference_table,
+                "materialization_time_stamp": str(materialization_time_stamp),
+                "table_count": len(annotation_tables),
+            }
 
-                if not reference_table:
-                    segmentation_table_name = build_segmentation_table_name(
+            if not reference_table:
+                segmentation_table_name = build_segmentation_table_name(
+                    annotation_table, pcg_table_name
+                )
+                try:
+                    segmentation_metadata = db.get_segmentation_table_metadata(
                         annotation_table, pcg_table_name
                     )
-                    try:
-                        segmentation_metadata = db.get_segmentation_table_metadata(
-                            annotation_table, pcg_table_name
-                        )
-                        create_segmentation_table = False
-                    except AttributeError as e:
-                        celery_logger.warning(f"SEGMENTATION TABLE DOES NOT EXIST: {e}")
-                        segmentation_metadata = {"last_updated": None}
-                        create_segmentation_table = True
+                    create_segmentation_table = False
+                except AttributeError as e:
+                    celery_logger.warning(f"SEGMENTATION TABLE DOES NOT EXIST: {e}")
+                    segmentation_metadata = {"last_updated": None}
+                    create_segmentation_table = True
 
-                    last_updated_time_stamp = segmentation_metadata.get("last_updated")
+                last_updated_time_stamp = segmentation_metadata.get("last_updated")
 
-                    if not last_updated_time_stamp:
-                        last_updated_time_stamp = None
-                    else:
-                        last_updated_time_stamp = str(last_updated_time_stamp)
+                if not last_updated_time_stamp:
+                    last_updated_time_stamp = None
+                else:
+                    last_updated_time_stamp = str(last_updated_time_stamp)
 
-                    table_metadata.update(
-                        {
-                            "create_segmentation_table": create_segmentation_table,
-                            "segmentation_table_name": segmentation_table_name,
-                            "temp_mat_table_name": f"temp__{annotation_table}",
-                            "pcg_table_name": pcg_table_name,
-                            "segmentation_source": segmentation_source,
-                            "last_updated_time_stamp": last_updated_time_stamp,
-                            "chunk_size": get_config_param(
-                                "MATERIALIZATION_ROW_CHUNK_SIZE"
-                            ),
-                            "find_all_expired_roots": datastack_info.get(
-                                "find_all_expired_roots", False
-                            ),
-                        }
-                    )
-                if analysis_version:
-                    table_metadata.update(
-                        {
-                            "analysis_version": analysis_version,
-                            "analysis_database": f"{datastack_info['datastack']}__mat{analysis_version}",
-                        }
-                    )
+                table_metadata.update(
+                    {
+                        "create_segmentation_table": create_segmentation_table,
+                        "segmentation_table_name": segmentation_table_name,
+                        "temp_mat_table_name": f"temp__{annotation_table}",
+                        "pcg_table_name": pcg_table_name,
+                        "segmentation_source": segmentation_source,
+                        "last_updated_time_stamp": last_updated_time_stamp,
+                        "chunk_size": get_config_param(
+                            "MATERIALIZATION_ROW_CHUNK_SIZE"
+                        ),
+                        "find_all_expired_roots": datastack_info.get(
+                            "find_all_expired_roots", False
+                        ),
+                    }
+                )
+            if analysis_version:
+                table_metadata.update(
+                    {
+                        "analysis_version": analysis_version,
+                        "analysis_database": f"{datastack_info['datastack']}__mat{analysis_version}",
+                    }
+                )
 
-                metadata.append(table_metadata.copy())
-                celery_logger.debug(metadata)
-        db.cached_session.close()
-        return metadata
-    except Exception as e:
-        db.cached_session.rollback()
-        celery_logger.error(e)
+            metadata.append(table_metadata.copy())
+            celery_logger.debug(metadata)
+    db.cached_session.close()
+    return metadata
 
 
 @celery.task(name="process:collect_data", acks_late=True)
