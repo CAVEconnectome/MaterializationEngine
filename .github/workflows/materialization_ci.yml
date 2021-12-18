@@ -11,6 +11,7 @@ on:
       - "materializationengine/**"
       - "tests/**"
       - "requirements.txt"
+      - ".github/workflows/**"
   pull_request:
     branches: master
 
