@@ -71,16 +71,23 @@ jobs:
     needs: test
     if: github.ref == 'refs/heads/master'
     steps:
-      - name: bumpversion
+      - name: git checkout
+        uses: actions/checkout@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      - name: perform merge
         shell: bash -l {0}
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pip install bumpversion
           bumpversion patch
+          git config --global user.name 
+          git config --global user.email "github-actions@users.noreply.github.com"
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/$GITHUB_REPOSITORY
           git push
           git push --tags
-      - name: flywire
-        shell: bash -l {}
-        run: |
           TAG=$(git describe --tags)
           git checkout flywire-production
           git rebase master
