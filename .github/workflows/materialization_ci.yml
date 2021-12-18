@@ -80,15 +80,15 @@ jobs:
       - name: perform merge
         shell: bash -l {0}
         run: |
-          pip install bumpversion
           git config --global user.name 
           git config --global user.email "github-actions@users.noreply.github.com"
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/$GITHUB_REPOSITORY
+          pip install bumpversion
           bumpversion patch
           git push
           git push --tags
           TAG=$(git describe --tags)
-          git checkout flywire-production
+          git checkout -b flywire-production
           git rebase master
           git tag flymat-$TAG
           git push --tags
