@@ -78,8 +78,6 @@ jobs:
           fetch-depth: 0
       - name: perform merge
         shell: bash -l {0}
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pip install bumpversion
           bumpversion patch
