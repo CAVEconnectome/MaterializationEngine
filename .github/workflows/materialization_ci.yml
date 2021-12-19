@@ -91,4 +91,5 @@ jobs:
           git checkout -b flywire-production
           git rebase master
           git tag flymat-$TAG
+          git push --force
           git push --tags
