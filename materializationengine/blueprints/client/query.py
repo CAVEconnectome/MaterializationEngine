@@ -113,7 +113,7 @@ def fix_columns_with_query(
 
 
 def _wkb_object_point_to_numpy(wkb):
-    """ Fixes single geometry element """
+    """Fixes single geometry element"""
     shp = to_shape(wkb)
     return shp.xy[0][0], shp.xy[1][0], shp.z
 
@@ -135,8 +135,7 @@ def _wkb_hex_point_to_numpy(wkbstr, wkb_data_start_ind=2):
 
 
 def _fix_wkb_hex_point_column(df_col, wkb_data_start_ind=2, n_threads=None):
-    func = partial(_wkb_hex_point_to_numpy,
-                   wkb_data_start_ind=wkb_data_start_ind)
+    func = partial(_wkb_hex_point_to_numpy, wkb_data_start_ind=wkb_data_start_ind)
     if n_threads != 1:
         xyz = mu.multiprocess_func(func, df_col.tolist(), n_threads)
     else:
@@ -157,11 +156,7 @@ def _fix_decimal_column(df_col):
         return df_col.apply(np.float)
 
 
-def make_spatial_filter(
-    model,
-    column_name,
-    bounding_box
-) -> Query:
+def make_spatial_filter(model, column_name, bounding_box) -> Query:
     """Generate spatial query that finds annotations within a bounding box.
 
     Args:
@@ -226,8 +221,7 @@ def render_query(statement, dialect=None):
             elif isinstance(value, list):
                 return "'{%s}'" % (
                     ",".join(
-                        [self.render_array_value(x, type_.item_type)
-                         for x in value]
+                        [self.render_array_value(x, type_.item_type) for x in value]
                     )
                 )
             return super(LiteralCompiler, self).render_literal_value(value, type_)
@@ -249,6 +243,7 @@ def specific_query(
     return_wkb=False,
     offset=None,
     limit=None,
+    get_count=False,
     suffixes=None,
 ):
     """Allows a more narrow query without requiring knowledge about the
@@ -276,20 +271,20 @@ def specific_query(
     select_columns: list of str
     consolidate_positions: whether to make the position columns arrays of x,y,z
     offset: int
+    limit: int or None
+    get_count: bool
+    suffixes: list of str or None
 
     Returns
     -------
     sqlalchemy query object:
     """
-    tables = [[table] if not isinstance(
-        table, list) else table for table in tables]
+    tables = [[table] if not isinstance(table, list) else table for table in tables]
     models = [model_dict[table[0]] for table in tables]
 
-    column_lists = [[m.key for m in model.__table__.columns]
-                    for model in models]
+    column_lists = [[m.key for m in model.__table__.columns] for model in models]
 
-    col_names, col_counts = np.unique(
-        np.concatenate(column_lists), return_counts=True)
+    col_names, col_counts = np.unique(np.concatenate(column_lists), return_counts=True)
     dup_cols = col_names[col_counts > 1]
     # if there are duplicate columns we need to redname
     if suffixes is None:
@@ -326,8 +321,7 @@ def specific_query(
                     select_columns += column_args
 
             elif column.key in dup_cols:
-                query_args.append(column.label(
-                    column.key + "_{}".format(suffix)))
+                query_args.append(column.label(column.key + "_{}".format(suffix)))
             else:
                 query_args.append(column)
 
@@ -350,8 +344,7 @@ def specific_query(
                 filter_values = np.array(filter_values, dtype="O")
 
                 filter_args.append(
-                    (model_dict[filter_table].__dict__[
-                     column_name].in_(filter_values),)
+                    (model_dict[filter_table].__dict__[column_name].in_(filter_values),)
                 )
     if filter_notin_dict is not None:
         for filter_table, filter_table_dict in filter_notin_dict.items():
@@ -372,8 +365,7 @@ def specific_query(
             for column_name in filter_table_dict.keys():
                 filter_value = filter_table_dict[column_name]
                 filter_args.append(
-                    (model_dict[filter_table].__dict__[
-                     column_name] == filter_value,)
+                    (model_dict[filter_table].__dict__[column_name] == filter_value,)
                 )
 
     if filter_spatial is not None:
@@ -393,6 +385,7 @@ def specific_query(
         fix_wkb=~return_wkb,
         offset=offset,
         limit=limit,
+        get_count=get_count,
     )
     if consolidate_positions:
         return concatenate_position_columns(df)
@@ -451,6 +444,7 @@ def _make_query(
         query = query.offset(offset)
     if limit is not None:
         query = query.limit(limit)
+
     return query
 
 
@@ -462,6 +456,7 @@ def _execute_query(
     fix_decimal=True,
     n_threads=None,
     index_col=None,
+    get_count=False,
 ):
     """Query the database and make a dataframe out of the results
 
@@ -469,21 +464,28 @@ def _execute_query(
         query: SQLAlchemy query object
         fix_wkb: Boolean to turn wkb objects into numpy arrays (optional, default is True)
         index_col: None or str
+        get_count: bool. If True only the query count is returned
 
     Returns:
         Dataframe with query results
     """
     # logging.info(query.statement)
-    df = read_sql_tmpfile(
-        query.statement.compile(engine, compile_kwargs={
-                                "literal_binds": True}), engine
-    )
-    # df = pd.read_sql(query.statement, engine,
-    #                     coerce_float=False, index_col=index_col)
 
-    df = fix_columns_with_query(
-        df, query, fix_wkb=fix_wkb, fix_decimal=fix_decimal, n_threads=n_threads
-    )
+    print(f"get_count: {get_count}")
+    if get_count:
+        count = query.count()
+        df = pd.DataFrame({"count": [count]})
+    else:
+        df = read_sql_tmpfile(
+            query.statement.compile(engine, compile_kwargs={"literal_binds": True}),
+            engine,
+        )
+        # df = pd.read_sql(query.statement, engine,
+        #                     coerce_float=False, index_col=index_col)
+
+        df = fix_columns_with_query(
+            df, query, fix_wkb=fix_wkb, fix_decimal=fix_decimal, n_threads=n_threads
+        )
 
     return df
 
@@ -499,6 +501,7 @@ def _query(
     index_col=None,
     offset=None,
     limit=None,
+    get_count=False,
 ):
     """Wraps make_query and execute_query in one function
 
@@ -512,6 +515,7 @@ def _query(
     index_col: str or None
     offset: int or None
     limit: int or None
+    get_count: bool
 
 
     :param select_columns:
@@ -536,6 +540,7 @@ def _query(
         query=query,
         fix_wkb=fix_wkb,
         index_col=index_col,
+        get_count=get_count,
     )
 
     return df
