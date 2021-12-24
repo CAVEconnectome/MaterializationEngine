@@ -378,8 +378,10 @@ pexpect==4.8.0
     # via ipython
 pickleshare==0.7.5
     # via ipython
-pillow==8.2.0
-    # via cloud-volume
+pillow==8.4.0
+    # via
+    #   -r /app/requirements.in
+    #   cloud-volume
 pluggy==0.13.1
     # via pytest
 posix-ipc==1.0.5
@@ -402,8 +404,10 @@ protobuf==3.17.2
     #   google-api-core
     #   googleapis-common-protos
     #   proto-plus
-psutil==5.4.3
-    # via cloud-volume
+psutil==5.8.0
+    # via
+    #   -r /app/requirements.in
+    #   cloud-volume
 psycopg2-binary==2.8.5
     # via
     #   dynamicannotationdb
