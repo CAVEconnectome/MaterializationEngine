@@ -42,7 +42,7 @@ def get_aligned_volume(aligned_volume):
 @cachetools.func.ttl_cache(maxsize=2, ttl=5 * 60)
 def get_datastacks():
     server = current_app.config["GLOBAL_SERVER"]
-    auth = AuthClient(server_address=server, token=current_app["AUTH_TOKEN"])
+    auth = AuthClient(server_address=server, token=current_app.config["AUTH_TOKEN"])
     print(auth.token)
     infoclient = InfoServiceClient(
         server_address=server,
