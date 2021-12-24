@@ -46,7 +46,7 @@ cachetools==4.2.4
     #   google-auth
     #   middle-auth-client
     #   pychunkedgraph
-caveclient==4.0.0
+caveclient==4.10.0
     # via -r /app/requirements.in
 celery==4.4.7
     # via -r /app/requirements.in
@@ -555,6 +555,7 @@ typing-inspect==0.6.0
 urllib3[brotli,secure]==1.26.7
     # via
     #   botocore
+    #   caveclient
     #   cloud-files
     #   cloud-volume
     #   pychunkedgraph
