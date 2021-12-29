@@ -86,6 +86,14 @@ query_parser.add_argument(
     location="args",
     help="whether to return position columns as seperate x,y,z columns (faster)",
 )
+query_parser.add_argument(
+    "count",
+    type=inputs.boolean,
+    default=False,
+    required=False,
+    location="args",
+    help="whether to only return the count of a query",
+)
 
 
 def after_request(response):
@@ -481,6 +489,11 @@ class FrozenTableQuery(Resource):
         if limit > max_limit:
             limit = max_limit
 
+        get_count = args.get("count", False)
+
+        if get_count:
+            limit = None
+
         logging.info("query {}".format(data))
         logging.info("args - {}".format(args))
 
@@ -500,6 +513,7 @@ class FrozenTableQuery(Resource):
             consolidate_positions=not args["split_positions"],
             offset=data.get("offset", None),
             limit=limit,
+            get_count=get_count,
         )
         time_d["execute query"] = time.time() - now
         now = time.time()
