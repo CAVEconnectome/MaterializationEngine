@@ -90,6 +90,6 @@ jobs:
           TAG=$(git describe --tags)
           git checkout flywire_production
           git rebase master
-          git tag flymat-$TAG
+          git tag vflymat-$TAG
           git push --force
           git push --tags
