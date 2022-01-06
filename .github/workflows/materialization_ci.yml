@@ -77,7 +77,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
-      - name: perform merge
+      - name: bumpversion
         shell: bash -l {0}
         run: |
           git config --global user.name "github-actions"
@@ -88,8 +88,27 @@ jobs:
           git push
           git push --tags
           TAG=$(git describe --tags)
+      - name: checkout and merge
+        shell: bash -l {0}
+        run: |
           git checkout flywire_production
           git rebase master
-          git tag vflymat-$TAG
-          git push --force
-          git push --tags
+      - name: check merge errors
+        shell: bashf-l {0}
+        run: |
+          CONFLICTS=$(git ls-files -u | wc -l)
+          if [ "$CONFLICTS" -gt 0 ] ; then
+            echo "Stopping workflow, merge errors detected"
+            echo "continue_workflow=false" >> $CONTINUE_WORKFLOW
+            git rebase --abort
+            exit 1
+          fi
+      - name: tag and push
+        continue-on-error: false
+        shell: bash -l {0}
+        run: |
+          if ["${{ env.continue_workflow }}"= true]; then 
+            git tag vflymat-$TAG
+            git push --force
+            git push --tags
+          fi
