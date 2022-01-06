@@ -96,10 +96,11 @@ jobs:
       - name: check merge errors
         shell: bash -l {0}
         run: |
+          "continue_workflow=true" >> $GITHUB_ENV
           CONFLICTS=$(git ls-files -u | wc -l)
           if [ "$CONFLICTS" -gt 0 ] ; then
             echo "Stopping workflow, merge errors detected"
-            echo "continue_workflow=false" >> $CONTINUE_WORKFLOW
+            "continue_workflow=false" >> $GITHUB_ENV
             git rebase --abort
             exit 1
           fi
