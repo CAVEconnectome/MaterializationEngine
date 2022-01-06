@@ -105,7 +105,7 @@ jobs:
             echo "continue_workflow=true" >> $GITHUB_ENV
           fi
       - name: tag and push
-        if: env.continue_workflow = true
+        if: env.continue_workflow == true
         shell: bash -l {0}
         run: |
           git tag vflymat-$TAG
