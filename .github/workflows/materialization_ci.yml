@@ -94,7 +94,7 @@ jobs:
           git checkout flywire_production
           git rebase master
       - name: check merge errors
-        shell: bashf-l {0}
+        shell: bash -l {0}
         run: |
           CONFLICTS=$(git ls-files -u | wc -l)
           if [ "$CONFLICTS" -gt 0 ] ; then
