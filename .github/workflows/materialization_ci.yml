@@ -96,20 +96,18 @@ jobs:
       - name: check merge errors
         shell: bash -l {0}
         run: |
-          "continue_workflow=true" >> $GITHUB_ENV
           CONFLICTS=$(git ls-files -u | wc -l)
           if [ "$CONFLICTS" -gt 0 ] ; then
             echo "Stopping workflow, merge errors detected"
-            "continue_workflow=false" >> $GITHUB_ENV
+            echo "continue_workflow=false" >> $GITHUB_ENV
             git rebase --abort
-            exit 1
+          else
+            echo "continue_workflow=true" >> $GITHUB_ENV
           fi
       - name: tag and push
-        continue-on-error: false
+        if: env.continue_workflow = true
         shell: bash -l {0}
         run: |
-          if ["${{ env.continue_workflow }}"= true]; then 
-            git tag vflymat-$TAG
-            git push --force
-            git push --tags
-          fi
+          git tag vflymat-$TAG
+          git push --force
+          git push --tags
