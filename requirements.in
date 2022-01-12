@@ -1,8 +1,8 @@
 caveclient>=4.10.0
-cloud-volume>=6.0.0
+cloud-volume>=6.1.0
 pillow>=8.3.2
 psutil>=5.6.6
-cloud-files
+cloud-files>=4.6.1
 pandas
 Flask<2.0
 SQLAlchemy<1.4
@@ -15,17 +15,17 @@ marshmallow-sqlalchemy
 flask-marshmallow
 Flask-Admin
 Flask-Cors
-flask-restx
+flask-restx>=0.5.0
 flask-accepts
 geoalchemy2>=0.9.2
 alembic
-celery==4.4.7
+celery==5.1.2
 cachetools
 gevent
 gcsfs>=0.8.0
 pyarrow
 flask_cors
-numpy>=1.20
+numpy==1.21.5
 dynamicannotationdb>=3.1.7
 emannotationschemas>=3.5.4
 -e git+git://github.com/seung-lab/PyChunkedGraph.git@v2.0.7#egg=pychunkedgraph
