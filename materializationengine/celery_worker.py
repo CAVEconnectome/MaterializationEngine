@@ -31,14 +31,14 @@ def create_celery(app=None):
             "task_routes": ("materializationengine.task_router.TaskRouter"),
             "task_serializer": "pickle",
             "result_serializer": "pickle",
-            "accept_content": ["pickle"],
+            "accept_content": ["pickle", "application/json"],
             "optimization": "fair",
             "task_send_sent_event": True,
             "worker_send_task_events": True,
             "worker_prefetch_multiplier": 1,
             "result_expires": 86400,  # results expire in broker after 1 day
-            # timeout (s) for tasks to be sent back to broker queue
-            "visibility_timeout": 8000,
+            "visibility_timeout": 8000, # timeout (s) for tasks to be sent back to broker queue
+            "beat_schedules": app.config["BEAT_SCHEDULES"]
         }
     )
 
@@ -99,7 +99,7 @@ def setup_periodic_tasks(sender, **kwargs):
         name="Clean up back end results",
     )
 
-    beat_schedules = celery.conf["BEAT_SCHEDULES"]
+    beat_schedules = celery.conf["beat_schedules"]
     celery_logger.info(beat_schedules)
     schedules = CeleryBeatSchema(many=True).dump(beat_schedules)
     for schedule in schedules:
