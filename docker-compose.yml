@@ -49,7 +49,7 @@ services:
       image: 'materialize:tag'
       env_file:
         - ./dev.env
-      command: ["celery", "worker", "--app=run.celery","--pool=prefork", "--hostname=worker.process@%h", "--queues=process,celery","--concurrency=4", "--loglevel=INFO", "-Ofair"]
+      command: celery --app="run.celery" worker --pool=prefork --hostname=worker.process@%h --queues=process,celery --concurrency=4 --loglevel=INFO -Ofair
       volumes:
         - ~/.cloudvolume/secrets:/home/nginx/.cloudvolume/secrets:z
         - ~/.cloudvolume/secrets/google-secret.json:/home/nginx/.cloudvolume/secrets/google-secret.json:z
@@ -60,7 +60,7 @@ services:
       image: 'materialize:tag'
       env_file:
         - ./dev.env
-      command: ["celery", "worker", "--app=run.celery","--pool=prefork", "--hostname=worker.process@%h", "--queues=process", "--concurrency=4", "--loglevel=INFO", "-Ofair"]
+      command: celery --app="run.celery" worker --pool=prefork --hostname=worker.process@%h --queues=process,celery --concurrency=4 --loglevel=INFO -Ofair
       volumes:
         - ~/.cloudvolume/secrets:/home/nginx/.cloudvolume/secrets:z
         - ~/.cloudvolume/secrets/google-secret.json:/home/nginx/.cloudvolume/secrets/google-secret.json:z
@@ -71,7 +71,7 @@ services:
       image: 'materialize:tag'
       env_file:
         - ./dev.env
-      command: ["celery", "beat", "--app=run.celery", "--pidfile=/home/nginx/celerybeat.pid"]
+      command: celery --app=run.celery beat --pidfile=/home/nginx/celerybeat.pid
       volumes:
         - ~/.cloudvolume/secrets:/home/nginx/.cloudvolume/secrets:z
         - ~/.cloudvolume/secrets/google-secret.json:/home/nginx/.cloudvolume/secrets/google-secret.json:z
