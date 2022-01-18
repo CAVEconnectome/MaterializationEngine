@@ -152,7 +152,7 @@ def get_expired_root_ids(mat_metadata: dict, expired_chunk_size: int = 100):
     if is_empty or old_roots is None:
         return None
     else:
-        return generate_chunked_root_ids(old_roots, expired_chunk_size)
+        yield generate_chunked_root_ids(old_roots, expired_chunk_size)
 
 
 def generate_chunked_root_ids(old_roots, expired_chunk_size):
