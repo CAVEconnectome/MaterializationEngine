@@ -71,9 +71,9 @@ def update_database_workflow(datastack_info: dict):
     # skip tables that are larger than 1,000,000 rows due to performance.
     for mat_metadata in mat_info:
         if not mat_metadata["reference_table"]:
-            annotation_chunks = generate_chunked_model_ids(mat_metadata)
             chunked_roots = get_expired_root_ids(mat_metadata)
             if mat_metadata["row_count"] < 1_000_000:
+                annotation_chunks = generate_chunked_model_ids(mat_metadata)
                 new_annotations = True
                 new_annotation_workflow = ingest_new_annotations_workflow(
                     mat_metadata, annotation_chunks
