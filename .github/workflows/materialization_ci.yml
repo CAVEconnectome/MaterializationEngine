@@ -109,6 +109,6 @@ jobs:
         if: env.continue_workflow == 'true'
         shell: bash -l {0}
         run: |
-          git tag vflymat-{{env.tag}}
+          git tag vflymat-${{env.tag}}
           git push --force
           git push --tags
