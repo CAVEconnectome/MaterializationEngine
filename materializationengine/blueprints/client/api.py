@@ -47,7 +47,7 @@ from flask_restx import inputs
 import time
 
 
-__version__ = "2.10.13"
+__version__ = "2.10.14"
 
 
 authorizations = {
@@ -189,7 +189,14 @@ def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
         datastack_name, table_name, version, Session
     )
     if analysis_table is None:
-        return None
+        abort(
+            404,
+            "Cannot find table {} in datastack {} at version {}".format(
+                table_name, datastack_name, version
+            ),
+        )
+    if not analysis_version.valid:
+        abort(410, "This materialization version is not available")
 
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
     metadata = db.get_table_metadata(table_name)
@@ -462,13 +469,6 @@ class FrozenTableQuery(Resource):
         Model = get_flat_model(datastack_name, table_name, version, Session)
         time_d["get Model"] = time.time() - now
         now = time.time()
-        if Model is None:
-            return (
-                "Cannot find table {} in datastack {} at version {}".format(
-                    table_name, datastack_name, version
-                ),
-                404,
-            )
 
         Session = sqlalchemy_cache.get("{}__mat{}".format(datastack_name, version))
         time_d["get Session"] = time.time() - now
@@ -597,13 +597,6 @@ class FrozenQuery(Resource):
         for table_desc in data["tables"]:
             table_name = table_desc[0]
             Model = get_flat_model(datastack_name, table_name, version, Session)
-            if Model is None:
-                return (
-                    "Cannot find table {} in datastack {} at version {}".format(
-                        table_name, datastack_name, version
-                    ),
-                    404,
-                )
             model_dict[table_name] = Model
 
         db_name = "{}__mat{}".format(datastack_name, version)
