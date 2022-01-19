@@ -88,6 +88,7 @@ jobs:
           git push
           git push --tags
           TAG=$(git describe --tags)
+          echo "tag=$TAG" >> $GITHUB_ENV
       - name: checkout and merge
         shell: bash -l {0}
         run: |
@@ -108,6 +109,6 @@ jobs:
         if: env.continue_workflow == 'true'
         shell: bash -l {0}
         run: |
-          git tag vflymat-$TAG
+          git tag vflymat-{{env.tag}}
           git push --force
           git push --tags
