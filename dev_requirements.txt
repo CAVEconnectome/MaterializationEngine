@@ -251,7 +251,7 @@ inflection==0.5.1
     # via python-jsonschema-objects
 iniconfig==1.1.1
     # via pytest
-ipython==7.25.0
+ipython==7.31.1
     # via caveclient
 ipython-genutils==0.2.0
     # via traitlets
