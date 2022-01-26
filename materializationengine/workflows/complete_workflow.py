@@ -28,7 +28,7 @@ celery_logger = get_task_logger(__name__)
 
 
 @celery.task(name="process:run_complete_workflow")
-def run_complete_workflow(datastack_info: dict, days_to_expire: int = 5):
+def run_complete_workflow(datastack_info: dict, days_to_expire: int = 5, **kwargs):
     """Run complete materialization workflow.
     Workflow overview:
         - Find all annotations with missing segmentation rows
@@ -103,4 +103,4 @@ def run_complete_workflow(datastack_info: dict, days_to_expire: int = 5):
         rebuild_reference_tables.si(mat_info),
         check_tables.si(mat_info, new_version_number),
     )
-    final_workflow.apply_async()
+    final_workflow.apply_async(kwargs={"Datastack": datastack_info["datastack"]})

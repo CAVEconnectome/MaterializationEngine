@@ -33,7 +33,7 @@ celery_logger = get_task_logger(__name__)
 
 
 @celery.task(name="process:process_new_annotations_workflow")
-def process_new_annotations_workflow(datastack_info: dict):
+def process_new_annotations_workflow(datastack_info: dict, **kwargs):
     """Base live materialization
 
     Workflow paths:
@@ -73,11 +73,11 @@ def process_new_annotations_workflow(datastack_info: dict):
                 update_metadata.s(mat_metadata),
             )  # final task which will process a return status/timing etc...
 
-            process_chunks_workflow.apply_async()
+            process_chunks_workflow.apply_async(kwargs={"Datastack": datastack_info["datastack"]})
 
 
 @celery.task(name="process:process_missing_roots_workflow")
-def process_missing_roots_workflow(datastack_info: dict):
+def process_missing_roots_workflow(datastack_info: dict, **kwargs):
     """Chunk supervoxel ids and lookup root ids in batches
 
 
@@ -117,7 +117,7 @@ def process_missing_roots_workflow(datastack_info: dict):
                     update_metadata.s(mat_metadata),
                 )  # final task which will process a return status/timing etc...
 
-                process_chunks_workflow.apply_async()
+                process_chunks_workflow.apply_async(kwargs={"Datastack": datastack_info["datastack"]})
             else:
                 celery_logger.info(
                     f"Skipped missing root id lookup for '{seg_table}', no missing root ids found"

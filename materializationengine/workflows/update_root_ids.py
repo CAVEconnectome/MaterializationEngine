@@ -21,7 +21,7 @@ celery_logger = get_task_logger(__name__)
 
 
 @celery.task(name="process:update_root_ids_task")
-def expired_root_id_workflow(datastack_info: dict):
+def expired_root_id_workflow(datastack_info: dict, **kwargs):
     """Workflow to process expired root ids and lookup and
     update table with current root ids.
 
@@ -49,7 +49,7 @@ def expired_root_id_workflow(datastack_info: dict):
     if len(workflow) <= 1:
         return "No root ids to update"
     workflow = chord(workflow, fin.s())
-    return workflow.apply_async()
+    return workflow.apply_async(kwargs={"Datastack": datastack_info["datastack"]})
 
 
 def update_root_ids_workflow(mat_metadata: dict, chunked_roots: List[int]):

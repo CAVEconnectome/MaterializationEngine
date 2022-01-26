@@ -37,7 +37,7 @@ def run_periodic_database_update() -> None:
             celery_logger.info(f"Start periodic database update job for {datastack}")
             datastack_info = get_datastack_info(datastack)
             task = update_database_workflow.s(datastack_info)
-            task.apply_async()
+            task.apply_async(kwargs={"Datastack": datastack})
         except Exception as e:
             celery_logger.error(e)
             raise e
@@ -45,7 +45,7 @@ def run_periodic_database_update() -> None:
 
 
 @celery.task(name="process:update_database_workflow")
-def update_database_workflow(datastack_info: dict):
+def update_database_workflow(datastack_info: dict, **kwargs):
     """Updates 'live' database:
         - Find all annotations with missing segmentation rows
         and lookup supervoxel_id and root_id
@@ -102,4 +102,4 @@ def update_database_workflow(datastack_info: dict):
     run_update_database_workflow = chain(
         chord(update_live_database_workflow, workflow_complete.si("update_root_ids")),
     )
-    run_update_database_workflow.apply_async()
+    run_update_database_workflow.apply_async(kwargs={"Datastack": datastack_info["datastack"]})

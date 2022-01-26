@@ -47,7 +47,7 @@ celery_logger = get_task_logger(__name__)
 
 
 @celery.task(name="process:materialize_database")
-def materialize_database(days_to_expire: int = 5) -> None:
+def materialize_database(days_to_expire: int = 5, **kwargs) -> None:
     """
     Materialize database. Steps are as follows:
     1. Create new versioned database.
@@ -69,7 +69,7 @@ def materialize_database(days_to_expire: int = 5) -> None:
             task = create_versioned_materialization_workflow.s(
                 datastack_info, days_to_expire
             )
-            task.apply_async()
+            task.apply_async(kwargs={"Datastack": datastack_info["datastack"]})
         except Exception as e:
             celery_logger.error(e)
             raise e
@@ -78,7 +78,7 @@ def materialize_database(days_to_expire: int = 5) -> None:
 
 @celery.task(name="process:create_versioned_materialization_workflow")
 def create_versioned_materialization_workflow(
-    datastack_info: dict, days_to_expire: int = 5
+    datastack_info: dict, days_to_expire: int = 5, **kwargs
 ):
     """Create a timelocked database of materialization annotations
     and associated segmentation data.
@@ -108,8 +108,8 @@ def create_versioned_materialization_workflow(
         rebuild_reference_tables.si(mat_info),
         check_tables.si(mat_info, new_version_number),
     )
-    status = workflow.apply_async()
-    return True
+    
+    return workflow
 
 
 def create_materializied_database_workflow(

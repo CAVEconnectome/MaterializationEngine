@@ -41,7 +41,7 @@ def run_periodic_materialization(days_to_expire: int = None) -> None:
             task = run_complete_workflow.s(
                 datastack_info, days_to_expire=days_to_expire
             )
-            task.apply_async()
+            task.apply_async(kwargs={"Datastack": datastack})
         except Exception as e:
             celery_logger.error(e)
             raise e
