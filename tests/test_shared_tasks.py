@@ -82,7 +82,7 @@ def test_chunk_ids(mat_metadata):
 
 
 def test_update_metadata(mat_metadata):
-    is_updated = update_metadata.s(mat_metadata).apply()
+    is_updated = update_metadata.si(mat_metadata).apply()
     mat_ts = mat_metadata["materialization_time_stamp"]
     assert is_updated.get() == {
         "Table: test_synapse_table__test_pcg": f"Time stamp {mat_ts}"
