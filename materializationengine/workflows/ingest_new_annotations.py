@@ -106,8 +106,7 @@ def process_missing_roots_workflow(datastack_info: dict):
     for mat_metadata in mat_info:
         if not mat_metadata["reference_table"]:
             missing_root_id_chunks = get_ids_with_missing_roots(
-                mat_metadata, use_segmentation_model=True
-            )
+                mat_metadata)
             seg_table = mat_metadata.get("segmentation_table_name")
             if missing_root_id_chunks:
                 process_chunks_workflow = chain(
