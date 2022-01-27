@@ -5,7 +5,7 @@ from typing import List
 import cloudvolume
 import numpy as np
 import pandas as pd
-from celery import chain, chord
+from celery import chain, chord, group
 from celery.utils.log import get_task_logger
 from dynamicannotationdb.models import SegmentationMetadata
 from materializationengine.celery_init import celery
@@ -70,7 +70,7 @@ def process_new_annotations_workflow(datastack_info: dict):
                 ingest_new_annotations_workflow(
                     mat_metadata, annotation_chunks
                 ),  # return here is required for chords
-                update_metadata.s(mat_metadata),
+                update_metadata.si(mat_metadata),
             )  # final task which will process a return status/timing etc...
 
             process_chunks_workflow.apply_async()
@@ -105,15 +105,13 @@ def process_missing_roots_workflow(datastack_info: dict):
     # filter for missing root ids (min/max ids)
     for mat_metadata in mat_info:
         if not mat_metadata["reference_table"]:
-            missing_root_id_chunks = get_ids_with_missing_roots(
-                mat_metadata)
+            missing_root_id_chunks = get_ids_with_missing_roots(mat_metadata)
             seg_table = mat_metadata.get("segmentation_table_name")
             if missing_root_id_chunks:
                 process_chunks_workflow = chain(
                     lookup_missing_root_ids_workflow(
                         mat_metadata, missing_root_id_chunks
-                    ),  # return here is required for chords
-                    update_metadata.s(mat_metadata),
+                    )  # return here is required for chords
                 )  # final task which will process a return status/timing etc...
 
                 process_chunks_workflow.apply_async()
@@ -182,19 +180,18 @@ def lookup_missing_root_ids_workflow(
     Returns:
         chain: chain of celery tasks
     """
-
     return chain(
         chord(
             [
-                chain(
+                group(
                     lookup_root_ids.si(mat_metadata, missing_root_id_chunk),
                 )
                 for missing_root_id_chunk in missing_root_id_chunks
             ],
             fin.si(),
-        )
+        ),
+        update_metadata.si(mat_metadata)
     )
-
 
 @celery.task(
     name="process:lookup_root_ids",
