@@ -70,80 +70,77 @@ mocked_root_id_data = [
 ]
 
 
-def test_create_missing_segmentation_table(mat_metadata, db_client):
-    table_metadata = create_missing_segmentation_table.s(mat_metadata).apply()
+class TestIngestMissingAnnotations:
+    def test_create_missing_segmentation_table(self, mat_metadata, db_client):
+        table_metadata = create_missing_segmentation_table.s(mat_metadata).apply()
 
-    __, engine = db_client
+        __, engine = db_client
 
-    seg_table_exists = engine.dialect.has_table(
-        engine.connect(), "test_synapse_table__test_pcg"
+        seg_table_exists = engine.dialect.has_table(
+            engine.connect(), "test_synapse_table__test_pcg"
+        )
+        assert table_metadata.get() == mat_metadata
+        assert seg_table_exists == True
+
+    def test_get_annotations_with_missing_supervoxel_ids(self, mat_metadata):
+        id_chunk_range = [1, 5]
+        annotations = get_annotations_with_missing_supervoxel_ids(
+            mat_metadata, id_chunk_range
+        )
+        logging.info(annotations)
+        assert annotations == missing_segmentation_data
+
+    @mock.patch(
+        "materializationengine.workflows.ingest_new_annotations.cloudvolume.CloudVolume"
     )
-    assert table_metadata.get() == mat_metadata
-    assert seg_table_exists == True
+    def test_get_cloudvolume_supervoxel_ids(self, mock_cv, mat_metadata):
+        mock_cv.return_value = True
 
+        with mock.patch(
+            "materializationengine.workflows.ingest_new_annotations.get_sv_id"
+        ) as mock_get_sv_id:
+            mock_get_sv_id.return_value = np.ndarray(
+                (1,), buffer=np.array([10000000]), dtype=int
+            )
+            supervoxel_data = get_cloudvolume_supervoxel_ids(
+                missing_segmentation_data, mat_metadata
+            )
+        assert supervoxel_data == mocked_supervoxel_data
 
-def test_get_annotations_with_missing_supervoxel_ids(mat_metadata):
-    id_chunk_range = [1, 5]
-    annotations = get_annotations_with_missing_supervoxel_ids(
-        mat_metadata, id_chunk_range
+    @mock.patch(
+        "materializationengine.workflows.ingest_new_annotations.chunkedgraph_cache.init_pcg"
     )
-    assert annotations == missing_segmentation_data
+    def test_get_new_root_ids(self, mock_chunkgraph, mat_metadata, annotation_data):
+        mock_chunkgraph.return_value = True
 
+        with mock.patch(
+            "materializationengine.workflows.ingest_new_annotations.get_root_ids"
+        ) as mock_get_roots:
+            mock_get_roots.return_value = np.ndarray(
+                (1,), buffer=np.array([20000000]), dtype=int
+            )
+            root_ids = get_new_root_ids(mocked_supervoxel_data, mat_metadata)
+        assert root_ids == [
+            {
+                "post_pt_supervoxel_id": 10000000,
+                "pre_pt_supervoxel_id": 10000000,
+                "post_pt_root_id": 20000000,
+                "pre_pt_root_id": 20000000,
+                "id": 4,
+            }
+        ]
 
-@mock.patch(
-    "materializationengine.workflows.ingest_new_annotations.cloudvolume.CloudVolume"
-)
-def test_get_cloudvolume_supervoxel_ids(mock_cv, mat_metadata):
-    mock_cv.return_value = True
+    def test_insert_segmentation_data(self, test_app, annotation_data, mat_metadata):
+        segmentation_data = annotation_data["new_segmentation_data"]
+        num_of_rows = insert_segmentation_data(segmentation_data, mat_metadata)
+        assert num_of_rows == {"Segmentation data inserted": 1}
 
-    with mock.patch(
-        "materializationengine.workflows.ingest_new_annotations.get_sv_id"
-    ) as mock_get_sv_id:
-        mock_get_sv_id.return_value = np.ndarray(
-            (1,), buffer=np.array([10000000]), dtype=int
-        )
-        supervoxel_data = get_cloudvolume_supervoxel_ids(
-            missing_segmentation_data, mat_metadata
-        )
-    assert supervoxel_data == mocked_supervoxel_data
-
-
-@mock.patch(
-    "materializationengine.workflows.ingest_new_annotations.chunkedgraph_cache.init_pcg"
-)
-def test_get_new_root_ids(mock_chunkgraph, mat_metadata, annotation_data):
-    mock_chunkgraph.return_value = True
-
-    with mock.patch(
-        "materializationengine.workflows.ingest_new_annotations.get_root_ids"
-    ) as mock_get_roots:
-        mock_get_roots.return_value = np.ndarray(
-            (1,), buffer=np.array([20000000]), dtype=int
-        )
-        root_ids = get_new_root_ids(mocked_supervoxel_data, mat_metadata)
-    assert root_ids == [
-        {
-            "post_pt_supervoxel_id": 10000000,
-            "pre_pt_supervoxel_id": 10000000,
-            "post_pt_root_id": 20000000,
-            "pre_pt_root_id": 20000000,
-            "id": 4,
+    def test_get_sql_supervoxel_ids(self, test_app, mat_metadata):
+        id_chunk_range = [1, 4]
+        supervoxel_ids = get_sql_supervoxel_ids(id_chunk_range, mat_metadata)
+        logging.info(supervoxel_ids)
+        assert supervoxel_ids == {
+            "id": [1, 2, 3, 4],
+            "pre_pt_supervoxel_id": [10000000, 30000000, 50000000, 10000000],
+            "post_pt_supervoxel_id": [20000000, 40000000, 60000000, 20000000],
         }
-    ]
-
-
-def test_insert_segmentation_data(test_app, annotation_data, mat_metadata):
-    segmentation_data = annotation_data["new_segmentation_data"]
-    num_of_rows = insert_segmentation_data(segmentation_data, mat_metadata)
-    assert num_of_rows == {"Segmentation data inserted": 1}
-
-
-def test_get_sql_supervoxel_ids(test_app, mat_metadata):
-    id_chunk_range = [1, 4]
-    supervoxel_ids = get_sql_supervoxel_ids(id_chunk_range, mat_metadata)
-    logging.info(supervoxel_ids)
-    assert supervoxel_ids == {
-        "id": [1, 2, 3, 4],
-        "pre_pt_supervoxel_id": [10000000, 30000000, 50000000, 10000000],
-        "post_pt_supervoxel_id": [20000000, 40000000, 60000000, 20000000],
-    }
