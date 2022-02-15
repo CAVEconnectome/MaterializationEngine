@@ -791,12 +791,10 @@ def check_tables(self, mat_info: list, analysis_version: int):
         live_table_row_count = (
             mat_session.query(MaterializedMetadata.row_count)
             .filter(MaterializedMetadata.table_name == annotation_table_name)
-            .one()
+            .scalar()
         )
-        mat_row_count = mat_client._get_table_row_count(
-            annotation_table_name, filter_valid=True
-        )
-        celery_logger.info(f"ROW COUNTS: {live_table_row_count[0]} {mat_row_count}")
+        mat_row_count = mat_client._get_table_row_count(annotation_table_name)
+        celery_logger.info(f"ROW COUNTS: {live_table_row_count} {mat_row_count}")
 
         if mat_row_count == 0:
             celery_logger.warning(
@@ -804,10 +802,10 @@ def check_tables(self, mat_info: list, analysis_version: int):
             )
             continue
 
-        if live_table_row_count[0] != mat_row_count:
+        if live_table_row_count != mat_row_count:
             raise ValueError(
                 f"""Row count doesn't match for table '{annotation_table_name}': 
-                    Row count in live database: {live_table_row_count[0]} - Row count in Mat_v{analysis_version}: {mat_row_count}"""
+                    Row count in '{aligned_volume}': {live_table_row_count} - Row count in {analysis_database}: {mat_row_count}"""
             )
         celery_logger.info(f"{annotation_table_name} row counts match")
         schema = mat_metadata["schema"]
@@ -845,8 +843,11 @@ def check_tables(self, mat_info: list, analysis_version: int):
         valid_table_count += 1
     celery_logger.info(f"Valid tables {valid_table_count}, Mat tables {table_count}")
 
-    if valid_table_count == table_count:
-        versioned_database.valid = True
+    if valid_table_count != table_count:
+        raise ValueError(
+            f"Valid table amounts don't match {valid_table_count} {table_count}"
+        )
+    versioned_database.valid = True
     try:
         session.commit()
         return "All materialized tables match valid row number from live tables"
