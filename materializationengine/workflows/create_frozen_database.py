@@ -793,7 +793,9 @@ def check_tables(self, mat_info: list, analysis_version: int):
             .filter(MaterializedMetadata.table_name == annotation_table_name)
             .one()
         )
-        mat_row_count = mat_client._get_table_row_count(annotation_table_name, filter_valid=True)
+        mat_row_count = mat_client._get_table_row_count(
+            annotation_table_name, filter_valid=True
+        )
         celery_logger.info(f"ROW COUNTS: {live_table_row_count[0]} {mat_row_count}")
 
         if mat_row_count == 0:
@@ -802,45 +804,45 @@ def check_tables(self, mat_info: list, analysis_version: int):
             )
             continue
 
-        if live_table_row_count[0] == mat_row_count:
-            celery_logger.info(f"{annotation_table_name} row counts match")
-            schema = mat_metadata["schema"]
-            table_metadata = None
-            if mat_metadata.get("reference_table"):
-                table_metadata = {
-                    "reference_table": mat_metadata.get("reference_table")
-                }
-
-            anno_model = make_flat_model(
-                table_name=annotation_table_name,
-                schema_type=schema,
-                segmentation_source=None,
-                table_metadata=table_metadata,
+        if live_table_row_count[0] != mat_row_count:
+            raise ValueError(
+                f"""Row count doesn't match for table '{annotation_table_name}': 
+                    Row count in live database: {live_table_row_count[0]} - Row count in Mat_v{analysis_version}: {mat_row_count}"""
             )
-            live_mapped_indexes = index_cache.get_index_from_model(
-                anno_model, mat_engine
-            )
-            mat_mapped_indexes = index_cache.get_table_indices(
-                annotation_table_name, mat_engine
-            )
+        celery_logger.info(f"{annotation_table_name} row counts match")
+        schema = mat_metadata["schema"]
+        table_metadata = None
+        if mat_metadata.get("reference_table"):
+            table_metadata = {"reference_table": mat_metadata.get("reference_table")}
 
-            if live_mapped_indexes != mat_mapped_indexes:
-                raise IndexMatchError(
-                    f"Indexes did not match: annotation indexes {live_mapped_indexes}; materialized indexes {mat_mapped_indexes}"
-                )
+        anno_model = make_flat_model(
+            table_name=annotation_table_name,
+            schema_type=schema,
+            segmentation_source=None,
+            table_metadata=table_metadata,
+        )
+        live_mapped_indexes = index_cache.get_index_from_model(anno_model, mat_engine)
+        mat_mapped_indexes = index_cache.get_table_indices(
+            annotation_table_name, mat_engine
+        )
 
-            celery_logger.info(
-                f"Indexes matches: {live_mapped_indexes} {mat_mapped_indexes}"
+        if live_mapped_indexes != mat_mapped_indexes:
+            raise IndexMatchError(
+                f"Indexes did not match: annotation indexes {live_mapped_indexes}; materialized indexes {mat_mapped_indexes}"
             )
 
-            table_validity = (
-                session.query(AnalysisTable)
-                .filter(AnalysisTable.analysisversion_id == versioned_database.id)
-                .filter(AnalysisTable.table_name == annotation_table_name)
-                .one()
-            )
-            table_validity.valid = True
-            valid_table_count += 1
+        celery_logger.info(
+            f"Indexes matches: {live_mapped_indexes} {mat_mapped_indexes}"
+        )
+
+        table_validity = (
+            session.query(AnalysisTable)
+            .filter(AnalysisTable.analysisversion_id == versioned_database.id)
+            .filter(AnalysisTable.table_name == annotation_table_name)
+            .one()
+        )
+        table_validity.valid = True
+        valid_table_count += 1
     celery_logger.info(f"Valid tables {valid_table_count}, Mat tables {table_count}")
 
     if valid_table_count == table_count:
