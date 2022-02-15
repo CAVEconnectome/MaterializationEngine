@@ -793,7 +793,7 @@ def check_tables(self, mat_info: list, analysis_version: int):
             .filter(MaterializedMetadata.table_name == annotation_table_name)
             .one()
         )
-        mat_row_count = mat_client._get_table_row_count(annotation_table_name)
+        mat_row_count = mat_client._get_table_row_count(annotation_table_name, filter_valid=True)
         celery_logger.info(f"ROW COUNTS: {live_table_row_count[0]} {mat_row_count}")
 
         if mat_row_count == 0:
