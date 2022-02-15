@@ -103,7 +103,7 @@ class TestSharedTasks:
 
         model = make_annotation_model(table_name, schema, with_crud_columns=False)
 
-        indexs = index_client.add_indices_sql_commands(table_name, model, engine)
-        for index in indexs:
+        indexes = index_client.add_indices_sql_commands(table_name, model, engine)
+        for index in indexes:
             index = add_index.s(database_name, index).apply()
             assert "Index" or "Alter" in index.get()
