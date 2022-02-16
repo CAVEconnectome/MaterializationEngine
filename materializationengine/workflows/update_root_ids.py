@@ -15,7 +15,8 @@ from materializationengine.shared_tasks import (
     get_materialization_info,
 )
 from materializationengine.utils import create_segmentation_model
-from sqlalchemy.sql import or_
+from sqlalchemy.sql import or_, text
+
 
 celery_logger = get_task_logger(__name__)
 
@@ -38,7 +39,7 @@ def expired_root_id_workflow(datastack_info: dict, **kwargs):
     workflow = []
     for mat_metadata in mat_info:
         if not mat_metadata["reference_table"]:
-            chunked_roots = get_expired_root_ids(mat_metadata)
+            chunked_roots = get_expired_root_ids_from_pcg(mat_metadata)
             if chunked_roots:
                 process_root_ids = update_root_ids_workflow(
                     mat_metadata, chunked_roots
@@ -52,7 +53,12 @@ def expired_root_id_workflow(datastack_info: dict, **kwargs):
     return workflow.apply_async(kwargs={"Datastack": datastack_info["datastack"]})
 
 
-def update_root_ids_workflow(mat_metadata: dict, chunked_roots: List[int]):
+@celery.task(
+    name="process:update_root_ids_workflow",
+    bind=True,
+    acks_late=True,
+)
+def update_root_ids_workflow(self, mat_metadata: dict, chunked_roots: List[int]):
     """Celery workflow that updates expired root ids in a
     segmentation table.
 
@@ -95,22 +101,15 @@ def update_root_ids(root_ids: List[int], mat_metadata: dict) -> True:
     """
     segmentation_table_name = mat_metadata.get("segmentation_table_name")
     celery_logger.info(f"Starting root_id updating on {segmentation_table_name} table")
+    celery_logger.info(f"LENGTH OF ROOTS {root_ids}")
 
-    supervoxel_data = get_supervoxel_ids(root_ids, mat_metadata)
-    groups = []
-    if supervoxel_data:
-        for __, data in supervoxel_data.items():
-            if data:
-                chunked_supervoxels = create_chunks(data, 100)
-                worker_chain = group(
-                    get_new_roots.si(chunk, mat_metadata)
-                    for chunk in chunked_supervoxels
-                )
-                groups.append(worker_chain)
-    return groups
+    return chain(
+        get_supervoxel_id_queries.si(root_ids, mat_metadata),
+        get_expired_roots_from_db.s(mat_metadata),
+    )
 
 
-def get_expired_root_ids(mat_metadata: dict, expired_chunk_size: int = 100):
+def get_expired_root_ids_from_pcg(mat_metadata: dict, expired_chunk_size: int = 100):
     """Find expired root ids from last updated timestamp. Returns chunked lists as
     generator.
 
@@ -124,7 +123,8 @@ def get_expired_root_ids(mat_metadata: dict, expired_chunk_size: int = 100):
     Yields:
         list: list of expired root ids
     """
-    last_updated_ts = mat_metadata.get("last_updated_time_stamp", None)
+
+    last_updated_ts = mat_metadata.get("last_updated_time_stamp")
     pcg_table_name = mat_metadata.get("pcg_table_name")
     find_all_expired_roots = mat_metadata.get("find_all_expired_roots", False)
     materialization_time_stamp_str = mat_metadata.get("materialization_time_stamp")
@@ -134,13 +134,12 @@ def get_expired_root_ids(mat_metadata: dict, expired_chunk_size: int = 100):
 
     if find_all_expired_roots:
         last_updated_ts = None
+    elif last_updated_ts:
+        last_updated_ts = datetime.datetime.strptime(
+            last_updated_ts, "%Y-%m-%d %H:%M:%S.%f"
+        )
     else:
-        if last_updated_ts:
-            last_updated_ts = datetime.datetime.strptime(
-                last_updated_ts, "%Y-%m-%d %H:%M:%S.%f"
-            )
-        else:
-            last_updated_ts = datetime.datetime.utcnow() - datetime.timedelta(days=5)
+        last_updated_ts = datetime.datetime.utcnow() - datetime.timedelta(days=5)
 
     celery_logger.info(f"Looking up expired root ids since: {last_updated_ts}")
 
@@ -152,7 +151,7 @@ def get_expired_root_ids(mat_metadata: dict, expired_chunk_size: int = 100):
     if is_empty or old_roots is None:
         return None
     else:
-        yield generate_chunked_root_ids(old_roots, expired_chunk_size)
+        return generate_chunked_root_ids(old_roots, expired_chunk_size)
 
 
 def generate_chunked_root_ids(old_roots, expired_chunk_size):
@@ -183,7 +182,14 @@ def lookup_expired_root_ids(
         return None
 
 
-def get_supervoxel_ids(root_id_chunk: list, mat_metadata: dict):
+@celery.task(
+    name="process:get_supervoxel_id_queries",
+    bind=True,
+    acks_late=True,
+    autoretry_for=(Exception,),
+    max_retries=3,
+)
+def get_supervoxel_id_queries(self, root_id_chunk: list, mat_metadata: dict):
     """Get supervoxel ids associated with expired root ids
 
     Args:
@@ -200,45 +206,35 @@ def get_supervoxel_ids(root_id_chunk: list, mat_metadata: dict):
     session = sqlalchemy_cache.get(aligned_volume)
     columns = [column.name for column in SegmentationModel.__table__.columns]
     root_id_columns = [column for column in columns if "root_id" in column]
-    expired_root_id_data = {}
-    try:
-        for root_id_column in root_id_columns:
-            prefix = root_id_column.rsplit("_", 2)[0]
-            supervoxel_name = f"{prefix}_supervoxel_id"
 
-            supervoxels = [
-                data
-                for data in session.query(
-                    SegmentationModel.id,
-                    getattr(SegmentationModel, root_id_column),
-                    getattr(SegmentationModel, supervoxel_name),
-                ).filter(
-                    or_(getattr(SegmentationModel, root_id_column)).in_(root_id_chunk)
-                )
-            ]
-            if supervoxels:
-                expired_root_id_data[root_id_column] = pd.DataFrame(
-                    supervoxels
-                ).to_dict(orient="records")
+    supervoxel_queries = []
+    for root_id_column in root_id_columns:
+        prefix = root_id_column.rsplit("_", 2)[0]
+        supervoxel_name = f"{prefix}_supervoxel_id"
+        celery_logger.info(f"ROOT ID CHUNK {root_id_chunk}")
+        sv_ids_query = session.query(
+            SegmentationModel.id,
+            getattr(SegmentationModel, root_id_column),
+            getattr(SegmentationModel, supervoxel_name),
+        ).filter(or_(getattr(SegmentationModel, root_id_column)).in_(root_id_chunk))
 
-    except Exception as e:
-        raise e
-    finally:
-        session.close()
-    if expired_root_id_data:
-        return expired_root_id_data
-    else:
-        return None
+        sv_ids_query = sv_ids_query.statement.compile(
+            compile_kwargs={"literal_binds": True}
+        )
+        supervoxel_queries.append({f"{root_id_column}": str(sv_ids_query)})
+        celery_logger.debug(f"SQL STATEMENT {sv_ids_query}")
+
+    return supervoxel_queries or None
 
 
 @celery.task(
-    name="process:get_new_roots",
+    name="process:get_expired_roots_from_db",
     bind=True,
     acks_late=True,
     autoretry_for=(Exception,),
     max_retries=3,
 )
-def get_new_roots(self, supervoxel_chunk: list, mat_metadata: dict):
+def get_expired_roots_from_db(self, supervoxel_queries: list, mat_metadata: dict):
     """Get new roots from supervoxels ids of expired roots
 
     Args:
@@ -248,6 +244,43 @@ def get_new_roots(self, supervoxel_chunk: list, mat_metadata: dict):
     Returns:
         dict: dicts of new root_ids
     """
+    aligned_volume = mat_metadata.get("aligned_volume")
+    query_chunk_size = mat_metadata.get("chunk_size", 100)
+
+    tasks = []
+
+    engine = sqlalchemy_cache.get_engine(aligned_volume)
+
+    # https://docs.sqlalchemy.org/en/14/core/connections.html#using-server-side-cursors-a-k-a-stream-results
+    for query_dict in supervoxel_queries:
+        column_name = list(query_dict.keys())[0]
+        query_stmt = text(list(query_dict.values())[0])
+        with engine.connect() as conn:
+            proxy = conn.execution_options(stream_results=True).execute(query_stmt)
+            while "batch not empty":
+                batch = proxy.fetchmany(
+                    query_chunk_size
+                )  # fetch n_rows from chunk_size
+                if not batch:
+                    break
+                celery_logger.info(batch)
+                supervoxel_data = pd.DataFrame(
+                    batch, columns=batch[0].keys(), dtype=object
+                ).to_dict(orient="records")
+
+                tasks.append(get_new_root_ids.si(supervoxel_data, mat_metadata))
+            proxy.close()
+    return group(tasks).apply_async
+
+
+@celery.task(
+    name="process:get_new_root_ids",
+    bind=True,
+    acks_late=True,
+    autoretry_for=(Exception,),
+    max_retries=3,
+)
+def get_new_root_ids(self, supervoxel_data, mat_metadata):
     pcg_table_name = mat_metadata.get("pcg_table_name")
 
     materialization_time_stamp = mat_metadata["materialization_time_stamp"]
@@ -259,7 +292,7 @@ def get_new_roots(self, supervoxel_chunk: list, mat_metadata: dict):
         formatted_mat_ts = datetime.datetime.strptime(
             materialization_time_stamp, "%Y-%m-%d %H:%M:%S.%f"
         )
-    root_ids_df = pd.DataFrame(supervoxel_chunk, dtype=object)
+    root_ids_df = pd.DataFrame(supervoxel_data, dtype=object)
 
     supervoxel_col_name = list(
         root_ids_df.loc[:, root_ids_df.columns.str.endswith("supervoxel_id")]
