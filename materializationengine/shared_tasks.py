@@ -47,7 +47,7 @@ def generate_chunked_model_ids(
 
     chunked_ids = chunk_ids(mat_metadata, AnnotationModel.id, chunk_size)
 
-    yield [chunk for chunk in chunked_ids]
+    return list(chunked_ids)
 
 
 def create_chunks(data_list: List, chunk_size: int) -> Generator:
