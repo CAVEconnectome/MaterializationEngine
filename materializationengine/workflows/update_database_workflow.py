@@ -14,7 +14,7 @@ from materializationengine.utils import get_config_param
 from materializationengine.workflows.ingest_new_annotations import \
     ingest_new_annotations_workflow
 from materializationengine.workflows.update_root_ids import (
-    get_expired_root_ids, update_root_ids_workflow)
+    get_expired_root_ids_from_pcg, update_root_ids_workflow)
 
 celery_logger = get_task_logger(__name__)
 
@@ -71,7 +71,7 @@ def update_database_workflow(datastack_info: dict, **kwargs):
     # skip tables that are larger than 1,000,000 rows due to performance.
     for mat_metadata in mat_info:
         if not mat_metadata["reference_table"]:
-            chunked_roots = get_expired_root_ids(mat_metadata)
+            chunked_roots = get_expired_root_ids_from_pcg(mat_metadata)
             if mat_metadata["row_count"] < 1_000_000:
                 annotation_chunks = generate_chunked_model_ids(mat_metadata)
                 new_annotations = True
