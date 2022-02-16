@@ -108,7 +108,7 @@ def create_versioned_materialization_workflow(
         rebuild_reference_tables.si(mat_info),
         check_tables.si(mat_info, new_version_number),
     )
-    
+
     return workflow
 
 
@@ -532,8 +532,8 @@ def drop_tables(self, mat_info: List[dict], analysis_version: int):
     finally:
         connection.close()
         mat_engine.dispose()
-
-    return {f"Tables dropped {tables_to_drop}"}
+    tables_dropped = list(tables_to_drop)
+    return f"Tables dropped {tables_dropped}"
 
 
 @celery.task(
@@ -793,7 +793,9 @@ def check_tables(self, mat_info: list, analysis_version: int):
             .filter(MaterializedMetadata.table_name == annotation_table_name)
             .scalar()
         )
-        mat_row_count = mat_client._get_table_row_count(annotation_table_name)
+        mat_row_count = mat_client._get_table_row_count(
+            annotation_table_name, filter_valid=True
+        )
         celery_logger.info(f"ROW COUNTS: {live_table_row_count} {mat_row_count}")
 
         if mat_row_count == 0:
