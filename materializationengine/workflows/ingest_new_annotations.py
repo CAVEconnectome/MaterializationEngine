@@ -5,7 +5,7 @@ from typing import List
 import cloudvolume
 import numpy as np
 import pandas as pd
-from celery import chain, chord
+from celery import chain, chord, group
 from celery.utils.log import get_task_logger
 from dynamicannotationdb.models import SegmentationMetadata
 from materializationengine.celery_init import celery
@@ -70,7 +70,7 @@ def process_new_annotations_workflow(datastack_info: dict, **kwargs):
                 ingest_new_annotations_workflow(
                     mat_metadata, annotation_chunks
                 ),  # return here is required for chords
-                update_metadata.s(mat_metadata),
+                update_metadata.si(mat_metadata),
             )  # final task which will process a return status/timing etc...
 
             process_chunks_workflow.apply_async(kwargs={"Datastack": datastack_info["datastack"]})
@@ -105,16 +105,13 @@ def process_missing_roots_workflow(datastack_info: dict, **kwargs):
     # filter for missing root ids (min/max ids)
     for mat_metadata in mat_info:
         if not mat_metadata["reference_table"]:
-            missing_root_id_chunks = get_ids_with_missing_roots(
-                mat_metadata, use_segmentation_model=True
-            )
+            missing_root_id_chunks = get_ids_with_missing_roots(mat_metadata)
             seg_table = mat_metadata.get("segmentation_table_name")
             if missing_root_id_chunks:
                 process_chunks_workflow = chain(
                     lookup_missing_root_ids_workflow(
                         mat_metadata, missing_root_id_chunks
-                    ),  # return here is required for chords
-                    update_metadata.s(mat_metadata),
+                    )  # return here is required for chords
                 )  # final task which will process a return status/timing etc...
 
                 process_chunks_workflow.apply_async(kwargs={"Datastack": datastack_info["datastack"]})
@@ -160,11 +157,14 @@ def get_ids_with_missing_roots(mat_metadata: dict) -> List:
     if min_id and max_id:
         if min_id < max_id:
             id_range = range(min_id, max_id + 1)
-            return list(create_chunks(id_range, mat_metadata.get("chunk_size", 500)))
+            return create_chunks(id_range, 500)
         elif min_id == max_id:
             return [min_id]
-
-    return f"No missing root_ids found in '{SegmentationModel.__table__.name}'"
+    else:
+        celery_logger.info(
+            f"No missing root_ids found in '{SegmentationModel.__table__.name}'"
+        )
+        return None
 
 
 def lookup_missing_root_ids_workflow(
@@ -183,17 +183,17 @@ def lookup_missing_root_ids_workflow(
     Returns:
         chain: chain of celery tasks
     """
-
     return chain(
         chord(
             [
-                chain(
+                group(
                     lookup_root_ids.si(mat_metadata, missing_root_id_chunk),
                 )
                 for missing_root_id_chunk in missing_root_id_chunks
             ],
             fin.si(),
-        )
+        ),
+        update_metadata.si(mat_metadata),
     )
 
 
@@ -252,7 +252,6 @@ def ingest_new_annotations_workflow(mat_metadata: dict, annotation_chunks: List[
     Returns:
         chain: chain of celery tasks
     """
-
     result = create_missing_segmentation_table(mat_metadata)
     return chain(
         chord(
@@ -294,8 +293,11 @@ def ingest_new_annotations(self, mat_metadata: dict, chunk: List[int]):
     try:
         start_time = time.time()
         missing_data = get_annotations_with_missing_supervoxel_ids(mat_metadata, chunk)
+        celery_logger.info(f"MISSING DATA: {missing_data}")
         if missing_data:
             supervoxel_data = get_cloudvolume_supervoxel_ids(missing_data, mat_metadata)
+            celery_logger.info(f"SUPERVOXEL DATA: {supervoxel_data}")
+
             root_id_data = get_new_root_ids(supervoxel_data, mat_metadata)
             result = insert_segmentation_data(root_id_data, mat_metadata)
             celery_logger.info(result)

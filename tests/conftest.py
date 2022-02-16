@@ -13,6 +13,7 @@ from dynamicannotationdb.materialization_client import DynamicMaterializationCli
 from materializationengine.app import create_app
 from materializationengine.celery_worker import create_celery
 from materializationengine.models import Base
+from materializationengine.database import sqlalchemy_cache
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -160,11 +161,9 @@ def setup_postgis_database(setup_docker_image, mat_metadata, annotation_data) ->
 
 
 @pytest.fixture(scope="session")
-def db_client(database_uri):
-    engine = create_engine(database_uri)
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    session = Session()
+def db_client(aligned_volume_name):
+    session = sqlalchemy_cache.get(aligned_volume_name)
+    engine = sqlalchemy_cache.get_engine(aligned_volume_name)
     yield session, engine
     session.close()
 
@@ -241,3 +240,29 @@ def insert_test_data(mat_metadata: dict, annotation_data: dict):
     return mat_client.insert_linked_segmentation(
         annotation_table_name, pcg_name, segmentation_data
     )
+
+
+def pytest_collection_modifyitems(session, config, items):
+    """Modified from: https://stackoverflow.com/a/70758938
+    In place reordering of class based tests to conform to dependencies
+    in statefulness between tests"""
+
+    # Follow how the workflow processes tasks Ingest > Update > Copy
+    test_ordering = [
+        "TestIngestMissingAnnotations",
+        "TestSharedTasks",
+        "TestUpdateRootIds",
+        "TestCreateFrozenVersion",
+    ]
+
+    # filter items and remove non-class based tests
+    class_mapping = {item: item.cls.__name__ for item in items if item.cls is not None}
+
+    sorted_items = items.copy()
+
+    # Iteratively move tests of each class to the end of the test queue
+    for test_class in test_ordering:
+        sorted_items = [
+            it for it in sorted_items if class_mapping[it] != test_class
+        ] + [it for it in sorted_items if class_mapping[it] == test_class]
+    items[:] = sorted_items
