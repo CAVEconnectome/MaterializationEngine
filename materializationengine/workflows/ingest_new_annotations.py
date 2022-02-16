@@ -73,7 +73,9 @@ def process_new_annotations_workflow(datastack_info: dict, **kwargs):
                 update_metadata.si(mat_metadata),
             )  # final task which will process a return status/timing etc...
 
-            process_chunks_workflow.apply_async(kwargs={"Datastack": datastack_info["datastack"]})
+            process_chunks_workflow.apply_async(
+                kwargs={"Datastack": datastack_info["datastack"]}
+            )
 
 
 @celery.task(name="process:process_missing_roots_workflow")
@@ -114,7 +116,9 @@ def process_missing_roots_workflow(datastack_info: dict, **kwargs):
                     )  # return here is required for chords
                 )  # final task which will process a return status/timing etc...
 
-                process_chunks_workflow.apply_async(kwargs={"Datastack": datastack_info["datastack"]})
+                process_chunks_workflow.apply_async(
+                    kwargs={"Datastack": datastack_info["datastack"]}
+                )
             else:
                 celery_logger.info(
                     f"Skipped missing root id lookup for '{seg_table}', no missing root ids found"
