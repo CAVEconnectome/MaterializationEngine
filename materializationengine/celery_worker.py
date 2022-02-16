@@ -30,9 +30,9 @@ def create_celery(app=None):
     celery.conf.update(
         {
             "task_routes": ("materializationengine.task_router.TaskRouter"),
-            "task_serializer": "pickle",
-            "result_serializer": "pickle",
-            "accept_content": ["pickle", "application/json"],
+            "task_serializer": "json",
+            "result_serializer": "json",
+            "accept_content": ["json", "application/json"],
             "optimization": "fair",
             "task_send_sent_event": True,
             "worker_send_task_events": True,
