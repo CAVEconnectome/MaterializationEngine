@@ -96,8 +96,21 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                             result_proxy = conn.execute(sql)
                             result = result_proxy.scalar()
                             if result:
+                                drop_connections = f"""
+                                SELECT 
+                                    pg_terminate_backend(pid) 
+                                FROM 
+                                    pg_stat_activity
+                                WHERE 
+                                    datname = '{database}'
+                                AND pid <> pg_backend_pid()
+                                """
+
+                                conn.execute(drop_connections)
+                                celery_logger.info(f"Dropped connections to: {database}")
                                 sql = "DROP DATABASE %s" % database
                                 result_proxy = conn.execute(sql)
+                                celery_logger.info(f"Database: {database} removed")
 
                                 # strip version from database string
                                 database_version = database.rsplit("__mat")[-1]

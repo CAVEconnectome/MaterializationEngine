@@ -10,6 +10,8 @@ on:
     paths:
       - "materializationengine/**"
       - "tests/**"
+      - "requirements.txt"
+      - ".github/workflows/**"
   pull_request:
     branches: master
 
@@ -20,7 +22,7 @@ jobs:
 
     services:
       postgres:
-        image: postgis/postgis:9.6-2.5
+        image: postgis/postgis:13-master
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -49,7 +51,7 @@ jobs:
         shell: bash -l {0}
         run: |
           pip install flake8 pytest
-          pip install -r dev_requirements.txt
+          pip install -r requirements.txt
           if [ -f test_requirements.txt ]; then pip install -r test_requirements.txt; fi
       - name: Lint with flake8
         shell: bash -l {0}
@@ -63,3 +65,49 @@ jobs:
         shell: bash -l {0}
         run: |
           pytest
+  deploy:
+    name: Tag a new version and push tag
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/master'
+    steps:
+      - name: git checkout
+        uses: actions/checkout@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      - name: bumpversion
+        shell: bash -l {0}
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@users.noreply.github.com"
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/$GITHUB_REPOSITORY
+          pip install bumpversion
+          bumpversion patch
+          git push
+          git push --tags
+          TAG=$(git describe --tags)
+          echo "tag=$TAG" >> $GITHUB_ENV
+      - name: checkout and merge
+        shell: bash -l {0}
+        run: |
+          git checkout flywire_production
+          git rebase master
+      - name: check merge errors
+        shell: bash -l {0}
+        run: |
+          CONFLICTS=$(git ls-files -u | wc -l)
+          if [ "$CONFLICTS" -gt 0 ] ; then
+            echo "Stopping workflow, merge errors detected"
+            echo "continue_workflow=false" >> $GITHUB_ENV
+            git rebase --abort
+          else
+            echo "continue_workflow=true" >> $GITHUB_ENV
+          fi
+      - name: tag and push
+        if: env.continue_workflow == 'true'
+        shell: bash -l {0}
+        run: |
+          git tag vflymat-${{env.tag}}
+          git push --force
+          git push --tags

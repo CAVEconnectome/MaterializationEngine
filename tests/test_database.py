@@ -13,36 +13,35 @@ import logging
 import pytest
 
 
-def test_get_sql_url_params(database_uri):
-    url_mapping = get_sql_url_params(database_uri)
+class TestDatabaseUtils:
+    def test_get_sql_url_params(self, database_uri):
+        url_mapping = get_sql_url_params(database_uri)
 
-    assert url_mapping["user"] == "postgres"
-    assert url_mapping["password"] == "postgres"
-    assert url_mapping["dbname"] == "test_aligned_volume"
-    assert url_mapping["host"] == "localhost"
-    assert url_mapping["port"] == 5432
+        assert url_mapping["user"] == "postgres"
+        assert url_mapping["password"] == "postgres"
+        assert url_mapping["dbname"] == "test_aligned_volume"
+        assert url_mapping["host"] == "localhost"
+        assert url_mapping["port"] == 5432
 
-
-def test_reflect_tables(database_uri):
-    sql_base = database_uri.rpartition("/")[0]
-    database_name = database_uri.rpartition("/")[-1]
-    tables = reflect_tables(sql_base, database_name)
-    logging.info(tables)
-    assert set(tables) == set(
-        [
-            "spatial_ref_sys",
-            "annotation_table_metadata",
-            "segmentation_table_metadata",
-            "analysisversion",
-            "analysistables",
-            "geography_columns",
-            "geometry_columns",
-            "raster_columns",
-            "raster_overviews",
-            "test_synapse_table",
-            "test_synapse_table__test_pcg",
-        ]
-    )
+    def test_reflect_tables(self, database_uri):
+        sql_base = database_uri.rpartition("/")[0]
+        database_name = database_uri.rpartition("/")[-1]
+        tables = reflect_tables(sql_base, database_name)
+        logging.info(tables)
+        assert set(tables) == set(
+            [
+                "spatial_ref_sys",
+                "annotation_table_metadata",
+                "segmentation_table_metadata",
+                "combined_table_metadata",
+                "analysisversion",
+                "analysistables",
+                "geography_columns",
+                "geometry_columns",
+                "test_synapse_table",
+                "test_synapse_table__test_pcg",
+            ]
+        )
 
 
 class TestCreateSession:

@@ -10,6 +10,7 @@ from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import sqlalchemy_cache
 from materializationengine.shared_tasks import (
     fin,
+    create_chunks,
     update_metadata,
     get_materialization_info,
 )
@@ -36,14 +37,19 @@ def expired_root_id_workflow(datastack_info: dict):
     )
     workflow = []
     for mat_metadata in mat_info:
-        chunked_roots = get_expired_root_ids(mat_metadata)
-        process_root_ids = update_root_ids_workflow(
-            mat_metadata, chunked_roots
-        )  # final task which will process a return status/timing etc...
-        workflow.append(process_root_ids)
+        if not mat_metadata["reference_table"]:
+            chunked_roots = get_expired_root_ids(mat_metadata)
+            if chunked_roots:
+                process_root_ids = update_root_ids_workflow(
+                    mat_metadata, chunked_roots
+                )  # final task which will process a return status/timing etc...
+                workflow.append(process_root_ids)
+            else:
+                continue
+    if len(workflow) <= 1:
+        return "No root ids to update"
     workflow = chord(workflow, fin.s())
-    status = workflow.apply_async()
-    return status
+    return workflow.apply_async()
 
 
 def update_root_ids_workflow(mat_metadata: dict, chunked_roots: List[int]):
@@ -88,8 +94,7 @@ def update_root_ids(root_ids: List[int], mat_metadata: dict) -> True:
         mat_metadata (dict): metadata for tasks
     """
     segmentation_table_name = mat_metadata.get("segmentation_table_name")
-    celery_logger.info(
-        f"Starting root_id updating on {segmentation_table_name} table")
+    celery_logger.info(f"Starting root_id updating on {segmentation_table_name} table")
 
     supervoxel_data = get_supervoxel_ids(root_ids, mat_metadata)
     groups = []
@@ -110,7 +115,7 @@ def create_chunks(data_list: List, chunk_size: int):
     if len(data_list) <= chunk_size:
         chunk_size = len(data_list)
     for i in range(0, len(data_list), chunk_size):
-        yield data_list[i: i + chunk_size]
+        yield data_list[i : i + chunk_size]
 
 
 def get_expired_root_ids(mat_metadata: dict, expired_chunk_size: int = 100):
@@ -130,8 +135,7 @@ def get_expired_root_ids(mat_metadata: dict, expired_chunk_size: int = 100):
     last_updated_ts = mat_metadata.get("last_updated_time_stamp", None)
     pcg_table_name = mat_metadata.get("pcg_table_name")
     find_all_expired_roots = mat_metadata.get("find_all_expired_roots", False)
-    materialization_time_stamp_str = mat_metadata.get(
-        "materialization_time_stamp")
+    materialization_time_stamp_str = mat_metadata.get("materialization_time_stamp")
     materialization_time_stamp = datetime.datetime.strptime(
         materialization_time_stamp_str, "%Y-%m-%d %H:%M:%S.%f"
     )
@@ -153,9 +157,13 @@ def get_expired_root_ids(mat_metadata: dict, expired_chunk_size: int = 100):
     )
     is_empty = np.all((old_roots == []))
 
-    if is_empty:
+    if is_empty or old_roots is None:
         return None
+    else:
+        return generate_chunked_root_ids(old_roots, expired_chunk_size)
 
+
+def generate_chunked_root_ids(old_roots, expired_chunk_size):
     if len(old_roots) < expired_chunk_size:
         chunks = len(old_roots)
     else:
@@ -208,8 +216,7 @@ def get_supervoxel_ids(root_id_chunk: list, mat_metadata: dict):
                     getattr(SegmentationModel, root_id_column),
                     getattr(SegmentationModel, supervoxel_name),
                 ).filter(
-                    or_(getattr(SegmentationModel, root_id_column)).in_(
-                        root_id_chunk)
+                    or_(getattr(SegmentationModel, root_id_column)).in_(root_id_chunk)
                 )
             ]
             if supervoxels:

@@ -1,4 +1,4 @@
-FROM gcr.io/neuromancer-seung-import/pychunkedgraph:graph-tool_dracopy
+FROM tiangolo/uwsgi-nginx-flask:python3.9
 
 ENV UWSGI_INI /app/uwsgi.ini
 COPY requirements.txt /app/.
