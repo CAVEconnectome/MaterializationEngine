@@ -249,7 +249,7 @@ mako==1.1.6
     # via alembic
 markdown==3.3.6
     # via python-jsonschema-objects
-markupsafe==2.1.0
+markupsafe==2.0.1
     # via
     #   jinja2
     #   mako
