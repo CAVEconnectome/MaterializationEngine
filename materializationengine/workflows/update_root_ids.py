@@ -110,14 +110,6 @@ def update_root_ids(root_ids: List[int], mat_metadata: dict) -> True:
     return groups
 
 
-def create_chunks(data_list: List, chunk_size: int):
-    """Return successive n-sized chunks from a list."""
-    if len(data_list) <= chunk_size:
-        chunk_size = len(data_list)
-    for i in range(0, len(data_list), chunk_size):
-        yield data_list[i : i + chunk_size]
-
-
 def get_expired_root_ids(mat_metadata: dict, expired_chunk_size: int = 100):
     """Find expired root ids from last updated timestamp. Returns chunked lists as
     generator.
