@@ -438,7 +438,7 @@ class FrozenTableCount(Resource):
 @client_bp.route("/datastack/<string:datastack_name>/table/<string:table_name>/query")
 class LiveTableQuery(Resource):
     @reset_auth
-    @auth_requires_permission("view", table_arg="datastack_name")
+    @auth_requires_permission("admin_view", table_arg="datastack_name")
     @client_bp.doc("live_simple_query", security="apikey")
     @accepts("SimpleQuerySchema", schema=SimpleQuerySchema, api=client_bp)
     def post(self, datastack_name: str, table_name: str):
