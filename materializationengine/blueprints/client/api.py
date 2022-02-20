@@ -9,6 +9,8 @@ from emannotationschemas.models import (
     annotation_models,
     create_table_dict,
     make_flat_model,
+    make_annotation_model,
+    make_segmentation_model,
 )
 from flask import Response, abort, current_app, request, stream_with_context
 from flask_accepts import accepts, responds
@@ -169,6 +171,29 @@ def get_analysis_version_and_table(
     if analysis_version is None:
         return analysis_version, None
     return analysis_version, analysis_table
+
+
+@cached(cache=LRUCache(maxsize=32))
+def get_split_models(datastack_name: str, table_name: str):
+    """get split models
+
+    Args:
+        datastack_name (str): datastack name
+        table_name (str): table_name
+        Session (_type_): session to live database
+
+    Returns:
+        (Model, Model): get annotation and segmentation model
+    """
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+    db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    schema_type = db.get_table_schema(table_name)
+
+    SegModel = make_segmentation_model(
+        table_name, schema_type, segmentation_source=pcg_table_name
+    )
+    AnnModel = make_annotation_model(table_name, schema_type)
+    return AnnModel, SegModel
 
 
 @cached(cache=LRUCache(maxsize=32))
@@ -407,6 +432,149 @@ class FrozenTableCount(Resource):
 
         Session = sqlalchemy_cache.get("{}__mat{}".format(datastack_name, version))
         return Session().query(Model).count(), 200
+
+
+@client_bp.expect(query_parser)
+@client_bp.route("/datastack/<string:datastack_name>/table/<string:table_name>/query")
+class LiveTableQuery(Resource):
+    @reset_auth
+    @auth_requires_permission("view", table_arg="datastack_name")
+    @client_bp.doc("live_simple_query", security="apikey")
+    @accepts("SimpleQuerySchema", schema=SimpleQuerySchema, api=client_bp)
+    def post(self, datastack_name: str, table_name: str):
+        """endpoint for doing a query with filters
+
+        Args:
+            datastack_name (str): datastack name
+            table_name (str): table names
+
+        Payload:
+        All values are optional.  Limit has an upper bound set by the server.
+        Consult the schema of the table for column names and appropriate values
+        {
+            "filter_out_dict": {
+                "tablename":{
+                    "column_name":[excluded,values]
+                }
+            },
+            "offset": 0,
+            "limit": 200000,
+            "select_columns": [
+                "column","names"
+            ],
+            "filter_in_dict": {
+                "tablename":{
+                    "column_name":[included,values]
+                }
+            },
+            "filter_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            "filter_spatial_dict": {
+                "tablename": {
+                "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+            }
+        }
+        Returns:
+            pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
+        """
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+        args = query_parser.parse_args()
+        Session = sqlalchemy_cache.get(aligned_volume_name)
+        time_d = {}
+        now = time.time()
+
+        data = request.parsed_obj
+
+        AnnModel, SegModel = get_split_models(datastack_name, table_name)
+        time_d["get Model"] = time.time() - now
+        now = time.time()
+
+        engine = sqlalchemy_cache.get_engine(aligned_volume_name)
+        time_d["get engine"] = time.time() - now
+        now = time.time()
+        max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
+
+        data = request.parsed_obj
+        time_d["get data"] = time.time() - now
+        now = time.time()
+        limit = data.get("limit", max_limit)
+
+        if limit > max_limit:
+            limit = max_limit
+
+        get_count = args.get("count", False)
+
+        if get_count:
+            limit = None
+
+        logging.info("query {}".format(data))
+        logging.info("args - {}".format(args))
+
+        time_d["setup query"] = time.time() - now
+        now = time.time()
+        seg_table = f"{table_name}__{datastack_name}"
+
+        def _format_filter(filter, table_in, seg_table):
+            if filter is None:
+                return filter
+            else:
+                table_filter = filter.get(table_in, None)
+                root_id_filters = [
+                    c for c in table_filter.keys() if c.endswith("root_id")
+                ]
+                other_filters = [
+                    c for c in table_filter.keys() if not c.endswith("root_id")
+                ]
+
+                filter[seg_table] = {c: table_filter[c] for c in root_id_filters}
+                filter[table_in] = {c: table_filter[c] for c in other_filters}
+                return filter
+
+        df = specific_query(
+            Session,
+            engine,
+            {table_name: AnnModel, seg_table: SegModel},
+            [[table_name, "id"], [seg_table, "id"]],
+            filter_in_dict=_format_filter(
+                data.get("filter_in_dict", None), table_name, seg_table
+            ),
+            filter_notin_dict=_format_filter(
+                data.get("filter_notin_dict", None), table_name, seg_table
+            ),
+            filter_equal_dict=_format_filter(
+                data.get("filter_equal_dict", None), table_name, seg_table
+            ),
+            filter_spatial=data.get("filter_spatial_dict", None),
+            select_columns=data.get("select_columns", None),
+            consolidate_positions=not args["split_positions"],
+            offset=data.get("offset", None),
+            limit=limit,
+            get_count=get_count,
+        )
+        time_d["execute query"] = time.time() - now
+        now = time.time()
+        headers = None
+        if len(df) == limit:
+            headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
+
+        if args["return_pyarrow"]:
+            context = pa.default_serialization_context()
+            serialized = context.serialize(df).to_buffer().to_pybytes()
+            time_d["serialize"] = time.time() - now
+            logging.info(time_d)
+            return Response(
+                serialized, headers=headers, mimetype="x-application/pyarrow"
+            )
+        else:
+            dfjson = df.to_json(orient="records")
+            time_d["serialize"] = time.time() - now
+            logging.info(time_d)
+            response = Response(dfjson, headers=headers, mimetype="application/json")
+            return after_request(response)
 
 
 @client_bp.expect(query_parser)
