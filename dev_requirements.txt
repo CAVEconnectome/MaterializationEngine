@@ -117,7 +117,11 @@ dracopy==0.0.19
     #   pychunkedgraph
 dynamicannotationdb==3.1.7
     # via -r /app/requirements.in
+<<<<<<< HEAD
 emannotationschemas==3.8.4
+=======
+emannotationschemas==3.8.2
+>>>>>>> 990042e (bumping EMA)
     # via
     #   -r /app/requirements.in
     #   dynamicannotationdb
