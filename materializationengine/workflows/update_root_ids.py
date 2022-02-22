@@ -6,6 +6,7 @@ import pandas as pd
 from celery import chain, chord, group
 from celery.utils.log import get_task_logger
 from materializationengine.celery_init import celery
+from materializationengine.throttle import CeleryThrottle
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import sqlalchemy_cache
 from materializationengine.shared_tasks import (
@@ -222,7 +223,6 @@ def get_supervoxel_id_queries(self, root_id_chunk: list, mat_metadata: dict):
             compile_kwargs={"literal_binds": True}
         )
         supervoxel_queries.append({f"{root_id_column}": str(sv_ids_query)})
-        celery_logger.debug(f"SQL STATEMENT {sv_ids_query}")
 
     return supervoxel_queries or None
 
@@ -247,30 +247,36 @@ def get_expired_roots_from_db(self, supervoxel_queries: list, mat_metadata: dict
     aligned_volume = mat_metadata.get("aligned_volume")
     query_chunk_size = mat_metadata.get("chunk_size", 100)
 
+    queue_length_limit = mat_metadata.get("queue_length_limit", 1000)
+    throttle_queue = mat_metadata.get("throttle_queue", False)
+
     tasks = []
+    throttle = CeleryThrottle(max_queue_length=queue_length_limit, queue_name="process")
 
     engine = sqlalchemy_cache.get_engine(aligned_volume)
 
     # https://docs.sqlalchemy.org/en/14/core/connections.html#using-server-side-cursors-a-k-a-stream-results
     for query_dict in supervoxel_queries:
-        column_name = list(query_dict.keys())[0]
         query_stmt = text(list(query_dict.values())[0])
         with engine.connect() as conn:
             proxy = conn.execution_options(stream_results=True).execute(query_stmt)
             while "batch not empty":
+                if throttle_queue:
+                    throttle.maybe_wait()
                 batch = proxy.fetchmany(
                     query_chunk_size
                 )  # fetch n_rows from chunk_size
                 if not batch:
                     break
-                celery_logger.info(batch)
                 supervoxel_data = pd.DataFrame(
                     batch, columns=batch[0].keys(), dtype=object
                 ).to_dict(orient="records")
 
-                tasks.append(get_new_root_ids.si(supervoxel_data, mat_metadata))
+                task = get_new_root_ids.si(supervoxel_data, mat_metadata).apply_async()
+                tasks.append(task.id)
+
             proxy.close()
-    return group(tasks).apply_async
+    return tasks
 
 
 @celery.task(
