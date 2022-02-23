@@ -321,7 +321,11 @@ def specific_query(
                     select_columns += column_args
 
             elif column.key in dup_cols:
-                query_args.append(column.label(column.key + "_{}".format(suffix)))
+                if len(suffix) > 0:
+                    suffix = f"_{suffix}"
+                else:
+                    suffix = ""
+                query_args.append(column.label(column.key + suffix))
             else:
                 query_args.append(column)
 
