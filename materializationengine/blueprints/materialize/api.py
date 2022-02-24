@@ -164,7 +164,7 @@ class ProcessNewAnnotationsTableResource(Resource):
         datastack_info = get_datastack_info(datastack_name)
         process_new_annotations_workflow.s(
             datastack_info, table_name=table_name
-        ).apply()
+        ).apply_async()
         return 200
 
 
