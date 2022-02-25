@@ -1,24 +1,71 @@
 import datetime
 import time
 from collections import deque
-
+import redis
 
 from celery.utils.log import get_task_logger
-
+from materializationengine.utils import get_config_param
 from materializationengine.celery_init import celery
 
 celery_logger = get_task_logger(__name__)
 
 
-def get_queue_length(queue_name="process"):
-    with celery.connection_or_acquire() as conn:
-        return conn.default_channel.queue_declare(queue=queue_name).message_count
+def get_queue_length(queue_name: str = "celery"):
+    """Get amount of tasks in specified redis queue
+
+    Args:
+        queue_name (str): Name of queue. Defaults to "celery".
+
+    Raises:
+        e: Redis error
+
+    Returns:
+        int: Amount of tasks held in a queue
+    """
+
+    try:
+        r = redis.StrictRedis(
+            host=get_config_param("REDIS_HOST"),
+            port=get_config_param("REDIS_PORT"),
+            db=0,
+        )
+
+    except Exception as e:
+        celery_logger.error(f"Redis connection error: {e}")
+        raise e
+    return r.llen(queue_name)
+
+
+def get_redis_memory_usage():
+    """Get redis memory usage
+
+    Raises:
+        e: Redis error
+
+    Returns:
+        int: Bytes of memory used in Redis
+    """
+    try:
+        r = redis.StrictRedis(
+            host=get_config_param("REDIS_HOST"),
+            port=get_config_param("REDIS_PORT"),
+            db=0,
+        )
+    except Exception as e:
+        celery_logger.error("Redis has an error: {e}")
+        raise e
+    return r.info()["used_memory"]
 
 
 class CeleryThrottle:
     """Modified from https://stackoverflow.com/a/43429475"""
 
-    def __init__(self, max_queue_length: int = 100, queue_name: str = "celery"):
+    def __init__(
+        self,
+        max_queue_length: int = 100,
+        poll_interval: float = 3.0,
+        memory_limit: int = 1073741824,
+    ):
         """Create a throttle to prevent too many tasks being sent
         to the broker. Will calculate wait time for task completion and
         sleep until the total task length is under the max_queue_length.
@@ -34,54 +81,42 @@ class CeleryThrottle:
             raise ValueError("max_queue_length must be great than 0")
         self.min_queue_length = max_queue_length // 2
         self.max_queue_length = max_queue_length
-        self.queue_name = queue_name
+        self.queue_name = None
+        self.poll_interval = poll_interval
+        self.memory_limit = memory_limit
 
-        # Variables used to track the queue and wait-rate
-        self.last_processed_count = 0
-        self.count_to_do = self.max_queue_length
-        self.last_measurement = None
-        self.first_run = True
-
-        # Use a fixed-length queue to hold last N rates
-        self.rates = deque(maxlen=15)
-        self.avg_rate = self._calculate_avg()
-
-    def _calculate_avg(self):
-        return float(sum(self.rates)) / (len(self.rates) or 1)
-
-    def _add_latest_rate(self):
-        """Calculate the rate that the queue is processing items."""
-        start = datetime.datetime.now()
-        elapsed_seconds = (start - self.last_measurement).total_seconds()
-        self.rates.append(self.last_processed_count / elapsed_seconds)
-        self.last_measurement = start
-        self.last_processed_count = 0
-        self.avg_rate = self._calculate_avg()
-
-    def maybe_wait(self):
+    def wait_if_queue_full(self, queue_name: str):
         """Pause the calling function or let it proceed, depending on the
         enqueued task amount.
+
+        Args:
+            queue_name (str): Name of queue to check amount of enqueued tasks
         """
-        self.last_processed_count += 1
-        if self.count_to_do > 0:
-            # Do not wait. Allow process to continue.
-            if self.first_run:
-                self.first_run = False
-                self.last_measurement = datetime.datetime.now()
-            self.count_to_do -= 1
-            return
+        if queue_name and not self.queue_name:
+            self.queue_name = queue_name
 
-        self._add_latest_rate()
-        task_count = get_queue_length(self.queue_name)
-        if task_count > self.min_queue_length:
+        while True:
+            queue_length = get_queue_length(self.queue_name)
+            if queue_length > self.max_queue_length:
+                time.sleep(self.poll_interval)
+            else:
+                break
 
-            surplus_task_count = task_count - self.min_queue_length
-            wait_time = (surplus_task_count / self.avg_rate) * 1.05
-            time.sleep(wait_time)
+    def wait_if_memory_maxed(self):
+        """Pause the calling function or let it proceed, depending on if max
+        memory is not reached.
 
-            if task_count < self.max_queue_length:
-                self.count_to_do = self.max_queue_length - self.min_queue_length
-        else:
-            # Add more items.
-            self.count_to_do = self.max_queue_length - task_count
-        return
+        Args:
+            queue_name (str): Name of queue to check amount of enqueued tasks
+        """
+
+        while True:
+            memory_used = get_redis_memory_usage()
+            if memory_used > self.memory_limit:
+                time.sleep(self.poll_interval)
+            else:
+                self.memory_remaining = self.memory_limit - memory_used
+                break
+
+
+throttle_celery = CeleryThrottle(get_config_param("QUEUE_LENGTH_LIMIT"))
