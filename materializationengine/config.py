@@ -30,7 +30,7 @@ class BaseConfig:
     MATERIALIZATION_ROW_CHUNK_SIZE = 500
     QUERY_LIMIT_SIZE = 200000
     QUEUE_LENGTH_LIMIT = 10000
-    THROTTLE_QUEUE = True
+    THROTTLE_QUEUES = True
     CELERY_WORKER_IP = os.environ.get("CELERY_WORKER_IP", "127.0.0.1")
     DATASTACKS = ["minnie65_phase3_v1"]
     DAYS_TO_EXPIRE = 7
@@ -92,7 +92,7 @@ class BaseConfig:
 
 class DevConfig(BaseConfig):
     ENV = "development"
-    DEBUG = True
+    # DEBUG = True
     SQLALCHEMY_DATABASE_URI = "postgres://postgres:materialize@db:5432/materialize"
     REDIS_HOST = os.environ.get("REDIS_HOST")
     REDIS_PORT = os.environ.get("REDIS_PORT")

@@ -178,6 +178,8 @@ def get_materialization_info(
                         "chunk_size": get_config_param(
                             "MATERIALIZATION_ROW_CHUNK_SIZE"
                         ),
+                        "queue_length_limit": get_config_param("QUEUE_LENGTH_LIMIT"),
+                        "throttle_queue": get_config_param("THROTTLE_QUEUE"),
                         "find_all_expired_roots": datastack_info.get(
                             "find_all_expired_roots", False
                         ),
