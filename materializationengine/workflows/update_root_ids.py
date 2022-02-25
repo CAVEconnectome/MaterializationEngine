@@ -6,7 +6,7 @@ import pandas as pd
 from celery import chain, chord, group
 from celery.utils.log import get_task_logger
 from materializationengine.celery_init import celery
-from materializationengine.throttle import CeleryThrottle
+from materializationengine.throttle import throttle_celery
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import sqlalchemy_cache
 from materializationengine.shared_tasks import (
@@ -81,7 +81,7 @@ def update_root_ids_workflow(self, mat_metadata: dict, chunked_roots: List[int])
     update_expired_roots_workflow = chain(
         chord(
             [
-                group(update_root_ids(root_ids, mat_metadata))
+                chain(update_root_ids(root_ids, mat_metadata))
                 for root_ids in chunked_roots
             ],
             fin.si(),
@@ -102,7 +102,7 @@ def update_root_ids(root_ids: List[int], mat_metadata: dict) -> True:
     """
     segmentation_table_name = mat_metadata.get("segmentation_table_name")
     celery_logger.info(f"Starting root_id updating on {segmentation_table_name} table")
-    celery_logger.info(f"LENGTH OF ROOTS {root_ids}")
+    celery_logger.info(f"LENGTH OF ROOTS {len(root_ids)}")
 
     return chain(
         get_supervoxel_id_queries.si(root_ids, mat_metadata),
@@ -212,7 +212,6 @@ def get_supervoxel_id_queries(self, root_id_chunk: list, mat_metadata: dict):
     for root_id_column in root_id_columns:
         prefix = root_id_column.rsplit("_", 2)[0]
         supervoxel_name = f"{prefix}_supervoxel_id"
-        celery_logger.info(f"ROOT ID CHUNK {root_id_chunk}")
         sv_ids_query = session.query(
             SegmentationModel.id,
             getattr(SegmentationModel, root_id_column),
@@ -243,15 +242,12 @@ def get_expired_roots_from_db(self, supervoxel_queries: list, mat_metadata: dict
 
     Returns:
         dict: dicts of new root_ids
+        TODO: Assign this and get_new_roots to new celery queue
     """
     aligned_volume = mat_metadata.get("aligned_volume")
     query_chunk_size = mat_metadata.get("chunk_size", 100)
 
-    queue_length_limit = mat_metadata.get("queue_length_limit", 1000)
-    throttle_queue = mat_metadata.get("throttle_queue", False)
-
     tasks = []
-    throttle = CeleryThrottle(max_queue_length=queue_length_limit, queue_name="process")
 
     engine = sqlalchemy_cache.get_engine(aligned_volume)
 
@@ -261,8 +257,7 @@ def get_expired_roots_from_db(self, supervoxel_queries: list, mat_metadata: dict
         with engine.connect() as conn:
             proxy = conn.execution_options(stream_results=True).execute(query_stmt)
             while "batch not empty":
-                if throttle_queue:
-                    throttle.maybe_wait()
+                throttle_celery.wait_if_queue_full(queue_name="root")
                 batch = proxy.fetchmany(
                     query_chunk_size
                 )  # fetch n_rows from chunk_size
@@ -271,7 +266,6 @@ def get_expired_roots_from_db(self, supervoxel_queries: list, mat_metadata: dict
                 supervoxel_data = pd.DataFrame(
                     batch, columns=batch[0].keys(), dtype=object
                 ).to_dict(orient="records")
-
                 task = get_new_root_ids.si(supervoxel_data, mat_metadata).apply_async()
                 tasks.append(task.id)
 
@@ -280,7 +274,7 @@ def get_expired_roots_from_db(self, supervoxel_queries: list, mat_metadata: dict
 
 
 @celery.task(
-    name="process:get_new_root_ids",
+    name="root:get_new_root_ids",
     bind=True,
     acks_late=True,
     autoretry_for=(Exception,),
