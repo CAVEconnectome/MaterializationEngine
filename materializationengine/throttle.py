@@ -105,9 +105,6 @@ class CeleryThrottle:
     def wait_if_memory_maxed(self):
         """Pause the calling function or let it proceed, depending on if max
         memory is not reached.
-
-        Args:
-            queue_name (str): Name of queue to check amount of enqueued tasks
         """
 
         while True:
