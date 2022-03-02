@@ -256,7 +256,8 @@ def get_expired_roots_from_db(self, supervoxel_queries: list, mat_metadata: dict
         with engine.connect() as conn:
             proxy = conn.execution_options(stream_results=True).execute(query_stmt)
             while "batch not empty":
-                throttle_celery.wait_if_queue_full(queue_name="process")
+                if mat_metadata.get("throttle_queues"):
+                    throttle_celery.wait_if_queue_full(queue_name="process")
                 batch = proxy.fetchmany(
                     query_chunk_size
                 )  # fetch n_rows from chunk_size
