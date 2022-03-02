@@ -1,11 +1,11 @@
-import datetime
 import time
-from collections import deque
-import redis
+from typing import List
 
+import redis
 from celery.utils.log import get_task_logger
-from materializationengine.utils import get_config_param
+
 from materializationengine.celery_init import celery
+from materializationengine.utils import get_config_param
 
 celery_logger = get_task_logger(__name__)
 
@@ -63,6 +63,7 @@ class CeleryThrottle:
     def __init__(
         self,
         max_queue_length: int = 100,
+        queues_to_throttle: List[str] = None,
         poll_interval: float = 3.0,
         memory_limit: int = 1073741824,
     ):
@@ -84,6 +85,7 @@ class CeleryThrottle:
         self.queue_name = None
         self.poll_interval = poll_interval
         self.memory_limit = memory_limit
+        self.queues_to_throttle = queues_to_throttle
 
     def wait_if_queue_full(self, queue_name: str):
         """Pause the calling function or let it proceed, depending on the
@@ -95,12 +97,13 @@ class CeleryThrottle:
         if queue_name and not self.queue_name:
             self.queue_name = queue_name
 
-        while True:
-            queue_length = get_queue_length(self.queue_name)
-            if queue_length > self.max_queue_length:
-                time.sleep(self.poll_interval)
-            else:
-                break
+        if queue_name in self.queues_to_throttle:
+            while True:
+                queue_length = get_queue_length(self.queue_name)
+                if queue_length > self.max_queue_length:
+                    time.sleep(self.poll_interval)
+                else:
+                    break
 
     def wait_if_memory_maxed(self):
         """Pause the calling function or let it proceed, depending on if max
@@ -116,4 +119,7 @@ class CeleryThrottle:
                 break
 
 
-throttle_celery = CeleryThrottle(get_config_param("QUEUE_LENGTH_LIMIT"))
+throttle_celery = CeleryThrottle(
+    max_queue_length=get_config_param("QUEUE_LENGTH_LIMIT"),
+    queues_to_throttle=get_config_param("QUEUES_TO_THROTTLE"),
+)
