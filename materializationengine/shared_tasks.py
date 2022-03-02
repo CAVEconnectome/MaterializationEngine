@@ -1,7 +1,9 @@
 import datetime
 import os
 from typing import Generator, List
+import time
 
+from celery.result import AsyncResult
 from celery.utils.log import get_task_logger
 from dynamicannotationdb.key_utils import build_segmentation_table_name
 from dynamicannotationdb.models import SegmentationMetadata
@@ -66,12 +68,12 @@ def create_chunks(data_list: List, chunk_size: int) -> Generator:
         yield data_list[i : i + chunk_size]
 
 
-@celery.task(name="process:fin", acks_late=True, bind=True)
+@celery.task(name="workflow:fin", acks_late=True, bind=True)
 def fin(self, *args, **kwargs):
     return True
 
 
-@celery.task(name="process:workflow_complete", acks_late=True, bind=True)
+@celery.task(name="workflow:workflow_complete", acks_late=True, bind=True)
 def workflow_complete(self, workflow_name):
     return f"{workflow_name} completed successfully"
 
@@ -179,7 +181,7 @@ def get_materialization_info(
                             "MATERIALIZATION_ROW_CHUNK_SIZE"
                         ),
                         "queue_length_limit": get_config_param("QUEUE_LENGTH_LIMIT"),
-                        "throttle_queue": get_config_param("THROTTLE_QUEUE"),
+                        "throttle_queue": get_config_param("THROTTLE_QUEUES"),
                         "find_all_expired_roots": datastack_info.get(
                             "find_all_expired_roots", False
                         ),
@@ -199,7 +201,7 @@ def get_materialization_info(
     return metadata
 
 
-@celery.task(name="process:collect_data", acks_late=True)
+@celery.task(name="workflow:collect_data", acks_late=True)
 def collect_data(*args, **kwargs):
     return args, kwargs
 
@@ -231,7 +233,7 @@ def chunk_ids(mat_metadata, model, chunk_size: int):
 
 
 @celery.task(
-    name="process:update_metadata",
+    name="workflow:update_metadata",
     bind=True,
     acks_late=True,
     autoretry_for=(Exception,),
@@ -282,7 +284,7 @@ def update_metadata(self, mat_metadata: dict):
 
 
 @celery.task(
-    name="process:add_index",
+    name="workflow:add_index",
     bind=True,
     acks_late=True,
     task_reject_on_worker_lost=True,
@@ -324,3 +326,21 @@ def add_index(self, database: dict, command: str):
         raise self.retry(exc=e, countdown=3)
 
     return f"Index {command} added to table"
+
+
+def monitor_task_states(task_ids: List, polling_rate: int = 0.2):
+    while True:
+        results = [AsyncResult(task_id, app=celery) for task_id in task_ids]
+
+        result_status = []
+        for result in results:
+            if result.state == "FAILURE":
+                raise Exception(result.traceback)
+            result_status.append(result.state)
+
+        celery_logger.debug(f"Celery task status: {result_status}")
+
+        if all(x == "SUCCESS" for x in result_status):
+            return True
+
+        time.sleep(polling_rate)

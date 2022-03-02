@@ -11,6 +11,7 @@ from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import sqlalchemy_cache
 from materializationengine.shared_tasks import (
     fin,
+    monitor_task_states,
     update_metadata,
     get_materialization_info,
 )
@@ -226,7 +227,7 @@ def get_supervoxel_id_queries(self, root_id_chunk: list, mat_metadata: dict):
 
 
 @celery.task(
-    name="process:get_expired_roots_from_db",
+    name="workflow:get_expired_roots_from_db",
     bind=True,
     acks_late=True,
     autoretry_for=(Exception,),
@@ -268,11 +269,12 @@ def get_expired_roots_from_db(self, supervoxel_queries: list, mat_metadata: dict
                 tasks.append(task.id)
 
             proxy.close()
+    tasks_completed = monitor_task_states(tasks)
     return True
 
 
 @celery.task(
-    name="workflow:get_new_root_ids",
+    name="process:get_new_root_ids",
     bind=True,
     acks_late=True,
     autoretry_for=(Exception,),
