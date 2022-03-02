@@ -19,7 +19,7 @@ from materializationengine.workflows.update_root_ids import (
 celery_logger = get_task_logger(__name__)
 
 
-@celery.task(name="process:run_periodic_database_update")
+@celery.task(name="workflow:run_periodic_database_update")
 def run_periodic_database_update() -> None:
     """
     Run update database workflow. Steps are as follows:
@@ -44,7 +44,7 @@ def run_periodic_database_update() -> None:
     return True
 
 
-@celery.task(name="process:update_database_workflow")
+@celery.task(name="workflow:update_database_workflow")
 def update_database_workflow(datastack_info: dict, **kwargs):
     """Updates 'live' database:
         - Find all annotations with missing segmentation rows

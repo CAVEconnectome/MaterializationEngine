@@ -45,24 +45,24 @@ services:
     depends_on:
       - redis-master
 
-  celery-process_1:
+  celery-workflow:
     image: 'materialize:tag'
     env_file:
       - ./dev.env
       - ./.env
-    command: celery --app="run.celery" worker --pool=prefork --hostname=worker.process@%h --queues=process,celery --concurrency=4 --loglevel=INFO -Ofair
+    command: celery --app="run.celery" worker --pool=prefork --hostname=worker.workflow@%h --queues=workflow,celery --concurrency=4 --loglevel=INFO -Ofair
     volumes:
       - ~/.cloudvolume/secrets:/home/nginx/.cloudvolume/secrets:z
       - ~/.cloudvolume/secrets/google-secret.json:/home/nginx/.cloudvolume/secrets/google-secret.json:z
     depends_on:
       - redis-master
 
-  celery-process_2:
+  celery-process:
     image: 'materialize:tag'
     env_file:
       - ./dev.env
       - ./.env
-    command: celery --app="run.celery" worker --pool=prefork --hostname=worker.process@%h --queues=celery,root --concurrency=4 --loglevel=INFO -Ofair
+    command: celery --app="run.celery" worker --pool=prefork --hostname=worker.process@%h --queues=celery,process --concurrency=4 --loglevel=INFO -Ofair
     volumes:
       - ~/.cloudvolume/secrets:/home/nginx/.cloudvolume/secrets:z
       - ~/.cloudvolume/secrets/google-secret.json:/home/nginx/.cloudvolume/secrets/google-secret.json:z
@@ -98,9 +98,9 @@ services:
     depends_on:
       - db
       - redis-master
-      - celery-process_1
-      - celery-process_2
-      # - celery-beat
+      - celery-process
+      - celery-workflow
+      - celery-beat
 
   flower:
     image: mher/flower:latest
@@ -111,8 +111,8 @@ services:
     ports:
       - 5555:5555
     depends_on:
-      - celery-process_1
-      - celery-process_2
+      - celery-process
+      - celery-workflow
 
 volumes:
   postgres_data:

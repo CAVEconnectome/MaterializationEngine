@@ -18,7 +18,7 @@ def _get_datastacks() -> List:
     raise NotImplementedError
 
 
-@celery.task(name="process:run_periodic_materialization")
+@celery.task(name="workflow:run_periodic_materialization")
 def run_periodic_materialization(days_to_expire: int = None) -> None:
     """
     Run complete materialization workflow. Steps are as follows:

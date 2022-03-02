@@ -29,7 +29,7 @@ def get_aligned_volumes_databases():
     return aligned_volume_databases
 
 
-@celery.task(name="process:remove_expired_databases")
+@celery.task(name="workflow:remove_expired_databases")
 def remove_expired_databases(delete_threshold: int = 5) -> str:
     """
     Remove expired database from time this method is called.

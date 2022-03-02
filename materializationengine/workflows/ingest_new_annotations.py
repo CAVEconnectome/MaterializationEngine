@@ -32,7 +32,7 @@ from sqlalchemy.sql import column, func
 celery_logger = get_task_logger(__name__)
 
 
-@celery.task(name="process:process_new_annotations_workflow")
+@celery.task(name="workflow:process_new_annotations_workflow")
 def process_new_annotations_workflow(datastack_info: dict, **kwargs):
     """Base live materialization
 
@@ -78,7 +78,7 @@ def process_new_annotations_workflow(datastack_info: dict, **kwargs):
             )
 
 
-@celery.task(name="process:process_missing_roots_workflow")
+@celery.task(name="workflow:process_missing_roots_workflow")
 def process_missing_roots_workflow(datastack_info: dict, **kwargs):
     """Chunk supervoxel ids and lookup root ids in batches
 
@@ -202,7 +202,7 @@ def lookup_missing_root_ids_workflow(
 
 
 @celery.task(
-    name="process:lookup_root_ids",
+    name="workflow:lookup_root_ids",
     acks_late=True,
     bind=True,
     autoretry_for=(Exception,),
@@ -271,7 +271,7 @@ def ingest_new_annotations_workflow(mat_metadata: dict, annotation_chunks: List[
 
 
 @celery.task(
-    name="process:ingest_new_annotations",
+    name="workflow:ingest_new_annotations",
     acks_late=True,
     bind=True,
     autoretry_for=(Exception,),
@@ -313,7 +313,7 @@ def ingest_new_annotations(self, mat_metadata: dict, chunk: List[int]):
     return {"Table name": f"{table_name}", "Run time": f"{run_time}"}
 
 
-@celery.task(name="process:create_missing_segmentation_table", bind=True)
+@celery.task(name="workflow:create_missing_segmentation_table", bind=True)
 def create_missing_segmentation_table(self, mat_metadata: dict) -> dict:
     """Create missing segmentation tables associated with an annotation table if it
     does not already exist.

@@ -28,7 +28,7 @@ from materializationengine.workflows.update_root_ids import (
 celery_logger = get_task_logger(__name__)
 
 
-@celery.task(name="process:run_complete_workflow")
+@celery.task(name="workflow:run_complete_workflow")
 def run_complete_workflow(datastack_info: dict, days_to_expire: int = 5, **kwargs):
     """Run complete materialization workflow.
     Workflow overview:

@@ -25,7 +25,7 @@ from materializationengine.utils import (
 celery_logger = get_task_logger(__name__)
 
 
-@celery.task(name="process:gcs_bulk_upload_workflow", bind=True, acks_late=True)
+@celery.task(name="workflow:gcs_bulk_upload_workflow", bind=True, acks_late=True)
 def gcs_bulk_upload_workflow(self, bulk_upload_params: dict):
     """Bulk insert of npy file from a google cloud storage
     bucket.
@@ -55,7 +55,7 @@ def gcs_bulk_upload_workflow(self, bulk_upload_params: dict):
     bulk_upload_workflow.apply_async()
 
 
-@celery.task(name="process:gcs_insert_missing_data_workflow", bind=True, acks_late=True)
+@celery.task(name="workflow:gcs_insert_missing_data_workflow", bind=True, acks_late=True)
 def gcs_insert_missing_data(self, bulk_upload_params: dict):
 
     bulk_upload_chunks = bulk_upload_params["chunks"]
@@ -141,7 +141,7 @@ def create_chunks(bulk_upload_info: dict) -> List:
     return chunks
 
 
-@celery.task(name="process:create_tables", acks_late=True, bind=True)
+@celery.task(name="workflow:create_tables", acks_late=True, bind=True)
 def create_tables(self, bulk_upload_params: dict):
     table_name = bulk_upload_params["annotation_table_name"]
     aligned_volume = bulk_upload_params["aligned_volume"]
@@ -222,7 +222,7 @@ def create_tables(self, bulk_upload_params: dict):
     return f"Tables {table_name}, {seg_table_name} created."
 
 
-@celery.task(name="process:bulk_upload_task", bind=True, acks_late=True, max_retries=3)
+@celery.task(name="workflow:bulk_upload_task", bind=True, acks_late=True, max_retries=3)
 def bulk_upload_task(self, bulk_upload_info: dict, chunk: List):
     try:
         file_data = []
@@ -353,7 +353,7 @@ def split_annotation_data(serialized_data, schema, upload_creation_time):
     return split_data
 
 
-@celery.task(name="process:add_table_indices", acks_late=True, max_retries=3, bind=True)
+@celery.task(name="workflow:add_table_indices", acks_late=True, max_retries=3, bind=True)
 def upload_data(self, data: List, bulk_upload_info: dict):
 
     aligned_volume = bulk_upload_info["aligned_volume"]
@@ -383,7 +383,7 @@ def upload_data(self, data: List, bulk_upload_info: dict):
     return True
 
 
-@celery.task(name="process:add_table_indices", bind=True, acks_late=True)
+@celery.task(name="workflow:add_table_indices", bind=True, acks_late=True)
 def add_table_indices(self, bulk_upload_info: dict):
     aligned_volume = bulk_upload_info["aligned_volume"]
     annotation_table_name = bulk_upload_info["annotation_table_name"]
@@ -421,7 +421,7 @@ def add_table_indices(self, bulk_upload_info: dict):
     return self.replace(chain(add_index_tasks))
 
 
-@celery.task(name="process:find_missing_chunks_by_ids", bind=True, acks_late=True)
+@celery.task(name="workflow:find_missing_chunks_by_ids", bind=True, acks_late=True)
 def find_missing_chunks_by_ids(self, bulk_upload_info: dict, chunk_size: int = 100_000):
     """Find missing chunks that failed to insert during bulk uploading.
     It will compare the .npy files in the bucket to the database. If

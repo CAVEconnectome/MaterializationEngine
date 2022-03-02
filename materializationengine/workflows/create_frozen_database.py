@@ -46,7 +46,7 @@ from sqlalchemy.exc import OperationalError
 celery_logger = get_task_logger(__name__)
 
 
-@celery.task(name="process:materialize_database")
+@celery.task(name="workflow:materialize_database")
 def materialize_database(days_to_expire: int = 5, **kwargs) -> None:
     """
     Materialize database. Steps are as follows:
@@ -76,7 +76,7 @@ def materialize_database(days_to_expire: int = 5, **kwargs) -> None:
     return True
 
 
-@celery.task(name="process:create_versioned_materialization_workflow")
+@celery.task(name="workflow:create_versioned_materialization_workflow")
 def create_versioned_materialization_workflow(
     datastack_info: dict, days_to_expire: int = 5, **kwargs
 ):
@@ -170,7 +170,7 @@ def format_materialization_database_workflow(mat_info: List[dict]):
 
 
 @celery.task(
-    name="process:rebuild_reference_tables",
+    name="workflow:rebuild_reference_tables",
     bind=True,
     acks_late=True,
     autoretry_for=(OperationalError,),
@@ -256,7 +256,7 @@ def create_new_version(
 
 
 @celery.task(
-    name="process:create_analysis_database",
+    name="workflow:create_analysis_database",
     bind=True,
     acks_late=True,
     autoretry_for=(OperationalError,),
@@ -343,7 +343,7 @@ def create_analysis_database(self, datastack_info: dict, analysis_version: int) 
 
 
 @celery.task(
-    name="process:create_materialized_metadata",
+    name="workflow:create_materialized_metadata",
     bind=True,
     acks_late=True,
 )
@@ -430,7 +430,7 @@ def create_materialized_metadata(
 
 
 @celery.task(
-    name="process:update_table_metadata",
+    name="workflow:update_table_metadata",
     bind=True,
     acks_late=True,
 )
@@ -477,7 +477,7 @@ def update_table_metadata(self, mat_info: List[dict]):
 
 
 @celery.task(
-    name="process:drop_tables",
+    name="workflow:drop_tables",
     bind=True,
     acks_late=True,
 )
@@ -537,7 +537,7 @@ def drop_tables(self, mat_info: List[dict], analysis_version: int):
 
 
 @celery.task(
-    name="process:insert_annotation_data",
+    name="workflow:insert_annotation_data",
     bind=True,
     acks_late=True,
     autoretry_for=(Exception,),
@@ -610,7 +610,7 @@ def insert_annotation_data(self, chunk: List[int], mat_metadata: dict):
 
 
 @celery.task(
-    name="process:merge_tables",
+    name="workflow:merge_tables",
     bind=True,
     acks_late=True,
     autoretry_for=(Exception,),
@@ -750,7 +750,7 @@ def insert_chunked_data(
 
 
 @celery.task(
-    name="process:check_tables",
+    name="workflow:check_tables",
     bind=True,
     acks_late=True,
 )
@@ -912,7 +912,7 @@ def get_analysis_table(
     return analysis_table
 
 
-@celery.task(name="process:drop_indices", bind=True, acks_late=True)
+@celery.task(name="workflow:drop_indices", bind=True, acks_late=True)
 def drop_indices(self, mat_metadata: dict):
     """Drop all indices of a given table.
 
@@ -940,7 +940,7 @@ def drop_indices(self, mat_metadata: dict):
     return "No indices dropped"
 
 
-@celery.task(name="process:add_indices", bind=True, acks_late=True)
+@celery.task(name="workflow:add_indices", bind=True, acks_late=True)
 def add_indices(self, mat_metadata: dict):
     """Find missing indices for a given table contained
     in the mat_metadata dict. Spawns a chain of celery

@@ -11,7 +11,6 @@ from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import sqlalchemy_cache
 from materializationengine.shared_tasks import (
     fin,
-    create_chunks,
     update_metadata,
     get_materialization_info,
 )
@@ -22,7 +21,7 @@ from sqlalchemy.sql import or_, text
 celery_logger = get_task_logger(__name__)
 
 
-@celery.task(name="process:update_root_ids_task")
+@celery.task(name="workflow:update_root_ids_task")
 def expired_root_id_workflow(datastack_info: dict, **kwargs):
     """Workflow to process expired root ids and lookup and
     update table with current root ids.
@@ -55,7 +54,7 @@ def expired_root_id_workflow(datastack_info: dict, **kwargs):
 
 
 @celery.task(
-    name="process:update_root_ids_workflow",
+    name="workflow:update_root_ids_workflow",
     bind=True,
     acks_late=True,
 )
@@ -81,7 +80,7 @@ def update_root_ids_workflow(self, mat_metadata: dict, chunked_roots: List[int])
     update_expired_roots_workflow = chain(
         chord(
             [
-                chain(update_root_ids(root_ids, mat_metadata))
+                group(update_root_ids(root_ids, mat_metadata))
                 for root_ids in chunked_roots
             ],
             fin.si(),
@@ -101,8 +100,8 @@ def update_root_ids(root_ids: List[int], mat_metadata: dict) -> True:
         mat_metadata (dict): metadata for tasks
     """
     segmentation_table_name = mat_metadata.get("segmentation_table_name")
-    celery_logger.info(f"Starting root_id updating on {segmentation_table_name} table")
-    celery_logger.info(f"LENGTH OF ROOTS {len(root_ids)}")
+    celery_logger.debug(f"Starting root_id updating on {segmentation_table_name} table")
+    celery_logger.debug(f"LENGTH OF ROOTS {len(root_ids)}")
 
     return chain(
         get_supervoxel_id_queries.si(root_ids, mat_metadata),
@@ -184,7 +183,7 @@ def lookup_expired_root_ids(
 
 
 @celery.task(
-    name="process:get_supervoxel_id_queries",
+    name="workflow:get_supervoxel_id_queries",
     bind=True,
     acks_late=True,
     autoretry_for=(Exception,),
@@ -234,7 +233,7 @@ def get_supervoxel_id_queries(self, root_id_chunk: list, mat_metadata: dict):
     max_retries=3,
 )
 def get_expired_roots_from_db(self, supervoxel_queries: list, mat_metadata: dict):
-    """Get new roots from supervoxels ids of expired roots
+    """Get new roots from supervoxels ids of expired roots.
 
     Args:
         supervoxel_chunk (list): [description]
@@ -242,7 +241,6 @@ def get_expired_roots_from_db(self, supervoxel_queries: list, mat_metadata: dict
 
     Returns:
         dict: dicts of new root_ids
-        TODO: Assign this and get_new_roots to new celery queue
     """
     aligned_volume = mat_metadata.get("aligned_volume")
     query_chunk_size = mat_metadata.get("chunk_size", 100)
@@ -270,11 +268,11 @@ def get_expired_roots_from_db(self, supervoxel_queries: list, mat_metadata: dict
                 tasks.append(task.id)
 
             proxy.close()
-    return tasks
+    return True
 
 
 @celery.task(
-    name="root:get_new_root_ids",
+    name="workflow:get_new_root_ids",
     bind=True,
     acks_late=True,
     autoretry_for=(Exception,),
