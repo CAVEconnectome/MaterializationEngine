@@ -270,7 +270,11 @@ def get_expired_roots_from_db(self, supervoxel_queries: list, mat_metadata: dict
                 tasks.append(task.id)
 
             proxy.close()
-    tasks_completed = monitor_task_states(tasks)
+    try:
+        tasks_completed = monitor_task_states(tasks)
+    except Exception as e:
+        celery_logger.error(f"Monitor reports task failed: {e}")
+        raise self.retry(exc=e, countdown=3)
     return True
 
 
