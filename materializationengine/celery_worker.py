@@ -35,6 +35,7 @@ def create_celery(app=None):
             "accept_content": ["json", "application/json"],
             "optimization": "fair",
             "task_send_sent_event": True,
+            "task_track_started": True,
             "worker_send_task_events": True,
             "worker_prefetch_multiplier": 1,
             "result_expires": 86400,  # results expire in broker after 1 day
