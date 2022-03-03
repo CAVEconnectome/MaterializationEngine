@@ -113,7 +113,7 @@ dill==0.3.3
     #   pathos
 dracopy==0.0.19
     # via
-    #   cloud-volume
+    #   cloud-volumes
     #   pychunkedgraph
 dynamicannotationdb==3.1.7
     # via -r /app/requirements.in
