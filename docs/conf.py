@@ -16,7 +16,6 @@ import sys
 sys.path.insert(0, os.path.abspath(".."))
 
 
-
 # -- Project information -----------------------------------------------------
 
 project = "Materialization Engine"
@@ -26,7 +25,7 @@ author = "Derrick Brittain,  Forrest Collman, Sven Dorkenwald"
 # The full version, including alpha/beta/rc tags
 release = "2.12.16"
 
-master_doc = 'index'
+master_doc = "index"
 
 # -- General configuration ---------------------------------------------------
 
@@ -40,7 +39,7 @@ extensions = [
     "sphinx_rtd_theme",
     "sphinx.ext.viewcode",
     "sphinx.ext.intersphinx",
-    "celery.contrib.sphinx"
+    "celery.contrib.sphinx",
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -62,9 +61,9 @@ html_theme = "sphinx_rtd_theme"
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = ['_static', 'images']
+html_static_path = ["_static", "images"]
 
 # set os variables for build
 os.environ["AUTH_DATABASE_NAME"] = "docs"
 
-os.environ['SPHINX_BUILD'] = '1'
+os.environ["SPHINX_BUILD"] = "1"

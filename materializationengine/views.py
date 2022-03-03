@@ -23,7 +23,7 @@ from materializationengine.blueprints.reset_auth import reset_auth
 from middle_auth_client import (
     auth_required,
     auth_requires_admin,
-    auth_requires_permission
+    auth_requires_permission,
 )
 
 
@@ -104,8 +104,7 @@ def get_relevant_datastack_info(datastack_name):
 @views_bp.route("/datastack/<datastack_name>")
 @auth_requires_permission("view", table_arg="datastack_name")
 def datastack_view(datastack_name):
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-        datastack_name)
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
 
     version_query = session.query(AnalysisVersion).filter(
@@ -140,12 +139,10 @@ def datastack_view(datastack_name):
 @views_bp.route("/datastack/<datastack_name>/version/<int:id>")
 @auth_requires_permission("view", table_arg="datastack_name")
 def version_view(datastack_name: str, id: int):
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-        datastack_name)
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
 
-    version = session.query(AnalysisVersion).filter(
-        AnalysisVersion.id == id).first()
+    version = session.query(AnalysisVersion).filter(AnalysisVersion.id == id).first()
 
     table_query = session.query(AnalysisTable).filter(
         AnalysisTable.analysisversion == version
@@ -183,8 +180,7 @@ def version_view(datastack_name: str, id: int):
 @views_bp.route("/datastack/<datastack_name>/table/<int:id>")
 @auth_requires_permission("view", table_arg="datastack_name")
 def table_view(datastack_name, id: int):
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-        datastack_name)
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
     table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
     mapping = {
@@ -199,16 +195,14 @@ def table_view(datastack_name, id: int):
         return redirect(mapping[table.schema])
     else:
         return redirect(
-            url_for("views.generic_report",
-                    datastack_name=datastack_name, id=id)
+            url_for("views.generic_report", datastack_name=datastack_name, id=id)
         )
 
 
 @views_bp.route("/datastack/<datastack_name>/table/<int:id>/cell_type_local")
 @auth_requires_permission("view", table_arg="datastack_name")
 def cell_type_local_report(datastack_name, id):
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-        datastack_name)
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
     table = AnalysisTable.query.filter(AnalysisTable.id == id).first_or_404()
     if table.schema != "cell_type_local":
@@ -252,8 +246,7 @@ def cell_type_local_report(datastack_name, id):
 @views_bp.route("/datastack/<datastack_name>/table/<int:id>/synapse")
 @auth_requires_permission("view", table_arg="datastack_name")
 def synapse_report(datastack_name, id):
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-        datastack_name)
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
     table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
     if table.schema != "synapse":
@@ -275,8 +268,7 @@ def synapse_report(datastack_name, id):
             SynapseModel.pre_pt_root_id == SynapseModel.post_pt_root_id
         )
         .filter(
-            and_(SynapseModel.pre_pt_root_id != 0,
-                 SynapseModel.post_pt_root_id != 0)
+            and_(SynapseModel.pre_pt_root_id != 0, SynapseModel.post_pt_root_id != 0)
         )
         .count()
     )
@@ -300,8 +292,7 @@ def synapse_report(datastack_name, id):
 @views_bp.route("/datastack/<datastack_name>/table/<int:id>/generic")
 @auth_requires_permission("view", table_arg="datastack_name")
 def generic_report(id):
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-        datastack_name)
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
     table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
 

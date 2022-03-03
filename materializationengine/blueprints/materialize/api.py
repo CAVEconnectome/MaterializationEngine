@@ -31,8 +31,7 @@ bulk_upload_parser.add_argument("schema", required=True, type=str)
 bulk_upload_parser.add_argument("materialized_ts", type=float)
 
 missing_chunk_parser = reqparse.RequestParser()
-missing_chunk_parser.add_argument(
-    "chunks", required=True, type=list, location="json")
+missing_chunk_parser.add_argument("chunks", required=True, type=list, location="json")
 missing_chunk_parser.add_argument(
     "column_mapping", required=True, type=dict, location="json"
 )
@@ -46,8 +45,7 @@ get_roots_parser.add_argument(
 )
 
 materialize_parser = reqparse.RequestParser()
-materialize_parser.add_argument(
-    "days_to_expire", required=True, default=None, type=int)
+materialize_parser.add_argument("days_to_expire", required=True, default=None, type=int)
 
 
 authorizations = {
@@ -71,8 +69,7 @@ def get_datastack_info(datastack_name: str) -> dict:
     INFOSERVICE_ENDPOINT = current_app.config["INFOSERVICE_ENDPOINT"]
     url = INFOSERVICE_ENDPOINT + f"/api/v2/datastack/full/{datastack_name}"
     try:
-        auth_header = {
-            "Authorization": f"Bearer {current_app.config['AUTH_TOKEN']}"}
+        auth_header = {"Authorization": f"Bearer {current_app.config['AUTH_TOKEN']}"}
         r = requests.get(url, headers=auth_header)
         r.raise_for_status()
         logging.info(url)
@@ -144,7 +141,6 @@ class ProcessNewAnnotationsResource(Resource):
         datastack_info = get_datastack_info(datastack_name)
         process_new_annotations_workflow.s(datastack_info).apply_async()
         return 200
-
 
 
 @mat_bp.route("/materialize/run/lookup_root_ids/datastack/<string:datastack_name>")
