@@ -85,7 +85,7 @@ services:
     image: 'materialize:tag'
     build:
       context: .
-      dockerfile: dev.Dockerfile
+      dockerfile: Dockerfile
     ports:
       - 80:80
     volumes:
