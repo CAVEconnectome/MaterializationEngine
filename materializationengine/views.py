@@ -27,7 +27,7 @@ from middle_auth_client import (
 )
 
 
-__version__ = "2.12.11"
+__version__ = "2.12.12"
 
 views_bp = Blueprint("views", __name__, url_prefix="/materialize/views")
 
