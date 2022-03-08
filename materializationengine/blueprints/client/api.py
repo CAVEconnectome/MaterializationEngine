@@ -494,8 +494,8 @@ class FrozenTableQuery(Resource):
         if get_count:
             limit = None
 
-        # logging.info("query {}".format(data))
-        # logging.info("args - {}".format(args))
+        logging.debug("query {}".format(data))
+        logging.debug("args - {}".format(args))
 
         time_d["setup query"] = time.time() - now
         now = time.time()
@@ -525,14 +525,14 @@ class FrozenTableQuery(Resource):
             context = pa.default_serialization_context()
             serialized = context.serialize(df).to_buffer().to_pybytes()
             time_d["serialize"] = time.time() - now
-            # logging.info(time_d)
+            logging.debug(time_d)
             return Response(
                 serialized, headers=headers, mimetype="x-application/pyarrow"
             )
         else:
             dfjson = df.to_json(orient="records")
             time_d["serialize"] = time.time() - now
-            # logging.info(time_d)
+            logging.debug(time_d)
             response = Response(dfjson, headers=headers, mimetype="application/json")
             return after_request(response)
 
@@ -608,7 +608,7 @@ class FrozenQuery(Resource):
         limit = data.get("limit", max_limit)
         if limit > max_limit:
             limit = max_limit
-        # logging.info("query {}".format(data))
+        logging.debug("query {}".format(data))
         df = specific_query(
             Session,
             engine,
