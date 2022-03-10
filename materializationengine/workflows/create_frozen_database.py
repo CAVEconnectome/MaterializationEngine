@@ -193,6 +193,7 @@ def create_new_version(
     datastack_info: dict,
     materialization_time_stamp: datetime.datetime.utcnow,
     days_to_expire: int = None,
+    minus_hours: int = 1,
 ):
     """Create new versioned database row in the analysis_version table.
     Sets the expiration date for the database.
@@ -201,7 +202,8 @@ def create_new_version(
         datastack_info (dict): datastack info from infoservice
         materialization_time_stamp (datetime.datetime.utcnow): UTC timestamp of root_id lookup
         days_to_expire (int, optional): Number of days until db is flagged to be expired. Defaults to 5.
-
+        minus_hours (int, optional): Number of hours before those days to set expiration time
+        in order to leave time for deletion
     Returns:
         [int]: version number of materialized database
     """
@@ -230,8 +232,10 @@ def create_new_version(
     else:
         new_version_number = top_version + 1
     if days_to_expire > 0:
-        expiration_date = materialization_time_stamp + datetime.timedelta(
-            days=days_to_expire
+        expiration_date = (
+            materialization_time_stamp
+            + datetime.timedelta(days=days_to_expire)
+            - datetime.timedelta(hours=minus_hours)
         )
     else:
         expiration_date = None
