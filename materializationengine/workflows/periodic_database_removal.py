@@ -53,6 +53,7 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                 expired_results = (
                     session.query(AnalysisVersion)
                     .filter(AnalysisVersion.expires_on <= current_time)
+                    .order_by(AnalysisVersion.time_stamp)
                     .all()
                 )
                 expired_versions = [str(expired_db) for expired_db in expired_results]
@@ -68,9 +69,9 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                 database for database in database_list if database.startswith(datastack)
             ]
 
-            # get databases to delete that are currently present
+            # get databases to delete that are currently present (ordered by timestamp)
             databases_to_delete = [
-                database for database in databases if database in expired_versions
+                database for database in expired_versions if database in databases
             ]
 
             dropped_dbs_info = {
@@ -88,49 +89,54 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                 with engine.connect() as conn:
                     conn.execution_options(isolation_level="AUTOCOMMIT")
                     for database in databases_to_delete:
-                        try:
-                            sql = (
-                                "SELECT 1 FROM pg_database WHERE datname='%s'"
-                                % database
-                            )
-                            result_proxy = conn.execute(sql)
-                            result = result_proxy.scalar()
-                            if result:
-                                drop_connections = f"""
-                                SELECT 
-                                    pg_terminate_backend(pid) 
-                                FROM 
-                                    pg_stat_activity
-                                WHERE 
-                                    datname = '{database}'
-                                AND pid <> pg_backend_pid()
-                                """
-
-                                conn.execute(drop_connections)
-                                celery_logger.info(f"Dropped connections to: {database}")
-                                sql = "DROP DATABASE %s" % database
+                        if (len(databases) - len(dropped_dbs)) > delete_threshold:
+                            try:
+                                sql = (
+                                    "SELECT 1 FROM pg_database WHERE datname='%s'"
+                                    % database
+                                )
                                 result_proxy = conn.execute(sql)
-                                celery_logger.info(f"Database: {database} removed")
+                                result = result_proxy.scalar()
+                                if result:
+                                    drop_connections = f"""
+                                    SELECT 
+                                        pg_terminate_backend(pid) 
+                                    FROM 
+                                        pg_stat_activity
+                                    WHERE 
+                                        datname = '{database}'
+                                    AND pid <> pg_backend_pid()
+                                    """
 
-                                # strip version from database string
-                                database_version = database.rsplit("__mat")[-1]
+                                    conn.execute(drop_connections)
+                                    celery_logger.info(
+                                        f"Dropped connections to: {database}"
+                                    )
+                                    sql = "DROP DATABASE %s" % database
+                                    result_proxy = conn.execute(sql)
+                                    celery_logger.info(f"Database: {database} removed")
 
-                                expired_database = (
-                                    session.query(AnalysisVersion)
-                                    .filter(AnalysisVersion.version == database_version)
-                                    .one()
+                                    # strip version from database string
+                                    database_version = database.rsplit("__mat")[-1]
+
+                                    expired_database = (
+                                        session.query(AnalysisVersion)
+                                        .filter(
+                                            AnalysisVersion.version == database_version
+                                        )
+                                        .one()
+                                    )
+                                    expired_database.valid = False
+                                    session.commit()
+                                    celery_logger.info(
+                                        f"Database '{expired_database}' dropped"
+                                    )
+                                    dropped_dbs.append(expired_database)
+                                    dropped_dbs_info["dropped_databases"] = dropped_dbs
+                            except Exception as e:
+                                celery_logger.error(
+                                    f"ERROR: {e}: {database} does not exist"
                                 )
-                                expired_database.valid = False
-                                session.commit()
-                                celery_logger.info(
-                                    f"Database '{expired_database}' dropped"
-                                )
-                                dropped_dbs.append(expired_database)
-                                dropped_dbs_info["dropped_databases"] = dropped_dbs
-                        except Exception as e:
-                            celery_logger.error(
-                                f"ERROR: {e}: {database} does not exist"
-                            )
             remove_db_cron_info.append(dropped_dbs_info)
             session.close()
     return remove_db_cron_info
