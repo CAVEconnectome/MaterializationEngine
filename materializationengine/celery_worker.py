@@ -10,6 +10,8 @@ from materializationengine.celery_init import celery
 from materializationengine.errors import TaskNotFound
 from materializationengine.schemas import CeleryBeatSchema
 import os
+from dateutil import relativedelta
+import datetime
 
 celery_logger = get_task_logger(__name__)
 
@@ -62,9 +64,30 @@ def celery_loggers(logger, *args, **kwargs):
     Display the Celery banner appears in the log output.
     https://www.distributedpython.com/2018/10/01/celery-docker-startup/
     """
-    logger.info(
-        f"Customize Celery logger, default handler: {logger.handlers[0]}")
+    logger.info(f"Customize Celery logger, default handler: {logger.handlers[0]}")
     logger.addHandler(logging.StreamHandler(sys.stdout))
+
+
+def days_till_next_month(date):
+    """function to pick out the same weekday in the next month
+    So if you pass the first wednesday of January, you get
+    the first wednesday of February
+
+    Args:
+        date (datetime.datetime): a timepoint
+
+    Returns:
+        datetime.datetime: same day next month (in the sense of same # of weeday)
+    """
+
+    weekday = relativedelta.weekday(date.isoweekday() - 1)
+    weeknum = (date.day - 1) // 7 + 1
+    weeknum = weeknum if weeknum <= 4 else 4
+    next_date = date + relativedelta.relativedelta(
+        months=1, day=1, weekday=weekday(weeknum)
+    )
+    delta_days = next_date - date
+    return delta_days.days
 
 
 @celery.on_after_configure.connect
@@ -76,25 +99,28 @@ def setup_periodic_tasks(sender, **kwargs):
         run_periodic_database_update,
     )
     from materializationengine.workflows.periodic_materialization import (
-        run_periodic_materialization
+        run_periodic_materialization,
     )
+
     periodic_tasks = {
         "run_daily_periodic_materialization": run_periodic_materialization.s(
             days_to_expire=2
-            ),
+        ),
         "run_weekly_periodic_materialization": run_periodic_materialization.s(
             days_to_expire=7
-            ),
+        ),
         "run_lts_periodic_materialization": run_periodic_materialization.s(
-            days_to_expire=30),
+            days_to_expire=days_till_next_month(datetime.datetime.utcnow())
+        ),
         "run_periodic_database_update": run_periodic_database_update.s(),
-        "remove_expired_databases": remove_expired_databases.s(delete_threshold=os.environ.get('MIN_DATABASES', 3)),
+        "remove_expired_databases": remove_expired_databases.s(
+            delete_threshold=os.environ.get("MIN_DATABASES", 3)
+        ),
     }
 
     # remove expired task results in redis broker
     sender.add_periodic_task(
-        crontab(hour=0, minute=0, day_of_week="*",
-                day_of_month="*", month_of_year="*"),
+        crontab(hour=0, minute=0, day_of_week="*", day_of_month="*", month_of_year="*"),
         add_backend_cleanup_task(celery),
         name="Clean up back end results",
     )
