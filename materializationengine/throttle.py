@@ -82,7 +82,6 @@ class CeleryThrottle:
             raise ValueError("max_queue_length must be great than 0")
         self.min_queue_length = max_queue_length // 2
         self.max_queue_length = max_queue_length
-        self.queue_name = None
         self.poll_interval = poll_interval
         self.memory_limit = memory_limit
         self.queues_to_throttle = queues_to_throttle
@@ -94,12 +93,11 @@ class CeleryThrottle:
         Args:
             queue_name (str): Name of queue to check amount of enqueued tasks
         """
-        if queue_name and not self.queue_name:
-            self.queue_name = queue_name
 
         if queue_name in self.queues_to_throttle:
+            celery_logger.debug(f"throttle queue {queue_name}")
             while True:
-                queue_length = get_queue_length(self.queue_name)
+                queue_length = get_queue_length(queue_name)
                 if queue_length > self.max_queue_length:
                     time.sleep(self.poll_interval)
                 else:
