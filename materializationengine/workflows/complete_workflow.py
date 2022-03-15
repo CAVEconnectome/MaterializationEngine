@@ -58,36 +58,17 @@ def run_complete_workflow(datastack_info: dict, days_to_expire: int = 5, **kwarg
     # lookup missing segmentation data for new annotations and update expired root_ids
     # skip tables that are larger than 1,000,000 rows due to performance.
     for mat_metadata in mat_info:
+        celery_logger.info(
+            f"Running workflow for {mat_metadata['annotation_table_name']}"
+        )
         if not mat_metadata["reference_table"]:
-            chunked_roots = get_expired_root_ids_from_pcg(mat_metadata)
-            if mat_metadata["row_count"] < 1_000_000:
-                annotation_chunks = generate_chunked_model_ids(mat_metadata)
-                new_annotations = True
-                new_annotation_workflow = ingest_new_annotations_workflow(
-                    mat_metadata, annotation_chunks
-                )
+            workflow = chain(
+                ingest_new_annotations_workflow(mat_metadata),
+                update_root_ids_workflow(mat_metadata),
+            )
 
-            else:
-                new_annotations = None
-
-            if chunked_roots:
-                update_expired_roots_workflow = update_root_ids_workflow(
-                    mat_metadata, chunked_roots
-                )
-                if new_annotations:
-                    ingest_and_update_root_ids_workflow = chain(
-                        new_annotation_workflow, update_expired_roots_workflow
-                    )
-                    update_live_database_workflow.append(
-                        ingest_and_update_root_ids_workflow
-                    )
-                else:
-                    update_live_database_workflow.append(update_expired_roots_workflow)
-            elif new_annotations:
-                update_live_database_workflow.append(new_annotation_workflow)
-            else:
-                update_live_database_workflow.append(fin.si())
-
+        update_live_database_workflow.append(workflow)
+    celery_logger.info(f"CHAINED TASKS: {update_live_database_workflow}")
     # copy live database as a materialized version and drop unneeded tables
     setup_versioned_database_workflow = create_materializied_database_workflow(
         datastack_info, new_version_number, materialization_time_stamp, mat_info
@@ -98,7 +79,7 @@ def run_complete_workflow(datastack_info: dict, days_to_expire: int = 5, **kwarg
 
     # combine all workflows into final workflow and run
     final_workflow = chain(
-        chord(update_live_database_workflow, fin.si()),
+        *update_live_database_workflow,
         setup_versioned_database_workflow,
         chord(format_database_workflow, fin.si()),
         rebuild_reference_tables.si(mat_info),
