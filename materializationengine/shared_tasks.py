@@ -82,6 +82,7 @@ def get_materialization_info(
     materialization_time_stamp: datetime.datetime.utcnow = None,
     skip_table: bool = False,
     row_size: int = 1_000_000,
+    table_name: str = None,
 ) -> List[dict]:
 
     """Initialize materialization by an aligned volume name. Iterates thorugh all
@@ -108,6 +109,8 @@ def get_materialization_info(
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
 
     annotation_tables = db.get_valid_table_names()
+    if table_name is not None:
+        annotation_tables = [next(a for a in annotation_tables if a == table_name)]
     metadata = []
     celery_logger.debug(f"Annotation tables: {annotation_tables}")
     for annotation_table in annotation_tables:
