@@ -49,7 +49,7 @@ def generate_chunked_model_ids(
 
     chunked_ids = chunk_ids(mat_metadata, AnnotationModel.id, chunk_size)
 
-    return list(chunked_ids)
+    return chunked_ids
 
 
 def create_chunks(data_list: List, chunk_size: int) -> Generator:
@@ -99,7 +99,7 @@ def get_materialization_info(
     Returns:
         List[dict]: [description]
     """
-
+    celery_logger.info(f"Collecting materialization metadata")
     aligned_volume_name = datastack_info["aligned_volume"]["name"]
     pcg_table_name = datastack_info["segmentation_source"].split("/")[-1]
     segmentation_source = datastack_info.get("segmentation_source")
@@ -181,7 +181,7 @@ def get_materialization_info(
                             "MATERIALIZATION_ROW_CHUNK_SIZE"
                         ),
                         "queue_length_limit": get_config_param("QUEUE_LENGTH_LIMIT"),
-                        "throttle_queue": get_config_param("THROTTLE_QUEUES"),
+                        "throttle_queues": get_config_param("THROTTLE_QUEUES"),
                         "find_all_expired_roots": datastack_info.get(
                             "find_all_expired_roots", False
                         ),
@@ -198,6 +198,7 @@ def get_materialization_info(
             metadata.append(table_metadata.copy())
             celery_logger.debug(metadata)
     db.cached_session.close()
+    celery_logger.info(f"Metadata collected for {len(metadata)} tables")
     return metadata
 
 
@@ -331,7 +332,7 @@ def add_index(self, database: dict, command: str):
 def monitor_task_states(task_ids: List, polling_rate: int = 0.2):
     while True:
         results = [AsyncResult(task_id, app=celery) for task_id in task_ids]
-
+        celery_logger.debug(f"Celery results {results}")
         result_status = []
         for result in results:
             if result.state == "FAILURE":
@@ -343,4 +344,16 @@ def monitor_task_states(task_ids: List, polling_rate: int = 0.2):
         if all(x == "SUCCESS" for x in result_status):
             return True
 
+        time.sleep(polling_rate)
+
+
+def monitor_workflow_state(workflow: AsyncResult, polling_rate: int = 0.2):
+
+    while True:
+        celery_logger.debug("WAITING FOR TASKS TO COMPLETE...")
+        if workflow.ready():
+            celery_logger.debug(f"WORKFLOW IDS: {workflow.id}, READY")
+        if workflow.successful():
+            celery_logger.debug("CHAIN COMPLETE")
+            return True
         time.sleep(polling_rate)
