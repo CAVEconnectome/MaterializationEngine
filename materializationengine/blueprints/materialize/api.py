@@ -18,7 +18,7 @@ from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoSuchTableError
 
 
-__version__ = "2.12.16"
+__version__ = "2.13.1"
 
 
 bulk_upload_parser = reqparse.RequestParser()
@@ -140,6 +140,31 @@ class ProcessNewAnnotationsResource(Resource):
 
         datastack_info = get_datastack_info(datastack_name)
         process_new_annotations_workflow.s(datastack_info).apply_async()
+        return 200
+
+
+@mat_bp.route(
+    "/materialize/run/ingest_annotations/datastack/<string:datastack_name>/<string:table_name>"
+)
+class ProcessNewAnnotationsTableResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("process new annotations workflow", security="apikey")
+    def post(self, datastack_name: str, table_name: str):
+        """Process newly added annotations and lookup segmentation data
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+            table_name (str): name of table
+        """
+        from materializationengine.workflows.ingest_new_annotations import (
+            process_new_annotations_workflow,
+        )
+
+        datastack_info = get_datastack_info(datastack_name)
+        process_new_annotations_workflow.s(
+            datastack_info, table_name=table_name
+        ).apply_async()
         return 200
 
 
