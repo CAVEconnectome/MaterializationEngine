@@ -106,8 +106,8 @@ dill==0.3.4
 dracopy==1.0.1
     # via cloud-volume
 dynamicannotationdb==3.2.0
-    # via -r requirements.in
-emannotationschemas==3.6.0
+    # via -r /app/requirements.in
+emannotationschemas==3.8.4
     # via
     #   -r requirements.in
     #   dynamicannotationdb

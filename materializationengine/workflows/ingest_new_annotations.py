@@ -33,7 +33,7 @@ celery_logger = get_task_logger(__name__)
 
 
 @celery.task(name="process:process_new_annotations_workflow")
-def process_new_annotations_workflow(datastack_info: dict):
+def process_new_annotations_workflow(datastack_info: dict, table_name: str = None):
     """Base live materialization
 
     Workflow paths:
@@ -47,10 +47,10 @@ def process_new_annotations_workflow(datastack_info: dict):
 
     Parameters
     ----------
-    aligned_volume_name : str
-        [description]
-    segmentation_source : dict
-        [description]
+    datastack_info : dict
+        datastack to run this workflow on
+    table_name : str (optional)
+        individual table to run this workflow on
     """
     materialization_time_stamp = datetime.datetime.utcnow()
 
@@ -58,6 +58,7 @@ def process_new_annotations_workflow(datastack_info: dict):
         datastack_info=datastack_info,
         materialization_time_stamp=materialization_time_stamp,
         skip_table=True,
+        table_name=table_name,
     )
 
     for mat_metadata in mat_info:
