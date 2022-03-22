@@ -88,26 +88,3 @@ jobs:
           git push --tags
           TAG=$(git describe --tags)
           echo "tag=$TAG" >> $GITHUB_ENV
-      - name: checkout and merge
-        shell: bash -l {0}
-        run: |
-          git checkout flywire_production
-          git rebase master
-      - name: check merge errors
-        shell: bash -l {0}
-        run: |
-          CONFLICTS=$(git ls-files -u | wc -l)
-          if [ "$CONFLICTS" -gt 0 ] ; then
-            echo "Stopping workflow, merge errors detected"
-            echo "continue_workflow=false" >> $GITHUB_ENV
-            git rebase --abort
-          else
-            echo "continue_workflow=true" >> $GITHUB_ENV
-          fi
-      - name: tag and push
-        if: env.continue_workflow == 'true'
-        shell: bash -l {0}
-        run: |
-          git tag vflymat-${{env.tag}}
-          git push --force
-          git push --tags
