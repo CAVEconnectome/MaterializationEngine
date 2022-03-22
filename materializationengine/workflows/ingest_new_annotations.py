@@ -595,7 +595,7 @@ def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
 
     cols = [x for x in root_ids_df.columns if "root_id" in x]
 
-    cg = chunkedgraph_cache.init_pcg(pcg_table_name)
+    cg_client = chunkedgraph_cache.init_pcg(pcg_table_name)
 
     # filter missing root_ids and lookup root_ids if missing
     mask = np.logical_and.reduce([root_ids_df[col].isna() for col in cols])
@@ -606,15 +606,15 @@ def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
             if "supervoxel_id" in col_name:
                 root_id_name = col_name.replace("supervoxel_id", "root_id")
                 data = missing_root_rows.loc[:, col_name]
-                root_id_array = get_root_ids(cg, data, materialization_time_stamp)
+                root_id_array = get_root_ids(cg_client, data, materialization_time_stamp)
                 root_ids_df.loc[data.index, root_id_name] = root_id_array
 
     return root_ids_df.to_dict(orient="records")
 
 
-def get_root_ids(cg, data, materialization_time_stamp):
+def get_root_ids(cgclient, data, materialization_time_stamp):
     root_id_array = np.squeeze(
-        cg.get_roots(data.to_list(), time_stamp=materialization_time_stamp)
+        cgclient.get_roots(data, timestamp=materialization_time_stamp)
     )
     return root_id_array
 
