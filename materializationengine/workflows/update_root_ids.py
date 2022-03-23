@@ -126,11 +126,12 @@ def get_expired_root_ids_from_pcg(mat_metadata: dict, expired_chunk_size: int = 
         pcg_table_name, last_updated_ts, materialization_time_stamp
     )
     is_empty = np.all((old_roots == []))
-    celery_logger.info(f"Amount of expired root ids: {len(old_roots)}")
 
     if is_empty or old_roots is None:
+        celery_logger.info(f"No root ids have expired since {str(last_updated_ts)}")
         return None
     else:
+        celery_logger.info(f"Amount of expired root ids: {len(old_roots)}")
         yield from generate_chunked_root_ids(old_roots, expired_chunk_size)
 
 
