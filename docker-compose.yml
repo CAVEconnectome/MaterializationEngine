@@ -50,7 +50,10 @@ services:
     env_file:
       - ./dev.env
       - ./.env
-    command: celery --app="run.celery" worker --pool=prefork --hostname=worker.workflow@%h --queues=workflow,celery --concurrency=4 --loglevel=INFO -Ofair
+    environment:
+      - WORKER_NAME=worker.workflow
+      - QUEUE_NAME=workflow
+    command: celery --app="run.celery" worker --pool=prefork --hostname=worker.workflow@%h --queues=workflow,celery --concurrency=2 --loglevel=INFO -Ofair
     volumes:
       - ~/.cloudvolume/secrets:/home/nginx/.cloudvolume/secrets:z
       - ~/.cloudvolume/secrets/google-secret.json:/home/nginx/.cloudvolume/secrets/google-secret.json:z
@@ -62,7 +65,10 @@ services:
     env_file:
       - ./dev.env
       - ./.env
-    command: celery --app="run.celery" worker --pool=prefork --hostname=worker.process@%h --queues=celery,process --concurrency=4 --loglevel=INFO -Ofair
+    environment:
+      - WORKER_NAME=worker.process
+      - QUEUE_NAME=process
+    command: celery --app="run.celery" worker --pool=prefork --hostname=worker.process@%h --queues=celery,process --concurrency=1 --loglevel=INFO -Ofair
     volumes:
       - ~/.cloudvolume/secrets:/home/nginx/.cloudvolume/secrets:z
       - ~/.cloudvolume/secrets/google-secret.json:/home/nginx/.cloudvolume/secrets/google-secret.json:z
