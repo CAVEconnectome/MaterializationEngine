@@ -51,7 +51,7 @@ def run_periodic_database_update() -> None:
 @celery.task(
     bind=True,
     base=LockedTask,
-    timeout=60 * 60 * 1.5,  # Task locked for 1.5 hours
+    timeout=int(60 * 60 * 1.5),  # Task locked for 1.5 hours
     name="workflow:update_database_workflow",
     acks_late=True,
 )
