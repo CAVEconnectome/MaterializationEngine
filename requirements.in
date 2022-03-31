@@ -27,4 +27,4 @@ pyarrow
 numpy>=1.21.5
 dynamicannotationdb>=3.2.0
 emannotationschemas>=3.8.4
--e git+git://github.com/seung-lab/PyChunkedGraph.git@v2.0.7#egg=pychunkedgraph
+-e git+https://github.com/seung-lab/PyChunkedGraph.git@v2.0.7#egg=pychunkedgraph
