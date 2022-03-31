@@ -1,25 +1,24 @@
 import datetime
-from typing import List
 from functools import lru_cache
+
 import numpy as np
 import pandas as pd
 from celery import chain, chord, group
 from celery.utils.log import get_task_logger
-from celery.utils.debug import memdump, sample_mem
 from materializationengine.celery_init import celery
-from materializationengine.throttle import throttle_celery
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import sqlalchemy_cache
 from materializationengine.shared_tasks import (
     fin,
+    get_materialization_info,
     monitor_task_states,
     monitor_workflow_state,
     update_metadata,
-    get_materialization_info,
+    workflow_complete,
 )
+from materializationengine.throttle import throttle_celery
 from materializationengine.utils import create_segmentation_model
 from sqlalchemy.sql import or_, text
-
 
 celery_logger = get_task_logger(__name__)
 
@@ -85,7 +84,7 @@ def update_root_ids_workflow(mat_metadata: dict):
     ).apply_async()
     tasks_completed = monitor_workflow_state(update_root_workflow)
     if tasks_completed:
-        return fin.si()
+        return workflow_complete.si("update_root_ids_workflow")
 
 
 def get_expired_root_ids_from_pcg(mat_metadata: dict, expired_chunk_size: int = 100):

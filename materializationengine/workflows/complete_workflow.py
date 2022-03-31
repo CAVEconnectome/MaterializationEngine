@@ -2,12 +2,11 @@ import datetime
 
 from celery import chain, chord
 from celery.utils.log import get_task_logger
-from celery.utils.debug import sample_mem, memdump
 from materializationengine.celery_init import celery
 from materializationengine.shared_tasks import (
-    generate_chunked_model_ids,
     fin,
     get_materialization_info,
+    workflow_complete,
 )
 from materializationengine.workflows.create_frozen_database import (
     check_tables,
@@ -19,11 +18,7 @@ from materializationengine.workflows.create_frozen_database import (
 from materializationengine.workflows.ingest_new_annotations import (
     ingest_new_annotations_workflow,
 )
-from materializationengine.workflows.update_root_ids import (
-    get_expired_root_ids_from_pcg,
-    update_root_ids_workflow,
-)
-
+from materializationengine.workflows.update_root_ids import update_root_ids_workflow
 
 celery_logger = get_task_logger(__name__)
 
@@ -84,5 +79,6 @@ def run_complete_workflow(datastack_info: dict, days_to_expire: int = 5, **kwarg
         chord(format_database_workflow, fin.si()),
         rebuild_reference_tables.si(mat_info),
         check_tables.si(mat_info, new_version_number),
+        workflow_complete.si("Materialization workflow")
     )
     final_workflow.apply_async(kwargs={"Datastack": datastack_info["datastack"]})
