@@ -247,6 +247,31 @@ class UpdateExpiredRootIdsResource(Resource):
         return 200
 
 
+@mat_bp.route("/materialize/run/update_database/datastack/<string:datastack_name>")
+class UpdateLiveDatabaseResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.expect(get_roots_parser)
+    @mat_bp.doc("Ingest new annotations and update expired root ids", security="apikey")
+    def post(self, datastack_name: str):
+        """Ingest new annotations and update expired root ids
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+        """
+        from materializationengine.workflows.update_database_workflow import (
+            update_database_workflow,
+        )
+
+        datastack_info = get_datastack_info(datastack_name)
+
+        args = get_roots_parser.parse_args()
+        datastack_info["find_all_expired_roots"] = args["find_all_expired_roots"]
+
+        update_database_workflow.s(datastack_info).apply_async()
+        return 200
+
+
 @mat_bp.expect(bulk_upload_parser)
 @mat_bp.route(
     "/bulk_upload/upload/<string:datastack_name>/<string:table_name>/<string:segmentation_source>/<string:description>"
