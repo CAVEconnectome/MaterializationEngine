@@ -21,13 +21,13 @@ def post_message_to_slack(text: str, attachment: dict = None):
         r = requests.post(slack_webhook, json=payload)
         r.raise_for_status()
     except requests.exceptions.HTTPError as e:
-        raise "An Http Error occurred:" + repr(e)
+        raise f"An Http Error occurred:{repr(e)}"
     except requests.exceptions.ConnectionError as e:
-        raise "An Error Connecting to the API occurred:" + repr(e)
+        raise f"An Error Connecting to the API occurred:{repr(e)}"
     except requests.exceptions.Timeout as e:
-        raise "A Timeout Error occurred:" + repr(e)
+        raise f"A Timeout Error occurred:{repr(e)}"
     except requests.exceptions.RequestException as e:
-        raise "An Unknown Error occurred" + repr(e)
+        raise f"An Unknown Error occurred{repr(e)}"
 
 
 def post_to_slack_on_task_failure(self, exc, task_id, args, kwargs, einfo):
