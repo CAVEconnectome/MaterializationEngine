@@ -2,22 +2,21 @@ import datetime
 import json
 import os
 
-from celery import chain, chord
+from celery import chain
 from celery.utils.log import get_task_logger
 from materializationengine.blueprints.materialize.api import get_datastack_info
 from materializationengine.celery_init import celery
 from materializationengine.shared_tasks import (
-    fin,
-    generate_chunked_model_ids,
     get_materialization_info,
+    monitor_workflow_state,
     workflow_complete,
 )
+from materializationengine.task import LockedTask
 from materializationengine.utils import get_config_param
 from materializationengine.workflows.ingest_new_annotations import (
     ingest_new_annotations_workflow,
 )
 from materializationengine.workflows.update_root_ids import (
-    get_expired_root_ids_from_pcg,
     update_root_ids_workflow,
 )
 
@@ -49,8 +48,14 @@ def run_periodic_database_update() -> None:
     return True
 
 
-@celery.task(name="workflow:update_database_workflow")
-def update_database_workflow(datastack_info: dict, **kwargs):
+@celery.task(
+    bind=True,
+    base=LockedTask,
+    timeout=60 * 60 * 1.5,  # Task locked for 1.5 hours
+    name="workflow:update_database_workflow",
+    acks_late=True,
+)
+def update_database_workflow(self, datastack_info: dict, **kwargs):
     """Updates 'live' database:
         - Find all annotations with missing segmentation rows
         and lookup supervoxel_id and root_id
@@ -88,3 +93,6 @@ def update_database_workflow(datastack_info: dict, **kwargs):
     run_update_database_workflow.apply_async(
         kwargs={"Datastack": datastack_info["datastack"]}
     )
+    tasks_completed = monitor_workflow_state(run_update_database_workflow)
+    if tasks_completed:
+        return True
