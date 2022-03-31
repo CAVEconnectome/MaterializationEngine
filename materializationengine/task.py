@@ -3,6 +3,7 @@ from hashlib import md5
 
 import redis
 from celery import Task
+from celery.utils.log import get_task_logger
 from kombu.utils.uuid import uuid
 
 from materializationengine.celery_slack import post_to_slack_on_task_failure
@@ -13,6 +14,8 @@ REDIS_CLIENT = redis.StrictRedis(
     port=get_config_param("REDIS_PORT"),
     db=0,
 )
+
+celery_logger = get_task_logger(__name__)
 
 
 def argument_signature(
