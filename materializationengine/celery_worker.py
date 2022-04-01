@@ -39,7 +39,9 @@ def create_celery(app=None):
             "worker_send_task_events": True,
             "worker_prefetch_multiplier": 1,
             "result_expires": 86400,  # results expire in broker after 1 day
-            "visibility_timeout": 8000,  # timeout (s) for tasks to be sent back to broker queue
+            "broker_transport_options": {
+                "visibility_timeout": 8000,
+            },  # timeout (s) for tasks to be sent back to broker queue
             "beat_schedules": app.config["BEAT_SCHEDULES"],
         }
     )
