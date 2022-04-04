@@ -79,8 +79,9 @@ class TestIngestMissingAnnotations:
         seg_table_exists = engine.dialect.has_table(
             engine.connect(), "test_synapse_table__test_pcg"
         )
-        assert table_metadata.get() == mat_metadata
-        assert seg_table_exists == True
+        return_val = table_metadata.get()
+        assert return_val is True
+        assert seg_table_exists is True
 
     def test_get_annotations_with_missing_supervoxel_ids(self, mat_metadata):
         id_chunk_range = [1, 5]

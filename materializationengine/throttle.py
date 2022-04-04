@@ -118,6 +118,6 @@ class CeleryThrottle:
 
 
 throttle_celery = CeleryThrottle(
-    max_queue_length=get_config_param("QUEUE_LENGTH_LIMIT"),
+    max_queue_length=int(get_config_param("QUEUE_LENGTH_LIMIT")),
     queues_to_throttle=get_config_param("QUEUES_TO_THROTTLE"),
 )

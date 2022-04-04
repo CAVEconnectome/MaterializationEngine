@@ -5,7 +5,6 @@ sys.modules["materializationengine.chunkedgraph_gateway"] = MagicMock()
 from materializationengine.workflows.update_root_ids import (
     get_expired_root_ids_from_pcg,
     get_new_root_ids,
-    get_expired_roots_from_db,
     get_supervoxel_id_queries,
 )
 import logging

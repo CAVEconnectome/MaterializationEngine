@@ -21,7 +21,9 @@ class TestSharedTasks:
     def test_generate_chunked_model_ids(self, mat_metadata):
         anno_id_chunks = generate_chunked_model_ids(mat_metadata)
         logging.info(anno_id_chunks)
-        assert anno_id_chunks == [[1, 3], [3, None]]
+
+        assert next(anno_id_chunks) == [1, 3]
+        assert next(anno_id_chunks) == [3, None]
 
     def test_fin(self):
         result = fin.s().apply()
@@ -62,6 +64,8 @@ class TestSharedTasks:
                 "find_all_expired_roots": False,
                 "analysis_version": 1,
                 "analysis_database": "test_datastack__mat1",
+                "queue_length_limit": 10000,
+                "throttle_queues": True,
             }
         ]
 
