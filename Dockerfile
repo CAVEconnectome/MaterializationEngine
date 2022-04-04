@@ -1,6 +1,9 @@
-FROM gcr.io/neuromancer-seung-import/pychunkedgraph:graph-tool_dracopy
+FROM tiangolo/uwsgi-nginx-flask:python3.7
 
 ENV UWSGI_INI /app/uwsgi.ini
+RUN mkdir -p /home/nginx/.cloudvolume/secrets \
+  && chown -R nginx /home/nginx \
+  && usermod -d /home/nginx -s /bin/bash nginx 
 COPY requirements.txt /app/.
 RUN mv /usr/local/lib/python3.7/site-packages/pip/_internal/index /usr/local/lib/python3.7/site-packages/pip/_internal/index_bak
 RUN python -m pip install --upgrade pip
