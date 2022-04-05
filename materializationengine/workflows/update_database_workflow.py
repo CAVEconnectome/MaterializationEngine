@@ -86,12 +86,11 @@ def update_database_workflow(self, datastack_info: dict, **kwargs):
             )
 
         update_live_database_workflow.append(workflow)
+
     run_update_database_workflow = chain(
         *update_live_database_workflow, workflow_complete.si("update_root_ids")
-    )
-    run_update_database_workflow.apply_async(
-        kwargs={"Datastack": datastack_info["datastack"]}
-    )
+    ).apply_async(kwargs={"Datastack": datastack_info["datastack"]})
+
     tasks_completed = monitor_workflow_state(run_update_database_workflow)
     if tasks_completed:
         return True
