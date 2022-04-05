@@ -1,9 +1,6 @@
 #!/bin/bash -e
 echo "*** WARNING: Celery worker shutdown started"
 
-# set celery broker url
-export CELERY_BROKER_URL=redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}/0
-
 # prevent the worker accepting new tasks
 echo "*** EVENT: Worker not accepting new tasks"
 celery control --destination $WORKER_NAME@$HOSTNAME cancel_consumer $QUEUE_NAME
