@@ -11,6 +11,7 @@ from materializationengine.celery_init import celery
 from materializationengine.celery_slack import post_to_slack_on_task_failure
 from materializationengine.errors import TaskNotFound
 from materializationengine.schemas import CeleryBeatSchema
+from materializationengine.utils import get_config_param
 from dateutil import relativedelta
 import datetime
 
@@ -123,7 +124,7 @@ def setup_periodic_tasks(sender, **kwargs):
         ),
         "run_periodic_database_update": run_periodic_database_update.s(),
         "remove_expired_databases": remove_expired_databases.s(
-            delete_threshold=os.environ.get("MIN_DATABASES", 3)
+            delete_threshold=get_config_param("MIN_DATABASES")
         ),
     }
 
