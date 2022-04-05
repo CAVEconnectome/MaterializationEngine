@@ -5,7 +5,6 @@ RUN mkdir -p /home/nginx/.cloudvolume/secrets \
   && chown -R nginx /home/nginx \
   && usermod -d /home/nginx -s /bin/bash nginx 
 COPY requirements.txt /app/.
-RUN mv /usr/local/lib/python3.7/site-packages/pip/_internal/index /usr/local/lib/python3.7/site-packages/pip/_internal/index_bak
 RUN python -m pip install --upgrade pip
 RUN pip install -r requirements.txt
 COPY . /app
