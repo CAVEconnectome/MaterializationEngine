@@ -19,13 +19,13 @@ class BaseConfig:
     REDIS_URL = "redis://"
     CELERY_BROKER_URL = "memory://"
     CELERY_RESULT_BACKEND = REDIS_URL
-    LOCAL_SERVICE_URL = os.environ.get("LOCAL_SERVICE_URL")
-    ANNO_ENDPOINT = f"https://{LOCAL_SERVICE_URL}/annotation/"
-    INFOSERVICE_ENDPOINT = "https://global.daf-apis.com/info"
-    AUTH_URI = "https://global.daf-apis.com/auth"
-    GLOBAL_SERVER = "https://global.daf-apis.com"
-    SCHEMA_SERVICE_ENDPOINT = "https://global.daf-apis.com/schema/"
-    SEGMENTATION_ENDPOINT = "https://global.daf-apis.com/"
+    LOCAL_SERVER_URL = os.environ.get("LOCAL_SERVER_URL")
+    GLOBAL_SERVER_URL = "https://global.daf-apis.com"
+    ANNO_ENDPOINT = f"{LOCAL_SERVER_URL}/annotation/"
+    INFOSERVICE_ENDPOINT = f"{GLOBAL_SERVER_URL}/info"
+    AUTH_URI = f"{GLOBAL_SERVER_URL}/auth"
+    SCHEMA_SERVICE_ENDPOINT = f"{GLOBAL_SERVER_URL}/schema/"
+    SEGMENTATION_ENDPOINT = f"{GLOBAL_SERVER_URL}/segmentation"
     MASTER_NAME = os.environ.get("MASTER_NAME", None)
     MATERIALIZATION_ROW_CHUNK_SIZE = 500
     QUERY_LIMIT_SIZE = 200000
@@ -85,8 +85,8 @@ class BaseConfig:
             "name": "Update Live Database",
             "minute": 0,
             "hour": "0-1,17-23",
-            "day_of_week": '1-5',
-            "task": "run_periodic_database_update"
+            "day_of_week": "1-5",
+            "task": "run_periodic_database_update",
         },
     ]
 
