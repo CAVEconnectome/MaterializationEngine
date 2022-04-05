@@ -18,6 +18,7 @@ from materializationengine.shared_tasks import (
 )
 from materializationengine.throttle import throttle_celery
 from materializationengine.utils import create_segmentation_model
+from requests import HTTPError
 from sqlalchemy.sql import or_, text
 
 celery_logger = get_task_logger(__name__)
@@ -156,11 +157,14 @@ def lookup_expired_root_ids(
             last_updated_ts, materialization_time_stamp
         )
         return old_roots
-    except ValueError as e:
-        celery_logger.info(
-            f"No expired root ids found between {last_updated_ts} and {materialization_time_stamp}: {e}"
-        )
-        return None
+    except (ValueError, HTTPError) as e:
+        if e.args[0].find("ValueError: need at least one array to concatenate"):
+            celery_logger.info(
+                f"No expired root ids found between {last_updated_ts} and {materialization_time_stamp}: {e}"
+            )
+            return None
+        else:
+            raise e
 
 
 def get_supervoxel_id_queries(root_id_chunk: list, mat_metadata: dict):
