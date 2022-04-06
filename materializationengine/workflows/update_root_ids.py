@@ -125,9 +125,7 @@ def get_expired_root_ids_from_pcg(mat_metadata: dict, expired_chunk_size: int = 
     old_roots = lookup_expired_root_ids(
         pcg_table_name, last_updated_ts, materialization_time_stamp
     )
-    is_empty = np.all((old_roots == []))
-
-    if is_empty or old_roots is None:
+    if old_roots is None:
         celery_logger.info(f"No root ids have expired since {str(last_updated_ts)}")
         return None
     else:
@@ -156,15 +154,11 @@ def lookup_expired_root_ids(
         old_roots, __ = cg_client.get_delta_roots(
             last_updated_ts, materialization_time_stamp
         )
-        return old_roots
-    except (ValueError, HTTPError) as e:
-        if e.args[0].find("ValueError: need at least one array to concatenate"):
-            celery_logger.info(
-                f"No expired root ids found between {last_updated_ts} and {materialization_time_stamp}: {e}"
-            )
-            return None
-        else:
-            raise e
+        if old_roots.size != 0:
+            return old_roots
+        return None
+    except HTTPError as e:
+        raise e
 
 
 def get_supervoxel_id_queries(root_id_chunk: list, mat_metadata: dict):
