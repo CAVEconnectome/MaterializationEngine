@@ -360,3 +360,33 @@ def monitor_workflow_state(workflow: AsyncResult, polling_rate: int = 0.2):
             celery_logger.debug("CHAIN COMPLETE")
             return True
         time.sleep(polling_rate)
+
+
+def check_if_task_is_running(task_name: str, worker_name_prefix: str) -> bool:
+    """Check if a task is running under a worker with a specified prefix name.
+    If the task is found to be in an active state then return True.
+
+    Parameters
+    ----------
+    task_name : str
+        name of task to check if it is running
+    worker_name_prefix : str
+        prefix of celery worker, used to check specific queue.
+
+    Returns
+    -------
+    bool
+        True if task_name is running else False
+    """
+    inspector = celery.control.inspect()
+    active_tasks_dict = inspector.active()
+
+    workflow_active_tasks = next(
+        v for k, v in active_tasks_dict.items() if worker_name_prefix in k
+    )
+
+    for active_task in workflow_active_tasks:
+        if task_name in active_task.values():
+            celery_logger.info(f"Task {task_name} is running...")
+            return True
+    return False

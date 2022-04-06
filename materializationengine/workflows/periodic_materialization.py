@@ -9,6 +9,7 @@ from celery.utils.log import get_task_logger
 from materializationengine.blueprints.materialize.api import get_datastack_info
 from materializationengine.workflows.complete_workflow import run_complete_workflow
 from materializationengine.celery_init import celery
+from materializationengine.shared_tasks import check_if_task_is_running
 from materializationengine.utils import get_config_param
 
 celery_logger = get_task_logger(__name__)
@@ -28,6 +29,11 @@ def run_periodic_materialization(days_to_expire: int = None) -> None:
     4. Merge annotation and segmentation tables together
     5. Drop non-materializied tables
     """
+    is_update_roots_running = check_if_task_is_running(
+        "workflow:update_database_workflow", "worker.workflow"
+    )
+    if is_update_roots_running:
+        return "Update Roots Workflow is running, delaying materialization until update roots is complete."
     try:
         datastacks = json.loads(os.environ["DATASTACKS"])
     except:
