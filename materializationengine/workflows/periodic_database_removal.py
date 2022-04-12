@@ -75,17 +75,14 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
             ]
 
             dropped_dbs_info = {
-                "aligned_volume": aligned_volume,
                 "materialized_databases": (databases, f"count={len(databases)}"),
-                "expired_databases": (
-                    expired_versions,
-                    f"count={len(expired_versions)}",
-                ),
+                "expired_databases": f"count={len(expired_versions)}",
                 "delete_threshold": delete_threshold,
+                "databases_to_drop": databases_to_delete,
             }
             dropped_dbs = []
 
-            if len(databases) > delete_threshold:
+            if len(databases_to_delete) > delete_threshold:
                 with engine.connect() as conn:
                     conn.execution_options(isolation_level="AUTOCOMMIT")
                     for database in databases_to_delete:
@@ -94,7 +91,9 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                                 f"Only one materialized database remaining: {database}, removal stopped."
                             )
                             break
-                        if (len(databases_to_delete) - len(dropped_dbs)) > delete_threshold:
+                        if (
+                            len(databases_to_delete) - len(dropped_dbs)
+                        ) > delete_threshold:
                             try:
                                 sql = (
                                     "SELECT 1 FROM pg_database WHERE datname='%s'"
@@ -102,6 +101,9 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                                 )
                                 result_proxy = conn.execute(sql)
                                 result = result_proxy.scalar()
+                                celery_logger.info(
+                                    f"Database to be dropped: {database} exists: {result}"
+                                )
                                 if result:
                                     drop_connections = f"""
                                     SELECT 
@@ -117,7 +119,7 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                                     celery_logger.info(
                                         f"Dropped connections to: {database}"
                                     )
-                                    sql = "DROP DATABASE %s" % database
+                                    sql = f"DROP DATABASE {database}"
                                     result_proxy = conn.execute(sql)
                                     celery_logger.info(f"Database: {database} removed")
 
