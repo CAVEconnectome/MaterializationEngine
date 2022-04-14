@@ -107,12 +107,13 @@ class LockedTask(Task):
             return task
 
         existing_task_id = self.get_existing_task_id(lock_id)
+        celery_logger.info(f"LOCKED_ID: {existing_task_id}")
         while not existing_task_id:
             task = self.lock_and_run(**run_args)
             if task:
                 return task
             existing_task_id = self.get_existing_task_id(lock_id)
-        return self.on_duplicate(self.name, task_id)
+        return self.on_duplicate(self.name, lock_id, task_id)
 
     def lock_and_run(self, lock_id: str, task_id: str = None, *args, **kwargs):
         lock_acquired = self.acquire_lock(lock_id, task_id)
@@ -130,12 +131,12 @@ class LockedTask(Task):
         lock_id = argument_signature(self.name, task_args, task_kwargs)
         self.unlock(lock_id)
 
-    def on_duplicate(self, task: str, existing_task_id: str):
+    def on_duplicate(self, task: str, lock_id: str, task_id: str):
         if self.raise_on_duplicate:
             raise KeyError(
-                f"Attempted to queue a duplicate of task: {task} with task ID: {existing_task_id}"
+                f"Attempted to queue a duplicate of task: {task} with task ID: {lock_id}:{task_id}"
             )
-        return self.AsyncResult(existing_task_id)
+        return self.AsyncResult(task_id)
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
         self.release_lock(task_args=args, task_kwargs=kwargs)
