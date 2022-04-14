@@ -7,10 +7,12 @@ from typing import List
 
 from celery.utils.log import get_task_logger
 from materializationengine.blueprints.materialize.api import get_datastack_info
-from materializationengine.workflows.complete_workflow import run_complete_workflow
 from materializationengine.celery_init import celery
+from materializationengine.database import sqlalchemy_cache
+from materializationengine.models import AnalysisVersion
 from materializationengine.shared_tasks import check_if_task_is_running
 from materializationengine.utils import get_config_param
+from materializationengine.workflows.complete_workflow import run_complete_workflow
 
 celery_logger = get_task_logger(__name__)
 
@@ -42,7 +44,21 @@ def run_periodic_materialization(days_to_expire: int = None) -> None:
     for datastack in datastacks:
         try:
             celery_logger.info(f"Start periodic materialization job for {datastack}")
+
             datastack_info = get_datastack_info(datastack)
+            aligned_volume = datastack_info["aligned_volume"]["name"]
+
+            session = sqlalchemy_cache.get(aligned_volume)
+            max_databases = get_config_param("MAX_DATABASES")
+
+            valid_databases = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.valid == True)
+                .order_by(AnalysisVersion.time_stamp)
+                .count()
+            )
+            if valid_databases >= max_databases:
+                return f"Number of valid materialized databases is {valid_databases}, threshold is set to: {max_databases}"
             datastack_info["database_expires"] = True
             task = run_complete_workflow.s(
                 datastack_info, days_to_expire=days_to_expire
