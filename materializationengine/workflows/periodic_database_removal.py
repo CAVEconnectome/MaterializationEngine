@@ -74,12 +74,6 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                 database for database in expired_versions if database in databases
             ]
 
-            dropped_dbs_info = {
-                "materialized_databases": (databases, f"count={len(databases)}"),
-                "expired_databases": f"count={len(expired_versions)}",
-                "delete_threshold": delete_threshold,
-                "databases_to_drop": databases_to_delete,
-            }
             dropped_dbs = []
 
             if len(databases_to_delete) > delete_threshold:
@@ -139,11 +133,10 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                                         f"Database '{expired_database}' dropped"
                                     )
                                     dropped_dbs.append(expired_database)
-                                    dropped_dbs_info["dropped_databases"] = dropped_dbs
                             except Exception as e:
                                 celery_logger.error(
                                     f"ERROR: {e}: {database} does not exist"
                                 )
-            remove_db_cron_info.append(dropped_dbs_info)
+            remove_db_cron_info.append(dropped_dbs)
             session.close()
     return remove_db_cron_info
