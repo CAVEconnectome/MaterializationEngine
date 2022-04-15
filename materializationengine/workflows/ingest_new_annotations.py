@@ -476,9 +476,13 @@ def get_cloudvolume_supervoxel_ids(
             if np.isnan(getattr(data, supervoxel_column)):
                 pos_data = getattr(data, col)
                 pos_array = np.asarray(pos_data)
-                svid = get_sv_id(
-                    cv, pos_array, coord_resolution
-                )  # pylint: disable=maybe-no-member
+                try:
+                    svid = get_sv_id(
+                        cv, pos_array, coord_resolution
+                    )  # pylint: disable=maybe-no-member
+                except Exception as e:
+                    celery_logger.error(f"Failed to get SVID: {pos_array}, {coord_resolution}. Error {e}")
+                    raise e
                 mat_df.loc[mat_df.id == data.id, supervoxel_column] = svid
     return mat_df.to_dict(orient="list")
 
