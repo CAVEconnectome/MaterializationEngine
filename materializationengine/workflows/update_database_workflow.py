@@ -78,19 +78,22 @@ def update_database_workflow(self, datastack_info: dict, **kwargs):
 
     # lookup missing segmentation data for new annotations and update expired root_ids
     # skip tables that are larger than 1,000,000 rows due to performance.
-    for mat_metadata in mat_info:
-        if not mat_metadata["reference_table"]:
-            workflow = chain(
-                ingest_new_annotations_workflow(mat_metadata),
-                update_root_ids_workflow(mat_metadata),
-            )
+    try:
+        for mat_metadata in mat_info:
+            if not mat_metadata["reference_table"]:
+                workflow = chain(
+                    ingest_new_annotations_workflow(mat_metadata),
+                    update_root_ids_workflow(mat_metadata),
+                )
 
-        update_live_database_workflow.append(workflow)
+            update_live_database_workflow.append(workflow)
 
-    run_update_database_workflow = chain(
-        *update_live_database_workflow, workflow_complete.si("update_root_ids")
-    ).apply_async(kwargs={"Datastack": datastack_info["datastack"]})
-
+        run_update_database_workflow = chain(
+            *update_live_database_workflow, workflow_complete.si("update_root_ids")
+        ).apply_async(kwargs={"Datastack": datastack_info["datastack"]})
+    except Exception as e:
+        celery_logger.error(f"An error has occurred: {e}")
+        raise e
     tasks_completed = monitor_workflow_state(run_update_database_workflow)
     if tasks_completed:
         return True
