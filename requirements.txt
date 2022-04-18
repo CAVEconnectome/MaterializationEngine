@@ -89,7 +89,7 @@ cloud-files==4.7.0
     # via
     #   -r requirements.in
     #   cloud-volume
-cloud-volume==8.3.0
+cloud-volume==8.5.4
     # via -r requirements.in
 compressed-segmentation==2.1.1
     # via cloud-volume
@@ -310,6 +310,7 @@ numpy==1.21.5
     #   multiwrapper
     #   pandas
     #   pyarrow
+    #   pyspng-seunglab
     #   simplejpeg
 oauthlib==3.2.0
     # via requests-oauthlib
@@ -393,6 +394,8 @@ pyparsing==3.0.7
 pyrsistent==0.18.1
     # via jsonschema
 pysimdjson==4.0.3
+    # via cloud-volume
+pyspng-seunglab==1.0.0
     # via cloud-volume
 pytest==7.0.1
     # via
