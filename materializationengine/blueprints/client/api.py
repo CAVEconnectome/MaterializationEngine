@@ -554,6 +554,7 @@ class LiveTableQuery(Resource):
             offset=data.get("offset", None),
             limit=limit,
             get_count=get_count,
+            outer_join=True,
         )
         time_d["execute query"] = time.time() - now
         now = time.time()
