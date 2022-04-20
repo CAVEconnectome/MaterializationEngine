@@ -534,6 +534,9 @@ class LiveTableQuery(Resource):
                 filter[table_in] = {c: table_filter[c] for c in other_filters}
                 return filter
 
+        filter_equal_dict = data.get("filter_equal_dict", None)
+        filter_equal_dict.update({"valid": True})
+
         df = specific_query(
             Session,
             engine,
