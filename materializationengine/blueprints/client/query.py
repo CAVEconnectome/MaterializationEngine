@@ -289,14 +289,30 @@ def specific_query(
 
     col_names, col_counts = np.unique(np.concatenate(column_lists), return_counts=True)
     dup_cols = col_names[col_counts > 1]
-    # if there are duplicate columns we need to redname
+    # if there are duplicate columns we need to rename
     if suffixes is None:
         suffixes = [DEFAULT_SUFFIX_LIST[i] for i in range(len(models))]
     else:
         assert len(suffixes) == len(models)
+
+    if len(tables) == 2:
+        join_args = (
+            model_dict[tables[1][0]],
+            model_dict[tables[1][0]].__dict__[tables[1][1]]
+            == model_dict[tables[0][0]].__dict__[tables[0][1]],
+        )
+    elif len(tables) > 2:
+        raise Exception("Currently, only single joins are supported")
+    else:
+        join_args = None
     query_args = []
     for model, suffix in zip(models, suffixes):
         for column in model.__table__.columns:
+            if join_args is not None:
+                if (model == model_dict[tables[1][0]]) and (
+                    column == model_dict[tables[1][0]].__dict__[tables[1][1]]
+                ):
+                    continue
             if isinstance(column.type, Geometry) and ~return_wkb:
                 if column.key in dup_cols:
                     column_args = [
@@ -331,17 +347,6 @@ def specific_query(
                 query_args.append(column.label(column.key + suffix))
             else:
                 query_args.append(column)
-
-    if len(tables) == 2:
-        join_args = (
-            model_dict[tables[1][0]],
-            model_dict[tables[1][0]].__dict__[tables[1][1]]
-            == model_dict[tables[0][0]].__dict__[tables[0][1]],
-        )
-    elif len(tables) > 2:
-        raise Exception("Currently, only single joins are supported")
-    else:
-        join_args = None
 
     filter_args = []
     if filter_in_dict is not None:
