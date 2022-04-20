@@ -155,7 +155,7 @@ flask-restx==0.5.1
     #   flask-accepts
 flask-sqlalchemy==2.5.1
     # via -r requirements.in
-fpzip==1.2.0
+fpzip==1.1.5
     # via cloud-volume
 frozenlist==1.3.0
     # via
