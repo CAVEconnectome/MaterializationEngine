@@ -245,6 +245,7 @@ def specific_query(
     limit=None,
     get_count=False,
     suffixes=None,
+    outer_join=False,
 ):
     """Allows a more narrow query without requiring knowledge about the
         underlying data structures
@@ -274,6 +275,8 @@ def specific_query(
     limit: int or None
     get_count: bool
     suffixes: list of str or None
+    outer_join (bool, Optional):
+        whether to do an outer join, otherwise do an inner (default False )
 
     Returns
     -------
@@ -390,6 +393,7 @@ def specific_query(
         offset=offset,
         limit=limit,
         get_count=get_count,
+        outer_join=outer_join,
     )
     if consolidate_positions:
         return concatenate_position_columns(df)
@@ -418,6 +422,7 @@ def _make_query(
     select_columns=None,
     offset=None,
     limit=None,
+    outer_join=False,
 ):
     """Constructs a query object with selects, joins, and filters
 
@@ -427,6 +432,7 @@ def _make_query(
         filter_args: Iterable of iterables
         select_columns: None or Iterable of str
         offset: Int offset of query
+        outer_join: whether to do an outer join
 
     Returns:
         SQLAchemy query object
@@ -435,7 +441,10 @@ def _make_query(
     query = this_sqlalchemy_session.query(*query_args)
 
     if join_args is not None:
-        query = query.join(*join_args, full=False)
+        if outer_join:
+            query = query.outerjoin(*join_args, full=False)
+        else:
+            query = query.join(*join_args, full=False)
 
     if filter_args is not None:
         for f in filter_args:
@@ -475,7 +484,7 @@ def _execute_query(
     """
     # logging.info(query.statement)
 
-    print(f"get_count: {get_count}")
+    # print(f"get_count: {get_count}")
     if get_count:
         count = query.count()
         df = pd.DataFrame({"count": [count]})
@@ -506,6 +515,7 @@ def _query(
     offset=None,
     limit=None,
     get_count=False,
+    outer_join=False,
 ):
     """Wraps make_query and execute_query in one function
 
@@ -527,7 +537,7 @@ def _query(
     :param index_col:
     :return:
     """
-    print(filter_args)
+
     query = _make_query(
         this_sqlalchemy_session,
         query_args=query_args,
@@ -536,6 +546,7 @@ def _query(
         select_columns=select_columns,
         offset=offset,
         limit=limit,
+        outer_join=outer_join,
     )
 
     df = _execute_query(
