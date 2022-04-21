@@ -18,6 +18,7 @@ from sqlalchemy import func, not_
 from sqlalchemy.orm import Query, Session
 from sqlalchemy.sql.sqltypes import Boolean, Integer
 from sqlalchemy.ext.declarative import DeclarativeMeta
+import pyarrow.csv
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
 
@@ -246,6 +247,7 @@ def specific_query(
     get_count=False,
     suffixes=None,
     outer_join=False,
+    use_pandas=True,
 ):
     """Allows a more narrow query without requiring knowledge about the
         underlying data structures
@@ -277,7 +279,9 @@ def specific_query(
     suffixes: list of str or None
     outer_join (bool, Optional):
         whether to do an outer join, otherwise do an inner (default False )
-
+    use_pandas (bool, Optional):
+        whether to return the query as a pandas dataframe, if False return as a pyarrow table
+        if true return as a pandas dataframe (pandas is deprecated, but Default = True)
     Returns
     -------
     sqlalchemy query object:
@@ -401,6 +405,7 @@ def specific_query(
         limit=limit,
         get_count=get_count,
         outer_join=outer_join,
+        use_pandas=use_pandas,
     )
     if consolidate_positions:
         return concatenate_position_columns(df)
@@ -408,7 +413,40 @@ def specific_query(
         return df
 
 
-def read_sql_tmpfile(query, db_engine):
+def read_sql_tmpfile(query, db_engine,use_pandas=True):
+    #from pandas.core.dtypes.common import pandas_dtype
+    import datetime
+
+    # dtypes = {
+    #     col.key: col.type.python_type
+    #     for col in query.statement.columns
+    #     if (
+    #         (col.type.python_type != datetime.datetime)
+    #         and (col.type.python_type != bool)
+    #     )
+    # }
+    parse_dates = [
+        col.key
+        for col in query.statement.columns
+        if col.type.python_type == datetime.datetime
+    ]
+
+    # def map_types(t):
+    #     if t == int:
+    #         return pandas_dtype("Int64")
+    #     elif t == float:
+    #         return pandas_dtype("Float64")
+    #     elif t == str:
+    #         return pandas_dtype("string")
+    #     elif t == bool:
+    #         return bool
+    #     else:
+    #         return pandas_dtype(t)
+
+    # print(dtypes)
+    # dtypes = {k: map_types(v) for k, v in dtypes.items()}
+
+    # print(dtypes)
     with tempfile.TemporaryFile() as tmpfile:
         copy_sql = "COPY ({query}) TO STDOUT WITH CSV {head}".format(
             query=query, head="HEADER"
@@ -417,7 +455,15 @@ def read_sql_tmpfile(query, db_engine):
         cur = conn.cursor()
         cur.copy_expert(copy_sql, tmpfile)
         tmpfile.seek(0)
-        df = pd.read_csv(tmpfile)
+        if use_pandas:
+            df = pd.read_csv(tmpfile, parse_dates=parse_dates)
+        else:
+            df = pyarrow.csv.read_csv(
+                tmpfile,
+                convert_options=pyarrow.csv.ConvertOptions(
+                    true_values=["t"], false_values=["f"]
+                ),
+            )
         return df
 
 
@@ -477,6 +523,7 @@ def _execute_query(
     n_threads=None,
     index_col=None,
     get_count=False,
+    use_pandas=True,
 ):
     """Query the database and make a dataframe out of the results
 
@@ -496,16 +543,18 @@ def _execute_query(
         count = query.count()
         df = pd.DataFrame({"count": [count]})
     else:
+
         df = read_sql_tmpfile(
             query.statement.compile(engine, compile_kwargs={"literal_binds": True}),
             engine,
+            use_pandas=use_pandas,
         )
         # df = pd.read_sql(query.statement, engine,
         #                     coerce_float=False, index_col=index_col)
 
-        df = fix_columns_with_query(
-            df, query, fix_wkb=fix_wkb, fix_decimal=fix_decimal, n_threads=n_threads
-        )
+        # df = fix_columns_with_query(
+        #    df, query, fix_wkb=fix_wkb, fix_decimal=fix_decimal, n_threads=n_threads
+        # )
 
     return df
 
@@ -523,6 +572,7 @@ def _query(
     limit=None,
     get_count=False,
     outer_join=False,
+    use_pandas=True,
 ):
     """Wraps make_query and execute_query in one function
 
@@ -563,6 +613,7 @@ def _query(
         fix_wkb=fix_wkb,
         index_col=index_col,
         get_count=get_count,
+        use_pandas=use_pandas,
     )
 
     return df
