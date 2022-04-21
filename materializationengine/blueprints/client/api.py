@@ -174,7 +174,7 @@ def get_analysis_version_and_table(
 
 
 @cached(cache=LRUCache(maxsize=32))
-def get_split_models(datastack_name: str, table_name: str):
+def get_split_models(datastack_name: str, table_name: str, with_crud_columns=True):
     """get split models
 
     Args:
@@ -192,7 +192,9 @@ def get_split_models(datastack_name: str, table_name: str):
     SegModel = make_segmentation_model(
         table_name, schema_type, segmentation_source=pcg_table_name
     )
-    AnnModel = make_annotation_model(table_name, schema_type)
+    AnnModel = make_annotation_model(
+        table_name, schema_type, with_crud_columns=with_crud_columns
+    )
     return AnnModel, SegModel
 
 
@@ -535,8 +537,11 @@ class LiveTableQuery(Resource):
                 return filter
 
         filter_equal_dict = data.get("filter_equal_dict", None)
-        filter_equal_dict.update({"valid": True})
-
+        if filter_equal_dict is None:
+            filter_equal_dict = {table_name: {"valid": "t"}}
+        else:
+            filter_equal_dict["table_name"].update({"valid": "t"})
+        print(filter_equal_dict)
         df = specific_query(
             Session,
             engine,
@@ -548,9 +553,7 @@ class LiveTableQuery(Resource):
             filter_notin_dict=_format_filter(
                 data.get("filter_notin_dict", None), table_name, seg_table
             ),
-            filter_equal_dict=_format_filter(
-                data.get("filter_equal_dict", None), table_name, seg_table
-            ),
+            filter_equal_dict=_format_filter(filter_equal_dict, table_name, seg_table),
             filter_spatial=data.get("filter_spatial_dict", None),
             select_columns=data.get("select_columns", None),
             consolidate_positions=not args["split_positions"],
