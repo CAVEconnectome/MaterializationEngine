@@ -289,6 +289,7 @@ def specific_query(
 
     col_names, col_counts = np.unique(np.concatenate(column_lists), return_counts=True)
     dup_cols = col_names[col_counts > 1]
+
     # if there are duplicate columns we need to rename
     if suffixes is None:
         suffixes = [DEFAULT_SUFFIX_LIST[i] for i in range(len(models))]
@@ -301,6 +302,7 @@ def specific_query(
             model_dict[tables[1][0]].__dict__[tables[1][1]]
             == model_dict[tables[0][0]].__dict__[tables[0][1]],
         )
+        dup_cols = dup_cols[np.where(dup_cols != tables[1][1])]
     elif len(tables) > 2:
         raise Exception("Currently, only single joins are supported")
     else:
