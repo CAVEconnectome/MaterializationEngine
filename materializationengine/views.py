@@ -161,7 +161,7 @@ def version_view(datastack_name: str, id: int):
     )
     schema_url = "<a href='{}/schema/views/type/{}/view'>{}</a>"
     df["schema"] = df.schema.map(
-        lambda x: schema_url.format(current_app.config["GLOBAL_SERVER"], x, x)
+        lambda x: schema_url.format(current_app.config["GLOBAL_SERVER_URL"], x, x)
     )
     df["table_name"] = df.table_name.map(
         lambda x: "<a href='/annotation/views/aligned_volume/{}/table/{}'>{}</a>".format(

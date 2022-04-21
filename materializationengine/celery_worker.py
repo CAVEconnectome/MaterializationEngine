@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 
 from celery.app.builtins import add_backend_cleanup_task
@@ -7,9 +8,10 @@ from celery.signals import after_setup_logger
 from celery.utils.log import get_task_logger
 
 from materializationengine.celery_init import celery
+from materializationengine.celery_slack import post_to_slack_on_task_failure
 from materializationengine.errors import TaskNotFound
 from materializationengine.schemas import CeleryBeatSchema
-import os
+from materializationengine.utils import get_config_param
 from dateutil import relativedelta
 import datetime
 
@@ -31,16 +33,19 @@ def create_celery(app=None):
     celery.conf.update(
         {
             "task_routes": ("materializationengine.task_router.TaskRouter"),
-            "task_serializer": "pickle",
-            "result_serializer": "pickle",
-            "accept_content": ["pickle"],
+            "task_serializer": "json",
+            "result_serializer": "json",
+            "accept_content": ["json", "application/json"],
             "optimization": "fair",
             "task_send_sent_event": True,
+            "task_track_started": True,
             "worker_send_task_events": True,
             "worker_prefetch_multiplier": 1,
             "result_expires": 86400,  # results expire in broker after 1 day
-            # timeout (s) for tasks to be sent back to broker queue
-            "visibility_timeout": 8000,
+            "broker_transport_options": {
+                "visibility_timeout": 8000,
+            },  # timeout (s) for tasks to be sent back to broker queue
+            "beat_schedules": app.config["BEAT_SCHEDULES"],
         }
     )
 
@@ -55,6 +60,8 @@ def create_celery(app=None):
                 return TaskBase.__call__(self, *args, **kwargs)
 
     celery.Task = ContextTask
+    if os.environ.get("SLACK_WEBHOOK"):
+        celery.Task.on_failure = post_to_slack_on_task_failure
     return celery
 
 
@@ -95,6 +102,9 @@ def setup_periodic_tasks(sender, **kwargs):
     from materializationengine.workflows.periodic_database_removal import (
         remove_expired_databases,
     )
+    from materializationengine.workflows.periodic_materialization import (
+        run_periodic_materialization,
+    )
     from materializationengine.workflows.update_database_workflow import (
         run_periodic_database_update,
     )
@@ -114,7 +124,7 @@ def setup_periodic_tasks(sender, **kwargs):
         ),
         "run_periodic_database_update": run_periodic_database_update.s(),
         "remove_expired_databases": remove_expired_databases.s(
-            delete_threshold=os.environ.get("MIN_DATABASES", 3)
+            delete_threshold=get_config_param("MIN_DATABASES")
         ),
     }
 
@@ -125,7 +135,7 @@ def setup_periodic_tasks(sender, **kwargs):
         name="Clean up back end results",
     )
 
-    beat_schedules = celery.conf["BEAT_SCHEDULES"]
+    beat_schedules = celery.conf["beat_schedules"]
     celery_logger.info(beat_schedules)
     schedules = CeleryBeatSchema(many=True).dump(beat_schedules)
     for schedule in schedules:

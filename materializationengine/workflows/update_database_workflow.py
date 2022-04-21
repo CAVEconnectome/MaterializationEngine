@@ -2,24 +2,28 @@ import datetime
 import json
 import os
 
-from celery import chain, chord
+from celery import chain
 from celery.utils.log import get_task_logger
 from materializationengine.blueprints.materialize.api import get_datastack_info
 from materializationengine.celery_init import celery
-from materializationengine.shared_tasks import (fin,
-                                                generate_chunked_model_ids,
-                                                get_materialization_info,
-                                                workflow_complete)
+from materializationengine.shared_tasks import (
+    get_materialization_info,
+    monitor_workflow_state,
+    workflow_complete,
+)
+from materializationengine.task import LockedTask
 from materializationengine.utils import get_config_param
-from materializationengine.workflows.ingest_new_annotations import \
-    ingest_new_annotations_workflow
+from materializationengine.workflows.ingest_new_annotations import (
+    ingest_new_annotations_workflow,
+)
 from materializationengine.workflows.update_root_ids import (
-    get_expired_root_ids, update_root_ids_workflow)
+    update_root_ids_workflow,
+)
 
 celery_logger = get_task_logger(__name__)
 
 
-@celery.task(name="process:run_periodic_database_update")
+@celery.task(name="workflow:run_periodic_database_update")
 def run_periodic_database_update() -> None:
     """
     Run update database workflow. Steps are as follows:
@@ -37,15 +41,20 @@ def run_periodic_database_update() -> None:
             celery_logger.info(f"Start periodic database update job for {datastack}")
             datastack_info = get_datastack_info(datastack)
             task = update_database_workflow.s(datastack_info)
-            task.apply_async()
+            task.apply_async(kwargs={"Datastack": datastack})
         except Exception as e:
             celery_logger.error(e)
             raise e
     return True
 
 
-@celery.task(name="process:update_database_workflow")
-def update_database_workflow(datastack_info: dict):
+@celery.task(
+    bind=True,
+    base=LockedTask,
+    timeout=int(60 * 60 * 24 * 7),  # Task locked for 1 week
+    name="workflow:update_database_workflow",
+)
+def update_database_workflow(self, datastack_info: dict, **kwargs):
     """Updates 'live' database:
         - Find all annotations with missing segmentation rows
         and lookup supervoxel_id and root_id
@@ -69,37 +78,22 @@ def update_database_workflow(datastack_info: dict):
 
     # lookup missing segmentation data for new annotations and update expired root_ids
     # skip tables that are larger than 1,000,000 rows due to performance.
-    for mat_metadata in mat_info:
-        if not mat_metadata["reference_table"]:
-            annotation_chunks = generate_chunked_model_ids(mat_metadata)
-            chunked_roots = get_expired_root_ids(mat_metadata)
-            if mat_metadata["row_count"] < 1_000_000:
-                new_annotations = True
-                new_annotation_workflow = ingest_new_annotations_workflow(
-                    mat_metadata, annotation_chunks
+    try:
+        for mat_metadata in mat_info:
+            if not mat_metadata["reference_table"]:
+                workflow = chain(
+                    ingest_new_annotations_workflow(mat_metadata),
+                    update_root_ids_workflow(mat_metadata),
                 )
-            else:
-                new_annotations = None
 
-            if chunked_roots:
-                update_expired_roots_workflow = update_root_ids_workflow(
-                    mat_metadata, chunked_roots
-                )
-                if new_annotations:
-                    ingest_and_update_root_ids_workflow = chain(
-                        new_annotation_workflow, update_expired_roots_workflow
-                    )
-                    update_live_database_workflow.append(
-                        ingest_and_update_root_ids_workflow
-                    )
-                else:
-                    update_live_database_workflow.append(update_expired_roots_workflow)
-            elif new_annotations:
-                update_live_database_workflow.append(new_annotation_workflow)
-            else:
-                return "Nothing to update"
+            update_live_database_workflow.append(workflow)
 
-    run_update_database_workflow = chain(
-        chord(update_live_database_workflow, workflow_complete.si("update_root_ids")),
-    )
-    run_update_database_workflow.apply_async()
+        run_update_database_workflow = chain(
+            *update_live_database_workflow, workflow_complete.si("update_root_ids")
+        ).apply_async(kwargs={"Datastack": datastack_info["datastack"]})
+    except Exception as e:
+        celery_logger.error(f"An error has occurred: {e}")
+        raise e
+    tasks_completed = monitor_workflow_state(run_update_database_workflow)
+    if tasks_completed:
+        return True

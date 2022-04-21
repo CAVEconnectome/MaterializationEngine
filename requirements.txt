@@ -12,7 +12,7 @@ alembic==1.7.6
     # via
     #   -r requirements.in
     #   dynamicannotationdb
-amqp==2.6.1
+amqp==5.0.9
     # via kombu
 aniso8601==9.0.1
     # via flask-restx
@@ -41,6 +41,8 @@ brotli==1.0.9
     # via cloud-files
 brotlipy==0.7.0
     # via urllib3
+cached-property==1.5.2
+    # via kombu
 cachetools==5.0.0
     # via
     #   -r requirements.in
@@ -49,7 +51,7 @@ cachetools==5.0.0
     #   middle-auth-client
 caveclient==4.11.0
     # via -r requirements.in
-celery==4.4.7
+celery==5.2.5
     # via -r requirements.in
 certifi==2021.10.8
     # via
@@ -67,17 +69,27 @@ charset-normalizer==2.0.12
     # via
     #   aiohttp
     #   requests
-click==7.1.2
+click==8.1.2
     # via
+    #   celery
+    #   click-didyoumean
+    #   click-plugins
+    #   click-repl
     #   cloud-files
     #   compressed-segmentation
     #   compresso
     #   flask
+click-didyoumean==0.3.0
+    # via celery
+click-plugins==1.1.1
+    # via celery
+click-repl==0.2.0
+    # via celery
 cloud-files==4.7.0
     # via
     #   -r requirements.in
     #   cloud-volume
-cloud-volume==8.3.0
+cloud-volume==8.5.4
     # via -r requirements.in
 compressed-segmentation==2.1.1
     # via cloud-volume
@@ -93,6 +105,7 @@ decorator==5.1.1
     # via
     #   gcsfs
     #   ipython
+    #   networkx
 deflate==0.3.0
     # via cloud-files
 deprecated==1.2.13
@@ -111,7 +124,7 @@ emannotationschemas==3.8.4
     #   dynamicannotationdb
 fastremap==1.12.2
     # via cloud-volume
-flask==1.1.4
+flask==2.0.2
     # via
     #   -r requirements.in
     #   emannotationschemas
@@ -140,9 +153,9 @@ flask-restx==0.5.1
     #   -r requirements.in
     #   emannotationschemas
     #   flask-accepts
-flask-sqlalchemy==2.4.4
+flask-sqlalchemy==2.5.1
     # via -r requirements.in
-fpzip==1.2.0
+fpzip==1.1.5
     # via cloud-volume
 frozenlist==1.3.0
     # via
@@ -164,7 +177,7 @@ gevent==21.12.0
     #   -r requirements.in
     #   cloud-files
     #   cloud-volume
-google-api-core==2.5.0
+google-api-core==2.4.0
     # via
     #   google-cloud-core
     #   google-cloud-storage
@@ -193,7 +206,7 @@ google-crc32c==1.3.0
     # via
     #   cloud-files
     #   google-resumable-media
-google-resumable-media==2.2.1
+google-resumable-media==2.1.0
     # via google-cloud-storage
 googleapis-common-protos==1.54.0
     # via google-api-core
@@ -204,9 +217,11 @@ idna==3.3
     #   requests
     #   urllib3
     #   yarl
-importlib-metadata==4.11.1
+importlib-metadata==4.10.1
     # via
     #   alembic
+    #   celery
+    #   click
     #   jsonschema
     #   kombu
     #   markdown
@@ -221,11 +236,11 @@ iniconfig==1.1.1
     # via pytest
 ipython==7.31.1
     # via caveclient
-itsdangerous==1.1.0
+itsdangerous==2.0.1
     # via flask
 jedi==0.18.1
     # via ipython
-jinja2==2.11.3
+jinja2==3.0.3
     # via flask
 jmespath==0.10.0
     # via
@@ -241,7 +256,7 @@ jsonschema==3.2.0
     #   emannotationschemas
     #   flask-restx
     #   python-jsonschema-objects
-kombu==4.6.11
+kombu==5.2.3
     # via celery
 mako==1.1.6
     # via alembic
@@ -278,7 +293,7 @@ multiprocess==0.70.12.2
     # via pathos
 multiwrapper==0.1.1
     # via -r requirements.in
-networkx==2.6.3
+networkx==2.1
     # via
     #   caveclient
     #   cloud-volume
@@ -295,6 +310,7 @@ numpy==1.21.5
     #   multiwrapper
     #   pandas
     #   pyarrow
+    #   pyspng-seunglab
     #   simplejpeg
 oauthlib==3.2.0
     # via requests-oauthlib
@@ -307,7 +323,7 @@ packaging==21.3
     #   geoalchemy2
     #   pytest
     #   redis
-pandas==1.1.5
+pandas==1.3.5
     # via
     #   -r requirements.in
     #   caveclient
@@ -335,7 +351,9 @@ pox==0.3.0
 ppft==1.6.6.4
     # via pathos
 prompt-toolkit==3.0.28
-    # via ipython
+    # via
+    #   click-repl
+    #   ipython
 protobuf==3.19.4
     # via
     #   cloud-files
@@ -376,6 +394,8 @@ pyparsing==3.0.7
 pyrsistent==0.18.1
     # via jsonschema
 pysimdjson==4.0.3
+    # via cloud-volume
+pyspng-seunglab==1.0.0
     # via cloud-volume
 pytest==7.0.1
     # via
@@ -425,6 +445,7 @@ simplejpeg==1.6.3
     # via cloud-volume
 six==1.16.0
     # via
+    #   click-repl
     #   cloud-files
     #   cloud-volume
     #   flask-cors
@@ -473,13 +494,14 @@ urllib3[brotli,secure]==1.26.8
     #   cloud-files
     #   cloud-volume
     #   requests
-vine==1.3.0
+vine==5.0.0
     # via
     #   amqp
     #   celery
+    #   kombu
 wcwidth==0.2.5
     # via prompt-toolkit
-werkzeug==1.0.1
+werkzeug==2.0.2
     # via
     #   flask
     #   flask-accepts

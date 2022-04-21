@@ -19,21 +19,26 @@ class BaseConfig:
     REDIS_URL = "redis://"
     CELERY_BROKER_URL = "memory://"
     CELERY_RESULT_BACKEND = REDIS_URL
-    LOCAL_SERVICE_URL = os.environ.get("LOCAL_SERVICE_URL")
-    ANNO_ENDPOINT = f"https://{LOCAL_SERVICE_URL}/annotation/"
-    INFOSERVICE_ENDPOINT = "https://global.daf-apis.com/info"
-    AUTH_URI = "https://global.daf-apis.com/auth"
-    GLOBAL_SERVER = "https://global.daf-apis.com"
-    SCHEMA_SERVICE_ENDPOINT = "https://global.daf-apis.com/schema/"
-    SEGMENTATION_ENDPOINT = "https://global.daf-apis.com/"
+    LOCAL_SERVER_URL = os.environ.get("LOCAL_SERVER_URL")
+    GLOBAL_SERVER_URL = "https://global.daf-apis.com"
+    ANNO_ENDPOINT = f"{LOCAL_SERVER_URL}/annotation/"
+    INFOSERVICE_ENDPOINT = f"{GLOBAL_SERVER_URL}/info"
+    AUTH_URI = f"{GLOBAL_SERVER_URL}/auth"
+    SCHEMA_SERVICE_ENDPOINT = f"{GLOBAL_SERVER_URL}/schema/"
+    SEGMENTATION_ENDPOINT = f"{GLOBAL_SERVER_URL}/segmentation"
     MASTER_NAME = os.environ.get("MASTER_NAME", None)
     MATERIALIZATION_ROW_CHUNK_SIZE = 500
     QUERY_LIMIT_SIZE = 200000
+    QUEUE_LENGTH_LIMIT = 10000
+    QUEUES_TO_THROTTLE = ["process"]
+    THROTTLE_QUEUES = True
     CELERY_WORKER_IP = os.environ.get("CELERY_WORKER_IP", "127.0.0.1")
     DATASTACKS = ["minnie65_phase3_v1"]
     DAYS_TO_EXPIRE = 7
     LTS_DAYS_TO_EXPIRE = 30
     INFO_API_VERSION = 2
+    MIN_DATABASES = 2
+    MAX_DATABASES = 2
     AUTH_SERVICE_NAMESPACE = "datastack"
     if os.environ.get("DAF_CREDENTIALS", None) is not None:
         with open(os.environ.get("DAF_CREDENTIALS"), "r") as f:
@@ -82,15 +87,15 @@ class BaseConfig:
             "name": "Update Live Database",
             "minute": 0,
             "hour": "0-1,17-23",
-            "day_of_week": '1-5',
-            "task": "run_periodic_database_update"
+            "day_of_week": "1-5",
+            "task": "run_periodic_database_update",
         },
     ]
 
 
 class DevConfig(BaseConfig):
     ENV = "development"
-    DEBUG = True
+    # DEBUG = True
     SQLALCHEMY_DATABASE_URI = "postgres://postgres:materialize@db:5432/materialize"
     REDIS_HOST = os.environ.get("REDIS_HOST")
     REDIS_PORT = os.environ.get("REDIS_PORT")

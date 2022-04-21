@@ -13,10 +13,10 @@ def check_pcg_mapping(table_id):
 
 
 default_server_address = os.environ.get(
-    "GLOBAL_SERVER_ADDRESS", default_global_server_address
+    "GLOBAL_SERVER_URL", default_global_server_address
 )
 
-PCG_SERVICE = os.environ.get("PCG_SERVICE", "http://pychunkedgraph-service/")
+PCG_SERVICE = os.environ.get("LOCAL_SERVER_URL", "http://pychunkedgraph-service/")
 
 
 class ChunkedGraphGateway:
