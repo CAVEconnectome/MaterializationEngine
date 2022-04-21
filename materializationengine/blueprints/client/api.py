@@ -49,7 +49,7 @@ from flask_restx import inputs
 import time
 
 
-__version__ = "2.14.6"
+__version__ = "3.0.0"
 
 
 authorizations = {
