@@ -112,7 +112,14 @@ query_parser.add_argument(
     location="args",
     help="whether to return pyarrow in pandas format, if false will return pyarrow table. true is default but deprecated",
 )
-
+query_parser.add_argument(
+    "filter_invalid",
+    type=inputs.boolean,
+    default=True,
+    required=False,
+    location="args",
+    help="whether to filter out invalid or expired annotations automatically (default is true), use false to see old/replaced annotations",
+)
 
 def after_request(response):
 
@@ -204,7 +211,6 @@ def get_split_models(datastack_name: str, table_name: str, with_crud_columns=Tru
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
     schema_type = db.get_table_schema(table_name)
-    print(with_crud_columns)
     SegModel = make_segmentation_model(
         table_name, schema_type, segmentation_source=pcg_table_name
     )
@@ -558,10 +564,11 @@ class LiveTableQuery(Resource):
                 return filter
 
         filter_equal_dict = data.get("filter_equal_dict", None)
-        if filter_equal_dict is None:
-            filter_equal_dict = {table_name: {"valid": "t"}}
-        else:
-            filter_equal_dict["table_name"].update({"valid": "t"})
+        if args['filter_invalid']:
+            if filter_equal_dict is None:
+                filter_equal_dict = {table_name: {"valid": "t"}}
+            else:
+                filter_equal_dict["table_name"].update({"valid": "t"})
         df = specific_query(
             Session,
             engine,
