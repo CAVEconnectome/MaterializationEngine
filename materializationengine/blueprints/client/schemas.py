@@ -45,6 +45,11 @@ class SimpleQuerySchema(Schema):
     limit = fields.Integer()
 
 
+class SimpleQueryWithTimeFilterSchema(SimpleQuerySchema):
+    timestamp_start = fields.DateTime(required=False)
+    timestamp_end = fields.DateTime(required=False)
+
+
 class ComplexQuerySchema(Schema):
     tables = fields.List(
         fields.List(fields.Str, validate=Length(equal=2)), required=True

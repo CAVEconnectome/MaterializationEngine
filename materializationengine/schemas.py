@@ -1,9 +1,16 @@
 from materializationengine.models import AnalysisTable, AnalysisVersion
+from dynamicannotationdb.models import SegmentationMetadata
 from flask_marshmallow import Marshmallow
 from marshmallow import fields, ValidationError, Schema
 from marshmallow_sqlalchemy import SQLAlchemyAutoSchema
 
 ma = Marshmallow()
+
+
+class SegmentationMetadataSchema(SQLAlchemyAutoSchema):
+    class Meta:
+        model = SegmentationMetadata
+        load_instance = True
 
 
 class AnalysisVersionSchema(SQLAlchemyAutoSchema):

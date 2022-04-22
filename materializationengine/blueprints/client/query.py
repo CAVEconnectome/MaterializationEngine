@@ -249,6 +249,7 @@ def specific_query(
     suffixes=None,
     outer_join=False,
     use_pandas=True,
+    extra_filter_args=None,
 ):
     """Allows a more narrow query without requiring knowledge about the
         underlying data structures
@@ -283,6 +284,8 @@ def specific_query(
     use_pandas (bool, Optional):
         whether to return the query as a pandas dataframe, if False return as a pyarrow table
         if true return as a pandas dataframe (pandas is deprecated, but Default = True)
+    extra_filter_args: (list of None)
+        list of extra filters to apply to the query
     Returns
     -------
     sqlalchemy query object:
@@ -355,7 +358,7 @@ def specific_query(
             else:
                 query_args.append(column)
 
-    filter_args = []
+    filter_args = extra_filter_args if extra_filter_args else []
     if filter_in_dict is not None:
         for filter_table, filter_table_dict in filter_in_dict.items():
             for column_name in filter_table_dict.keys():

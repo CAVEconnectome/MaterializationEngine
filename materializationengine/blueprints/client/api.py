@@ -1,53 +1,47 @@
 import logging
-import os
 from cloudfiles import compression
 import pyarrow as pa
 from cachetools import LRUCache, TTLCache, cached
-from emannotationschemas import get_schema
 from emannotationschemas.models import (
-    Base,
-    annotation_models,
-    create_table_dict,
     make_flat_model,
     make_annotation_model,
     make_segmentation_model,
 )
-from flask import Response, abort, current_app, request, stream_with_context
-from flask_accepts import accepts, responds
+from flask import Response, abort, current_app, request
+from flask_accepts import accepts
 from flask_restx import Namespace, Resource, reqparse
-from materializationengine.blueprints.client.query import _execute_query, specific_query
+from materializationengine.blueprints.client.query import specific_query
 from materializationengine.blueprints.client.schemas import (
     ComplexQuerySchema,
-    CreateTableSchema,
-    GetDeleteAnnotationSchema,
-    Metadata,
-    PostPutAnnotationSchema,
-    SegmentationDataSchema,
-    SegmentationTableSchema,
     SimpleQuerySchema,
+    SimpleQueryWithTimeFilterSchema,
 )
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import (
-    create_session,
     dynamic_annotation_cache,
     sqlalchemy_cache,
 )
 from materializationengine.info_client import (
     get_aligned_volumes,
     get_datastack_info,
-    get_datastacks,
 )
 from materializationengine.models import AnalysisTable, AnalysisVersion
-from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
+from materializationengine.schemas import (
+    AnalysisTableSchema,
+    AnalysisVersionSchema,
+    SegmentationMetadataSchema,
+)
 from middle_auth_client import (
     auth_required,
     auth_requires_admin,
     auth_requires_permission,
 )
-from sqlalchemy.engine.url import make_url
 from flask_restx import inputs
 import time
-import io
+from dynamicannotationdb.errors import (
+    TableNameNotFound,
+)
+from sqlalchemy import or_, and_
 
 __version__ = "3.0.0"
 
@@ -120,6 +114,7 @@ query_parser.add_argument(
     location="args",
     help="whether to filter out invalid or expired annotations automatically (default is true), use false to see old/replaced annotations",
 )
+
 
 def after_request(response):
 
@@ -324,6 +319,37 @@ class DatastackVersion(Resource):
         return schema.dump(response), 200
 
 
+@client_bp.route(
+    "/datastack/<string:datastack_name>/table/<string:table_name>/segmentation_metadata"
+)
+class TableSegmentationMetadata(Resource):
+    @reset_auth
+    @auth_requires_permission("view", table_arg="datastack_name")
+    @client_bp.doc("view production table segmentation metadata", security="apikey")
+    def get(self, datastack_name: str, table_name: str):
+        """get metadata on the segmentation data for a table associated with a datastack
+        in the production table, useful for understanding when the data was last updated
+        successfully.. data could be in the middle of being updated.
+        Args:
+            datastack_name (str): datastack name
+            table_name (str): annotation table name
+        Returns:
+            dict: dict of metadata
+        """
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        try:
+            seg_table_metadata = db.get_segmentation_table_metadata(
+                table_name, pcg_table_name
+            )
+        except TableNameNotFound:
+            return f"table {table_name} not found in datastack {datastack_name}", 404
+        schema = SegmentationMetadataSchema()
+        return schema.dump(seg_table_metadata, many=False), 200
+
+
 @client_bp.route("/datastack/<string:datastack_name>/metadata")
 class DatastackMetadata(Resource):
     @reset_auth
@@ -464,9 +490,17 @@ class LiveTableQuery(Resource):
     @reset_auth
     @auth_requires_permission("admin_view", table_arg="datastack_name")
     @client_bp.doc("live_simple_query", security="apikey")
-    @accepts("SimpleQuerySchema", schema=SimpleQuerySchema, api=client_bp)
+    @accepts(
+        "SimpleQueryWithTimeFilterSchema",
+        schema=SimpleQueryWithTimeFilterSchema,
+        api=client_bp,
+    )
     def post(self, datastack_name: str, table_name: str):
-        """endpoint for doing a query with filters
+        """endpoint for doing a query with filters on the production database
+        this data is subject to change any any moment based upon annotations
+        or proofreading and is not stable for analysis.
+        timestamp_start and timestamp_end will filter the results to only
+        include annotations that were created or deleted in that time interval
 
         Args:
             datastack_name (str): datastack name
@@ -476,6 +510,8 @@ class LiveTableQuery(Resource):
         All values are optional.  Limit has an upper bound set by the server.
         Consult the schema of the table for column names and appropriate values
         {
+            "timestamp_start": "%Y-%m-%dT%H:%M:%S.%f",
+            "timestamp_end":"%Y-%m-%dT%H:%M:%S.%f",
             "filter_out_dict": {
                 "tablename":{
                     "column_name":[excluded,values]
@@ -564,11 +600,35 @@ class LiveTableQuery(Resource):
                 return filter
 
         filter_equal_dict = data.get("filter_equal_dict", None)
-        if args['filter_invalid']:
+        if args["filter_invalid"]:
             if filter_equal_dict is None:
                 filter_equal_dict = {table_name: {"valid": "t"}}
             else:
                 filter_equal_dict["table_name"].update({"valid": "t"})
+
+        time_filter_args = []
+        timestamp_start = data.get("timestamp_start", None)
+        timestamp_end = data.get("timestamp_end", None)
+        if timestamp_start and timestamp_end:
+            f1 = AnnModel.created.between(str(timestamp_start), str(timestamp_end))
+            f2 = AnnModel.deleted.between(str(timestamp_start), str(timestamp_end))
+            f = or_(f1, or_(f2, AnnModel.deleted.is_(None)))
+            time_filter_args.append(f)
+        elif timestamp_start:
+            f1 = or_(
+                AnnModel.created > str(timestamp_start),
+                or_(
+                    AnnModel.deleted > str(timestamp_start), AnnModel.deleted.is_(None)
+                ),
+            )
+            time_filter_args.append(f1)
+        elif timestamp_end:
+            f1 = or_(
+                AnnModel.created < str(timestamp_end),
+                or_(AnnModel.deleted < str(timestamp_end), AnnModel.deleted.is_(None)),
+            )
+            time_filter_args.append(f1)
+
         df = specific_query(
             Session,
             engine,
@@ -589,6 +649,7 @@ class LiveTableQuery(Resource):
             get_count=get_count,
             outer_join=True,
             use_pandas=args["return_pandas"],
+            extra_filter_args=time_filter_args,
         )
         time_d["execute query"] = time.time() - now
         now = time.time()
