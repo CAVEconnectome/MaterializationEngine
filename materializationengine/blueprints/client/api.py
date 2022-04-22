@@ -672,7 +672,7 @@ class LiveTableQuery(Resource):
                 "return_pandas=true is deprecated and may convert columns with nulls to floats, Please upgrade CAVEclient to >XXX with pip install -U caveclient"
             )
         if len(warnings) > 0:
-            headers = {"Warning": "\n".join(warnings)}
+            headers = {"Warning": ". ".join(warnings)}
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
             serialized = context.serialize(df).to_buffer().to_pybytes()
@@ -808,7 +808,7 @@ class FrozenTableQuery(Resource):
                 please upgrade CAVEclient to >XXX with pip install -U caveclient"
             )
         if len(warnings) > 0:
-            headers = {"Warning": "\n".join(warnings)}
+            headers = {"Warning": ". ".join(warnings)}
 
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
@@ -923,7 +923,7 @@ class FrozenQuery(Resource):
                 please upgrade CAVEclient to >XXX with pip install -U caveclient"
             )
         if len(warnings) > 0:
-            headers = {"Warning": "\n".join(warnings)}
+            headers = {"Warning": ". ".join(warnings)}
 
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
