@@ -41,7 +41,7 @@ import time
 from dynamicannotationdb.errors import (
     TableNameNotFound,
 )
-from sqlalchemy import or_, and_
+from sqlalchemy import or_, and_, not_
 
 __version__ = "3.0.0"
 
@@ -612,20 +612,22 @@ class LiveTableQuery(Resource):
         if timestamp_start and timestamp_end:
             f1 = AnnModel.created.between(str(timestamp_start), str(timestamp_end))
             f2 = AnnModel.deleted.between(str(timestamp_start), str(timestamp_end))
-            f = or_(f1, or_(f2, AnnModel.deleted.is_(None)))
+            f = (or_(f1, f2),)
             time_filter_args.append(f)
         elif timestamp_start:
-            f1 = or_(
-                AnnModel.created > str(timestamp_start),
+            f1 = (
                 or_(
-                    AnnModel.deleted > str(timestamp_start), AnnModel.deleted.is_(None)
+                    AnnModel.created > str(timestamp_start),
+                    AnnModel.deleted > str(timestamp_start),
                 ),
             )
             time_filter_args.append(f1)
         elif timestamp_end:
-            f1 = or_(
-                AnnModel.created < str(timestamp_end),
-                or_(AnnModel.deleted < str(timestamp_end), AnnModel.deleted.is_(None)),
+            f1 = (
+                or_(
+                    AnnModel.created < str(timestamp_end),
+                    AnnModel.deleted < str(timestamp_end),
+                ),
             )
             time_filter_args.append(f1)
 
