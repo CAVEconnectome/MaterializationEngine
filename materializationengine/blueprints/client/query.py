@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from functools import partial
 from typing import List
-
+from collections.abc import Iterable
 import numpy as np
 import pandas as pd
 import shapely
@@ -21,7 +21,152 @@ from sqlalchemy.ext.declarative import DeclarativeMeta
 import pyarrow as pa
 import pyarrow.csv
 
+
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
+
+
+def map_filters(filters, timestamp: datetime, timestamp_past: datetime, cg_client):
+    """translate a list of filter dictionaries
+       from a point in the future, to a point in the past
+
+    Args:
+        filters (list[dict]): filter dictionaries with
+        timestamp ([datetime.datetime]): timestamp you want to query with
+        timestamp_past ([datetime.datetime]): timestamp rootids are passed in
+
+    Returns:
+        new_filters: list[dict]
+            filters translated to timestamp past
+        future_id_map: dict
+            mapping from passed IDs to the IDs in the past
+    """
+
+    new_filters = []
+    root_ids = []
+    for filter_dict in filters:
+        if filter_dict is not None:
+            for col, val in filter_dict.items():
+                if col.endswith("root_id"):
+                    if not isinstance(val, (Iterable, np.ndarray)):
+                        root_ids.append([val])
+                    else:
+                        root_ids.append(val)
+
+    # if there are no root_ids then we can safely return now
+    if len(root_ids) == 0:
+        return filters, {}
+    root_ids = np.unique(np.concatenate(root_ids))
+    cg_client = chunkedgraph_cache.init_pcg(pcg_table)
+    filter_timed_end = cg_client.is_latest_roots(root_ids, timestamp=timestamp)
+    filter_timed_start = cg_client.get_root_timestamps(root_ids) < timestamp
+    filter_timestamp = np.logical_and(filter_timed_start, filter_timed_end)
+    if not np.all(filter_timestamp):
+        roots_too_old = root_ids[~filter_timed_end]
+        roots_too_recent = root_ids[~filter_timed_start]
+
+        if len(roots_too_old) > 0:
+            too_old_str = f"{roots_too_old} are expired, "
+        else:
+            too_old_str = ""
+        if len(roots_too_recent) > 0:
+            too_recent_str = f"{roots_too_recent} are too recent, "
+        else:
+            too_recent_str = ""
+
+        raise ValueError(
+            f"Timestamp incompatible with IDs: {too_old_str}{too_recent_str}use chunkedgraph client to find valid ID(s)"
+        )
+
+    id_mapping = cg_client.get_past_ids(
+        root_ids, timestamp_past=timestamp_past, timestamp_future=timestamp
+    )
+    for filter_dict in filters:
+        if filter_dict is None:
+            new_filters.append(filter_dict)
+        else:
+            new_dict = {}
+            for col, root_ids in filter_dict.items():
+                if col.endswith("root_id"):
+                    if not isinstance(root_ids, (Iterable, np.ndarray)):
+                        new_dict[col] = id_mapping["past_id_map"][root_ids]
+                    else:
+                        new_dict[col] = np.concatenate(
+                            [id_mapping["past_id_map"][v] for v in root_ids]
+                        )
+                else:
+                    new_dict[col] = root_ids
+            new_filters.append(new_dict)
+    return new_filters, id_mapping["future_id_map"]
+
+
+def _update_rootids(df: pd.DataFrame, timestamp: datetime, future_map: dict, cg_client):
+    # post process the dataframe to update all the root_ids columns
+    # with the most up to date get roots
+    if len(future_map) == 0:
+        future_map = None
+
+    sv_columns = [c for c in df.columns if c.endswith("supervoxel_id")]
+
+    all_root_ids = np.empty(0, dtype=np.int64)
+
+    # go through the columns and collect all the root_ids to check
+    # to see if they need updating
+    for sv_col in sv_columns:
+        root_id_col = sv_col[: -len("supervoxel_id")] + "root_id"
+        # use the future map to update rootIDs
+        if future_map is not None:
+            df[root_id_col].replace(future_map, inplace=True)
+        all_root_ids = np.append(all_root_ids, df[root_id_col].values.copy())
+
+    uniq_root_ids = np.unique(all_root_ids)
+
+    del all_root_ids
+    uniq_root_ids = uniq_root_ids[uniq_root_ids != 0]
+    # logging.info(f"uniq_root_ids {uniq_root_ids}")
+
+    is_latest_root = cg_client.is_latest_roots(uniq_root_ids, timestamp=timestamp)
+    latest_root_ids = uniq_root_ids[is_latest_root]
+    latest_root_ids = np.concatenate([[0], latest_root_ids])
+
+    # go through the columns and collect all the supervoxel ids to update
+    all_svids = np.empty(0, dtype=np.int64)
+    all_is_latest = []
+    all_svid_lengths = []
+    for sv_col in sv_columns:
+        root_id_col = sv_col[: -len("supervoxel_id")] + "root_id"
+        svids = df[sv_col].values
+        root_ids = df[root_id_col]
+        is_latest_root = np.isin(root_ids, latest_root_ids)
+        all_is_latest.append(is_latest_root)
+        n_svids = len(svids[~is_latest_root])
+        all_svid_lengths.append(n_svids)
+        logging.info(f"{sv_col} has {n_svids} to update")
+        all_svids = np.append(all_svids, svids[~is_latest_root])
+    logging.info(f"num zero svids: {np.sum(all_svids==0)}")
+    logging.info(f"all_svids dtype {all_svids.dtype}")
+    logging.info(f"all_svid_lengths {all_svid_lengths}")
+
+    # find the up to date root_ids for those supervoxels
+    updated_root_ids = cg_client.get_roots(all_svids, timestamp=timestamp)
+    del all_svids
+
+    # loop through the columns again replacing the root ids with their updated
+    # supervoxelids
+    k = 0
+    for is_latest_root, n_svids, sv_col in zip(
+        all_is_latest, all_svid_lengths, sv_columns
+    ):
+        root_id_col = sv_col[: -len("supervoxel_id")] + "root_id"
+        root_ids = df[root_id_col].values.copy()
+
+        uroot_id = updated_root_ids[k : k + n_svids]
+        k += n_svids
+        root_ids[~is_latest_root] = uroot_id
+        # ran into an isssue with pyarrow producing read only columns
+        df[root_id_col] = None
+        df[root_id_col] = root_ids
+
+    return df
 
 
 def concatenate_position_columns(df):

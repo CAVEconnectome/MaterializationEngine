@@ -18,7 +18,11 @@ from emannotationschemas.models import (
 from flask import Response, abort, current_app, request
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, reqparse
-from materializationengine.blueprints.client.query import specific_query
+from materializationengine.blueprints.client.query import (
+    specific_query,
+    map_filters,
+    _update_rootids,
+)
 from materializationengine.blueprints.client.schemas import (
     ComplexQuerySchema,
     SimpleQuerySchema,
@@ -53,6 +57,10 @@ from dynamicannotationdb.errors import (
     TableNameNotFound,
 )
 from sqlalchemy import or_, and_, not_
+from datetime import datetime
+from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
+import pandas as pd
+import numpy as np
 
 __version__ = "4.0.20"
 
@@ -118,12 +126,12 @@ query_parser.add_argument(
     help="whether to return pyarrow in pandas format, if false will return pyarrow table. true is default but deprecated",
 )
 query_parser.add_argument(
-    "filter_invalid",
-    type=inputs.boolean,
-    default=True,
+    "timestamp",
+    type=inputs.datetime_from_iso8601,
+    default=datetime.utcnow(),
     required=False,
     location="args",
-    help="whether to filter out invalid or expired annotations automatically (default is true), use false to see old/replaced annotations",
+    help="what timestamp to query at",
 )
 
 
@@ -494,23 +502,36 @@ class FrozenTableCount(Resource):
         return Session().query(Model).count(), 200
 
 
+def _format_filter(filter, table_in):
+    if filter is None:
+        return filter
+    else:
+        table_filter = filter.get(table_in, None)
+        # root_id_filters = [
+        #     c for c in table_filter.keys() if c.endswith("root_id")
+        # ]
+        other_filters = [c for c in table_filter.keys() if not c.endswith("root_id")]
+
+        # filter[seg_table] = {c: table_filter[c] for c in root_id_filters}
+        filter[table_in] = {c: table_filter[c] for c in other_filters}
+        return filter
+
+
 @client_bp.expect(query_parser)
 @client_bp.route("/datastack/<string:datastack_name>/table/<string:table_name>/query")
 class LiveTableQuery(Resource):
     @reset_auth
-    @auth_requires_permission("admin_view", table_arg="datastack_name")
+    @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("live_simple_query", security="apikey")
     @accepts(
-        "SimpleQueryWithTimeFilterSchema",
-        schema=SimpleQueryWithTimeFilterSchema,
+        "SimpleQuerySchema",
+        schema=SimpleQuerySchema,
         api=client_bp,
     )
     def post(self, datastack_name: str, table_name: str):
         """endpoint for doing a query with filters on the production database
         this data is subject to change any any moment based upon annotations
         or proofreading and is not stable for analysis.
-        timestamp_start and timestamp_end will filter the results to only
-        include annotations that were created or deleted in that time interval
 
         Args:
             datastack_name (str): datastack name
@@ -520,8 +541,6 @@ class LiveTableQuery(Resource):
         All values are optional.  Limit has an upper bound set by the server.
         Consult the schema of the table for column names and appropriate values
         {
-            "timestamp_start": "%Y-%m-%dT%H:%M:%S.%f",
-            "timestamp_end":"%Y-%m-%dT%H:%M:%S.%f",
             "filter_out_dict": {
                 "tablename":{
                     "column_name":[excluded,values]
@@ -557,16 +576,7 @@ class LiveTableQuery(Resource):
         time_d = {}
         now = time.time()
 
-        data = request.parsed_obj
-
-        AnnModel, SegModel = get_split_models(
-            datastack_name,
-            table_name,
-            with_crud_columns=args.get("include_crud_columns", False),
-        )
-
-        time_d["get Model"] = time.time() - now
-        now = time.time()
+        timestamp = args["timestamp"]
 
         engine = sqlalchemy_cache.get_engine(aligned_volume_name)
         time_d["get engine"] = time.time() - now
@@ -588,91 +598,199 @@ class LiveTableQuery(Resource):
 
         logging.info("query {}".format(data))
         logging.info("args - {}".format(args))
+        Session = sqlalchemy_cache.get(aligned_volume_name)
+
+        # find the analysis version that we use to support this timestamp
+        base_analysis_version = (
+            Session.query(AnalysisVersion)
+            .filter(AnalysisVersion.datastack == datastack_name)
+            .filter(AnalysisVersion.valid == True)
+            .filter(AnalysisVersion.time_stamp < str(timestamp))
+            .order_by(AnalysisVersion.time_stamp.desc())
+            .first()
+        )
+        if base_analysis_version is None:
+            return "No version available to support that timestamp", 404
+
+        timestamp_start = base_analysis_version.time_stamp
+        # check if the table is in this timestamp
+        analysis_table = (
+            Session.query(AnalysisTable)
+            .filter(AnalysisTable.analysisversion_id == base_analysis_version.id)
+            .filter(AnalysisTable.valid == True)
+            .filter(AnalysisTable.table_name == table_name)
+            .first()
+        )
+        filter_in_dict = data.get("filter_in_dict", None)
+        filter_out_dict = data.get("filter_notin_dict", None)
+        filter_equal_dict = data.get("filter_equal_dict", None)
+
+        # db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        # table_metadata = db.get_table_metadata(table_name)
+        cg_client = chunkedgraph_cache.init_pcg(pcg_table_name)
+        if analysis_table is None:
+            df_mat = None
+        else:
+            # if it is translate the query parameters to that moment in time
+
+            version = base_analysis_version.version
+            mat_engine = sqlalchemy_cache.get_engine(
+                "{}__mat{}".format(datastack_name, version)
+            )
+            Model = get_flat_model(datastack_name, table_name, version, Session)
+            time_d["get Model"] = time.time() - now
+            now = time.time()
+
+            MatSession = sqlalchemy_cache.get(
+                "{}__mat{}".format(datastack_name, version)
+            )
+
+            past_filters, future_map = map_filters(
+                [filter_in_dict, filter_out_dict, filter_equal_dict],
+                timestamp,
+                timestamp_start,
+                cg_client,
+            )
+            past_filter_in_dict, past_filter_out_dict, past_equal_dict = past_filters
+            if past_equal_dict is not None:
+                # when doing a filter equal in the past
+                # we translate it to a filter_in, as 1 ID might
+                # be multiple IDs in the past.
+                # so we want to update the filter_in dict
+                cols = [col for col in past_equal_dict.keys()]
+                for col in cols:
+                    if col.endswith("root_id"):
+                        if past_filter_in_dict is None:
+                            past_filter_in_dict = {}
+                        past_filter_in_dict[col] = past_equal_dict.pop(col)
+                if len(past_equal_dict) == 0:
+                    past_equal_dict = None
+
+            time_d["get MatSession"] = time.time() - now
+            now = time.time()
+
+            # todo fix reference annotations
+            # tables, suffixes = self._resolve_merge_reference(
+            #     True, table_name, datastack_name, version
+            # )
+            # model_dict = {}
+            # for table_desc in data["tables"]:
+            #     table_name = table_desc[0]
+            #     Model = get_flat_model(datastack_name, table_name, version, Session)
+            #     model_dict[table_name] = Model
+
+            df_mat = specific_query(
+                MatSession,
+                mat_engine,
+                {table_name: Model},
+                [table_name],
+                filter_in_dict=past_filter_in_dict,
+                filter_notin_dict=past_filter_out_dict,
+                filter_equal_dict=None,
+                filter_spatial=data.get("filter_spatial_dict", None),
+                select_columns=data.get("select_columns", None),
+                consolidate_positions=False,
+                offset=data.get("offset", None),
+                limit=limit,
+                get_count=get_count,
+                use_pandas=True,
+            )
+            df_mat = _update_rootids(df_mat, timestamp, future_map, cg_client)
+        AnnModel, SegModel = get_split_models(
+            datastack_name,
+            table_name,
+            with_crud_columns=args.get("include_crud_columns", False),
+        )
+
+        time_d["get Model"] = time.time() - now
+        now = time.time()
+
+        # get the production database with a timestamp interval query
+        f1 = AnnModel.created.between(str(timestamp_start), str(timestamp))
+        f2 = AnnModel.deleted.between(str(timestamp_start), str(timestamp))
+        f = (or_(f1, f2),)
+        time_filter_args = [f]
 
         time_d["setup query"] = time.time() - now
         now = time.time()
         seg_table = f"{table_name}__{datastack_name}"
 
-        def _format_filter(filter, table_in, seg_table):
-            if filter is None:
-                return filter
-            else:
-                table_filter = filter.get(table_in, None)
-                root_id_filters = [
-                    c for c in table_filter.keys() if c.endswith("root_id")
-                ]
-                other_filters = [
-                    c for c in table_filter.keys() if not c.endswith("root_id")
-                ]
-
-                filter[seg_table] = {c: table_filter[c] for c in root_id_filters}
-                filter[table_in] = {c: table_filter[c] for c in other_filters}
-                return filter
-
-        filter_equal_dict = data.get("filter_equal_dict", None)
-        if args["filter_invalid"]:
-            if filter_equal_dict is None:
-                filter_equal_dict = {table_name: {"valid": "t"}}
-            else:
-                filter_equal_dict["table_name"].update({"valid": "t"})
-
-        time_filter_args = []
-        timestamp_start = data.get("timestamp_start", None)
-        timestamp_end = data.get("timestamp_end", None)
-        if timestamp_start and timestamp_end:
-            f1 = AnnModel.created.between(str(timestamp_start), str(timestamp_end))
-            f2 = AnnModel.deleted.between(str(timestamp_start), str(timestamp_end))
-            f = (or_(f1, f2),)
-            time_filter_args.append(f)
-        elif timestamp_start:
-            f1 = (
-                or_(
-                    AnnModel.created > str(timestamp_start),
-                    AnnModel.deleted > str(timestamp_start),
-                ),
-            )
-            time_filter_args.append(f1)
-        elif timestamp_end:
-            f1 = (
-                or_(
-                    AnnModel.created < str(timestamp_end),
-                    AnnModel.deleted < str(timestamp_end),
-                ),
-            )
-            time_filter_args.append(f1)
-
-        df = specific_query(
+        df_new = specific_query(
             Session,
             engine,
             {table_name: AnnModel, seg_table: SegModel},
             [[table_name, "id"], [seg_table, "id"]],
-            filter_in_dict=_format_filter(
-                data.get("filter_in_dict", None), table_name, seg_table
-            ),
+            filter_in_dict=_format_filter(data.get("filter_in_dict", None), table_name),
             filter_notin_dict=_format_filter(
-                data.get("filter_notin_dict", None), table_name, seg_table
+                data.get("filter_notin_dict", None), table_name
             ),
-            filter_equal_dict=_format_filter(filter_equal_dict, table_name, seg_table),
+            filter_equal_dict=_format_filter(filter_equal_dict, table_name),
             filter_spatial=data.get("filter_spatial_dict", None),
             select_columns=data.get("select_columns", None),
             consolidate_positions=not args["split_positions"],
             offset=data.get("offset", None),
             limit=limit,
             get_count=get_count,
-            outer_join=True,
-            use_pandas=args["return_pandas"],
+            outer_join=False,
+            use_pandas=True,
             extra_filter_args=time_filter_args,
         )
         time_d["execute query"] = time.time() - now
+        now = time.time()
+
+        # update the root_ids for the supervoxel_ids from production
+        is_delete = df_new["deleted"] < timestamp
+        is_create = (df_new["created"] > timestamp_start.replace(tzinfo=None)) & (
+            (df_new["deleted"] > timestamp) | df_new["deleted"].isna()
+        )
+
+        root_cols = [c for c in df_new.columns if c.endswith("pt_root_id")]
+
+        df_create = df_new[is_create]
+        for c in root_cols:
+            sv_col = c.replace("root_id", "supervoxel_id")
+            svids = df_create[sv_col].values
+            # not_null = ~svids.isna()
+            new_roots = cg_client.get_roots(svids, timestamp=timestamp).astype(np.int64)
+            df_create[c] = new_roots
+        df_create = df_create.drop(["created", "deleted", "superceded_id"], axis=1)
+        time_d["update new roots"] = time.time() - now
+        now = time.time()
+
+        # merge the dataframes
+        if df_mat is not None:
+            df = df_mat[~df_mat.id.isin(df_new[is_delete].id)]
+            if len(df_create) > 0:
+                df = pd.concat([df, df_create], ignore_index=True)
+        else:
+            df = df_create
+
+        # apply the filters post
+        # apply the original filters to remove rows
+        # from this result which are not relevant
+
+        if filter_in_dict is not None:
+            for col, val in filter_in_dict.items():
+                if col.endswith("root_id"):
+                    df = df[df[col].isin(val)]
+        if filter_out_dict is not None:
+            for col, val in filter_out_dict.items():
+                if col.endswith("root_id"):
+                    df = df[~df[col].isin(val)]
+        if filter_equal_dict is not None:
+            for col, val in filter_equal_dict.items():
+                if col.endswith("root_id"):
+                    df = df[df[col] == val]
+
         now = time.time()
         headers = None
         warnings = []
         if len(df) == limit:
             warnings.append(f'201 - "Limited query to {max_limit} rows')
-        if args["return_pandas"] and args["return_pyarrow"]:
-            warnings.append(
-                "return_pandas=true is deprecated and may convert columns with nulls to floats, Please upgrade CAVEclient to >XXX with pip install -U caveclient"
-            )
+        # if args["return_pandas"] and args["return_pyarrow"]:
+        #     warnings.append(
+        #         "return_pandas=true is deprecated and may convert columns with nulls to floats, Please upgrade CAVEclient to >XXX with pip install -U caveclient"
+        #     )
         if len(warnings) > 0:
             headers = {"Warning": ". ".join(warnings)}
         if args["return_pyarrow"]:
