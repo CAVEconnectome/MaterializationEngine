@@ -907,6 +907,7 @@ class FrozenQuery(Resource):
             use_pandas=args["return_pandas"],
         )
         headers = None
+        warnings = []
         if len(df) == limit:
             warnings.append(f'201 - "Limited query to {max_limit} rows')
         if args["return_pandas"] and args["return_pyarrow"]:
