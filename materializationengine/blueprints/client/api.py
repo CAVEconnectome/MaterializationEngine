@@ -686,6 +686,7 @@ class LiveTableQuery(Resource):
                 use_pandas=True,
             )
             df_mat = _update_rootids(df_mat, timestamp, future_map, cg_client)
+
         AnnModel, SegModel = get_split_models(
             datastack_name,
             table_name,
@@ -775,7 +776,7 @@ class LiveTableQuery(Resource):
         now = time.time()
         headers = None
         warnings = []
-        if len(df) == limit:
+        if len(df) >= max_limit:
             warnings.append(f'201 - "Limited query to {max_limit} rows')
         # if args["return_pandas"] and args["return_pyarrow"]:
         #     warnings.append(
@@ -910,7 +911,7 @@ class FrozenTableQuery(Resource):
         now = time.time()
         headers = None
         warnings = []
-        if len(df) == limit:
+        if len(df) >= max_limit:
             warnings.append(f'201 - "Limited query to {max_limit} rows')
         if args["return_pandas"] and args["return_pyarrow"]:
             warnings.append(
@@ -1025,8 +1026,8 @@ class FrozenQuery(Resource):
             use_pandas=args["return_pandas"],
         )
         headers = None
-        warnings=[]
-        if len(df) == limit:
+        warnings = []
+        if len(df) >= max_limit:
             warnings.append(f'201 - "Limited query to {max_limit} rows')
         if args["return_pandas"] and args["return_pyarrow"]:
             warnings.append(
