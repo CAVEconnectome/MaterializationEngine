@@ -132,7 +132,7 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                                     celery_logger.info(
                                         f"Database '{expired_database}' dropped"
                                     )
-                                    dropped_dbs.append(expired_database)
+                                    dropped_dbs.append(database)
                             except Exception as e:
                                 celery_logger.error(
                                     f"ERROR: {e}: {database} does not exist"
