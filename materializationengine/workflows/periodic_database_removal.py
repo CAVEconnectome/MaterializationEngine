@@ -8,7 +8,7 @@ from celery.utils.log import get_task_logger
 from materializationengine.celery_init import celery
 from materializationengine.database import create_session
 from materializationengine.info_client import get_aligned_volumes, get_datastack_info
-from materializationengine.models import AnalysisVersion
+from dynamicannotationdb.models import AnalysisVersion
 from materializationengine.utils import get_config_param
 from sqlalchemy import create_engine
 from sqlalchemy.engine.url import make_url

@@ -1,22 +1,21 @@
 import logging
 
 import requests
+from dynamicannotationdb.models import AnalysisTable, AnalysisVersion, Base
 from flask import abort, current_app
 from flask_restx import Namespace, Resource, inputs, reqparse
+from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import (
     create_session,
     dynamic_annotation_cache,
     sqlalchemy_cache,
 )
 from materializationengine.info_client import get_aligned_volumes
-from materializationengine.blueprints.reset_auth import reset_auth
-from materializationengine.models import AnalysisTable, AnalysisVersion, Base
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from middle_auth_client import auth_required, auth_requires_admin
 from sqlalchemy import MetaData, Table
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoSuchTableError
-
 
 __version__ = "3.0.2"
 

@@ -20,7 +20,7 @@ from materializationengine.database import (
 )
 from materializationengine.errors import IndexMatchError
 from materializationengine.index_manager import index_cache
-from materializationengine.models import (
+from dynamicannotationdb.models import (
     AnalysisTable,
     AnalysisVersion,
     Base,
@@ -405,7 +405,7 @@ def create_materialized_metadata(
                     .one()
                 )
 
-                valid_row_count = mat_client._get_table_row_count(
+                valid_row_count = mat_client.database.get_table_row_count(
                     table_name, filter_valid=True
                 )
                 celery_logger.info(f"Row count {valid_row_count}")
@@ -647,7 +647,7 @@ def merge_tables(self, mat_metadata: dict):
     analysis_sql_uri = create_analysis_sql_uri(
         SQL_URI_CONFIG, datastack, analysis_version
     )
-
+    
     # get schema and match column order for sql query
     anno_schema = get_schema(schema)
     flat_schema = create_flattened_schema(anno_schema)
@@ -742,15 +742,13 @@ def insert_chunked_data(
 
     results = cur.fetchmany(batch_size)
 
-    # If there were less than the limit then it is the last page of data
     if len(results) < batch_size:
         return
-    else:
-        # Find highest returned uid in results to get next key
-        next_key = results[-1][0]
-        return insert_chunked_data(
-            annotation_table_name, sql_statement, cur, engine, next_key
-        )
+    # Find highest returned uid in results to get next key
+    next_key = results[-1][0]
+    return insert_chunked_data(
+        annotation_table_name, sql_statement, cur, engine, next_key
+    )
 
 
 @celery.task(
@@ -889,7 +887,7 @@ def get_analysis_table(
         SQLAlchemy model: returns a sqlalchemy model of a target table
     """
     anno_db = dynamic_annotation_cache.get_db(aligned_volume)
-    schema_name = anno_db.get_table_schema(table_name)
+    schema_name = anno_db.database.get_table_metadata(table_name)
     SQL_URI_CONFIG = get_config_param("SQLALCHEMY_DATABASE_URI")
     analysis_sql_uri = create_analysis_sql_uri(SQL_URI_CONFIG, datastack, mat_version)
     analysis_engine = create_engine(analysis_sql_uri)
@@ -928,7 +926,7 @@ def drop_indices(self, mat_metadata: dict):
     """
     add_indices = mat_metadata.get("add_indices", False)
     if add_indices:
-        analysis_version = mat_metadata.get("analysis_version", None)
+        analysis_version = mat_metadata.get("analysis_version")
         datastack = mat_metadata["datastack"]
         temp_mat_table_name = mat_metadata["temp_mat_table_name"]
         SQL_URI_CONFIG = get_config_param("SQLALCHEMY_DATABASE_URI")

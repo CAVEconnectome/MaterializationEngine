@@ -187,12 +187,12 @@ def get_split_models(datastack_name: str, table_name: str):
     """
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    schema_type = db.get_table_schema(table_name)
+    schema_type = db.database.get_table_metadata(table_name, filter_col="schema_type")
 
-    SegModel = make_segmentation_model(
+    SegModel = db.schema.create_annotation_model(
         table_name, schema_type, segmentation_source=pcg_table_name
     )
-    AnnModel = make_annotation_model(table_name, schema_type)
+    AnnModel = db.schema.create_annotation_model(table_name, schema_type)
     return AnnModel, SegModel
 
 
@@ -224,13 +224,13 @@ def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
         abort(410, "This materialization version is not available")
 
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    metadata = db.get_table_metadata(table_name)
+    metadata = db.database.get_table_metadata(table_name)
     reference_table = metadata.get("reference_table")
     if reference_table:
         table_metadata = {"reference_table": reference_table}
     else:
         table_metadata = None
-    return make_flat_model(
+    return db.schema.create_flat_model(
         table_name=table_name,
         schema_type=analysis_table.schema,
         segmentation_source=None,
@@ -398,7 +398,7 @@ class FrozenTableMetadata(Resource):
         tables = schema.dump(analysis_table)
 
         db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        ann_md = db.get_table_metadata(table_name)
+        ann_md = db.database.get_table_metadata(table_name)
         ann_md.pop("id")
         ann_md.pop("deleted")
         tables.update(ann_md)
