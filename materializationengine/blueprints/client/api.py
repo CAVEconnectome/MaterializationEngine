@@ -475,6 +475,11 @@ class LiveTableQuery(Resource):
                 "tablename": {
                 "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
             }
+            "filter_like_dict": {
+                "tablename":{
+                    "column_name": "%phrase_searching%"
+                }
+            }
         }
         Returns:
             pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
@@ -549,6 +554,7 @@ class LiveTableQuery(Resource):
                 data.get("filter_equal_dict", None), table_name, seg_table
             ),
             filter_spatial=data.get("filter_spatial_dict", None),
+            filter_like=data.get("filter_like_dict", None),
             select_columns=data.get("select_columns", None),
             consolidate_positions=not args["split_positions"],
             offset=data.get("offset", None),
@@ -677,6 +683,7 @@ class FrozenTableQuery(Resource):
             filter_notin_dict=data.get("filter_notin_dict", None),
             filter_equal_dict=data.get("filter_equal_dict", None),
             filter_spatial=data.get("filter_spatial_dict", None),
+            filter_like=data.get("filter_like_dict", None),
             select_columns=data.get("select_columns", None),
             consolidate_positions=not args["split_positions"],
             offset=data.get("offset", None),
@@ -786,6 +793,7 @@ class FrozenQuery(Resource):
             filter_notin_dict=data.get("filter_notin_dict", None),
             filter_equal_dict=data.get("filter_equal_dict", None),
             filter_spatial=data.get("filter_spatial_dict", None),
+            filter_like=data.get("filter_like_dict", None),
             select_columns=data.get("select_columns", None),
             consolidate_positions=not args["split_positions"],
             offset=data.get("offset", None),

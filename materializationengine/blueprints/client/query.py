@@ -15,6 +15,7 @@ from geoalchemy2.shape import to_shape
 from geoalchemy2.types import Geometry
 from multiwrapper import multiprocessing_utils as mu
 from sqlalchemy import func, not_
+from sqlalchemy.sql.operators import ilike_op
 from sqlalchemy.orm import Query, Session
 from sqlalchemy.sql.sqltypes import Boolean, Integer
 from sqlalchemy.ext.declarative import DeclarativeMeta
@@ -238,6 +239,7 @@ def specific_query(
     filter_notin_dict=None,
     filter_equal_dict=None,
     filter_spatial=None,
+    filter_like=None,
     select_columns=None,
     consolidate_positions=True,
     return_wkb=False,
@@ -268,6 +270,10 @@ def specific_query(
         outer layer: keys are table_namess
         inner layer: keys are column names, values are [min,max] as list of lists
                     e.g. [[0,0,0], [1,1,1]]
+    filter_like: dict of dicts
+        outer layer: keys are table_namess
+        inner layer: keys are column names, values are a string to pass to ilike,
+                     columns must be string types
     select_columns: list of str
     consolidate_positions: whether to make the position columns arrays of x,y,z
     offset: int
@@ -378,7 +384,18 @@ def specific_query(
                 bounding_box = filter_table_dict[column_name]
                 filter = make_spatial_filter(model, column_name, bounding_box)
                 filter_args.append((filter,))
-
+                
+    if filter_like is not None:
+        for filter_table, filter_table_dict in filter_like.items():
+            for column_name in filter_table_dict.keys():
+                filter_value = filter_table_dict[column_name]
+                filter_args.append(
+                    (
+                        ilike_op(
+                            model_dict[filter_table].__dict__[column_name], filter_value
+                        ),
+                    )
+                )
     df = _query(
         sqlalchemy_session,
         engine,
