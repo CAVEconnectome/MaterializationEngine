@@ -6,7 +6,6 @@ from cachetools import LRUCache, TTLCache, cached
 from emannotationschemas import get_schema
 from emannotationschemas.models import (
     Base,
-    annotation_models,
     create_table_dict,
     make_flat_model,
     make_annotation_model,
