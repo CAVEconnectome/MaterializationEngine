@@ -48,7 +48,7 @@ from flask_restx import inputs
 import time
 
 
-__version__ = "3.0.3"
+__version__ = "3.0.4"
 
 
 authorizations = {
