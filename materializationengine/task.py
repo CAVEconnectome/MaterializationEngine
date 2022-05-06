@@ -12,6 +12,7 @@ from materializationengine.utils import get_config_param
 REDIS_CLIENT = redis.StrictRedis(
     host=get_config_param("REDIS_HOST"),
     port=get_config_param("REDIS_PORT"),
+    password=get_config_param("REDIS_PASSWORD"),
     db=0,
 )
 
