@@ -27,6 +27,7 @@ def get_queue_length(queue_name: str = "celery"):
         r = redis.StrictRedis(
             host=get_config_param("REDIS_HOST"),
             port=get_config_param("REDIS_PORT"),
+            password=get_config_param("REDIS_PASSWORD"),
             db=0,
         )
 
@@ -49,8 +50,10 @@ def get_redis_memory_usage():
         r = redis.StrictRedis(
             host=get_config_param("REDIS_HOST"),
             port=get_config_param("REDIS_PORT"),
+            password=get_config_param("REDIS_PASSWORD"),
             db=0,
         )
+
     except Exception as e:
         celery_logger.error("Redis has an error: {e}")
         raise e
