@@ -213,12 +213,19 @@ def get_split_models(datastack_name: str, table_name: str, with_crud_columns=Tru
     """
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    table_metadata = db.get_table_metadata(table_name)
     schema_type = db.get_table_schema(table_name)
-    SegModel = make_segmentation_model(
-        table_name, schema_type, segmentation_source=pcg_table_name
-    )
+    if table_metadata["reference_table"] is None:
+        SegModel = make_segmentation_model(
+            table_name, schema_type, segmentation_source=pcg_table_name
+        )
+    else:
+        SegModel = None
     AnnModel = make_annotation_model(
-        table_name, schema_type, with_crud_columns=with_crud_columns
+        table_name,
+        schema_type,
+        table_metadata=table_metadata,
+        with_crud_columns=with_crud_columns,
     )
     return AnnModel, SegModel
 
@@ -615,8 +622,8 @@ class LiveTableQuery(Resource):
         filter_out_dict = data.get("filter_notin_dict", None)
         filter_equal_dict = data.get("filter_equal_dict", None)
 
-        # db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        # table_metadata = db.get_table_metadata(table_name)
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        table_metadata = db.get_table_metadata(table_name)
         cg_client = chunkedgraph_cache.init_pcg(pcg_table_name)
         if analysis_table is None:
             df_mat = None
@@ -668,12 +675,20 @@ class LiveTableQuery(Resource):
             #     table_name = table_desc[0]
             #     Model = get_flat_model(datastack_name, table_name, version, Session)
             #     model_dict[table_name] = Model
-
+            if table_metadata["reference_table"] is None:
+                model_dict = {table_name: Model}
+                tables = [table_name]
+            else:
+                ref_table = table_metadata["reference_table"]
+                RefModel = get_flat_model(datastack_name, ref_table, version, Session)
+                model_dict = {table_name: Model, ref_table: RefModel}
+                tables = [[table_name, "target_id"], [ref_table, "id"]]
+            print("doing mat part")
             df_mat = specific_query(
                 MatSession,
                 mat_engine,
-                {table_name: Model},
-                [table_name],
+                model_dict,
+                tables,
                 filter_in_dict=past_filter_in_dict,
                 filter_notin_dict=past_filter_out_dict,
                 filter_equal_dict=None,
@@ -686,31 +701,51 @@ class LiveTableQuery(Resource):
                 use_pandas=True,
             )
             df_mat = _update_rootids(df_mat, timestamp, future_map, cg_client)
-
+            print("done mat part")
+        print("doing live query part")
         AnnModel, SegModel = get_split_models(
             datastack_name,
             table_name,
-            with_crud_columns=args.get("include_crud_columns", False),
+            with_crud_columns=True,
         )
 
         time_d["get Model"] = time.time() - now
         now = time.time()
-
-        # get the production database with a timestamp interval query
-        f1 = AnnModel.created.between(str(timestamp_start), str(timestamp))
-        f2 = AnnModel.deleted.between(str(timestamp_start), str(timestamp))
-        f = (or_(f1, f2),)
-        time_filter_args = [f]
+        if table_metadata["reference_table"] is None:
+            # get the production database with a timestamp interval query
+            f1 = AnnModel.created.between(str(timestamp_start), str(timestamp))
+            f2 = AnnModel.deleted.between(str(timestamp_start), str(timestamp))
+            f = (or_(f1, f2),)
+            time_filter_args = [f]
+        else:
+            time_filter_args = None
 
         time_d["setup query"] = time.time() - now
         now = time.time()
         seg_table = f"{table_name}__{datastack_name}"
 
+        if table_metadata["reference_table"] is None:
+            model_dict = {table_name: AnnModel, seg_table: SegModel}
+            tables = [[table_name, "id"], [seg_table, "id"]]
+        else:
+            ref_table = table_metadata["reference_table"]
+            RefModel, SegModel = get_split_models(
+                datastack_name,
+                ref_table,
+                with_crud_columns=True,
+            )
+            seg_table = f"{ref_table}__{datastack_name}"
+            model_dict = {
+                table_name: AnnModel,
+                ref_table: RefModel,
+                seg_table: SegModel,
+            }
+            tables = [[table_name, "target_id"], [ref_table, "id"], [seg_table, "id"]]
         df_new = specific_query(
             Session,
             engine,
-            {table_name: AnnModel, seg_table: SegModel},
-            [[table_name, "id"], [seg_table, "id"]],
+            model_dict,
+            tables,
             filter_in_dict=_format_filter(data.get("filter_in_dict", None), table_name),
             filter_notin_dict=_format_filter(
                 data.get("filter_notin_dict", None), table_name
