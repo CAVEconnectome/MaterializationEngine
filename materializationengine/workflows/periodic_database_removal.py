@@ -76,18 +76,16 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
 
             dropped_dbs = []
 
-            if len(databases_to_delete) > delete_threshold:
+            if len(databases) > delete_threshold:
                 with engine.connect() as conn:
                     conn.execution_options(isolation_level="AUTOCOMMIT")
                     for database in databases_to_delete:
-                        if len(databases_to_delete) - len(dropped_dbs) == 1:
+                        if len(databases) - len(dropped_dbs) == 1:
                             celery_logger.info(
                                 f"Only one materialized database remaining: {database}, removal stopped."
                             )
                             break
-                        if (
-                            len(databases_to_delete) - len(dropped_dbs)
-                        ) > delete_threshold:
+                        if (len(databases) - len(dropped_dbs)) > delete_threshold:
                             try:
                                 sql = (
                                     "SELECT 1 FROM pg_database WHERE datname='%s'"
@@ -132,7 +130,7 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                                     celery_logger.info(
                                         f"Database '{expired_database}' dropped"
                                     )
-                                    dropped_dbs.append(expired_database)
+                                    dropped_dbs.append(database)
                             except Exception as e:
                                 celery_logger.error(
                                     f"ERROR: {e}: {database} does not exist"

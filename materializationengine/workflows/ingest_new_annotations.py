@@ -34,7 +34,9 @@ celery_logger = get_task_logger(__name__)
 
 
 @celery.task(name="workflow:process_new_annotations_workflow")
-def process_new_annotations_workflow(datastack_info: dict, **kwargs):
+def process_new_annotations_workflow(
+    datastack_info: dict, table_name: str = None, **kwargs
+):
     """Base live materialization
 
     Workflow paths:
@@ -264,8 +266,7 @@ def ingest_new_annotations_workflow(mat_metadata: dict):
     annotation_chunks = generate_chunked_model_ids(mat_metadata)
     table_created = create_missing_segmentation_table(mat_metadata)
     if table_created:
-        celery_logger.info(
-            f'Table created: {mat_metadata["segmentation_table_name"]}')
+        celery_logger.info(f'Table created: {mat_metadata["segmentation_table_name"]}')
 
     ingest_workflow = chain(
         chord(
@@ -481,7 +482,9 @@ def get_cloudvolume_supervoxel_ids(
                         cv, pos_array, coord_resolution
                     )  # pylint: disable=maybe-no-member
                 except Exception as e:
-                    celery_logger.error(f"Failed to get SVID: {pos_array}, {coord_resolution}. Error {e}")
+                    celery_logger.error(
+                        f"Failed to get SVID: {pos_array}, {coord_resolution}. Error {e}"
+                    )
                     raise e
                 mat_df.loc[mat_df.id == data.id, supervoxel_column] = svid
     return mat_df.to_dict(orient="list")
@@ -626,7 +629,9 @@ def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
             if "supervoxel_id" in col_name:
                 root_id_name = col_name.replace("supervoxel_id", "root_id")
                 data = missing_root_rows.loc[:, col_name]
-                root_id_array = get_root_ids(cg_client, data, materialization_time_stamp)
+                root_id_array = get_root_ids(
+                    cg_client, data, materialization_time_stamp
+                )
                 root_ids_df.loc[data.index, root_id_name] = root_id_array
 
     return root_ids_df.to_dict(orient="records")
