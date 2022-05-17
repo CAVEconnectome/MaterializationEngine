@@ -80,7 +80,7 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                 with engine.connect() as conn:
                     conn.execution_options(isolation_level="AUTOCOMMIT")
                     for database in databases_to_delete:
-                        if len(databases) - len(dropped_dbs) == 1:
+                        if len(databases) - (len(dropped_dbs) + 1) == 1:
                             celery_logger.info(
                                 f"Only one materialized database remaining: {database}, removal stopped."
                             )
