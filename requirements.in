@@ -26,4 +26,4 @@ gcsfs>=0.8.0
 pyarrow==3.0.0
 flask_cors
 numpy>=1.20
-dynamicannotationdb>=4.0.0
+dynamicannotationdb>=4.0.3

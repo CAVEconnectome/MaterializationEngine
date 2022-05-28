@@ -51,7 +51,7 @@ from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 import pandas as pd
 import numpy as np
 
-__version__ = "3.1.1"
+__version__ = "3.1.2"
 
 
 authorizations = {
