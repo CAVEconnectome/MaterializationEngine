@@ -27,3 +27,4 @@ pyarrow==3.0.0
 flask_cors
 numpy>=1.20
 dynamicannotationdb>=4.0.3
+emannotationschemas>=4.2.0
