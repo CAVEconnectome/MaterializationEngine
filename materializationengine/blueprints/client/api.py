@@ -1,20 +1,23 @@
 import logging
 import os
-from cloudfiles import compression
+import time
+
 import pyarrow as pa
 from cachetools import LRUCache, TTLCache, cached
+from cloudfiles import compression
+from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 from emannotationschemas import get_schema
 from emannotationschemas.models import (
     Base,
-    annotation_models,
     create_table_dict,
-    make_flat_model,
     make_annotation_model,
+    make_flat_model,
     make_segmentation_model,
+    sqlalchemy_models,
 )
 from flask import Response, abort, current_app, request, stream_with_context
 from flask_accepts import accepts, responds
-from flask_restx import Namespace, Resource, reqparse
+from flask_restx import Namespace, Resource, inputs, reqparse
 from materializationengine.blueprints.client.query import _execute_query, specific_query
 from materializationengine.blueprints.client.schemas import (
     ComplexQuerySchema,
@@ -37,7 +40,6 @@ from materializationengine.info_client import (
     get_datastack_info,
     get_datastacks,
 )
-from materializationengine.models import AnalysisTable, AnalysisVersion
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from middle_auth_client import (
     auth_required,
@@ -45,9 +47,6 @@ from middle_auth_client import (
     auth_requires_permission,
 )
 from sqlalchemy.engine.url import make_url
-from flask_restx import inputs
-import time
-
 
 __version__ = "3.0.3"
 

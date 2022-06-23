@@ -1,5 +1,4 @@
-from materializationengine.models import AnalysisTable, AnalysisVersion
-
+from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
 class TestModels:
     def test_analysis_version(self, mat_metadata):
