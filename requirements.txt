@@ -116,7 +116,7 @@ dill==0.3.4
     #   pathos
 dracopy==1.0.1
     # via cloud-volume
-dynamicannotationdb==4.0.3
+dynamicannotationdb==5.0.0
     # via -r requirements.in
 emannotationschemas==4.2.0
     # via
