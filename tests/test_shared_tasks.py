@@ -1,6 +1,6 @@
 import datetime
 import logging
-from materializationengine.models import AnalysisVersion
+from dynamicannotationdb.models import AnalysisVersion
 from materializationengine.shared_tasks import (
     generate_chunked_model_ids,
     chunk_ids,
