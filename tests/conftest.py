@@ -156,7 +156,7 @@ def setup_postgis_database(setup_docker_image, mat_metadata, annotation_data) ->
         test_logger.info(f"IS TEST DATA INSERTED: {is_inserted}")
         yield True
     except Exception as e:
-        test_logger.error(f"Cannot connect to database {sql_uri}")
+        test_logger.error(f"Cannot connect to database {sql_uri}: {e}")
 
 
 @pytest.fixture(scope="session")
@@ -189,9 +189,9 @@ def check_database(sql_uri: str) -> None:  # pragma: no cover
 
 
 def setup_database(aligned_volume_name, database_uri):
-    mat_client = DynamicAnnotationInterface(aligned_volume_name, database_uri)
+    mat_client = DynamicAnnotationInterface(database_uri, aligned_volume_name)
     base = Base
-    base.metadata.bind = mat_client.engine
+    base.metadata.bind = mat_client.database.engine
     base.metadata.create_all()
     return True
 
@@ -199,7 +199,7 @@ def setup_database(aligned_volume_name, database_uri):
 def add_annotation_table(mat_metadata: dict):
     aligned_volume_name = mat_metadata["aligned_volume"]
     database_uri = mat_metadata["sql_uri"]
-    anno_client = DynamicAnnotationInterface(aligned_volume_name, database_uri)
+    anno_client = DynamicAnnotationInterface(database_uri, aligned_volume_name)
 
     table_name = mat_metadata["annotation_table_name"]
     schema_type = mat_metadata["schema_type"]
@@ -225,16 +225,20 @@ def insert_test_data(mat_metadata: dict, annotation_data: dict):
     aligned_volume_name = mat_metadata["aligned_volume"]
     annotation_table_name = mat_metadata["annotation_table_name"]
     synapse_data = annotation_data["synapse_data"]
+    schema_type = mat_metadata["schema_type"]
+
     segmentation_data = annotation_data["segmentation_data"]
 
     database_uri = mat_metadata["sql_uri"]
     pcg_name = mat_metadata["pcg_table_name"]
 
-    anno_client = DynamicAnnotationInterface(aligned_volume_name, database_uri)
+    anno_client = DynamicAnnotationInterface(database_uri, aligned_volume_name)
 
-    anno_client.annotation.insert_annotations(annotation_table_name, synapse_data)
-
-    is_created = anno_client.segmentation.create_segmentation_table(annotation_table_name, pcg_name)
+    data = anno_client.annotation.insert_annotations(annotation_table_name, synapse_data)
+    test_logger.info(f"DATA INSERTED: {data}")
+    is_created = anno_client.segmentation.create_segmentation_table(
+        annotation_table_name, schema_type, pcg_name
+    )
     return anno_client.segmentation.insert_linked_segmentation(
         annotation_table_name, pcg_name, segmentation_data
     )
