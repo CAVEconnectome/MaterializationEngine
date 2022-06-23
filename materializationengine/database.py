@@ -108,7 +108,7 @@ class DynamicMaterializationCache:
             db_client = self._get_mat_client(database)
         db_client = self._clients[database]
 
-        connection_ok = ping_connection(db_client.cached_session)
+        connection_ok = ping_connection(db_client.database.cached_session)
 
         if not connection_ok:
             db_client = self._get_mat_client(database)

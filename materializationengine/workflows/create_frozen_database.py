@@ -795,7 +795,7 @@ def check_tables(self, mat_info: list, analysis_version: int):
             .filter(MaterializedMetadata.table_name == annotation_table_name)
             .scalar()
         )
-        mat_row_count = mat_client._get_table_row_count(
+        mat_row_count = mat_client.database.get_table_row_count(
             annotation_table_name, filter_valid=True
         )
         celery_logger.info(f"ROW COUNTS: {live_table_row_count} {mat_row_count}")
@@ -860,7 +860,7 @@ def check_tables(self, mat_info: list, analysis_version: int):
         celery_logger.error(e)
     finally:
         session.close()
-        mat_client.cached_session.close()
+        mat_client.database.cached_session.close()
         mat_session.close()
         engine.dispose()
         mat_engine.dispose()

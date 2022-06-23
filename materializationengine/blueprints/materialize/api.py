@@ -396,8 +396,8 @@ class DatasetResource(Resource):
     @auth_requires_admin
     @mat_bp.doc("get_aligned_volume_versions", security="apikey")
     def get(self, aligned_volume_name: str):
-        db = dynamic_annotation_cache.get(aligned_volume_name)
-        response = db.session.query(AnalysisVersion.datastack).distinct()
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        response = db.database.cached_session.query(AnalysisVersion.datastack).distinct()
         aligned_volumes = [r._asdict() for r in response]
         return aligned_volumes
 
