@@ -9,10 +9,9 @@ import docker
 import psycopg2
 import pytest
 from dynamicannotationdb import DynamicAnnotationInterface
-
+from dynamicannotationdb.models import Base
 from materializationengine.app import create_app
 from materializationengine.celery_worker import create_celery
-from materializationengine.models import Base
 from materializationengine.database import sqlalchemy_cache
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
