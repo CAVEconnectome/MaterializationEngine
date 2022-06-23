@@ -100,7 +100,7 @@ def get_materialization_info(
     Returns:
         List[dict]: [description]
     """
-    celery_logger.info(f"Collecting materialization metadata")
+    celery_logger.info("Collecting materialization metadata")
     aligned_volume_name = datastack_info["aligned_volume"]["name"]
     pcg_table_name = datastack_info["segmentation_source"].split("/")[-1]
     segmentation_source = datastack_info.get("segmentation_source")
@@ -110,22 +110,22 @@ def get_materialization_info(
 
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
 
-    annotation_tables = db.get_valid_table_names()
+    annotation_tables = db.database.get_valid_table_names()
     if table_name is not None:
         annotation_tables = [next(a for a in annotation_tables if a == table_name)]
     metadata = []
     celery_logger.debug(f"Annotation tables: {annotation_tables}")
     for annotation_table in annotation_tables:
-        row_count = db._get_table_row_count(annotation_table, filter_valid=True)
-        max_id = db.get_max_id_value(annotation_table)
-        min_id = db.get_min_id_value(annotation_table)
+        row_count = db.database.get_table_row_count(annotation_table, filter_valid=True)
+        max_id = db.database.get_max_id_value(annotation_table)
+        min_id = db.database.get_min_id_value(annotation_table)
         if row_count == 0:
             continue
 
         if row_count >= row_size and skip_table:
             continue
 
-        md = db.get_table_metadata(annotation_table)
+        md = db.database.get_table_metadata(annotation_table)
         vx = md.get("voxel_resolution_x", None)
         vy = md.get("voxel_resolution_y", None)
         vz = md.get("voxel_resolution_z", None)
@@ -141,7 +141,7 @@ def get_materialization_info(
                 "annotation_table_name": annotation_table,
                 "datastack": datastack_info["datastack"],
                 "aligned_volume": str(aligned_volume_name),
-                "schema": db.get_table_schema(annotation_table),
+                "schema": db.database.get_table_schema(annotation_table),
                 "max_id": int(max_id),
                 "min_id": int(min_id),
                 "row_count": row_count,
@@ -157,7 +157,7 @@ def get_materialization_info(
                     annotation_table, pcg_table_name
                 )
                 try:
-                    segmentation_metadata = db.get_segmentation_table_metadata(
+                    segmentation_metadata = db.segmentation.get_segmentation_table_metadata(
                         annotation_table, pcg_table_name
                     )
                     create_segmentation_table = False
@@ -200,7 +200,7 @@ def get_materialization_info(
 
             metadata.append(table_metadata.copy())
             celery_logger.debug(metadata)
-    db.cached_session.close()
+    db.database.cached_session.close()
     celery_logger.info(f"Metadata collected for {len(metadata)} tables")
     return metadata
 
