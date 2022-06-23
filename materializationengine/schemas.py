@@ -1,4 +1,4 @@
-from materializationengine.models import AnalysisTable, AnalysisVersion
+from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 from flask_marshmallow import Marshmallow
 from marshmallow import fields, ValidationError, Schema
 from marshmallow_sqlalchemy import SQLAlchemyAutoSchema

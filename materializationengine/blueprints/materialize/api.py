@@ -1,16 +1,16 @@
 import logging
 
 import requests
+from dynamicannotationdb.models import AnalysisTable, AnalysisVersion, Base
 from flask import abort, current_app
 from flask_restx import Namespace, Resource, inputs, reqparse
+from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import (
     create_session,
     dynamic_annotation_cache,
     sqlalchemy_cache,
 )
 from materializationengine.info_client import get_aligned_volumes
-from materializationengine.blueprints.reset_auth import reset_auth
-from materializationengine.models import AnalysisTable, AnalysisVersion, Base
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from middle_auth_client import auth_required, auth_requires_admin
 from sqlalchemy import MetaData, Table
@@ -19,6 +19,8 @@ from sqlalchemy.exc import NoSuchTableError
 
 
 __version__ = "3.2.1"
+
+
 
 
 bulk_upload_parser = reqparse.RequestParser()
@@ -396,8 +398,8 @@ class DatasetResource(Resource):
     @auth_requires_admin
     @mat_bp.doc("get_aligned_volume_versions", security="apikey")
     def get(self, aligned_volume_name: str):
-        db = dynamic_annotation_cache.get(aligned_volume_name)
-        response = db.session.query(AnalysisVersion.datastack).distinct()
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        response = db.database.cached_session.query(AnalysisVersion.datastack).distinct()
         aligned_volumes = [r._asdict() for r in response]
         return aligned_volumes
 

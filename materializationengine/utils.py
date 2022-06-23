@@ -1,5 +1,5 @@
 import os
-from emannotationschemas import models as em_models
+from dynamicannotationdb.schema import DynamicSchemaClient
 from geoalchemy2.shape import to_shape
 from flask import current_app
 
@@ -63,26 +63,24 @@ def create_segmentation_model(mat_metadata):
     annotation_table_name = mat_metadata.get("annotation_table_name")
     schema_type = mat_metadata.get("schema")
     pcg_table_name = mat_metadata.get("pcg_table_name")
-
-    SegmentationModel = em_models.make_segmentation_model(
+    schema_client = DynamicSchemaClient()
+    return schema_client.create_segmentation_model(
         annotation_table_name, schema_type, pcg_table_name
     )
-    return SegmentationModel
 
 
 def create_annotation_model(mat_metadata, with_crud_columns: bool = True):
     annotation_table_name = mat_metadata.get("annotation_table_name")
     schema_type = mat_metadata.get("schema")
-    table_metadata = {
-        "reference_table": mat_metadata.get("reference_table")
-    }
-    AnnotationModel = em_models.make_annotation_model(
+    table_metadata = {"reference_table": mat_metadata.get("reference_table")}
+    schema_client = DynamicSchemaClient()
+
+    return schema_client.create_annotation_model(
         table_name=annotation_table_name,
         schema_type=schema_type,
         table_metadata=table_metadata,
         with_crud_columns=with_crud_columns,
     )
-    return AnnotationModel
 
 
 def get_config_param(config_param: str):

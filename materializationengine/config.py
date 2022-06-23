@@ -1,7 +1,7 @@
 # Define the application directory
 import os
 import logging
-from emannotationschemas.models import Base
+from dynamicannotationdb.models import Base
 from flask_sqlalchemy import SQLAlchemy
 import json
 

@@ -9,9 +9,8 @@ import pandas as pd
 from celery import chain, group, chord
 from celery.utils.log import get_task_logger
 from dynamicannotationdb.models import AnnoMetadata, SegmentationMetadata
-from emannotationschemas import get_schema
-from emannotationschemas import models as em_models
-from emannotationschemas.flatten import create_flattened_schema
+
+from dynamicannotationdb.schema import DynamicSchemaClient
 from materializationengine.celery_init import celery
 from materializationengine.database import sqlalchemy_cache
 from materializationengine.index_manager import index_cache
@@ -312,13 +311,14 @@ def format_data(data: List, bulk_upload_info: dict):
         base_df = pd.concat([base_df, temp_df], axis=1)
 
     records = base_df.to_dict("records")
-    schema = get_schema(schema)
-    FlattendSchema = create_flattened_schema(schema)
+    schema_client = DynamicSchemaClient()
+    schema = schema_client.get_schema(schema)
+    FlattendSchema = schema_client.get_flattened_schema(schema)
 
     (
         flat_annotation_schema,
         flat_segmentation_schema,
-    ) = em_models.split_annotation_schema(FlattendSchema)
+    ) = schema_client._split_flattened_schema(FlattendSchema)
     anno_data = split_annotation_data(
         records, flat_annotation_schema, upload_creation_time
     )
@@ -392,9 +392,9 @@ def add_table_indices(self, bulk_upload_info: dict):
     schema = bulk_upload_info["schema"]
 
     engine = sqlalchemy_cache.get_engine(aligned_volume)
-
-    anno_model = em_models.make_annotation_model(annotation_table_name, schema)
-    seg_model = em_models.make_segmentation_model(
+    schema_client = DynamicSchemaClient()
+    anno_model = schema_client.create_annotation_model(annotation_table_name, schema)
+    seg_model = schema_client.create_segmentation_model(
         annotation_table_name, schema, segmentation_source
     )
 

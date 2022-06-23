@@ -9,7 +9,7 @@ from celery.utils.log import get_task_logger
 from materializationengine.blueprints.materialize.api import get_datastack_info
 from materializationengine.celery_init import celery
 from materializationengine.database import sqlalchemy_cache
-from materializationengine.models import AnalysisVersion
+from dynamicannotationdb.models import AnalysisVersion
 from materializationengine.shared_tasks import check_if_task_is_running
 from materializationengine.utils import get_config_param
 from materializationengine.workflows.complete_workflow import run_complete_workflow

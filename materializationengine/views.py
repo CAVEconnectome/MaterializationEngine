@@ -2,30 +2,29 @@ import datetime
 
 import pandas as pd
 from dateutil import parser
-from emannotationschemas.models import make_annotation_model, make_dataset_models
+from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
+from dynamicannotationdb.schema import DynamicSchemaClient
 from flask import (
     Blueprint,
     abort,
+    current_app,
     redirect,
     render_template,
     request,
     url_for,
-    current_app,
 )
-from sqlalchemy import and_, func, or_
-
-from materializationengine.celery_init import celery
-from materializationengine.database import sqlalchemy_cache
-from materializationengine.info_client import get_datastack_info, get_datastacks
-from materializationengine.models import AnalysisTable, AnalysisVersion
-from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
-from materializationengine.blueprints.reset_auth import reset_auth
 from middle_auth_client import (
     auth_required,
     auth_requires_admin,
-    auth_requires_permission
+    auth_requires_permission,
 )
+from sqlalchemy import and_, func, or_
 
+from materializationengine.blueprints.reset_auth import reset_auth
+from materializationengine.celery_init import celery
+from materializationengine.database import sqlalchemy_cache
+from materializationengine.info_client import get_datastack_info, get_datastacks
+from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 
 __version__ = "3.2.1"
 
@@ -104,8 +103,7 @@ def get_relevant_datastack_info(datastack_name):
 @views_bp.route("/datastack/<datastack_name>")
 @auth_requires_permission("view", table_arg="datastack_name")
 def datastack_view(datastack_name):
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-        datastack_name)
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
 
     version_query = session.query(AnalysisVersion).filter(
@@ -140,12 +138,10 @@ def datastack_view(datastack_name):
 @views_bp.route("/datastack/<datastack_name>/version/<int:id>")
 @auth_requires_permission("view", table_arg="datastack_name")
 def version_view(datastack_name: str, id: int):
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-        datastack_name)
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
 
-    version = session.query(AnalysisVersion).filter(
-        AnalysisVersion.id == id).first()
+    version = session.query(AnalysisVersion).filter(AnalysisVersion.id == id).first()
 
     table_query = session.query(AnalysisTable).filter(
         AnalysisTable.analysisversion == version
@@ -164,10 +160,9 @@ def version_view(datastack_name: str, id: int):
         lambda x: schema_url.format(current_app.config["GLOBAL_SERVER_URL"], x, x)
     )
     df["table_name"] = df.table_name.map(
-        lambda x: "<a href='/annotation/views/aligned_volume/{}/table/{}'>{}</a>".format(
-            aligned_volume_name, x, x
-        )
+        lambda x: f"<a href='/annotation/views/aligned_volume/{aligned_volume_name}/table/{x}'>{x}</a>"
     )
+
     with pd.option_context("display.max_colwidth", -1):
         output_html = df.to_html(escape=False)
 
@@ -183,8 +178,7 @@ def version_view(datastack_name: str, id: int):
 @views_bp.route("/datastack/<datastack_name>/table/<int:id>")
 @auth_requires_permission("view", table_arg="datastack_name")
 def table_view(datastack_name, id: int):
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-        datastack_name)
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
     table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
     mapping = {
@@ -199,35 +193,29 @@ def table_view(datastack_name, id: int):
         return redirect(mapping[table.schema])
     else:
         return redirect(
-            url_for("views.generic_report",
-                    datastack_name=datastack_name, id=id)
+            url_for("views.generic_report", datastack_name=datastack_name, id=id)
         )
 
 
 @views_bp.route("/datastack/<datastack_name>/table/<int:id>/cell_type_local")
 @auth_requires_permission("view", table_arg="datastack_name")
 def cell_type_local_report(datastack_name, id):
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-        datastack_name)
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
     table = AnalysisTable.query.filter(AnalysisTable.id == id).first_or_404()
     if table.schema != "cell_type_local":
         abort(504, "this table is not a cell_type_local table")
+    schema_client = DynamicSchemaClient()
 
-    make_dataset_models(
-        table.analysisversion.dataset, [], version=table.analysisversion.version
-    )
-    CellTypeModel = make_annotation_model(
-        table.analysisversion.dataset,
-        table.schema,
+    CellTypeModel = schema_client.create_annotation_model(
         table.tablename,
-        version=table.analysisversion.version,
+        table.schema,
     )
 
     n_annotations = CellTypeModel.query.count()
 
     cell_type_merge_query = (
-        db.session.query(
+        session.query(
             CellTypeModel.pt_root_id,
             CellTypeModel.cell_type,
             func.count(CellTypeModel.pt_root_id).label("num_cells"),
@@ -237,7 +225,9 @@ def cell_type_local_report(datastack_name, id):
     ).limit(100)
 
     df = pd.read_sql(
-        cell_type_merge_query.statement, db.get_engine(), coerce_float=False
+        cell_type_merge_query.statement,
+        sqlalchemy_cache.get_engine(aligned_volume_name),
+        coerce_float=False,
     )
     return render_template(
         "cell_type_local.html",
@@ -252,31 +242,24 @@ def cell_type_local_report(datastack_name, id):
 @views_bp.route("/datastack/<datastack_name>/table/<int:id>/synapse")
 @auth_requires_permission("view", table_arg="datastack_name")
 def synapse_report(datastack_name, id):
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-        datastack_name)
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
     table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
     if table.schema != "synapse":
         abort(504, "this table is not a synapse table")
-
-    make_dataset_models(
-        table.analysisversion.datastack, [], version=table.analysisversion.version
-    )
-
-    SynapseModel = make_annotation_model(
-        table.analysisversion.dataset,
-        "synapse",
+    schema_client = DynamicSchemaClient()
+    SynapseModel = schema_client.create_annotation_model(
         table.tablename,
-        version=table.analysisversion.version,
+        table.schema,
     )
+
     synapses = SynapseModel.query.count()
     n_autapses = (
         SynapseModel.query.filter(
             SynapseModel.pre_pt_root_id == SynapseModel.post_pt_root_id
         )
         .filter(
-            and_(SynapseModel.pre_pt_root_id != 0,
-                 SynapseModel.post_pt_root_id != 0)
+            and_(SynapseModel.pre_pt_root_id != 0, SynapseModel.post_pt_root_id != 0)
         )
         .count()
     )
@@ -299,21 +282,14 @@ def synapse_report(datastack_name, id):
 
 @views_bp.route("/datastack/<datastack_name>/table/<int:id>/generic")
 @auth_requires_permission("view", table_arg="datastack_name")
-def generic_report(id):
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-        datastack_name)
+def generic_report(datastack_name, id):
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
     table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
-
-    make_dataset_models(
-        table.analysisversion.dataset, [], version=table.analysisversion.version
-    )
-
-    Model = make_annotation_model(
-        table.analysisversion.dataset,
-        table.schema,
+    schema_client = DynamicSchemaClient()
+    Model = schema_client.create_annotation_model(
         table.tablename,
-        version=table.analysisversion.version,
+        table.schema,
     )
 
     n_annotations = Model.query.count()

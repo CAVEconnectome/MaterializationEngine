@@ -4,17 +4,18 @@ import sys
 from datetime import date, datetime
 
 import numpy as np
+from dynamicannotationdb.models import Base, AnalysisVersion
 from flask import Blueprint, Flask, current_app, jsonify, redirect
+from flask_cors import CORS
 from flask_restx import Api
 from flask_sqlalchemy import SQLAlchemy
-from flask_cors import CORS
+
 from materializationengine import __version__
 from materializationengine.admin import setup_admin
 from materializationengine.blueprints.client.api import client_bp
 from materializationengine.blueprints.materialize.api import mat_bp
-from materializationengine.config import configure_app, config
+from materializationengine.config import config, configure_app
 from materializationengine.database import sqlalchemy_cache
-from materializationengine.models import AnalysisVersion, Base
 from materializationengine.schemas import ma
 from materializationengine.utils import get_instance_folder_path
 from materializationengine.views import views_bp

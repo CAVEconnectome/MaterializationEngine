@@ -1,19 +1,23 @@
 import logging
 import os
-from cloudfiles import compression
+import time
+
 import pyarrow as pa
 from cachetools import LRUCache, TTLCache, cached
+from cloudfiles import compression
+from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 from emannotationschemas import get_schema
 from emannotationschemas.models import (
     Base,
     create_table_dict,
-    make_flat_model,
     make_annotation_model,
+    make_flat_model,
     make_segmentation_model,
+    sqlalchemy_models,
 )
 from flask import Response, abort, current_app, request, stream_with_context
 from flask_accepts import accepts, responds
-from flask_restx import Namespace, Resource, reqparse
+from flask_restx import Namespace, Resource, inputs, reqparse
 from materializationengine.blueprints.client.query import _execute_query, specific_query
 from materializationengine.blueprints.client.schemas import (
     ComplexQuerySchema,
@@ -36,7 +40,6 @@ from materializationengine.info_client import (
     get_datastack_info,
     get_datastacks,
 )
-from materializationengine.models import AnalysisTable, AnalysisVersion
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from middle_auth_client import (
     auth_required,
@@ -44,9 +47,6 @@ from middle_auth_client import (
     auth_requires_permission,
 )
 from sqlalchemy.engine.url import make_url
-from flask_restx import inputs
-import time
-
 
 __version__ = "3.2.1"
 
@@ -186,12 +186,12 @@ def get_split_models(datastack_name: str, table_name: str):
     """
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    schema_type = db.get_table_schema(table_name)
+    schema_type = db.database.get_table_metadata(table_name, filter_col="schema_type")
 
-    SegModel = make_segmentation_model(
+    SegModel = db.schema.create_annotation_model(
         table_name, schema_type, segmentation_source=pcg_table_name
     )
-    AnnModel = make_annotation_model(table_name, schema_type)
+    AnnModel = db.schema.create_annotation_model(table_name, schema_type)
     return AnnModel, SegModel
 
 
@@ -223,13 +223,13 @@ def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
         abort(410, "This materialization version is not available")
 
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    metadata = db.get_table_metadata(table_name)
+    metadata = db.database.get_table_metadata(table_name)
     reference_table = metadata.get("reference_table")
     if reference_table:
         table_metadata = {"reference_table": reference_table}
     else:
         table_metadata = None
-    return make_flat_model(
+    return db.schema.create_flat_model(
         table_name=table_name,
         schema_type=analysis_table.schema,
         segmentation_source=None,
@@ -397,7 +397,7 @@ class FrozenTableMetadata(Resource):
         tables = schema.dump(analysis_table)
 
         db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        ann_md = db.get_table_metadata(table_name)
+        ann_md = db.database.get_table_metadata(table_name)
         ann_md.pop("id")
         ann_md.pop("deleted")
         tables.update(ann_md)

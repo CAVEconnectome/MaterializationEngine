@@ -8,8 +8,8 @@ import uuid
 import docker
 import psycopg2
 import pytest
-from dynamicannotationdb.annotation_client import DynamicAnnotationClient
-from dynamicannotationdb.materialization_client import DynamicMaterializationClient
+from dynamicannotationdb import DynamicAnnotationInterface
+
 from materializationengine.app import create_app
 from materializationengine.celery_worker import create_celery
 from materializationengine.models import Base
@@ -170,7 +170,7 @@ def db_client(aligned_volume_name):
 
 @pytest.fixture(scope="session")
 def mat_client(aligned_volume_name, database_uri):
-    mat_client = DynamicMaterializationClient(aligned_volume_name, database_uri)
+    mat_client = DynamicAnnotationInterface(aligned_volume_name, database_uri)
     return mat_client
 
 
@@ -190,7 +190,7 @@ def check_database(sql_uri: str) -> None:  # pragma: no cover
 
 
 def setup_database(aligned_volume_name, database_uri):
-    mat_client = DynamicMaterializationClient(aligned_volume_name, database_uri)
+    mat_client = DynamicAnnotationInterface(aligned_volume_name, database_uri)
     base = Base
     base.metadata.bind = mat_client.engine
     base.metadata.create_all()
@@ -200,7 +200,7 @@ def setup_database(aligned_volume_name, database_uri):
 def add_annotation_table(mat_metadata: dict):
     aligned_volume_name = mat_metadata["aligned_volume"]
     database_uri = mat_metadata["sql_uri"]
-    anno_client = DynamicAnnotationClient(aligned_volume_name, database_uri)
+    anno_client = DynamicAnnotationInterface(aligned_volume_name, database_uri)
 
     table_name = mat_metadata["annotation_table_name"]
     schema_type = mat_metadata["schema_type"]
@@ -210,7 +210,7 @@ def add_annotation_table(mat_metadata: dict):
     vy = mat_metadata["voxel_resolution_y"]
     vz = mat_metadata["voxel_resolution_z"]
 
-    table_info = anno_client.create_annotation_table(
+    table_info = anno_client.annotation.create_table(
         table_name,
         schema_type,
         description,
@@ -231,13 +231,12 @@ def insert_test_data(mat_metadata: dict, annotation_data: dict):
     database_uri = mat_metadata["sql_uri"]
     pcg_name = mat_metadata["pcg_table_name"]
 
-    anno_client = DynamicAnnotationClient(aligned_volume_name, database_uri)
+    anno_client = DynamicAnnotationInterface(aligned_volume_name, database_uri)
 
-    anno_client.insert_annotations(annotation_table_name, synapse_data)
+    anno_client.annotation.insert_annotations(annotation_table_name, synapse_data)
 
-    mat_client = DynamicMaterializationClient(aligned_volume_name, database_uri)
-    is_created = mat_client.create_and_attach_seg_table(annotation_table_name, pcg_name)
-    return mat_client.insert_linked_segmentation(
+    is_created = anno_client.segmentation.create_segmentation_table(annotation_table_name, pcg_name)
+    return anno_client.segmentation.insert_linked_segmentation(
         annotation_table_name, pcg_name, segmentation_data
     )
 

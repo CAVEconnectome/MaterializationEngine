@@ -8,7 +8,7 @@ from materializationengine.database import (
 )
 from sqlalchemy.orm import scoped_session
 from sqlalchemy.engine.base import Engine
-from dynamicannotationdb.materialization_client import DynamicMaterializationClient
+from dynamicannotationdb import DynamicAnnotationInterface
 import logging
 import pytest
 
@@ -71,4 +71,4 @@ class TestSqlAlchemyCache:
 class TestDynamicMaterializationCache:
     def test_get_mat_client(self, test_app, aligned_volume_name):
         self.mat_client = dynamic_annotation_cache.get_db(aligned_volume_name)
-        assert isinstance(self.mat_client, DynamicMaterializationClient)
+        assert isinstance(self.mat_client, DynamicAnnotationInterface)
