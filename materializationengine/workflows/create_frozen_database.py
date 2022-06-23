@@ -427,7 +427,7 @@ def create_materialized_metadata(
     finally:
         session.close()
         engine.dispose()
-        mat_client.cached_session.close()
+        mat_client.database.cached_session.close()
         analysis_session.close()
         analysis_engine.dispose()
     return True
