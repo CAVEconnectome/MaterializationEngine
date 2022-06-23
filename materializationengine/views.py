@@ -26,7 +26,7 @@ from materializationengine.database import sqlalchemy_cache
 from materializationengine.info_client import get_datastack_info, get_datastacks
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 
-__version__ = "3.0.3"
+__version__ = "3.2.1"
 
 views_bp = Blueprint("views", __name__, url_prefix="/materialize/views")
 

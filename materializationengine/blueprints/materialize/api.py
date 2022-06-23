@@ -17,7 +17,9 @@ from sqlalchemy import MetaData, Table
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoSuchTableError
 
-__version__ = "3.0.3"
+
+__version__ = "3.2.1"
+
 
 
 
