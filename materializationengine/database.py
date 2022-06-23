@@ -117,7 +117,7 @@ class DynamicMaterializationCache:
 
     def _get_mat_client(self, database: str):
         sql_uri_config = get_config_param("SQLALCHEMY_DATABASE_URI")
-        mat_client = DynamicAnnotationInterface(database, sql_uri_config)
+        mat_client = DynamicAnnotationInterface(sql_uri_config, database)
         self._clients[database] = mat_client
         return self._clients[database]
 
