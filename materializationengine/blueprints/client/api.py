@@ -48,7 +48,7 @@ from middle_auth_client import (
 )
 from sqlalchemy.engine.url import make_url
 
-__version__ = "4.0.1"
+__version__ = "4.0.2"
 
 
 authorizations = {
