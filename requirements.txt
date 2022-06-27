@@ -167,7 +167,7 @@ furl==2.1.3
     # via middle-auth-client
 gcsfs==2022.1.0
     # via -r requirements.in
-geoalchemy2==0.10.2
+geoalchemy2==0.11.1
     # via
     #   -r requirements.in
     #   dynamicannotationdb
