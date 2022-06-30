@@ -3,12 +3,13 @@ Periodically clean up expired materialized databases.
 """
 import itertools
 from datetime import datetime
+from typing import List
 
 from celery.utils.log import get_task_logger
+from dynamicannotationdb.models import AnalysisVersion
 from materializationengine.celery_init import celery
 from materializationengine.database import create_session
 from materializationengine.info_client import get_aligned_volumes, get_datastack_info
-from dynamicannotationdb.models import AnalysisVersion
 from materializationengine.utils import get_config_param
 from sqlalchemy import create_engine
 from sqlalchemy.engine.url import make_url
@@ -27,6 +28,16 @@ def get_aligned_volumes_databases():
         databases = [database[0] for database in result]
     aligned_volume_databases = list(set(aligned_volumes).intersection(databases))
     return aligned_volume_databases
+
+
+def get_existing_databases(engine) -> List:
+    result = engine.execute("SELECT datname FROM pg_database;").fetchall()
+    return list(itertools.chain.from_iterable(result))
+
+
+def get_all_versions(session):
+    versions = session.query(AnalysisVersion).all()
+    return [str(version) for version in versions]
 
 
 @celery.task(name="workflow:remove_expired_databases")
@@ -63,8 +74,8 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                 continue
 
             # get databases that exist currently, filter by materializied dbs
-            result = engine.execute("SELECT datname FROM pg_database;").fetchall()
-            database_list = list(itertools.chain.from_iterable(result))
+            database_list = get_existing_databases(engine)
+
             databases = [
                 database for database in database_list if database.startswith(datastack)
             ]
@@ -80,7 +91,12 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                 with engine.connect() as conn:
                     conn.execution_options(isolation_level="AUTOCOMMIT")
                     for database in databases_to_delete:
-                        if len(databases) - (len(dropped_dbs) + 1) == 1:
+                        existing_databases = get_existing_databases(engine)
+                        mat_versions = get_all_versions(session)
+                        remaining_databases = set(mat_versions).intersection(
+                            existing_databases
+                        )
+                        if len(remaining_databases) == 1:
                             celery_logger.info(
                                 f"Only one materialized database remaining: {database}, removal stopped."
                             )
