@@ -8,7 +8,8 @@ from celery.utils.log import get_task_logger
 from dynamicannotationdb.key_utils import build_segmentation_table_name
 from dynamicannotationdb.models import SegmentationMetadata
 from sqlalchemy import and_, func, text
-from sqlalchemy.exc import ProgrammingError, NoResultFound
+from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.orm.exc import NoResultFound
 from materializationengine.celery_init import celery
 from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
 from materializationengine.utils import (
