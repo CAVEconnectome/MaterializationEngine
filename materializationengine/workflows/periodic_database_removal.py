@@ -39,6 +39,10 @@ def get_all_versions(session):
     versions = session.query(AnalysisVersion).all()
     return [str(version) for version in versions]
 
+def get_valid_versions(session):
+    valid_versions = session.query(AnalysisVersion).filter(AnalysisVersion.valid == True).all()
+    return [str(version) for version in valid_versions]
+
 
 @celery.task(name="workflow:remove_expired_databases")
 def remove_expired_databases(delete_threshold: int = 5) -> str:
@@ -91,12 +95,18 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                 with engine.connect() as conn:
                     conn.execution_options(isolation_level="AUTOCOMMIT")
                     for database in databases_to_delete:
+                        # see if any materialized databases exist
                         existing_databases = get_existing_databases(engine)
                         mat_versions = get_all_versions(session)
                         remaining_databases = set(mat_versions).intersection(
                             existing_databases
                         )
-                        if len(remaining_databases) == 1:
+                        # double check to see if there is only one valid db remaining
+                        valid_versions = get_valid_versions(session)
+                        remaining_valid_databases = set(valid_versions).intersection(
+                            existing_databases
+                        )                        
+                        if len(remaining_databases) or len(remaining_valid_databases) == 1:
                             celery_logger.info(
                                 f"Only one materialized database remaining: {database}, removal stopped."
                             )
