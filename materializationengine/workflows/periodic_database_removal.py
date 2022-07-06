@@ -106,7 +106,7 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                         remaining_valid_databases = set(valid_versions).intersection(
                             existing_databases
                         )                        
-                        if len(remaining_databases) or len(remaining_valid_databases) == 1:
+                        if len(remaining_databases) == 1 or len(remaining_valid_databases) == 1:
                             celery_logger.info(
                                 f"Only one materialized database remaining: {database}, removal stopped."
                             )
