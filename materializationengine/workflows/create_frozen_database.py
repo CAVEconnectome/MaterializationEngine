@@ -697,7 +697,7 @@ def merge_tables(self, mat_metadata: dict):
             ON {AnnotationModel.id} = "{SegmentationModel.__table__.name}".id
         WHERE
             {AnnotationModel.id} = "{SegmentationModel.__table__.name}".id
-        AND {AnnotationModel.created} <= {mat_time_stamp}
+        AND {AnnotationModel.created} <= "{mat_time_stamp}"
         AND {AnnotationModel.valid} = true
 
     """
