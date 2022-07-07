@@ -406,7 +406,9 @@ def create_materialized_metadata(
                 )
 
                 valid_row_count = mat_client.database.get_table_row_count(
-                    table_name, filter_valid=True
+                    table_name,
+                    filter_valid=True,
+                    filter_timestamp=materialization_time_stamp,
                 )
                 celery_logger.info(f"Row count {valid_row_count}")
                 if valid_row_count == 0:
@@ -641,13 +643,14 @@ def merge_tables(self, mat_metadata: dict):
     temp_table_name = mat_metadata["temp_mat_table_name"]
     schema = mat_metadata["schema"]
     datastack = mat_metadata["datastack"]
+    mat_time_stamp = mat_metadata["materialization_time_stamp"]
 
     # create dynamic sql_uri
     SQL_URI_CONFIG = get_config_param("SQLALCHEMY_DATABASE_URI")
     analysis_sql_uri = create_analysis_sql_uri(
         SQL_URI_CONFIG, datastack, analysis_version
     )
-    
+
     # get schema and match column order for sql query
     anno_schema = get_schema(schema)
     flat_schema = create_flattened_schema(anno_schema)
@@ -694,6 +697,7 @@ def merge_tables(self, mat_metadata: dict):
             ON {AnnotationModel.id} = "{SegmentationModel.__table__.name}".id
         WHERE
             {AnnotationModel.id} = "{SegmentationModel.__table__.name}".id
+        AND {AnnotationModel.created} <= {mat_time_stamp}
         AND {AnnotationModel.valid} = true
 
     """
@@ -785,18 +789,16 @@ def check_tables(self, mat_info: list, analysis_version: int):
         .filter(AnalysisVersion.version == analysis_version)
         .one()
     )
-
     valid_table_count = 0
     for mat_metadata in mat_info:
         annotation_table_name = mat_metadata["annotation_table_name"]
+        mat_timestamp = mat_metadata["materialization_time_stamp"]
 
-        live_table_row_count = (
-            mat_session.query(MaterializedMetadata.row_count)
-            .filter(MaterializedMetadata.table_name == annotation_table_name)
-            .scalar()
+        live_table_row_count = mat_client.database.get_table_row_count(
+            annotation_table_name, filter_valid=True, filter_timestamp=mat_timestamp
         )
         mat_row_count = mat_client.database.get_table_row_count(
-            annotation_table_name, filter_valid=True
+            annotation_table_name, filter_valid=True, filter_timestamp=mat_timestamp
         )
         celery_logger.info(f"ROW COUNTS: {live_table_row_count} {mat_row_count}")
 
