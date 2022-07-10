@@ -647,7 +647,7 @@ def merge_tables(self, mat_metadata: dict):
     analysis_sql_uri = create_analysis_sql_uri(
         SQL_URI_CONFIG, datastack, analysis_version
     )
-    
+
     # get schema and match column order for sql query
     anno_schema = get_schema(schema)
     flat_schema = create_flattened_schema(anno_schema)
@@ -823,7 +823,9 @@ def check_tables(self, mat_info: list, analysis_version: int):
             segmentation_source=None,
             table_metadata=table_metadata,
         )
-        live_mapped_indexes = index_cache.get_table_indices(annotation_table_name, engine)
+        live_mapped_indexes = index_cache.get_index_from_model(
+            annotation_table_name, anno_model, mat_engine
+        )
         mat_mapped_indexes = index_cache.get_table_indices(
             annotation_table_name, mat_engine
         )
