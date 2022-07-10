@@ -823,12 +823,12 @@ def check_tables(self, mat_info: list, analysis_version: int):
             segmentation_source=None,
             table_metadata=table_metadata,
         )
-        live_mapped_indexes = index_cache.get_index_from_model(anno_model, mat_engine)
+        live_mapped_indexes = index_cache.get_table_indices(annotation_table_name, engine)
         mat_mapped_indexes = index_cache.get_table_indices(
             annotation_table_name, mat_engine
         )
 
-        if live_mapped_indexes != mat_mapped_indexes:
+        if live_mapped_indexes.keys() != mat_mapped_indexes.keys():
             raise IndexMatchError(
                 f"Indexes did not match: annotation indexes {live_mapped_indexes}; materialized indexes {mat_mapped_indexes}"
             )

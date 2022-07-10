@@ -15,26 +15,34 @@ class IndexCache:
         Returns:
             dict: Map of reflected indices on given table.
         """
-        insp = reflection.Inspector.from_engine(engine)
+        inspector = reflection.Inspector.from_engine(engine)
         try:
-            pk_columns = insp.get_pk_constraint(table_name)
-            indexed_columns = insp.get_indexes(table_name)
-            foreign_keys = insp.get_foreign_keys(table_name)
+            pk_columns = inspector.get_pk_constraint(table_name)
+            indexed_columns = inspector.get_indexes(table_name)
+            foreign_keys = inspector.get_foreign_keys(table_name)
         except Exception as e:
             print(f"No table named '{table_name}', error: {e}")
             return None
         index_map = {}
         if pk_columns:
-            pk_name = {"primary_key_name": pk_columns.get("name")}
+            pkey_name = pk_columns.get("name").lower()
+            pk_name = {"primary_key_name": pkey_name}
             if pk_name["primary_key_name"]:
-                pk = {"index_name": f"{pk_columns['name']}", "type": "primary_key"}
-                index_map.update({pk_columns["constrained_columns"][0]: pk})
+                pk = {
+                    "column_name": pk_columns["constrained_columns"][0],
+                    "index_name": pkey_name,
+                    "type": "primary_key",
+                }
+                index_map[pkey_name] = pk
 
         if indexed_columns:
             for index in indexed_columns:
                 dialect_options = index.get("dialect_options", None)
-
-                indx_map = {"index_name": index["name"]}
+                index_name = index["name"].lower()
+                indx_map = {
+                    "column_name": index["column_names"][0],
+                    "index_name": index_name,
+                }
                 if dialect_options:
                     if "gist" in dialect_options.values():
                         indx_map.update(
@@ -46,18 +54,20 @@ class IndexCache:
                 else:
                     indx_map.update({"type": "index", "dialect_options": None})
 
-                index_map.update({index["column_names"][0]: indx_map})
+                index_map[index_name] = indx_map
         if foreign_keys:
             for foreign_key in foreign_keys:
-                foreign_key_name = foreign_key["name"]
+                foreign_key_name = foreign_key["name"].lower()
                 fk_data = {
+                    "column_name": foreign_key["referred_columns"][0],
                     "type": "foreign_key",
                     "foreign_key_name": foreign_key_name,
                     "foreign_key_table": foreign_key["referred_table"],
                     "foreign_key_column": foreign_key["constrained_columns"][0],
                     "target_column": foreign_key["referred_columns"][0],
                 }
-                index_map.update({foreign_key_name: fk_data})
+                fkey_column_key = f'{foreign_key["referred_table"]}_{foreign_key["referred_columns"][0]}_fkey' 
+                index_map[fkey_column_key] = fk_data
         return index_map
 
     def get_index_from_model(self, model, engine):
