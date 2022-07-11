@@ -988,9 +988,10 @@ def add_indices(self, mat_metadata: dict):
         analysis_session.close()
         analysis_engine.dispose()
 
-        add_index_tasks = chain(
-            [add_index.si(analysis_database, command) for command in commands]
-        )
-
-        return self.replace(add_index_tasks)
+        if commands:
+            add_index_tasks = chain(
+                [add_index.si(analysis_database, command) for command in commands]
+            )
+            return self.replace(add_index_tasks)
+        return fin.si()
     return "Indices already exist"
