@@ -835,7 +835,7 @@ def check_tables(self, mat_info: list, analysis_version: int):
         )
 
         if live_mapped_indexes.keys() != mat_mapped_indexes.keys():
-            raise IndexMatchError(
+            celery_logger.warning(
                 f"Indexes did not match: annotation indexes {live_mapped_indexes}; materialized indexes {mat_mapped_indexes}"
             )
 
