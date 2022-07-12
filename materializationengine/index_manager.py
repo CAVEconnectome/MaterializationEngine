@@ -57,15 +57,16 @@ class IndexCache:
         if foreign_keys:
             for foreign_key in foreign_keys:
                 foreign_key_name = foreign_key["name"].lower()
+                fkey_column_key = f'{foreign_key["referred_table"]}_{foreign_key["referred_columns"][0]}_fkey' 
                 fk_data = {
                     "column_name": foreign_key["referred_columns"][0],
                     "type": "foreign_key",
+                    "index_name": fkey_column_key,
                     "foreign_key_name": foreign_key_name,
                     "foreign_key_table": foreign_key["referred_table"],
                     "foreign_key_column": foreign_key["constrained_columns"][0],
                     "target_column": foreign_key["referred_columns"][0],
                 }
-                fkey_column_key = f'{foreign_key["referred_table"]}_{foreign_key["referred_columns"][0]}_fkey' 
                 index_map[fkey_column_key] = fk_data
         return index_map
 
@@ -121,16 +122,17 @@ class IndexCache:
                         target_column,
                     ) = foreign_key.target_fullname.split(".")
                     foreign_key_name = foreign_key.name.lower()
+                    fkey_column_key = f'{target_table_name}_{foreign_key.constraint.column_keys[0]}_fkey' 
 
                     foreign_key_map = {
                         "type": "foreign_key",
                         "column_name": foreign_key.constraint.column_keys[0],
+                        "index_name": fkey_column_key,
                         "foreign_key_name": foreign_key_name,
                         "foreign_key_table": target_table_name,
                         "foreign_key_column": foreign_key.constraint.column_keys[0],
                         "target_column": target_column,
                     }
-                    fkey_column_key = f'{target_table_name}_{foreign_key.constraint.column_keys[0]}_fkey' 
 
                     index_map[fkey_column_key] = foreign_key_map
         return index_map
@@ -203,15 +205,14 @@ class IndexCache:
             if index_type == "spatial_index":
                 command = f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} USING GIST ({column_name} gist_geometry_ops_nd);"
             if index_type == "foreign_key":
-                foreign_key_name = model_indices[column_name]["foreign_key_name"]
-                foreign_key_table = model_indices[column_name]["foreign_key_table"]
-                foreign_key_column = model_indices[column_name]["foreign_key_column"]
-                target_column = model_indices[column_name]["target_column"]
+                foreign_key_name = model_indices[index]["foreign_key_name"]
+                foreign_key_table = model_indices[index]["foreign_key_table"]
+                foreign_key_column = model_indices[index]["foreign_key_column"]
+                target_column = model_indices[index]["target_column"]
                 command = f"""ALTER TABLE "{table_name}"
                               ADD CONSTRAINT {foreign_key_name}
                               FOREIGN KEY ("{foreign_key_column}") 
                               REFERENCES "{foreign_key_table}" ("{target_column}");"""
-                missing_indices.add(foreign_key_name)
             commands.append(command)
         return commands
 
