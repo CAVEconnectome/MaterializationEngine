@@ -449,13 +449,18 @@ def specific_query(
     else:
         assert len(suffixes) == len(models)
 
-    if len(tables) == 2:
-        join_args = (
-            model_dict[tables[1][0]],
-            model_dict[tables[1][0]].__dict__[tables[1][1]]
-            == model_dict[tables[0][0]].__dict__[tables[0][1]],
-        )
-        dup_cols = dup_cols[np.where(dup_cols != tables[1][1])]
+    if len(tables) >= 2:
+        join_args = []
+        for k in range(1, len(tables)):
+
+            join_args.append(
+                (
+                    model_dict[tables[k][0]],
+                    model_dict[tables[k][0]].__dict__[tables[k][1]]
+                    == model_dict[tables[0][0]].__dict__[tables[0][1]],
+                ),
+            )
+        dup_cols = dup_cols[np.where(np.isin(dup_cols, [t[1] for t in tables]))]
     elif len(tables) > 2:
         raise Exception("Currently, only single joins are supported")
     else:
@@ -696,7 +701,7 @@ def _execute_query(
         count = query.count()
         df = pd.DataFrame({"count": [count]})
     else:
-
+        print(query)
         df = read_sql_tmpfile(
             query.statement.compile(engine, compile_kwargs={"literal_binds": True}),
             engine,
