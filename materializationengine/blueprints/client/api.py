@@ -116,6 +116,14 @@ query_parser.add_argument(
     location="args",
     help="whether to return pyarrow in pandas format, if false will return pyarrow table. true is default but deprecated",
 )
+query_parser.add_argument(
+    "filter_invalid",
+    type=inputs.boolean,
+    default=True,
+    required=False,
+    location="args",
+    help="whether to filter out invalid or expired annotations automatically (default is true), use false to see old/replaced annotations",
+)
 
 
 def after_request(response):
@@ -560,10 +568,11 @@ class LiveTableQuery(Resource):
                 return filter
 
         filter_equal_dict = data.get("filter_equal_dict", None)
-        if filter_equal_dict is None:
-            filter_equal_dict = {table_name: {"valid": "t"}}
-        else:
-            filter_equal_dict["table_name"].update({"valid": "t"})
+        if args["filter_invalid"]:
+            if filter_equal_dict is None:
+                filter_equal_dict = {table_name: {"valid": "t"}}
+            else:
+                filter_equal_dict["table_name"].update({"valid": "t"})
         df = specific_query(
             Session,
             engine,

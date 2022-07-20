@@ -18,6 +18,7 @@ from sqlalchemy import func, not_
 from sqlalchemy.orm import Query, Session
 from sqlalchemy.sql.sqltypes import Boolean, Integer
 from sqlalchemy.ext.declarative import DeclarativeMeta
+import pyarrow as pa
 import pyarrow.csv
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
@@ -413,35 +414,30 @@ def specific_query(
         return df
 
 
-def read_sql_tmpfile(query, db_engine,use_pandas=True):
-    #from pandas.core.dtypes.common import pandas_dtype
+def read_sql_tmpfile(query, db_engine, use_pandas=True):
+    # from pandas.core.dtypes.common import pandas_dtype
     import datetime
 
-    # dtypes = {
-    #     col.key: col.type.python_type
-    #     for col in query.statement.columns
-    #     if (
-    #         (col.type.python_type != datetime.datetime)
-    #         and (col.type.python_type != bool)
-    #     )
-    # }
+    python_types_d = {col.key: col.type.python_type for col in query.statement.columns}
     parse_dates = [
         col.key
         for col in query.statement.columns
         if col.type.python_type == datetime.datetime
     ]
 
-    # def map_types(t):
-    #     if t == int:
-    #         return pandas_dtype("Int64")
-    #     elif t == float:
-    #         return pandas_dtype("Float64")
-    #     elif t == str:
-    #         return pandas_dtype("string")
-    #     elif t == bool:
-    #         return bool
-    #     else:
-    #         return pandas_dtype(t)
+    def map_pyarrow_types(t):
+        if t == int:
+            return pa.int64()
+        elif t == float:
+            return pa.float32()
+        elif t == str:
+            return pa.string()
+        elif t == bool:
+            return pa.bool_()
+        elif t == datetime.datetime:
+            return pa.timestamp("ns")
+        else:
+            return None
 
     # print(dtypes)
     # dtypes = {k: map_types(v) for k, v in dtypes.items()}
@@ -458,10 +454,19 @@ def read_sql_tmpfile(query, db_engine,use_pandas=True):
         if use_pandas:
             df = pd.read_csv(tmpfile, parse_dates=parse_dates)
         else:
+            pyarrow_fields = []
+            for k, v in python_types_d.items():
+                pyt = map_pyarrow_types(v)
+                if pyt is not None:
+                    pyarrow_fields.append(pa.field(k, pyt))
+
             df = pyarrow.csv.read_csv(
                 tmpfile,
                 convert_options=pyarrow.csv.ConvertOptions(
-                    true_values=["t"], false_values=["f"]
+                    column_types=pa.schema(pyarrow_fields),
+                    true_values=["t"],
+                    false_values=["f"],
+                    timestamp_parsers=[pyarrow.csv.ISO8601, "%Y-%m-%d %H:%M:%S.%f"],
                 ),
             )
         return df
