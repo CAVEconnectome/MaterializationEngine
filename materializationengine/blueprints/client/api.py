@@ -48,6 +48,11 @@ from middle_auth_client import (
 )
 from sqlalchemy.engine.url import make_url
 
+
+from flask_restx import inputs
+import time
+import io
+
 __version__ = "4.0.20"
 
 
@@ -94,6 +99,22 @@ query_parser.add_argument(
     required=False,
     location="args",
     help="whether to only return the count of a query",
+)
+query_parser.add_argument(
+    "include_crud_columns",
+    type=inputs.boolean,
+    default=False,
+    required=False,
+    location="args",
+    help="whether to include crud columns in production queries",
+)
+query_parser.add_argument(
+    "return_pandas",
+    type=inputs.boolean,
+    default=True,
+    required=False,
+    location="args",
+    help="whether to return pyarrow in pandas format, if false will return pyarrow table. true is default but deprecated",
 )
 
 
@@ -488,7 +509,12 @@ class LiveTableQuery(Resource):
 
         data = request.parsed_obj
 
-        AnnModel, SegModel = get_split_models(datastack_name, table_name)
+        AnnModel, SegModel = get_split_models(
+            datastack_name,
+            table_name,
+            with_crud_columns=args.get("include_crud_columns", False),
+        )
+
         time_d["get Model"] = time.time() - now
         now = time.time()
 
@@ -538,7 +564,6 @@ class LiveTableQuery(Resource):
             filter_equal_dict = {table_name: {"valid": "t"}}
         else:
             filter_equal_dict["table_name"].update({"valid": "t"})
-        print(filter_equal_dict)
         df = specific_query(
             Session,
             engine,
@@ -558,13 +583,20 @@ class LiveTableQuery(Resource):
             limit=limit,
             get_count=get_count,
             outer_join=True,
+            use_pandas=args["return_pandas"],
         )
         time_d["execute query"] = time.time() - now
         now = time.time()
         headers = None
+        warnings = []
         if len(df) == limit:
-            headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
-
+            warnings.append(f'201 - "Limited query to {max_limit} rows')
+        if args["return_pandas"] and args["return_pyarrow"]:
+            warnings.append(
+                "return_pandas=true is deprecated and may convert columns with nulls to floats, Please upgrade CAVEclient to >XXX with pip install -U caveclient"
+            )
+        if len(warnings) > 0:
+            headers = {"Warning": "\n".join(warnings)}
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
             serialized = context.serialize(df).to_buffer().to_pybytes()
@@ -686,12 +718,21 @@ class FrozenTableQuery(Resource):
             offset=data.get("offset", None),
             limit=limit,
             get_count=get_count,
+            use_pandas=args["return_pandas"],
         )
         time_d["execute query"] = time.time() - now
         now = time.time()
         headers = None
+        warnings = []
         if len(df) == limit:
-            headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
+            warnings.append(f'201 - "Limited query to {max_limit} rows')
+        if args["return_pandas"] and args["return_pyarrow"]:
+            warnings.append(
+                f"return pandas is deprecated, \
+                please upgrade CAVEclient to >XXX with pip install -U caveclient"
+            )
+        if len(warnings) > 0:
+            headers = {"Warning": "\n".join(warnings)}
 
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
@@ -795,10 +836,18 @@ class FrozenQuery(Resource):
             offset=data.get("offset", None),
             limit=limit,
             suffixes=data.get("suffixes", None),
+            use_pandas=args["return_pandas"],
         )
         headers = None
         if len(df) == limit:
-            headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
+            warnings.append(f'201 - "Limited query to {max_limit} rows')
+        if args["return_pandas"] and args["return_pyarrow"]:
+            warnings.append(
+                f"return pandas is deprecated, \
+                please upgrade CAVEclient to >XXX with pip install -U caveclient"
+            )
+        if len(warnings) > 0:
+            headers = {"Warning": "\n".join(warnings)}
 
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
