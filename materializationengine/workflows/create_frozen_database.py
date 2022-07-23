@@ -165,7 +165,7 @@ def format_materialization_database_workflow(mat_info: List[dict]):
     """
     create_frozen_database_tasks = []
     for mat_metadata in mat_info:
-        if not mat_metadata["reference_table"]:
+        if not mat_metadata["reference_table"]: # need to build tables before adding reference tables with fkeys
             create_frozen_database_workflow = chain(
                 merge_tables.si(mat_metadata), add_indices.si(mat_metadata)
             )
@@ -181,14 +181,19 @@ def format_materialization_database_workflow(mat_info: List[dict]):
     max_retries=3,
 )
 def rebuild_reference_tables(self, mat_info: List[dict]):
-    add_index_tasks = [
-        add_indices.si(mat_metadata)
-        for mat_metadata in mat_info
-        if mat_metadata["reference_table"]
-    ]
+    reference_table_tasks = []
+    for mat_metadata in mat_info:
+        if mat_metadata["reference_table"]:
+            if mat_metadata["segmentation_table_name"]:
+                reference_table_workflow = chain(
+                    merge_tables.si(mat_metadata), add_indices.si(mat_metadata)
+                )
+            else:
+                reference_table_workflow = add_indices.si(mat_metadata)
+                reference_table_tasks.append(reference_table_workflow)
 
-    if add_index_tasks:
-        return self.replace(chain(add_index_tasks))
+    if reference_table_tasks:
+        return self.replace(chain(reference_table_tasks))
     else:
         return fin.si()
 
