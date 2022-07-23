@@ -165,7 +165,7 @@ def format_materialization_database_workflow(mat_info: List[dict]):
     """
     create_frozen_database_tasks = []
     for mat_metadata in mat_info:
-        if not mat_metadata["reference_table"]:
+        if not mat_metadata["reference_table"]: # need to build tables before adding reference tables with fkeys
             create_frozen_database_workflow = chain(
                 merge_tables.si(mat_metadata), add_indices.si(mat_metadata)
             )
