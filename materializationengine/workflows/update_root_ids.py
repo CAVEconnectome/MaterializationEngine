@@ -40,7 +40,7 @@ def expired_root_id_workflow(datastack_info: dict, **kwargs):
         materialization_time_stamp=materialization_time_stamp,
     )
     for mat_metadata in mat_info:
-        if mat_metadata["segmentation_table_name"]:
+        if mat_metadata.get("segmentation_table_name"):
             update_root_ids_workflow(mat_metadata).apply_async(
                 kwargs={"Datastack": datastack_info["datastack"]}
             )

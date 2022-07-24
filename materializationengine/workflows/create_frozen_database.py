@@ -184,7 +184,7 @@ def rebuild_reference_tables(self, mat_info: List[dict]):
     reference_table_tasks = []
     for mat_metadata in mat_info:
         if mat_metadata["reference_table"]:
-            if mat_metadata["segmentation_table_name"]:
+            if mat_metadata.get("segmentation_table_name"):
                 reference_table_workflow = chain(
                     merge_tables.si(mat_metadata), add_indices.si(mat_metadata)
                 )

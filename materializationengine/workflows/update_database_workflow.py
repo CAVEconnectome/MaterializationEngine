@@ -80,7 +80,7 @@ def update_database_workflow(self, datastack_info: dict, **kwargs):
     # skip tables that are larger than 1,000,000 rows due to performance.
     try:
         for mat_metadata in mat_info:
-            if mat_metadata["segmentation_table_name"]:
+            if mat_metadata.get("segmentation_table_name"):
                 workflow = chain(
                     ingest_new_annotations_workflow(mat_metadata),
                     update_root_ids_workflow(mat_metadata),

@@ -56,7 +56,7 @@ def run_complete_workflow(datastack_info: dict, days_to_expire: int = 5, **kwarg
         celery_logger.info(
             f"Running workflow for {mat_metadata['annotation_table_name']}"
         )
-        if mat_metadata["segmentation_table_name"]:
+        if mat_metadata.get("segmentation_table_name"):
             workflow = chain(
                 ingest_new_annotations_workflow(mat_metadata),
                 update_root_ids_workflow(mat_metadata),

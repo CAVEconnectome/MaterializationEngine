@@ -67,7 +67,7 @@ def process_new_annotations_workflow(
     for mat_metadata in mat_info:
         if (
             mat_metadata["row_count"] < 1_000_000
-            and mat_metadata["segmentation_table_name"]
+            and mat_metadata.get("segmentation_table_name")
         ):
             annotation_chunks = generate_chunked_model_ids(mat_metadata)
             process_chunks_workflow = chain(
@@ -110,7 +110,7 @@ def process_missing_roots_workflow(datastack_info: dict, **kwargs):
     )
     # filter for missing root ids (min/max ids)
     for mat_metadata in mat_info:
-        if mat_metadata["segmentation_table_name"]:
+        if mat_metadata.get("segmentation_table_name"):
             missing_root_id_chunks = get_ids_with_missing_roots(mat_metadata)
             seg_table = mat_metadata.get("segmentation_table_name")
             if missing_root_id_chunks:
