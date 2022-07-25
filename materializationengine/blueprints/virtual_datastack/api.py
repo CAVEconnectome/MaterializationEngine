@@ -22,7 +22,7 @@ from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoSuchTableError
 
 from .models import VirtualDatastack
-from .schema import VirtualDatastackSchema
+from .schema import VirtualDatastacksSchema
 
 __version__ = "4.0.22"
 
@@ -39,7 +39,7 @@ virtual_datastack_bp = Namespace(
 def get_virtual_datastacks(aligned_volume: str):
     db = dynamic_annotation_cache.get_db(database=aligned_volume)
     results = db.database.cached_session.query(VirtualDatastack).all()
-    schema = VirtualDatastackSchema(many=True)
+    schema = VirtualDatastacksSchema(many=True)
     return schema.dump(results)
 
 
@@ -50,7 +50,7 @@ def get_virtual_datastack(aligned_volume: str, virtual_datastack_name: str):
         .filter(VirtualDatastack.release_name == virtual_datastack_name)
         .one()
     )
-    schema = VirtualDatastackSchema()
+    schema = VirtualDatastacksSchema()
     return schema.dump(results)
 
 
