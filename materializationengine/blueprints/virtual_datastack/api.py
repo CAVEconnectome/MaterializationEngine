@@ -43,11 +43,11 @@ def get_virtual_datastacks(aligned_volume: str):
     return schema.dump(results)
 
 
-def get_virtual_datastack(aligned_volume: str, virutal_datastack_name: str):
+def get_virtual_datastack(aligned_volume: str, virtual_datastack_name: str):
     db = dynamic_annotation_cache.get_db(database=aligned_volume)
     results = (
         db.database.cached_session.query(VirtualDatastack)
-        .filter(VirtualDatastack.release_name == virutal_datastack_name)
+        .filter(VirtualDatastack.release_name == virtual_datastack_name)
         .one()
     )
     schema = VirtualDatastackSchema()
