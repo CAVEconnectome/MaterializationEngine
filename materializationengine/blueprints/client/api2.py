@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from tkinter import FALSE
 
 import pyarrow as pa
 from cachetools import LRUCache, TTLCache, cached
@@ -435,7 +436,7 @@ class FrozenTableCount(Resource):
 
 
 @client_bp.expect(query_parser)
-@client_bp.route("/datastack/<string:datastack_name>/table/<string:table_name>/query")
+@client_bp.route("/datastack/<string:datastack_name>/query")
 class LiveTableQuery(Resource):
     @reset_auth
     @auth_requires_permission("admin_view", table_arg="datastack_name")
@@ -452,6 +453,7 @@ class LiveTableQuery(Resource):
         All values are optional.  Limit has an upper bound set by the server.
         Consult the schema of the table for column names and appropriate values
         {
+            "table":"tablename",
             "filter_out_dict": {
                 "tablename":{
                     "column_name":[excluded,values]
@@ -534,27 +536,37 @@ class LiveTableQuery(Resource):
                 filter[table_in] = {c: table_filter[c] for c in other_filters}
                 return filter
 
-        df = specific_query(
-            Session,
-            engine,
-            {table_name: AnnModel, seg_table: SegModel},
-            [[table_name, "id"], [seg_table, "id"]],
-            filter_in_dict=_format_filter(
-                data.get("filter_in_dict", None), table_name, seg_table
-            ),
-            filter_notin_dict=_format_filter(
-                data.get("filter_notin_dict", None), table_name, seg_table
-            ),
-            filter_equal_dict=_format_filter(
-                data.get("filter_equal_dict", None), table_name, seg_table
-            ),
-            filter_spatial=data.get("filter_spatial_dict", None),
-            select_columns=data.get("select_columns", None),
-            consolidate_positions=not args["split_positions"],
-            offset=data.get("offset", None),
-            limit=limit,
-            get_count=get_count,
-        )
+        user_data = request.parsed_obj
+
+        mat_query_manager = QueryManager(mat_engine, mat_Session, live=False)
+        # modify user_data for materialized data
+        # modify filters back in time
+        # add in joins for reference annotations
+        mat_query_manager.parse_request(user_data)
+        mat_df = execute_query_manager(query_manager)
+        # update expired root_ids
+        # reapply orignal filters
+
+        # if timestamp doesn't match materialization
+        live_query_manager = QueryManager(live_engine, live_Session, live=True)
+        user_data = request.parsed_obj
+        # modify user_data for live data
+        # modify filters back in time to last update
+        # modify filters to apply segmenation filters to segmentation tables
+        # add in joins for ann>segmentation tables
+        # add in joins for reference annotations (and ref_ann>ref_seg)
+        # add in filters to exclude things before materialization
+        live_query_manager.parse_request(user_data)
+        live_df = execute_query_manager(query_manager)
+        # update expired root_ids
+        # reapply orignal filters
+        user_data = request.parsed_obj
+        mat_query_manager = QueryManager(mat_engine, matSession)
+        # modify user_data for materialized data
+        mat_query_manager.parse_request(user_data)
+
+        mat_df = execute_query_manager(query_manager)
+
         time_d["execute query"] = time.time() - now
         now = time.time()
         headers = None
