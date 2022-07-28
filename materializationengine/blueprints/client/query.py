@@ -229,6 +229,12 @@ def render_query(statement, dialect=None):
     return LiteralCompiler(dialect, statement).process(statement)
 
 
+def execute_query_manager(query_manager):
+    query = query_manager.construct_query()
+    df = _execute_query(query_manager._session, query_manager._engine, query=query)
+    return df
+
+
 def specific_query(
     sqlalchemy_session,
     engine,
