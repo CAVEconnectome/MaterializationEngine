@@ -482,6 +482,8 @@ class LiveTableQuery(Resource):
             datastack_name
         )
         args = query_parser.parse_args()
+        
+        
         Session = sqlalchemy_cache.get(aligned_volume_name)
         time_d = {}
         now = time.time()
