@@ -494,8 +494,7 @@ class LiveTableQuery(Resource):
             headers = None
 
         args = query_parser.parse_args()
-        
-        
+
         Session = sqlalchemy_cache.get(aligned_volume_name)
         time_d = {}
         now = time.time()
