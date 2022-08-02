@@ -130,13 +130,6 @@ def check_aligned_volume(aligned_volume):
         abort(400, f"aligned volume: {aligned_volume} not valid")
 
 
-@cached(cache=TTLCache(maxsize=64, ttl=600))
-def get_relevant_datastack_info(datastack_name):
-    ds_info = get_datastack_info(datastack_name=datastack_name)
-    seg_source = ds_info["segmentation_source"]
-    pcg_table_name = seg_source.split("/")[-1]
-    aligned_volume_name = ds_info["aligned_volume"]["name"]
-    return aligned_volume_name, pcg_table_name
 
 
 @cached(cache=LRUCache(maxsize=64))
