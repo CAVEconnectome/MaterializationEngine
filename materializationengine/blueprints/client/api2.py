@@ -19,7 +19,7 @@ from emannotationschemas.models import (
 from flask import Response, abort, current_app, request, stream_with_context
 from flask_accepts import accepts, responds
 from flask_restx import Namespace, Resource, inputs, reqparse
-from materializationengine.blueprints.client.query import _execute_query, specific_query
+from materializationengine.blueprints.client.query import _execute_query, execute_query_manager, specific_query
 from materializationengine.blueprints.client.schemas import (
     ComplexQuerySchema,
     CreateTableSchema,
@@ -407,7 +407,7 @@ class FrozenTableMetadata(Resource):
 
 
 @client_bp.route(
-    "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/count"
+    @client_bp.route("/datastack/<string:datastack_name>/query/count")
 )
 class FrozenTableCount(Resource):
     @reset_auth
@@ -453,34 +453,76 @@ class LiveTableQuery(Resource):
         All values are optional.  Limit has an upper bound set by the server.
         Consult the schema of the table for column names and appropriate values
         {
-            "table":"tablename",
-            "filter_out_dict": {
-                "tablename":{
-                    "column_name":[excluded,values]
-                }
-            },
+            "table":"table_name",
+            "joins":[[table_name,table_column], [joined_table,joined_column],
+                     [joined_table, joincol2],[third_table, joincol_third]]
+            "timestamp": "XXXXXXX",
             "offset": 0,
             "limit": 200000,
-            "select_columns": [
-                "column","names"
-            ],
+            "suffixes":{
+                "table_name":"suffix1",
+                "joined_table":"suffix2",
+                "third_table":"suffix3"
+            },
+            "select_columns": {
+                "table_name":[ "column","names"]
+            },
             "filter_in_dict": {
-                "tablename":{
+                "table_name":{
                     "column_name":[included,values]
                 }
             },
+            "filter_out_dict": {
+                "table_name":{
+                    "column_name":[excluded,values]
+                }
+            },
             "filter_equal_dict": {
-                "tablename":{
+                "table_name":{
                     "column_name":value
                 }
             "filter_spatial_dict": {
-                "tablename": {
+                "table_name": {
                 "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
             }
         }
         Returns:
             pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
         """
+
+        
+
+        args = query_parser.parse_args() 
+        user_data = request.parsed_obj
+        mat_version = get_closest_mat_version(datastack, user_data['timestamp'])
+        mat_df = execute_materialized_query(datastack, mat_version, user_data)
+        prod_df = execute_production_query(datastack, user_data, mat_version.timestamp, args['timestamp'])
+        df = combine_queries(mat_df, prod_df, data)
+
+        return format_dataframe(df)
+
+    
+
+
+        if len(df) == limit:
+            headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
+
+        if args["return_pyarrow"]:
+            context = pa.default_serialization_context()
+            serialized = context.serialize(df).to_buffer().to_pybytes()
+            time_d["serialize"] = time.time() - now
+            logging.info(time_d)
+            return Response(
+                serialized, headers=headers, mimetype="x-application/pyarrow"
+            )
+        else:
+            dfjson = df.to_json(orient="records")
+            time_d["serialize"] = time.time() - now
+            logging.info(time_d)
+            response = Response(dfjson, headers=headers, mimetype="application/json")
+            return after_request(response)
+
+        
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
