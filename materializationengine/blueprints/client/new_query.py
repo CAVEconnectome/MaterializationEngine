@@ -2,6 +2,84 @@ from .query import _execute_query
 import datetime
 from cachetools import TTLCache, cached
 from materializationengine.info_client import get_datastack_info
+import numpy as np
+
+def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_client):
+    """translate a list of filter dictionaries
+       from a point in the future, to a point in the past
+
+    Args:
+        filters (list[dict]): filter dictionaries with
+        timestamp ([datetime.datetime]): timestamp you want to query with
+        timestamp_past ([datetime.datetime]): timestamp rootids are passed in
+
+    Returns:
+        new_filters: list[dict]
+            filters translated to timestamp past
+        future_id_map: dict
+            mapping from passed IDs to the IDs in the past
+    """
+
+    new_filters = []
+    root_ids = []
+    for filter_dict in filters:
+        if filter_dict is not None:
+            for col, val in filter_dict.items():
+                if col.endswith("root_id"):
+                    if not isinstance(val, (Iterable, np.ndarray)):
+                        root_ids.append([val])
+                    else:
+                        root_ids.append(val)
+
+    # if there are no root_ids then we can safely return now
+    if len(root_ids) == 0:
+        return filters, {}
+    root_ids = np.unique(np.concatenate(root_ids))
+    
+    filter_timed_end = cg_client.is_latest_roots(root_ids, timestamp=timestamp_to)
+    if timestamp_to>timestamp_from:
+        filter_timed_start = cg_client.get_root_timestamps(root_ids) < timestamp_
+    else:
+        filter_timed_start = cg_client.get_root_timestamps(root_ids) < timestamp
+    filter_timestamp = np.logical_and(filter_timed_start, filter_timed_end)
+
+    if not np.all(filter_timestamp):
+        roots_too_old = root_ids[~filter_timed_end]
+        roots_too_recent = root_ids[~filter_timed_start]
+
+        if len(roots_too_old) > 0:
+            too_old_str = f"{roots_too_old} are expired, "
+        else:
+            too_old_str = ""
+        if len(roots_too_recent) > 0:
+            too_recent_str = f"{roots_too_recent} are too recent, "
+        else:
+            too_recent_str = ""
+
+        raise ValueError(
+            f"Timestamp incompatible with IDs: {too_old_str}{too_recent_str}use chunkedgraph client to find valid ID(s)"
+        )
+
+    id_mapping = cg_client.get_past_ids(
+        root_ids, timestamp_past=timestamp_past, timestamp_future=timestamp
+    )
+    for filter_dict in filters:
+        if filter_dict is None:
+            new_filters.append(filter_dict)
+        else:
+            new_dict = {}
+            for col, root_ids in filter_dict.items():
+                if col.endswith("root_id"):
+                    if not isinstance(root_ids, (Iterable, np.ndarray)):
+                        new_dict[col] = id_mapping["past_id_map"][root_ids]
+                    else:
+                        new_dict[col] = np.concatenate(
+                            [id_mapping["past_id_map"][v] for v in root_ids]
+                        )
+                else:
+                    new_dict[col] = root_ids
+            new_filters.append(new_dict)
+    return new_filters, id_mapping["future_id_map"]
 
 
 @cached(cache=TTLCache(maxsize=64, ttl=600))
