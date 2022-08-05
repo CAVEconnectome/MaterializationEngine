@@ -18,7 +18,7 @@ from materializationengine.database import dynamic_annotation_cache, sqlalchemy_
 from materializationengine.info_client import get_aligned_volumes, get_datastack_info, get_relevant_datastack_info
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from middle_auth_client import auth_requires_permission
-from materializationengine.blueprints.client.datastack import validate_version
+from materializationengine.blueprints.client.datastack import validate_datastack
 __version__ = "4.0.20"
 
 
@@ -203,6 +203,7 @@ def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
 class DatastackVersions(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
+    @validate_datastack
     @client_bp.doc("datastack_versions", security="apikey")
     def get(self, datastack_name: str):
         """get available versions
@@ -233,6 +234,7 @@ class DatastackVersions(Resource):
 class DatastackVersion(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
+    @validate_datastack
     @client_bp.doc("version metadata", security="apikey")
     def get(self, datastack_name: str, version: int):
         """get version metadata
@@ -265,6 +267,7 @@ class DatastackVersion(Resource):
 class DatastackMetadata(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
+    @validate_datastack
     @client_bp.doc("all valid version metadata", security="apikey")
     def get(self, datastack_name: str):
         """get materialized metadata for all valid versions
@@ -293,6 +296,7 @@ class DatastackMetadata(Resource):
 class FrozenTableVersions(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
+    @validate_datastack
     @client_bp.doc("get_frozen_tables", security="apikey")
     def get(self, datastack_name: str, version: int):
         """get frozen tables
@@ -335,6 +339,7 @@ class FrozenTableVersions(Resource):
 class FrozenTableMetadata(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
+    @validate_datastack
     @client_bp.doc("get_frozen_table_metadata", security="apikey")
     def get(self, datastack_name: str, version: int, table_name: str):
         """get frozen table metadata
@@ -372,6 +377,7 @@ class FrozenTableMetadata(Resource):
 class FrozenTableCount(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
+    @validate_datastack
     @client_bp.doc("simple_query", security="apikey")
     def get(self, datastack_name: str, version: int, table_name: str):
         """get annotation count in table
@@ -400,6 +406,7 @@ class FrozenTableCount(Resource):
 class LiveTableQuery(Resource):
     @reset_auth
     @auth_requires_permission("admin_view", table_arg="datastack_name")
+    @validate_datastack
     @client_bp.doc("live_simple_query", security="apikey")
     @accepts("SimpleQuerySchema", schema=SimpleQuerySchema, api=client_bp)
     def post(self, datastack_name: str, table_name: str):
@@ -545,6 +552,7 @@ class LiveTableQuery(Resource):
 class FrozenTableQuery(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
+    @validate_datastack
     @client_bp.doc("simple_query", security="apikey")
     @accepts("SimpleQuerySchema", schema=SimpleQuerySchema, api=client_bp)
     def post(self, datastack_name: str, version: int, table_name: str):
@@ -669,6 +677,7 @@ class FrozenTableQuery(Resource):
 class FrozenQuery(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
+    @validate_datastack
     @client_bp.doc("complex_query", security="apikey")
     @accepts("ComplexQuerySchema", schema=ComplexQuerySchema, api=client_bp)
     def post(self, datastack_name: str, version: int):
