@@ -92,9 +92,8 @@ def validate_datastack(f):
                 # check if target table is valid
                 valid_tables = [r.table_name for r in response]
                 if target_table not in valid_tables:
-                    raise ValueError(
-                        f"{target_table} not valid for version {target_version}"
-                    )
+                    return f"{target_table} not valid for version {target_version}", 400
+
             # remap datastack name to point to parent version
             if kwargs.get("datastack_name"):
                 kwargs["datastack_name"] = parent_datastack
