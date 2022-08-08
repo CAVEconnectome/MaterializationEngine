@@ -59,18 +59,19 @@ def validate_datastack(f):
                     .all()
                 )
 
-        # no need to map to a parent version
         if not any(parent_version_info):
             return f(*args, **kwargs)
-        else:
-            parent_version = str(parent_version_info[0][0])
+
+        parent_database = str(parent_version_info[0][0])
+        parent_datastack = parent_database.rsplit("__mat")[0]
+
         # validate all parent versions
         valid_versions = []
         for version_info in parent_version_info:
             info = version_info[0]
             if info.valid:
                 valid_versions.append(info.version)
-        
+
         if target_table and target_version:
             # confirm target version is valid
             if target_version in valid_versions:
@@ -96,10 +97,10 @@ def validate_datastack(f):
                     )
             # remap datastack name to point to parent version
             if kwargs.get("datastack_name"):
-                kwargs["datastack_name"] = parent_version
+                kwargs["datastack_name"] = parent_datastack
             else:
                 args_list = list(args)
-                args_list[0] = parent_version
+                args_list[0] = parent_datastack
                 new_args = tuple(args_list)
                 return f(*new_args, **kwargs)
         return f(*args, **kwargs)
