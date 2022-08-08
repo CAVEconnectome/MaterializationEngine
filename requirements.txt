@@ -116,7 +116,7 @@ dill==0.3.4
     #   pathos
 dracopy==1.0.1
     # via cloud-volume
-dynamicannotationdb==5.0.7
+dynamicannotationdb==5.1.0
     # via -r requirements.in
 emannotationschemas==5.0.2
     # via
@@ -514,9 +514,9 @@ zipp==3.7.0
     # via
     #   importlib-metadata
     #   importlib-resources
-zope-event==4.5.0
+zope.event==4.5.0
     # via gevent
-zope-interface==5.4.0
+zope.interface==5.4.0
     # via gevent
 zstandard==0.17.0
     # via cloud-files
