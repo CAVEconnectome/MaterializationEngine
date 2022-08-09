@@ -228,7 +228,6 @@ class DatastackVersions(Resource):
 
         Args:
             datastack_name (str): datastack name
-            specified_datastack (str): what datask
 
         Returns:
             list(int): list of versions that are available
