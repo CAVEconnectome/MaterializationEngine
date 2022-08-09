@@ -130,7 +130,7 @@ def get_analysis_version_and_table(
         return None, None
     analysis_table = (
         Session.query(AnalysisTable)
-        .filter(AnalysisTable.analysisversion_id == AnalysisVersion.id)
+        .filter(AnalysisTable.analysisversion_id == analysis_version.id)
         .filter(AnalysisTable.table_name == table_name)
         .first()
     )

@@ -116,7 +116,6 @@ def validate_datastack(f):
         # get args and kwargs as a dict
         arguments = parse_args(f, *args, **kwargs)
 
-        target_table = arguments.get("table_name")
         target_datastack = arguments.get("datastack_name")
         target_version = arguments.get("version")
         # save the original target datastack and version in kwargs
@@ -158,7 +157,6 @@ def validate_datastack(f):
             # remap datastack name to point to parent version
 
             if kwargs.get("datastack_name"):
-                print("using kwargs route")
                 kwargs["datastack_name"] = parent_datastack
                 kwargs["version"] = parent_version
                 return f(*args, **kwargs)
@@ -167,7 +165,6 @@ def validate_datastack(f):
                 args_list[0] = parent_datastack
                 args_list[1] = parent_version
                 new_args = tuple(args_list)
-                print("using non kwarg route")
                 return f(*new_args, **kwargs)
 
         else:
