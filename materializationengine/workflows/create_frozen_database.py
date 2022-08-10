@@ -101,7 +101,7 @@ def create_versioned_materialization_workflow(
         datastack_info, new_version_number, materialization_time_stamp
     )
 
-    setup_versioned_database = create_materializied_database_workflow(
+    setup_versioned_database = create_materialized_database_workflow(
         datastack_info, new_version_number, materialization_time_stamp, mat_info
     )
     format_workflow = format_materialization_database_workflow(mat_info)
@@ -116,13 +116,13 @@ def create_versioned_materialization_workflow(
     return workflow
 
 
-def create_materializied_database_workflow(
+def create_materialized_database_workflow(
     datastack_info: dict,
     new_version_number: int,
     materialization_time_stamp: datetime.datetime.utcnow,
     mat_info: List[dict],
 ):
-    """Celery workflow to create a materializied database.
+    """Celery workflow to create a materialized database.
 
     Workflow:
         - Copy live database as a versioned materialized database.
