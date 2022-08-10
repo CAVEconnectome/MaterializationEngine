@@ -22,7 +22,9 @@ def _get_datastacks() -> List:
 
 
 @celery.task(name="workflow:run_periodic_materialization")
-def run_periodic_materialization(days_to_expire: int = None) -> None:
+def run_periodic_materialization(
+    days_to_expire: int = None, merge_tables: bool = True
+) -> None:
     """
     Run complete materialization workflow. Steps are as follows:
     1. Find missing segmentation data in a given datastack and lookup.
@@ -61,7 +63,7 @@ def run_periodic_materialization(days_to_expire: int = None) -> None:
                 return f"Number of valid materialized databases is {valid_databases}, threshold is set to: {max_databases}"
             datastack_info["database_expires"] = True
             task = run_complete_workflow.s(
-                datastack_info, days_to_expire=days_to_expire
+                datastack_info, days_to_expire=days_to_expire, merge_tables=merge_tables
             )
             task.apply_async(kwargs={"Datastack": datastack})
         except Exception as e:
