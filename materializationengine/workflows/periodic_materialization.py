@@ -31,7 +31,7 @@ def run_periodic_materialization(
     2. Update expired root ids
     3. Copy database to new frozen version
     4. Merge annotation and segmentation tables together
-    5. Drop non-materializied tables
+    5. Drop non-materialized tables
     """
     is_update_roots_running = check_if_task_is_running(
         "workflow:update_database_workflow", "worker.workflow"
