@@ -122,8 +122,9 @@ def setup_periodic_tasks(sender, **kwargs):
         ),
         "run_lts_periodic_materialization": run_periodic_materialization.s(
             days_to_expire=days_till_next_month(
-                datetime.datetime.utcnow(), merge_tables=merge_tables
-            )
+                datetime.datetime.utcnow(),
+            ),
+            merge_tables=merge_tables,
         ),
         "run_periodic_database_update": run_periodic_database_update.s(),
         "remove_expired_databases": remove_expired_databases.s(
