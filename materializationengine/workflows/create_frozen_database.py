@@ -7,12 +7,22 @@ from typing import List
 import pandas as pd
 from celery import chain, chord
 from celery.utils.log import get_task_logger
-from dynamicannotationdb.models import AnnoMetadata
+from dynamicannotationdb.models import (
+    AnalysisTable,
+    AnalysisVersion,
+    AnnoMetadata,
+    Base,
+    MaterializedMetadata,
+)
 from emannotationschemas import get_schema
 from emannotationschemas.flatten import create_flattened_schema
-from emannotationschemas.models import create_table_dict, make_flat_model
-from materializationengine.celery_init import celery
+from emannotationschemas.models import (
+    create_table_dict,
+    make_flat_model,
+    make_reference_annotation_model,
+)
 from materializationengine.blueprints.materialize.api import get_datastack_info
+from materializationengine.celery_init import celery
 from materializationengine.database import (
     create_session,
     dynamic_annotation_cache,
@@ -20,17 +30,11 @@ from materializationengine.database import (
 )
 from materializationengine.errors import IndexMatchError
 from materializationengine.index_manager import index_cache
-from dynamicannotationdb.models import (
-    AnalysisTable,
-    AnalysisVersion,
-    Base,
-    MaterializedMetadata,
-)
 from materializationengine.shared_tasks import (
+    add_index,
     fin,
     get_materialization_info,
     query_id_range,
-    add_index,
 )
 from materializationengine.utils import (
     create_annotation_model,
@@ -161,7 +165,7 @@ def format_materialization_database_workflow(mat_info: List[dict]):
     """
     create_frozen_database_tasks = []
     for mat_metadata in mat_info:
-        if not mat_metadata["reference_table"]:
+        if not mat_metadata["reference_table"]: # need to build tables before adding reference tables with fkeys
             create_frozen_database_workflow = chain(
                 merge_tables.si(mat_metadata), add_indices.si(mat_metadata)
             )
@@ -177,14 +181,19 @@ def format_materialization_database_workflow(mat_info: List[dict]):
     max_retries=3,
 )
 def rebuild_reference_tables(self, mat_info: List[dict]):
-    add_index_tasks = [
-        add_indices.si(mat_metadata)
-        for mat_metadata in mat_info
-        if mat_metadata["reference_table"]
-    ]
+    reference_table_tasks = []
+    for mat_metadata in mat_info:
+        if mat_metadata["reference_table"]:
+            if mat_metadata.get("segmentation_table_name"):
+                reference_table_workflow = chain(
+                    merge_tables.si(mat_metadata), add_indices.si(mat_metadata)
+                )
+            else:
+                reference_table_workflow = add_indices.si(mat_metadata)
+                reference_table_tasks.append(reference_table_workflow)
 
-    if add_index_tasks:
-        return self.replace(chain(add_index_tasks))
+    if reference_table_tasks:
+        return self.replace(chain(reference_table_tasks))
     else:
         return fin.si()
 
@@ -825,13 +834,15 @@ def check_tables(self, mat_info: list, analysis_version: int):
             segmentation_source=None,
             table_metadata=table_metadata,
         )
-        live_mapped_indexes = index_cache.get_index_from_model(anno_model, mat_engine)
+        live_mapped_indexes = index_cache.get_index_from_model(
+            annotation_table_name, anno_model, mat_engine
+        )
         mat_mapped_indexes = index_cache.get_table_indices(
             annotation_table_name, mat_engine
         )
 
-        if live_mapped_indexes != mat_mapped_indexes:
-            raise IndexMatchError(
+        if live_mapped_indexes.keys() != mat_mapped_indexes.keys():
+            celery_logger.warning(
                 f"Indexes did not match: annotation indexes {live_mapped_indexes}; materialized indexes {mat_mapped_indexes}"
             )
 
@@ -960,37 +971,48 @@ def add_indices(self, mat_metadata: dict):
     if add_indices:
         analysis_version = mat_metadata.get("analysis_version")
         datastack = mat_metadata["datastack"]
+        aligned_volume = mat_metadata["aligned_volume"]
         analysis_database = mat_metadata["analysis_database"]
         SQL_URI_CONFIG = get_config_param("SQLALCHEMY_DATABASE_URI")
         analysis_sql_uri = create_analysis_sql_uri(
             SQL_URI_CONFIG, datastack, analysis_version
         )
-
+        engine = sqlalchemy_cache.get_engine(aligned_volume)
         analysis_session, analysis_engine = create_session(analysis_sql_uri)
 
         annotation_table_name = mat_metadata.get("annotation_table_name")
         schema = mat_metadata.get("schema")
 
-        table_metadata = None
         if mat_metadata.get("reference_table"):
-            table_metadata = {"reference_table": mat_metadata.get("reference_table")}
+            model = make_reference_annotation_model(
+                table_name=annotation_table_name,
+                schema_type=schema,
+                target_table=mat_metadata.get("reference_table"),
+                segmentation_source=None,
+                with_crud_columns=False,
+            )
+            commands = index_cache.add_indices_sql_commands(
+                annotation_table_name, model, engine
+            )
+        else:
+            model = make_flat_model(
+                table_name=annotation_table_name,
+                schema_type=schema,
+                segmentation_source=None,
+                table_metadata=None,
+            )
 
-        model = make_flat_model(
-            table_name=annotation_table_name,
-            schema_type=schema,
-            segmentation_source=None,
-            table_metadata=table_metadata,
-        )
+            commands = index_cache.add_indices_sql_commands(
+                annotation_table_name, model, analysis_engine
+            )
 
-        commands = index_cache.add_indices_sql_commands(
-            annotation_table_name, model, analysis_engine
-        )
         analysis_session.close()
         analysis_engine.dispose()
 
-        add_index_tasks = chain(
-            [add_index.si(analysis_database, command) for command in commands]
-        )
-
-        return self.replace(add_index_tasks)
+        if commands:
+            add_index_tasks = chain(
+                [add_index.si(analysis_database, command) for command in commands]
+            )
+            return self.replace(add_index_tasks)
+        return fin.si()
     return "Indices already exist"

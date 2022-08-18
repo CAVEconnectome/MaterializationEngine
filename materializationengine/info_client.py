@@ -1,14 +1,15 @@
-from materializationengine.errors import (
-    AlignedVolumeNotFoundException,
-    DataStackNotFoundException,
-)
-from materializationengine.utils import get_config_param
-from flask import current_app
-import requests
 import os
-from caveclient.infoservice import InfoServiceClient
-from caveclient.auth import AuthClient
+
 import cachetools.func
+import requests
+from cachetools import LRUCache, TTLCache, cached
+from caveclient.auth import AuthClient
+from caveclient.infoservice import InfoServiceClient
+from flask import current_app
+
+from materializationengine.errors import (AlignedVolumeNotFoundException,
+                                          DataStackNotFoundException)
+from materializationengine.utils import get_config_param
 
 
 @cachetools.func.ttl_cache(maxsize=2, ttl=5 * 60)
@@ -70,3 +71,11 @@ def get_datastack_info(datastack_name):
         raise DataStackNotFoundException(
             f"datastack {datastack_name} info not returned"
         )
+
+@cached(cache=TTLCache(maxsize=64, ttl=600))
+def get_relevant_datastack_info(datastack_name):
+    ds_info = get_datastack_info(datastack_name=datastack_name)
+    seg_source = ds_info["segmentation_source"]
+    pcg_table_name = seg_source.split("/")[-1]
+    aligned_volume_name = ds_info["aligned_volume"]["name"]
+    return aligned_volume_name, pcg_table_name

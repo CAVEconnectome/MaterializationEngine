@@ -139,13 +139,13 @@ def get_materialization_info(
         voxel_resolution = [vx, vy, vz]
 
         reference_table = md.get("reference_table")
-
+        schema = db.database.get_table_schema(annotation_table)
         if max_id and max_id > 0:
             table_metadata = {
                 "annotation_table_name": annotation_table,
                 "datastack": datastack_info["datastack"],
                 "aligned_volume": str(aligned_volume_name),
-                "schema": db.database.get_table_schema(annotation_table),
+                "schema": schema,
                 "max_id": int(max_id),
                 "min_id": int(min_id),
                 "row_count": row_count,
@@ -155,28 +155,29 @@ def get_materialization_info(
                 "materialization_time_stamp": str(materialization_time_stamp),
                 "table_count": len(annotation_tables),
             }
-
-            if not reference_table:
+            has_segmentation_table = db.schema.is_segmentation_table_required(schema)
+            if has_segmentation_table:
                 segmentation_table_name = build_segmentation_table_name(
                     annotation_table, pcg_table_name
                 )
-                try:
-                    segmentation_metadata = (
-                        db.segmentation.get_segmentation_table_metadata(
-                            annotation_table, pcg_table_name
-                        )
-                    )
+
+                segmentation_metadata = db.segmentation.get_segmentation_table_metadata(
+                    annotation_table, pcg_table_name
+                )
+                if segmentation_metadata:
                     create_segmentation_table = False
-                except NoResultFound as e:
-                    celery_logger.warning(f"SEGMENTATION TABLE DOES NOT EXIST: {e}")
+                else:
+                    celery_logger.warning(
+                        f"SEGMENTATION TABLE DOES NOT EXIST: {segmentation_table_name}"
+                    )
                     segmentation_metadata = {"last_updated": None}
                     create_segmentation_table = True
+
                 last_updated_time_stamp = segmentation_metadata.get("last_updated")
 
-                if not last_updated_time_stamp:
-                    last_updated_time_stamp = None
-                else:
-                    last_updated_time_stamp = str(last_updated_time_stamp)
+                last_updated_time_stamp = (
+                    str(last_updated_time_stamp) if last_updated_time_stamp else None
+                )
 
                 table_metadata.update(
                     {
