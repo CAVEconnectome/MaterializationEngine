@@ -24,7 +24,7 @@ copyright = "2021, Derrick Brittain"
 author = "Derrick Brittain,  Forrest Collman, Sven Dorkenwald"
 
 # The full version, including alpha/beta/rc tags
-release = "4.0.14"
+release = "4.0.22"
 
 master_doc = 'index'
 

@@ -23,10 +23,14 @@ from sqlalchemy import and_, func, or_
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.celery_init import celery
 from materializationengine.database import sqlalchemy_cache
-from materializationengine.info_client import get_datastack_info, get_datastacks
+from materializationengine.info_client import (
+    get_datastack_info,
+    get_datastacks,
+    get_relevant_datastack_info,
+)
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 
-__version__ = "4.0.14"
+__version__ = "4.0.22"
 
 views_bp = Blueprint("views", __name__, url_prefix="/materialize/views")
 
@@ -90,14 +94,6 @@ def make_df_with_links_to_id(objects, schema, url, col, **urlkwargs):
         axis=1,
     )
     return df
-
-
-def get_relevant_datastack_info(datastack_name):
-    ds_info = get_datastack_info(datastack_name=datastack_name)
-    seg_source = ds_info["segmentation_source"]
-    pcg_table_name = seg_source.split("/")[-1]
-    aligned_volume_name = ds_info["aligned_volume"]["name"]
-    return aligned_volume_name, pcg_table_name
 
 
 @views_bp.route("/datastack/<datastack_name>")
