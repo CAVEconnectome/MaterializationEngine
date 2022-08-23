@@ -77,7 +77,7 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                 celery_logger.error(f"Error: {sql_error}")
                 continue
 
-            # get databases that exist currently, filter by materializied dbs
+            # get databases that exist currently, filter by materialized dbs
             database_list = get_existing_databases(engine)
 
             databases = [

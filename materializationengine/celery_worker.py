@@ -112,15 +112,19 @@ def setup_periodic_tasks(sender, **kwargs):
         run_periodic_materialization,
     )
 
+    merge_tables = get_config_param("MERGE_TABLES")
     periodic_tasks = {
         "run_daily_periodic_materialization": run_periodic_materialization.s(
-            days_to_expire=2
+            days_to_expire=2, merge_tables=merge_tables
         ),
         "run_weekly_periodic_materialization": run_periodic_materialization.s(
-            days_to_expire=7
+            days_to_expire=7, merge_tables=merge_tables
         ),
         "run_lts_periodic_materialization": run_periodic_materialization.s(
-            days_to_expire=days_till_next_month(datetime.datetime.utcnow())
+            days_to_expire=days_till_next_month(
+                datetime.datetime.utcnow(),
+            ),
+            merge_tables=merge_tables,
         ),
         "run_periodic_database_update": run_periodic_database_update.s(),
         "remove_expired_databases": remove_expired_databases.s(

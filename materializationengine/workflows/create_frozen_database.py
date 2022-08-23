@@ -51,7 +51,9 @@ celery_logger = get_task_logger(__name__)
 
 
 @celery.task(name="workflow:materialize_database")
-def materialize_database(days_to_expire: int = 5, **kwargs) -> None:
+def materialize_database(
+    days_to_expire: int = 5, merge_tables: bool = True, **kwargs
+) -> None:
     """
     Materialize database. Steps are as follows:
     1. Create new versioned database.
@@ -71,7 +73,7 @@ def materialize_database(days_to_expire: int = 5, **kwargs) -> None:
             celery_logger.info(f"Materializing {datastack} database")
             datastack_info = get_datastack_info(datastack)
             task = create_versioned_materialization_workflow.s(
-                datastack_info, days_to_expire
+                datastack_info, days_to_expire, merge_tables
             )
             task.apply_async(kwargs={"Datastack": datastack_info["datastack"]})
         except Exception as e:
@@ -82,7 +84,7 @@ def materialize_database(days_to_expire: int = 5, **kwargs) -> None:
 
 @celery.task(name="workflow:create_versioned_materialization_workflow")
 def create_versioned_materialization_workflow(
-    datastack_info: dict, days_to_expire: int = 5, **kwargs
+    datastack_info: dict, days_to_expire: int = 5, merge_tables: bool = True, **kwargs
 ):
     """Create a timelocked database of materialization annotations
     and associated segmentation data.
@@ -101,28 +103,33 @@ def create_versioned_materialization_workflow(
         datastack_info, new_version_number, materialization_time_stamp
     )
 
-    setup_versioned_database = create_materializied_database_workflow(
+    setup_versioned_database = create_materialized_database_workflow(
         datastack_info, new_version_number, materialization_time_stamp, mat_info
     )
-    format_workflow = format_materialization_database_workflow(mat_info)
+    if merge_tables:
+        format_workflow = format_materialization_database_workflow(mat_info)
 
+        analysis_database_workflow = chain(
+            chord(format_workflow, fin.s()), rebuild_reference_tables.si(mat_info)
+        )
+    else:
+        analysis_database_workflow = fin.si()
     workflow = chain(
         setup_versioned_database,
-        chord(format_workflow, fin.s()),
-        rebuild_reference_tables.si(mat_info),
+        analysis_database_workflow,
         check_tables.si(mat_info, new_version_number),
     )
 
     return workflow
 
 
-def create_materializied_database_workflow(
+def create_materialized_database_workflow(
     datastack_info: dict,
     new_version_number: int,
     materialization_time_stamp: datetime.datetime.utcnow,
     mat_info: List[dict],
 ):
-    """Celery workflow to create a materializied database.
+    """Celery workflow to create a materialized database.
 
     Workflow:
         - Copy live database as a versioned materialized database.
@@ -165,7 +172,9 @@ def format_materialization_database_workflow(mat_info: List[dict]):
     """
     create_frozen_database_tasks = []
     for mat_metadata in mat_info:
-        if not mat_metadata["reference_table"]: # need to build tables before adding reference tables with fkeys
+        if not mat_metadata[
+            "reference_table"
+        ]:  # need to build tables before adding reference tables with fkeys
             create_frozen_database_workflow = chain(
                 merge_tables.si(mat_metadata), add_indices.si(mat_metadata)
             )
@@ -276,7 +285,7 @@ def create_new_version(
     max_retries=3,
 )
 def create_analysis_database(self, datastack_info: dict, analysis_version: int) -> str:
-    """Copies live database to new versioned database for materializied annotations.
+    """Copies live database to new versioned database for materialized annotations.
 
     Args:
         datastack_info (dict): datastack metadata
