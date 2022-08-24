@@ -116,7 +116,11 @@ def get_materialization_info(
     metadata = []
     celery_logger.debug(f"Annotation tables: {annotation_tables}")
     for annotation_table in annotation_tables:
-        row_count = db.database.get_table_row_count(annotation_table, filter_valid=True)
+        row_count = db.database.get_table_row_count(
+            annotation_table,
+            filter_valid=True,
+            filter_timestamp=str(materialization_time_stamp),
+        )
         max_id = db.database.get_max_id_value(annotation_table)
         min_id = db.database.get_min_id_value(annotation_table)
         if row_count == 0:
@@ -156,6 +160,7 @@ def get_materialization_info(
                 segmentation_table_name = build_segmentation_table_name(
                     annotation_table, pcg_table_name
                 )
+
                 segmentation_metadata = db.segmentation.get_segmentation_table_metadata(
                     annotation_table, pcg_table_name
                 )

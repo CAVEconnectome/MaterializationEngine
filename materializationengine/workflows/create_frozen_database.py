@@ -424,7 +424,9 @@ def create_materialized_metadata(
                 )
 
                 valid_row_count = mat_client.database.get_table_row_count(
-                    table_name, filter_valid=True
+                    table_name,
+                    filter_valid=True,
+                    filter_timestamp=materialization_time_stamp,
                 )
                 celery_logger.info(f"Row count {valid_row_count}")
                 if valid_row_count == 0:
@@ -659,6 +661,7 @@ def merge_tables(self, mat_metadata: dict):
     temp_table_name = mat_metadata["temp_mat_table_name"]
     schema = mat_metadata["schema"]
     datastack = mat_metadata["datastack"]
+    mat_time_stamp = mat_metadata["materialization_time_stamp"]
 
     # create dynamic sql_uri
     SQL_URI_CONFIG = get_config_param("SQLALCHEMY_DATABASE_URI")
@@ -678,7 +681,7 @@ def merge_tables(self, mat_metadata: dict):
         with_crud_columns=False,
     )
 
-    AnnotationModel = create_annotation_model(mat_metadata, with_crud_columns=False)
+    AnnotationModel = create_annotation_model(mat_metadata)
     SegmentationModel = create_segmentation_model(mat_metadata)
 
     query_columns = {}
@@ -701,7 +704,6 @@ def merge_tables(self, mat_metadata: dict):
     columns = [f'"{col.table}".{col.name}' for col in sorted_columns_list]
 
     mat_session, mat_engine = create_session(analysis_sql_uri)
-
     query = f"""
         SELECT 
             {', '.join(columns)}
@@ -712,6 +714,7 @@ def merge_tables(self, mat_metadata: dict):
             ON {AnnotationModel.id} = "{SegmentationModel.__table__.name}".id
         WHERE
             {AnnotationModel.id} = "{SegmentationModel.__table__.name}".id
+        AND {AnnotationModel.created} <= '{mat_time_stamp}'
         AND {AnnotationModel.valid} = true
 
     """
@@ -797,21 +800,20 @@ def check_tables(self, mat_info: list, analysis_version: int):
     engine = sqlalchemy_cache.get_engine(aligned_volume)
     mat_session = sqlalchemy_cache.get(analysis_database)
     mat_engine = sqlalchemy_cache.get_engine(analysis_database)
+    live_client = dynamic_annotation_cache.get_db(aligned_volume)
     mat_client = dynamic_annotation_cache.get_db(analysis_database)
     versioned_database = (
         session.query(AnalysisVersion)
         .filter(AnalysisVersion.version == analysis_version)
         .one()
     )
-
     valid_table_count = 0
     for mat_metadata in mat_info:
         annotation_table_name = mat_metadata["annotation_table_name"]
+        mat_timestamp = mat_metadata["materialization_time_stamp"]
 
-        live_table_row_count = (
-            mat_session.query(MaterializedMetadata.row_count)
-            .filter(MaterializedMetadata.table_name == annotation_table_name)
-            .scalar()
+        live_table_row_count = live_client.database.get_table_row_count(
+            annotation_table_name, filter_valid=True, filter_timestamp=mat_timestamp
         )
         mat_row_count = mat_client.database.get_table_row_count(
             annotation_table_name, filter_valid=True
