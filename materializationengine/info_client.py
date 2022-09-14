@@ -7,8 +7,10 @@ from caveclient.auth import AuthClient
 from caveclient.infoservice import InfoServiceClient
 from flask import current_app
 
-from materializationengine.errors import (AlignedVolumeNotFoundException,
-                                          DataStackNotFoundException)
+from materializationengine.errors import (
+    AlignedVolumeNotFoundException,
+    DataStackNotFoundException,
+)
 from materializationengine.utils import get_config_param
 
 
@@ -43,7 +45,6 @@ def get_aligned_volume(aligned_volume):
 def get_datastacks():
     server = current_app.config["GLOBAL_SERVER_URL"]
     auth = AuthClient(server_address=server, token=current_app.config["AUTH_TOKEN"])
-    print(auth.token)
     infoclient = InfoServiceClient(
         server_address=server,
         auth_client=auth,
@@ -60,17 +61,20 @@ def get_datastacks():
 def get_datastack_info(datastack_name):
     server = current_app.config["GLOBAL_SERVER_URL"]
     auth = AuthClient(server_address=server, token=current_app.config["AUTH_TOKEN"])
-    infoclient = InfoServiceClient(
+    info_client = InfoServiceClient(
         server_address=server,
         auth_client=auth,
         api_version=current_app.config.get("INFO_API_VERSION", 2),
     )
     try:
-        return infoclient.get_datastack_info(datastack_name=datastack_name)
-    except requests.HTTPError:
+        datastack_info = info_client.get_datastack_info(datastack_name=datastack_name)
+        datastack_info["datastack"] = datastack_name
+        return datastack_info
+    except requests.HTTPError as e:
         raise DataStackNotFoundException(
-            f"datastack {datastack_name} info not returned"
+            f"datastack {datastack_name} info not returned {e}"
         )
+
 
 @cached(cache=TTLCache(maxsize=64, ttl=600))
 def get_relevant_datastack_info(datastack_name):
