@@ -30,7 +30,7 @@ from materializationengine.info_client import (
 )
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 
-__version__ = "4.0.24"
+__version__ = "4.0.25"
 
 views_bp = Blueprint("views", __name__, url_prefix="/materialize/views")
 
