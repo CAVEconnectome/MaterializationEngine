@@ -548,7 +548,7 @@ class CreateVirtualPublicVersionResource(Resource):
         virtual_datastack_name = f"{virtual_version_name}_v{analysis_version.version}"
 
         time_to_expire = analysis_version.expires_on - datetime.datetime.utcnow()
-        if time_to_expire.days > 1000:
+        if time_to_expire.days < 1000:
             expiration_timestamp = str(
                 analysis_version.expires_on + datetime.timedelta(days=36525)
             )
