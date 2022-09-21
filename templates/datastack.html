@@ -6,7 +6,38 @@
 
 {% block content %}
 <h3> versions </h3>
-{{table|safe}}
+<table>
+  <tr>
+      {% for col in column_names %}
+      <th>{{col}}</th>
+      {% endfor %}
+  </tr>
+  {% for row in row_data %}
+  <tr>
+      {% for col, row_ in zip(column_names, row) %}
+      {% if col == link_version %}
+      <td>
+          <button type="button" onclick=window.location.href="{{url_for('views.version_view', datastack_name=datastack, id=row_)}}">
+          {{ row_ }}
+          </button>
+      </td>
+      {% elif row_ == 'AVAILABLE' %}
+      <td class="completed">{{row_}}</td>
+      {% elif row_ == 'FAILED' %}
+      <td class="failure">{{row_}}</td>
+      {% elif row_ == 'RUNNING' %}
+      <td class="running">{{row_}}</td>
+      {% elif row_ == 'EXPIRED' %}
+      <td class="expired">{{row_}}</td>
+      {% else %}
+      <td>{{row_}}</td>
+      {% endif %}
+      {% endfor %}
+  </tr>
+  {% endfor %}
+
+</table>
+<!-- {{table|safe}} -->
 <a href="{{url_for('views.datastack_view',datastack_name=datastack)}}?all=true">show all</a> 
 
 {% endblock %}
