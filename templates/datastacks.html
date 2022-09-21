@@ -1,11 +1,23 @@
 {% extends 'base.html' %}
 
 {% block header %}
-  <h1>{% block title %}Datastacks:{% endblock %}</h1>
+  <h1>{% block title %}Datastacks{% endblock %}</h1>
 {% endblock %}
 
 {% block content %}
-{% for datastack in datastacks %}
-  <p><a href="{{url_for('views.datastack_view',datastack_name=datastack)}}" >{{datastack}}</a></p>
-{% endfor %}
+<div class="card-container">
+  <div class="row">
+
+    {% for datastack in datastacks %}
+        <div class="card mx-auto" style="width: 18rem;"> 
+          <a href="{{url_for('views.datastack_view',datastack_name=datastack['name'])}}" style="text-decoration:none" > 
+          <h5 class="card-title">{{datastack['name']}}</h5>
+          <p class="card-text">{{datastack['description']}}</p>
+
+        </div>
+        </a>
+    {% endfor %}
+
+  </div>
+</div>
 {% endblock %}
