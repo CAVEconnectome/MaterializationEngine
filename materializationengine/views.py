@@ -1,5 +1,5 @@
 import datetime
-
+import logging
 import pandas as pd
 from dateutil import parser
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
@@ -36,7 +36,7 @@ views_bp = Blueprint("views", __name__, url_prefix="/materialize/views")
 
 
 @views_bp.before_request
-@reset_auth
+# @reset_auth
 def before_request():
     pass
 
@@ -45,8 +45,23 @@ def before_request():
 @views_bp.route("/index")
 @auth_required
 def index():
+    datastacks = get_datastacks()
+    datastack_payload = []
+    for datastack in datastacks:
+        datastack_data = {"name": datastack}
+        try:
+            datastack_info = get_datastack_info(datastack)
+        except Exception as e:
+            logging.warning(e)
+            datastack_info = None
+        aligned_volume_info = datastack_info.get("aligned_volume")
+
+        if aligned_volume_info:
+            datastack_data["description"] = aligned_volume_info.get("description")
+
+        datastack_payload.append(datastack_data)
     return render_template(
-        "datastacks.html", datastacks=get_datastacks(), version=__version__
+        "datastacks.html", datastacks=datastack_payload, version=__version__
     )
 
 
@@ -110,24 +125,24 @@ def datastack_view(datastack_name):
         version_query = version_query.filter(AnalysisVersion.valid == True)
     versions = version_query.order_by(AnalysisVersion.version.desc()).all()
 
-    if len(versions) > 0:
-        schema = AnalysisVersionSchema(many=True)
-        df = make_df_with_links_to_id(
-            versions,
-            schema,
-            "views.version_view",
-            "version",
-            datastack_name=datastack_name,
+    if len(versions) <= 0:
+        return render_template(
+            "datastack.html",
+            datastack=datastack_name,
+            version=__version__,
         )
-        df_html_table = df.to_html(escape=False)
-    else:
-        df_html_table = ""
-
+    schema = AnalysisVersionSchema(many=True)
+    df = pd.DataFrame(data=schema.dump(versions, many=True))
+    column_names = df.columns.values
+    row_data = list(df.values.tolist())
     return render_template(
         "datastack.html",
+        column_names=column_names,
+        row_data=row_data,
+        link_version="version",
         datastack=datastack_name,
-        table=df_html_table,
         version=__version__,
+        zip=zip,
     )
 
 
@@ -137,7 +152,9 @@ def version_view(datastack_name: str, id: int):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
 
-    version = session.query(AnalysisVersion).filter(AnalysisVersion.id == id).first()
+    version = (
+        session.query(AnalysisVersion).filter(AnalysisVersion.version == id).first()
+    )
 
     table_query = session.query(AnalysisTable).filter(
         AnalysisTable.analysisversion == version
@@ -158,9 +175,11 @@ def version_view(datastack_name: str, id: int):
     df["table_name"] = df.table_name.map(
         lambda x: f"<a href='/annotation/views/aligned_volume/{aligned_volume_name}/table/{x}'>{x}</a>"
     )
-
+    classes = ["table table-borderless"]
     with pd.option_context("display.max_colwidth", -1):
-        output_html = df.to_html(escape=False)
+        output_html = df.to_html(
+            escape=False, classes=classes, index=False, justify="left", border=0
+        )
 
     return render_template(
         "version.html",
@@ -204,7 +223,7 @@ def cell_type_local_report(datastack_name, id):
     schema_client = DynamicSchemaClient()
 
     CellTypeModel = schema_client.create_annotation_model(
-        table.tablename,
+        table.table_name,
         table.schema,
     )
 
@@ -229,7 +248,7 @@ def cell_type_local_report(datastack_name, id):
         "cell_type_local.html",
         version=__version__,
         schema_name=table.schema,
-        table_name=table.tablename,
+        table_name=table.table_name,
         dataset=table.analysisversion.dataset,
         table=df.to_html(),
     )
@@ -245,7 +264,7 @@ def synapse_report(datastack_name, id):
         abort(504, "this table is not a synapse table")
     schema_client = DynamicSchemaClient()
     SynapseModel = schema_client.create_annotation_model(
-        table.tablename,
+        table.table_name,
         table.schema,
     )
 
@@ -271,7 +290,7 @@ def synapse_report(datastack_name, id):
         dataset=table.analysisversion.dataset,
         analysisversion=table.analysisversion.version,
         version=__version__,
-        table_name=table.tablename,
+        table_name=table.table_name,
         schema_name="synapses",
     )
 
