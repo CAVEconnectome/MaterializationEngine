@@ -1,24 +1,14 @@
 import datetime
+import json
 import logging
+
 import pandas as pd
-from dateutil import parser
-from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
+from dynamicannotationdb.models import AnalysisTable, AnalysisVersion, VersionErrorTable
 from dynamicannotationdb.schema import DynamicSchemaClient
-from flask import (
-    Blueprint,
-    abort,
-    current_app,
-    redirect,
-    render_template,
-    request,
-    url_for,
-)
-from middle_auth_client import (
-    auth_required,
-    auth_requires_admin,
-    auth_requires_permission,
-)
+from flask import Blueprint, abort, redirect, render_template, request, url_for
+from middle_auth_client import auth_required, auth_requires_permission
 from sqlalchemy import and_, func, or_
+from sqlalchemy.sql import text
 
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.celery_init import celery
@@ -28,7 +18,11 @@ from materializationengine.info_client import (
     get_datastacks,
     get_relevant_datastack_info,
 )
-from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
+from materializationengine.schemas import (
+    AnalysisTableSchema,
+    AnalysisVersionSchema,
+    VersionErrorTableSchema,
+)
 
 __version__ = "4.0.25"
 
@@ -36,7 +30,7 @@ views_bp = Blueprint("views", __name__, url_prefix="/materialize/views")
 
 
 @views_bp.before_request
-# @reset_auth
+@reset_auth
 def before_request():
     pass
 
@@ -98,13 +92,16 @@ def get_job_info(job_name: str):
     return render_template("job.html", job=job_info, version=__version__)
 
 
-def make_df_with_links_to_id(objects, schema, url, col, **urlkwargs):
-    df = pd.DataFrame(data=schema.dump(objects, many=True))
+def make_df_with_links_to_id(
+    objects, schema, url, col, col_value, df=None, **urlkwargs
+):
+    if df is None:
+        df = pd.DataFrame(data=schema.dump(objects, many=True))
     if urlkwargs is None:
         urlkwargs = {}
     df[col] = df.apply(
         lambda x: "<a href='{}'>{}</a>".format(
-            url_for(url, id=x.id, **urlkwargs), x[col]
+            url_for(url, id=getattr(x, col_value), **urlkwargs), x[col]
         ),
         axis=1,
     )
@@ -125,31 +122,92 @@ def datastack_view(datastack_name):
         version_query = version_query.filter(AnalysisVersion.valid == True)
     versions = version_query.order_by(AnalysisVersion.version.desc()).all()
 
-    if len(versions) <= 0:
-        return render_template(
-            "datastack.html",
-            datastack=datastack_name,
-            version=__version__,
+    if len(versions) > 0:
+        schema = AnalysisVersionSchema(many=True)
+        column_order = schema.declared_fields.keys()
+        df = pd.DataFrame(data=schema.dump(versions, many=True))
+
+        df = make_df_with_links_to_id(
+            objects=versions,
+            schema=schema,
+            url="views.version_error",
+            col="status",
+            col_value="version",
+            df=df,
+            datastack_name=datastack_name,
         )
-    schema = AnalysisVersionSchema(many=True)
-    df = pd.DataFrame(data=schema.dump(versions, many=True))
-    column_names = df.columns.values
-    row_data = list(df.values.tolist())
+        df = make_df_with_links_to_id(
+            objects=versions,
+            schema=schema,
+            url="views.version_view",
+            col="version",
+            col_value="version",
+            df=df,
+            datastack_name=datastack_name,
+        )
+        df = df.reindex(columns=column_order)
+
+        classes = ["table table-borderless"]
+        with pd.option_context("display.max_colwidth", -1):
+            output_html = df.to_html(
+                escape=False, classes=classes, index=False, justify="left", border=0
+            )
+    else:
+        output_html = ""
+
     return render_template(
         "datastack.html",
-        column_names=column_names,
-        row_data=row_data,
-        link_version="version",
         datastack=datastack_name,
+        table=output_html,
         version=__version__,
-        zip=zip,
     )
+
+
+@views_bp.route("/datastack/<datastack_name>/version/<int:id>/failed")
+@auth_requires_permission("view", table_arg="datastack_name")
+def version_error(datastack_name: str, id: int):
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+
+    aligned_volume_name = "minnie65_phase3"
+
+    session = sqlalchemy_cache.get(aligned_volume_name)
+
+    version = (
+        session.query(AnalysisVersion).filter(AnalysisVersion.version == id).first()
+    )
+    error = (
+        session.query(VersionErrorTable)
+        .filter(VersionErrorTable.analysisversion_id == version.id)
+        .first()
+    )
+    if error:
+        schema = VersionErrorTableSchema()
+        error_data = schema.dump(error)
+        return render_template(
+            "version_error.html",
+            traceback=json.dumps(error_data["error"]),
+            error_type=error_data["exception"],
+            datastack=datastack_name,
+            version=__version__,
+            mat_version=version.version,
+        )
+
+    else:
+        return render_template(
+            "version_error.html",
+            error_type=None,
+            datastack=datastack_name,
+            version=__version__,
+            mat_version=version.version,
+        )
 
 
 @views_bp.route("/datastack/<datastack_name>/version/<int:id>")
 @auth_requires_permission("view", table_arg="datastack_name")
 def version_view(datastack_name: str, id: int):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+    aligned_volume_name = "minnie65_phase3"
+
     session = sqlalchemy_cache.get(aligned_volume_name)
 
     version = (
@@ -160,21 +218,22 @@ def version_view(datastack_name: str, id: int):
         AnalysisTable.analysisversion == version
     )
     tables = table_query.all()
+    schema = AnalysisTableSchema(many=True)
 
     df = make_df_with_links_to_id(
-        tables,
-        AnalysisTableSchema(many=True),
-        "views.table_view",
-        "id",
+        objects=tables,
+        schema=AnalysisTableSchema(many=True),
+        url="views.table_view",
+        col="id",
+        col_value="id",
         datastack_name=datastack_name,
     )
-    schema_url = "<a href='{}/schema/views/type/{}/view'>{}</a>"
-    df["schema"] = df.schema.map(
-        lambda x: schema_url.format(current_app.config["GLOBAL_SERVER_URL"], x, x)
-    )
-    df["table_name"] = df.table_name.map(
-        lambda x: f"<a href='/annotation/views/aligned_volume/{aligned_volume_name}/table/{x}'>{x}</a>"
-    )
+
+    column_order = schema.declared_fields.keys()
+    df = df.reindex(columns=column_order)
+
+    logging.info(version)
+
     classes = ["table table-borderless"]
     with pd.option_context("display.max_colwidth", -1):
         output_html = df.to_html(
@@ -183,8 +242,8 @@ def version_view(datastack_name: str, id: int):
 
     return render_template(
         "version.html",
-        datastack=version.datastack,
-        analysisversion=version.version,
+        datastack=datastack_name,
+        analysisversion=version,
         table=output_html,
         version=__version__,
     )
@@ -222,21 +281,19 @@ def cell_type_local_report(datastack_name, id):
         abort(504, "this table is not a cell_type_local table")
     schema_client = DynamicSchemaClient()
 
-    CellTypeModel = schema_client.create_annotation_model(
-        table.table_name,
-        table.schema,
+    AnnoCellTypeModel, SegCellTypeModel = schema_client.get_split_models(
+        table.table_name, table.schema, pcg_table_name
     )
-
-    n_annotations = CellTypeModel.query.count()
+    n_annotations = AnnoCellTypeModel.query.count()
 
     cell_type_merge_query = (
         session.query(
-            CellTypeModel.pt_root_id,
-            CellTypeModel.cell_type,
-            func.count(CellTypeModel.pt_root_id).label("num_cells"),
+            SegCellTypeModel.pt_root_id,
+            AnnoCellTypeModel.cell_type,
+            func.count(SegCellTypeModel.pt_root_id).label("num_cells"),
         )
-        .group_by(CellTypeModel.pt_root_id, CellTypeModel.cell_type)
-        .order_by("num_cells DESC")
+        .group_by(SegCellTypeModel.pt_root_id, AnnoCellTypeModel.cell_type)
+        .order_by(text("num_cells DESC"))
     ).limit(100)
 
     df = pd.read_sql(
@@ -244,13 +301,18 @@ def cell_type_local_report(datastack_name, id):
         sqlalchemy_cache.get_engine(aligned_volume_name),
         coerce_float=False,
     )
+    classes = ["table table-borderless"]
+
     return render_template(
         "cell_type_local.html",
         version=__version__,
         schema_name=table.schema,
+        n_annotations=n_annotations,
         table_name=table.table_name,
-        dataset=table.analysisversion.dataset,
-        table=df.to_html(),
+        dataset=table.analysisversion.datastack,
+        table=df.to_html(
+            escape=False, classes=classes, index=False, justify="left", border=0
+        ),
     )
 
 
@@ -263,23 +325,25 @@ def synapse_report(datastack_name, id):
     if table.schema != "synapse":
         abort(504, "this table is not a synapse table")
     schema_client = DynamicSchemaClient()
-    SynapseModel = schema_client.create_annotation_model(
-        table.table_name,
-        table.schema,
-    )
 
-    synapses = SynapseModel.query.count()
+    AnnoSynapseModel, SegSynapseModel = schema_client.get_split_models(
+        table.table_name, table.schema, pcg_table_name
+    )
+    synapses = AnnoSynapseModel.query.count()
     n_autapses = (
-        SynapseModel.query.filter(
-            SynapseModel.pre_pt_root_id == SynapseModel.post_pt_root_id
+        AnnoSynapseModel.query.filter(
+            SegSynapseModel.pre_pt_root_id == SegSynapseModel.post_pt_root_id
         )
         .filter(
-            and_(SynapseModel.pre_pt_root_id != 0, SynapseModel.post_pt_root_id != 0)
+            and_(
+                SegSynapseModel.pre_pt_root_id != 0,
+                SegSynapseModel.post_pt_root_id != 0,
+            )
         )
         .count()
     )
-    n_no_root = SynapseModel.query.filter(
-        or_(SynapseModel.pre_pt_root_id == 0, SynapseModel.post_pt_root_id == 0)
+    n_no_root = AnnoSynapseModel.query.filter(
+        or_(SegSynapseModel.pre_pt_root_id == 0, SegSynapseModel.post_pt_root_id == 0)
     ).count()
 
     return render_template(
@@ -287,7 +351,7 @@ def synapse_report(datastack_name, id):
         num_synapses=synapses,
         num_autapses=n_autapses,
         num_no_root=n_no_root,
-        dataset=table.analysisversion.dataset,
+        dataset=table.analysisversion.datastack,
         analysisversion=table.analysisversion.version,
         version=__version__,
         table_name=table.table_name,
@@ -303,7 +367,7 @@ def generic_report(datastack_name, id):
     table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
     schema_client = DynamicSchemaClient()
     Model = schema_client.create_annotation_model(
-        table.tablename,
+        table.table_name,
         table.schema,
     )
 
@@ -311,10 +375,10 @@ def generic_report(datastack_name, id):
 
     return render_template(
         "generic.html",
-        n_annotations=n_annotations,
-        dataset=table.analysisversion.dataset,
+        dataset=datastack_name,
         analysisversion=table.analysisversion.version,
         version=__version__,
-        table_name=table.tablename,
+        table_name=table.table_name,
         schema_name=table.schema,
+        n_annotations=n_annotations,
     )
