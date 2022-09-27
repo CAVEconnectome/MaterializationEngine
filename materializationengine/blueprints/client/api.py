@@ -24,7 +24,7 @@ from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSc
 from middle_auth_client import auth_requires_permission
 from materializationengine.blueprints.client.datastack import validate_datastack
 
-__version__ = "4.0.26"
+__version__ = "4.0.27"
 
 
 authorizations = {
