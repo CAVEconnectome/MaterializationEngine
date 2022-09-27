@@ -47,6 +47,7 @@ class TestSharedTasks:
                 "schema": "synapse",
                 "create_segmentation_table": False,
                 "max_id": 4,
+                "merge_table": True,
                 "min_id": 1,
                 "row_count": 4,
                 "add_indices": True,

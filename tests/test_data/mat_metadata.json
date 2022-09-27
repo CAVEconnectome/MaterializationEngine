@@ -18,6 +18,7 @@
     "table_count": 4,
     "temp_mat_table_name": "temp__test_synapse_table",
     "add_indices": true,
+    "merge_table": true,
     "voxel_resolution_x": 4.0,
     "voxel_resolution_y": 4.0,
     "voxel_resolution_z": 40.0
