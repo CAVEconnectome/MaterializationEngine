@@ -40,6 +40,7 @@ class TestDatabaseUtils:
                 "geometry_columns",
                 "test_synapse_table",
                 "test_synapse_table__test_pcg",
+                "version_error"
             ]
         )
 
