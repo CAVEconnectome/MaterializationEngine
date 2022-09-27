@@ -20,12 +20,12 @@ celery_logger = get_task_logger(__name__)
 
 
 def argument_signature(
-    task_name: str, task_args=None, task_kwargs=None, key_prefix="LOCKEDTASK_"
+    task_name: str, task_args=None, task_kwargs=None, key_prefix="LOCKED_WORKFLOW_TASK"
 ):
     str_args = json.dumps(task_args or [], sort_keys=True)
     str_kwargs = json.dumps(task_kwargs or {}, sort_keys=True)
     task_hash = md5((task_name + str_args + str_kwargs).encode()).hexdigest()
-    return key_prefix + task_hash
+    return key_prefix
 
 
 class LockedTask(Task):
