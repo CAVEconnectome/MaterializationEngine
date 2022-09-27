@@ -1,4 +1,4 @@
-from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
+from dynamicannotationdb.models import AnalysisTable, AnalysisVersion, VersionErrorTable
 from flask_marshmallow import Marshmallow
 from marshmallow import fields, ValidationError, Schema
 from marshmallow_sqlalchemy import SQLAlchemyAutoSchema
@@ -15,6 +15,12 @@ class AnalysisVersionSchema(SQLAlchemyAutoSchema):
 class AnalysisTableSchema(SQLAlchemyAutoSchema):
     class Meta:
         model = AnalysisTable
+        load_instance = True
+
+
+class VersionErrorTableSchema(SQLAlchemyAutoSchema):
+    class Meta:
+        model = VersionErrorTable
         load_instance = True
 
 
