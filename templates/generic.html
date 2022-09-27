@@ -1,15 +1,12 @@
 {% extends 'base.html' %}
 
 {% block header %}
-  <h1>{% block title %}{{dataset}}</h1>
-   <h3>version {{analysisversion}}</h3> 
-   <h4> {{table_name}} (schema: {{schema_name}})</h4>
-   {% endblock %}</h1>
+<h1 class="datastack_header">{% block title %}{{dataset}}</h1>
+<h4 class="datastack_header">n_annotations: {{n_annotations}}</h4>
+
+<h4 class="datastack_header"> {{table_name}}</h4>
+<h4 class="schema_type"> schema: {{schema_name}}</h4>
+{% endblock %}</h1>
 {% endblock %}
-
 {% block content %}
-
-<table>
-  <tr><td>num annotations</td><td>{{n_annotations}}</td></tr>
-</table>
 {% endblock %}

@@ -21,6 +21,16 @@ li a {
 /* Change the link color to #111 (black) on hover */
 li a:hover {
   background-color: #111;
+  color: white;
+}
+
+.datastack_header {
+  text-align: center;
+}
+
+.schema_type {
+  text-align: center;
+  color:rgb(138, 130, 130)
 }
 
 .version_num {
