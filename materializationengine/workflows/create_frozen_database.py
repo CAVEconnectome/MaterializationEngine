@@ -96,7 +96,7 @@ def create_versioned_materialization_workflow(
     """
     materialization_time_stamp = datetime.datetime.utcnow()
     new_version_number = create_new_version(
-        datastack_info, materialization_time_stamp, days_to_expire
+        datastack_info, materialization_time_stamp, days_to_expire, merge_tables
     )
 
     mat_info = get_materialization_info(
@@ -210,6 +210,7 @@ def create_new_version(
     materialization_time_stamp: datetime.datetime.utcnow,
     days_to_expire: int = None,
     minus_hours: int = 1,
+    merge_tables: bool = True
 ):
     """Create new versioned database row in the analysis_version table.
     Sets the expiration date for the database.
@@ -250,6 +251,7 @@ def create_new_version(
         valid=False,
         expires_on=expiration_date,
         status="RUNNING",
+        is_merged=merge_tables
     )
 
     try:
