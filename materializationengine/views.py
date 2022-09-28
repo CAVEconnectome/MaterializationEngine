@@ -5,7 +5,7 @@ import logging
 import pandas as pd
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion, VersionErrorTable
 from dynamicannotationdb.schema import DynamicSchemaClient
-from flask import Blueprint, abort, redirect, render_template, request, url_for
+from flask import Blueprint, abort, redirect, render_template, request, url_for, current_app
 from middle_auth_client import auth_required, auth_requires_permission
 from sqlalchemy import and_, func, or_
 from sqlalchemy.sql import text
@@ -230,6 +230,13 @@ def version_view(datastack_name: str, id: int):
     )
 
     column_order = schema.declared_fields.keys()
+    schema_url = "<a href='{}/schema/views/type/{}/view'>{}</a>"
+    df["schema"] = df.schema.map(
+        lambda x: schema_url.format(current_app.config["GLOBAL_SERVER_URL"], x, x)
+    )
+    df["table_name"] = df.table_name.map(
+        lambda x: f"<a href='/annotation/views/aligned_volume/{aligned_volume_name}/table/{x}'>{x}</a>"
+    )    
     df = df.reindex(columns=column_order)
 
     logging.info(version)
