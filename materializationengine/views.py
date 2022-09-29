@@ -182,8 +182,6 @@ def datastack_view(datastack_name):
 def version_error(datastack_name: str, id: int):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
 
-    aligned_volume_name = "minnie65_phase3"
-
     session = sqlalchemy_cache.get(aligned_volume_name)
 
     version = (
@@ -220,7 +218,6 @@ def version_error(datastack_name: str, id: int):
 @auth_requires_permission("view", table_arg="datastack_name")
 def version_view(datastack_name: str, id: int):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
-    aligned_volume_name = "minnie65_phase3"
 
     session = sqlalchemy_cache.get(aligned_volume_name)
 
