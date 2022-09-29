@@ -5,11 +5,20 @@ import logging
 import pandas as pd
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion, VersionErrorTable
 from dynamicannotationdb.schema import DynamicSchemaClient
-from flask import Blueprint, abort, redirect, render_template, request, url_for, current_app
+from flask import (
+    Blueprint,
+    abort,
+    redirect,
+    render_template,
+    request,
+    url_for,
+    current_app,
+)
 from middle_auth_client import auth_required, auth_requires_permission
 from sqlalchemy import and_, func, or_
 from sqlalchemy.sql import text
-
+from materializationengine.celery_init import celery
+from celery.result import AsyncResult
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.celery_init import celery
 from materializationengine.database import sqlalchemy_cache
@@ -236,7 +245,7 @@ def version_view(datastack_name: str, id: int):
     )
     df["table_name"] = df.table_name.map(
         lambda x: f"<a href='/annotation/views/aligned_volume/{aligned_volume_name}/table/{x}'>{x}</a>"
-    )    
+    )
     df = df.reindex(columns=column_order)
 
     logging.info(version)
@@ -283,7 +292,9 @@ def table_view(datastack_name, id: int):
 def cell_type_local_report(datastack_name, id):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
-    table = AnalysisTable.query.filter(AnalysisTable.id == id).first_or_404()
+    table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
+    if not table:
+        abort(404, "Table not found")
     if table.schema != "cell_type_local":
         abort(504, "this table is not a cell_type_local table")
     schema_client = DynamicSchemaClient()
@@ -291,7 +302,7 @@ def cell_type_local_report(datastack_name, id):
     AnnoCellTypeModel, SegCellTypeModel = schema_client.get_split_models(
         table.table_name, table.schema, pcg_table_name
     )
-    n_annotations = AnnoCellTypeModel.query.count()
+    n_annotations = session.query(AnnoCellTypeModel).count()
 
     cell_type_merge_query = (
         session.query(
@@ -326,6 +337,42 @@ def cell_type_local_report(datastack_name, id):
 @views_bp.route("/datastack/<datastack_name>/table/<int:id>/synapse")
 @auth_requires_permission("view", table_arg="datastack_name")
 def synapse_report(datastack_name, id):
+    synapse_task = get_synapse_info.s(datastack_name, id)
+    task = synapse_task.apply_async()
+    return redirect(
+        url_for(
+            "views.check_if_complete",
+            datastack_name=datastack_name,
+            id=id,
+            task_id=str(task.id),
+        )
+    )
+
+
+@views_bp.route("/datastack/<datastack_name>/table/<int:id>/synapse/<task_id>/loading")
+@auth_requires_permission("view", table_arg="datastack_name")
+def check_if_complete(datastack_name, id, task_id):
+    res = AsyncResult(task_id, app=celery)
+    if res.ready() is True:
+        synapse_data = res.result
+
+        return render_template(
+            "synapses.html",
+            synapses=synapse_data["synapses"],
+            num_autapses=synapse_data["n_autapses"],
+            num_no_root=synapse_data["n_no_root"],
+            dataset=datastack_name,
+            analysisversion=synapse_data["version"],
+            version=__version__,
+            table_name=synapse_data["table_name"],
+            schema_name="synapse",
+        )
+    else:
+        return render_template("loading.html", version=__version__)
+
+
+@celery.task(name="process:get_synapse_info", acks_late=True, bind=True)
+def get_synapse_info(self, datastack_name, id):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
     table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
@@ -336,11 +383,12 @@ def synapse_report(datastack_name, id):
     AnnoSynapseModel, SegSynapseModel = schema_client.get_split_models(
         table.table_name, table.schema, pcg_table_name
     )
-    synapses = AnnoSynapseModel.query.count()
+
+    synapses = session.query(AnnoSynapseModel).count()
+
     n_autapses = (
-        AnnoSynapseModel.query.filter(
-            SegSynapseModel.pre_pt_root_id == SegSynapseModel.post_pt_root_id
-        )
+        session.query(AnnoSynapseModel)
+        .filter(SegSynapseModel.pre_pt_root_id == SegSynapseModel.post_pt_root_id)
         .filter(
             and_(
                 SegSynapseModel.pre_pt_root_id != 0,
@@ -349,21 +397,24 @@ def synapse_report(datastack_name, id):
         )
         .count()
     )
-    n_no_root = AnnoSynapseModel.query.filter(
-        or_(SegSynapseModel.pre_pt_root_id == 0, SegSynapseModel.post_pt_root_id == 0)
-    ).count()
-
-    return render_template(
-        "synapses.html",
-        num_synapses=synapses,
-        num_autapses=n_autapses,
-        num_no_root=n_no_root,
-        dataset=table.analysisversion.datastack,
-        analysisversion=table.analysisversion.version,
-        version=__version__,
-        table_name=table.table_name,
-        schema_name="synapses",
+    n_no_root = (
+        session.query(AnnoSynapseModel)
+        .filter(
+            or_(
+                SegSynapseModel.pre_pt_root_id == 0,
+                SegSynapseModel.post_pt_root_id == 0,
+            )
+        )
+        .count()
     )
+
+    return {
+        "table": table,
+        "synapses": synapses,
+        "n_autapses": n_autapses,
+        "n_no_root": n_no_root,
+        "version": table.analysisversion.version,
+    }
 
 
 @views_bp.route("/datastack/<datastack_name>/table/<int:id>/generic")
@@ -378,7 +429,7 @@ def generic_report(datastack_name, id):
         table.schema,
     )
 
-    n_annotations = Model.query.count()
+    n_annotations = session.query(Model).count()
 
     return render_template(
         "generic.html",
