@@ -3,7 +3,12 @@ import json
 import logging
 
 import pandas as pd
-from dynamicannotationdb.models import AnalysisTable, AnalysisVersion, VersionErrorTable
+from dynamicannotationdb.models import (
+    AnalysisTable,
+    AnalysisVersion,
+    VersionErrorTable,
+    AnnoMetadata,
+)
 from dynamicannotationdb.schema import DynamicSchemaClient
 from flask import (
     Blueprint,
@@ -423,10 +428,18 @@ def generic_report(datastack_name, id):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
     table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
+    anno_metadata = (
+        session.query(AnnoMetadata)
+        .filter(AnnoMetadata.table_name == table.table_name)
+        .first()
+    )
+    if anno_metadata.reference_table:
+        table_metadata = {"reference_table": anno_metadata.reference_table}
+    else:
+        table_metadata = None
     schema_client = DynamicSchemaClient()
     Model = schema_client.create_annotation_model(
-        table.table_name,
-        table.schema,
+        table.table_name, table.schema, table_metadata
     )
 
     n_annotations = session.query(Model).count()
