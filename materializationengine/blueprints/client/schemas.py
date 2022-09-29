@@ -35,6 +35,23 @@ class SegmentationDataSchema(Schema):
     segmentations = fields.List(fields.Dict, required=True)
 
 
+class V2QuerySchema(Schema):
+    table = fields.Str()
+    timestamp = fields.DateTime()
+    join_tables = fields.List(
+        fields.List(fields.Str),
+        required=False,
+    )
+    filter_in_dict = fields.Dict()
+    filter_notin_dict = fields.Dict()
+    filter_equal_dict = fields.Dict()
+    filter_spatial_dict = fields.Dict()
+    select_columns = fields.Dict()
+    offset = fields.Integer()
+    limit = fields.Integer()
+    suffixes = fields.Dict()
+
+
 class SimpleQuerySchema(Schema):
     filter_in_dict = fields.Dict()
     filter_notin_dict = fields.Dict()
