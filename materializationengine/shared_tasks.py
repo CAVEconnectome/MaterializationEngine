@@ -10,7 +10,9 @@ from dynamicannotationdb.models import SegmentationMetadata
 from sqlalchemy import and_, func, text
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm.exc import NoResultFound
+from materializationengine.info_client import get_relevant_datastack_info
 from materializationengine.celery_init import celery
+from dynamicannotationdb.models import AnalysisVersion, VersionErrorTable
 from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
 from materializationengine.utils import (
     create_annotation_model,
@@ -42,14 +44,10 @@ def generate_chunked_model_ids(
     else:
         AnnotationModel = create_annotation_model(mat_metadata)
     chunk_size = mat_metadata.get("chunk_size")
-
     if not chunk_size:
         ROW_CHUNK_SIZE = get_config_param("MATERIALIZATION_ROW_CHUNK_SIZE")
         chunk_size = ROW_CHUNK_SIZE
-
-    chunked_ids = chunk_ids(mat_metadata, AnnotationModel.id, chunk_size)
-
-    return chunked_ids
+    return chunk_ids(mat_metadata, AnnotationModel.id, chunk_size)
 
 
 def create_chunks(data_list: List, chunk_size: int) -> Generator:
@@ -66,6 +64,50 @@ def create_chunks(data_list: List, chunk_size: int) -> Generator:
         chunk_size = len(data_list)
     for i in range(0, len(data_list), chunk_size):
         yield data_list[i : i + chunk_size]
+
+
+@celery.task
+def workflow_failed(request, exc, traceback, mat_info, *args, **kwargs):
+    aligned_volume = mat_info[0]["aligned_volume"]
+    analysis_version = mat_info[0]["analysis_version"]
+    datastack = mat_info[0]["datastack"]
+
+    message = f"Task failure: {request.id}"
+
+    failure_info = f"""
+        Datastack: {datastack}
+        Task ID: {request.id}
+        task_args: {str(args)}
+        task_kwargs: {kwargs}
+        Exception: {exc}
+        Traceback: {traceback}
+    """
+    session = sqlalchemy_cache.get(aligned_volume)
+
+    version = (
+        session.query(AnalysisVersion)
+        .filter(AnalysisVersion.version == analysis_version)
+        .one()
+    )
+
+    error_entry = VersionErrorTable(
+        exception=str(exc), error=traceback, analysisversion_id=version.id
+    )
+    celery_logger.info(error_entry)
+    session.add(error_entry)
+
+    version.valid = False
+    version.status = "FAILED"
+    session.flush()
+    try:
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        celery_logger.error(f"Failed to insert error msg: {e}")
+    finally:
+        session.close()
+    celery_logger.error(f"{message}: {failure_info}")
+    return failure_info
 
 
 @celery.task(name="workflow:fin", acks_late=True, bind=True)
@@ -87,7 +129,7 @@ def get_materialization_info(
     table_name: str = None,
 ) -> List[dict]:
 
-    """Initialize materialization by an aligned volume name. Iterates thorugh all
+    """Initialize materialization by an aligned volume name. Iterates through all
     tables in a aligned volume database and gathers metadata for each table. The list
     of tables are passed to workers for materialization.
 
@@ -116,7 +158,11 @@ def get_materialization_info(
     metadata = []
     celery_logger.debug(f"Annotation tables: {annotation_tables}")
     for annotation_table in annotation_tables:
-        row_count = db.database.get_table_row_count(annotation_table, filter_valid=True)
+        row_count = db.database.get_table_row_count(
+            annotation_table,
+            filter_valid=True,
+            filter_timestamp=str(materialization_time_stamp),
+        )
         max_id = db.database.get_max_id_value(annotation_table)
         min_id = db.database.get_min_id_value(annotation_table)
         if row_count == 0:
@@ -156,6 +202,7 @@ def get_materialization_info(
                 segmentation_table_name = build_segmentation_table_name(
                     annotation_table, pcg_table_name
                 )
+
                 segmentation_metadata = db.segmentation.get_segmentation_table_metadata(
                     annotation_table, pcg_table_name
                 )
@@ -190,6 +237,7 @@ def get_materialization_info(
                         "find_all_expired_roots": datastack_info.get(
                             "find_all_expired_roots", False
                         ),
+                        "merge_table": get_config_param("MERGE_TABLES"),
                     }
                 )
             if analysis_version:
@@ -201,7 +249,7 @@ def get_materialization_info(
                 )
 
             metadata.append(table_metadata.copy())
-            celery_logger.debug(metadata)
+    celery_logger.debug(metadata)
     db.database.cached_session.close()
     celery_logger.info(f"Metadata collected for {len(metadata)} tables")
     return metadata
@@ -361,6 +409,9 @@ def monitor_workflow_state(workflow: AsyncResult, polling_rate: int = 0.2):
         if workflow.successful():
             celery_logger.debug("CHAIN COMPLETE")
             return True
+        if workflow.failed():
+            return False
+
         time.sleep(polling_rate)
 
 

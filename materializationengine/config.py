@@ -39,6 +39,7 @@ class BaseConfig:
     INFO_API_VERSION = 2
     MIN_DATABASES = 2
     MAX_DATABASES = 2
+    MERGE_TABLES = True
     AUTH_SERVICE_NAMESPACE = "datastack"
     if os.environ.get("DAF_CREDENTIALS", None) is not None:
         with open(os.environ.get("DAF_CREDENTIALS"), "r") as f:

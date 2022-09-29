@@ -44,7 +44,7 @@ def pytest_configure(config):
 def mat_metadata():
     p = pathlib.Path("tests/test_data", "mat_metadata.json")
     mat_dict = json.loads(p.read_text())
-    mat_dict["materialization_time_stamp"] = str(datetime.datetime.utcnow())
+    mat_dict["materialization_time_stamp"] = str(datetime.datetime.utcnow() + datetime.timedelta(days=1))
     return mat_dict
 
 

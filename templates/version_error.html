@@ -1,0 +1,12 @@
+{% extends 'base.html' %} {% block header %}
+<h1>{% block title %}Error Log for version: {{ mat_version }}{% endblock %}</h1>
+{% endblock %} {% block content %}
+<h3>Error: {{ error_type }}</h3>
+<script>
+  var traceback ={{ traceback }};
+</script>
+<body>
+  <div class="container">{{ traceback }}</div>
+</body>
+
+{% endblock %}

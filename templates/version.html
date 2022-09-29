@@ -1,8 +1,7 @@
 {% extends 'base.html' %}
 
 {% block header %}
-  <h1>{% block title %}{{datastack}}{% endblock %}</h1>
-  <h3>version {{analysisversion}}</h3> 
+  <h1 class="datastack_header">{% block title %}{{datastack}}{% endblock %}</h1>
 {% endblock %}
 
 {% block content %}

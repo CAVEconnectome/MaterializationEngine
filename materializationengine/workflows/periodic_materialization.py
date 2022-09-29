@@ -22,14 +22,16 @@ def _get_datastacks() -> List:
 
 
 @celery.task(name="workflow:run_periodic_materialization")
-def run_periodic_materialization(days_to_expire: int = None) -> None:
+def run_periodic_materialization(
+    days_to_expire: int = None, merge_tables: bool = True
+) -> None:
     """
     Run complete materialization workflow. Steps are as follows:
     1. Find missing segmentation data in a given datastack and lookup.
     2. Update expired root ids
     3. Copy database to new frozen version
     4. Merge annotation and segmentation tables together
-    5. Drop non-materializied tables
+    5. Drop non-materialized tables
     """
     is_update_roots_running = check_if_task_is_running(
         "workflow:update_database_workflow", "worker.workflow"
@@ -61,7 +63,7 @@ def run_periodic_materialization(days_to_expire: int = None) -> None:
                 return f"Number of valid materialized databases is {valid_databases}, threshold is set to: {max_databases}"
             datastack_info["database_expires"] = True
             task = run_complete_workflow.s(
-                datastack_info, days_to_expire=days_to_expire
+                datastack_info, days_to_expire=days_to_expire, merge_tables=merge_tables
             )
             task.apply_async(kwargs={"Datastack": datastack})
         except Exception as e:

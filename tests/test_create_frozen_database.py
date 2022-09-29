@@ -33,9 +33,10 @@ class TestCreateFrozenVersion:
         is_created = create_analysis_database.s(datastack_info, 1).apply()
         assert is_created.get() == True
 
-    def test_create_materialized_metadata(self):
+    def test_create_materialized_metadata(self, mat_metadata):
         is_table_created = create_materialized_metadata.s(
             datastack_info=datastack_info,
+            mat_info=mat_metadata,
             analysis_version=1,
             materialization_time_stamp=materialization_time_stamp,
         ).apply()

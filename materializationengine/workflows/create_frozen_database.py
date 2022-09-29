@@ -51,7 +51,9 @@ celery_logger = get_task_logger(__name__)
 
 
 @celery.task(name="workflow:materialize_database")
-def materialize_database(days_to_expire: int = 5, **kwargs) -> None:
+def materialize_database(
+    days_to_expire: int = 5, merge_tables: bool = True, **kwargs
+) -> None:
     """
     Materialize database. Steps are as follows:
     1. Create new versioned database.
@@ -71,7 +73,7 @@ def materialize_database(days_to_expire: int = 5, **kwargs) -> None:
             celery_logger.info(f"Materializing {datastack} database")
             datastack_info = get_datastack_info(datastack)
             task = create_versioned_materialization_workflow.s(
-                datastack_info, days_to_expire
+                datastack_info, days_to_expire, merge_tables
             )
             task.apply_async(kwargs={"Datastack": datastack_info["datastack"]})
         except Exception as e:
@@ -82,7 +84,7 @@ def materialize_database(days_to_expire: int = 5, **kwargs) -> None:
 
 @celery.task(name="workflow:create_versioned_materialization_workflow")
 def create_versioned_materialization_workflow(
-    datastack_info: dict, days_to_expire: int = 5, **kwargs
+    datastack_info: dict, days_to_expire: int = 5, merge_tables: bool = True, **kwargs
 ):
     """Create a timelocked database of materialization annotations
     and associated segmentation data.
@@ -93,36 +95,40 @@ def create_versioned_materialization_workflow(
         aligned volumed relating to a datastack
     """
     materialization_time_stamp = datetime.datetime.utcnow()
-
     new_version_number = create_new_version(
-        datastack_info, materialization_time_stamp, days_to_expire
+        datastack_info, materialization_time_stamp, days_to_expire, merge_tables
     )
+
     mat_info = get_materialization_info(
         datastack_info, new_version_number, materialization_time_stamp
     )
 
-    setup_versioned_database = create_materializied_database_workflow(
+    setup_versioned_database = create_materialized_database_workflow(
         datastack_info, new_version_number, materialization_time_stamp, mat_info
     )
-    format_workflow = format_materialization_database_workflow(mat_info)
 
-    workflow = chain(
+    if merge_tables:
+        format_workflow = format_materialization_database_workflow(mat_info)
+        analysis_database_workflow = chain(
+            chord(format_workflow, fin.s()), rebuild_reference_tables.si(mat_info)
+        )
+
+    else:
+        analysis_database_workflow = fin.si()
+    return chain(
         setup_versioned_database,
-        chord(format_workflow, fin.s()),
-        rebuild_reference_tables.si(mat_info),
+        analysis_database_workflow,
         check_tables.si(mat_info, new_version_number),
     )
 
-    return workflow
 
-
-def create_materializied_database_workflow(
+def create_materialized_database_workflow(
     datastack_info: dict,
     new_version_number: int,
     materialization_time_stamp: datetime.datetime.utcnow,
     mat_info: List[dict],
 ):
-    """Celery workflow to create a materializied database.
+    """Celery workflow to create a materialized database.
 
     Workflow:
         - Copy live database as a versioned materialized database.
@@ -139,15 +145,14 @@ def create_materializied_database_workflow(
     Returns:
         chain: chain of celery tasks
     """
-    setup_versioned_database = chain(
+    return chain(
         create_analysis_database.si(datastack_info, new_version_number),
         create_materialized_metadata.si(
-            datastack_info, new_version_number, materialization_time_stamp
+            datastack_info, mat_info, new_version_number, materialization_time_stamp
         ),
         update_table_metadata.si(mat_info),
         drop_tables.si(mat_info, new_version_number),
     )
-    return setup_versioned_database
 
 
 def format_materialization_database_workflow(mat_info: List[dict]):
@@ -165,7 +170,9 @@ def format_materialization_database_workflow(mat_info: List[dict]):
     """
     create_frozen_database_tasks = []
     for mat_metadata in mat_info:
-        if not mat_metadata["reference_table"]: # need to build tables before adding reference tables with fkeys
+        if not mat_metadata[
+            "reference_table"
+        ]:  # need to build tables before adding reference tables with fkeys
             create_frozen_database_workflow = chain(
                 merge_tables.si(mat_metadata), add_indices.si(mat_metadata)
             )
@@ -203,6 +210,7 @@ def create_new_version(
     materialization_time_stamp: datetime.datetime.utcnow,
     days_to_expire: int = None,
     minus_hours: int = 1,
+    merge_tables: bool = True
 ):
     """Create new versioned database row in the analysis_version table.
     Sets the expiration date for the database.
@@ -218,34 +226,21 @@ def create_new_version(
     """
     aligned_volume = datastack_info["aligned_volume"]["name"]
     datastack = datastack_info.get("datastack")
-
-    table_objects = [
-        AnalysisVersion.__tablename__,
-        AnalysisTable.__tablename__,
-    ]
+    table_objects = [AnalysisVersion.__tablename__, AnalysisTable.__tablename__]
     SQL_URI_CONFIG = get_config_param("SQLALCHEMY_DATABASE_URI")
     sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
     sql_uri = make_url(f"{sql_base_uri}/{aligned_volume}")
-
     session, engine = create_session(sql_uri)
-
-    # create analysis metadata table if not exists
     for table in table_objects:
         if not engine.dialect.has_table(engine, table):
             Base.metadata.tables[table].create(bind=engine)
-
     top_version = session.query(func.max(AnalysisVersion.version)).scalar()
-
-    if top_version is None:
-        new_version_number = 1
-    else:
-        new_version_number = top_version + 1
+    new_version_number = 1 if top_version is None else top_version + 1
     if days_to_expire > 0:
         expiration_date = (
-            materialization_time_stamp
-            + datetime.timedelta(days=days_to_expire)
-            - datetime.timedelta(hours=minus_hours)
-        )
+            materialization_time_stamp + datetime.timedelta(days=days_to_expire)
+        ) - datetime.timedelta(hours=minus_hours)
+
     else:
         expiration_date = None
 
@@ -255,7 +250,10 @@ def create_new_version(
         version=new_version_number,
         valid=False,
         expires_on=expiration_date,
+        status="RUNNING",
+        is_merged=merge_tables
     )
+
     try:
         session.add(analysisversion)
         session.commit()
@@ -276,7 +274,7 @@ def create_new_version(
     max_retries=3,
 )
 def create_analysis_database(self, datastack_info: dict, analysis_version: int) -> str:
-    """Copies live database to new versioned database for materializied annotations.
+    """Copies live database to new versioned database for materialized annotations.
 
     Args:
         datastack_info (dict): datastack metadata
@@ -363,6 +361,7 @@ def create_analysis_database(self, datastack_info: dict, analysis_version: int) 
 def create_materialized_metadata(
     self,
     datastack_info: dict,
+    mat_info: List,
     analysis_version: int,
     materialization_time_stamp: datetime.datetime.utcnow,
 ):
@@ -380,16 +379,12 @@ def create_materialized_metadata(
     Returns:
         bool: True if Metadata table were created and table info was inserted.
     """
-    aligned_volume = datastack_info["aligned_volume"]["name"]
     datastack = datastack_info["datastack"]
     SQL_URI_CONFIG = get_config_param("SQLALCHEMY_DATABASE_URI")
-    sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
-    sql_uri = make_url(f"{sql_base_uri}/{aligned_volume}")
     analysis_sql_uri = create_analysis_sql_uri(
         SQL_URI_CONFIG, datastack, analysis_version
     )
 
-    session, engine = create_session(sql_uri)
     analysis_session, analysis_engine = create_session(analysis_sql_uri)
 
     try:
@@ -399,44 +394,34 @@ def create_materialized_metadata(
         )  # pylint: disable=maybe-no-member
     except Exception as e:
         celery_logger.error(f"Materialized Metadata table creation failed {e}")
-
-    mat_client = dynamic_annotation_cache.get_db(f"{datastack}__mat{analysis_version}")
-
-    tables = session.query(AnnoMetadata).all()
     try:
-        for table in tables:
+        for mat_metadata in mat_info:
+
             # only create table if marked as valid in the metadata table
-            if table.valid:
-                table_name = table.table_name
-                schema_type = (
-                    session.query(AnnoMetadata.schema_type)
-                    .filter(AnnoMetadata.table_name == table_name)
-                    .one()
-                )
+            annotation_table_name = mat_metadata["annotation_table_name"]
+            schema_type = mat_metadata["schema"]
+            valid_row_count = mat_metadata["row_count"]
+            segmentation_source = mat_metadata.get("segmentation_source")
+            merge_table = mat_metadata.get("merge_table")
 
-                valid_row_count = mat_client.database.get_table_row_count(
-                    table_name, filter_valid=True
-                )
-                celery_logger.info(f"Row count {valid_row_count}")
-                if valid_row_count == 0:
-                    continue
+            celery_logger.info(f"Row count {valid_row_count}")
+            if valid_row_count == 0:
+                continue
 
-                mat_metadata = MaterializedMetadata(
-                    schema=schema_type[0],
-                    table_name=table_name,
-                    row_count=valid_row_count,
-                    materialized_timestamp=materialization_time_stamp,
-                )
-                analysis_session.add(mat_metadata)
-                analysis_session.commit()
+            mat_metadata = MaterializedMetadata(
+                schema=schema_type,
+                table_name=annotation_table_name,
+                row_count=valid_row_count,
+                materialized_timestamp=materialization_time_stamp,
+                segmentation_source=segmentation_source,
+                is_merged=merge_table,
+            )
+            analysis_session.add(mat_metadata)
+            analysis_session.commit()
     except Exception as database_error:
         analysis_session.rollback()
-        session.rollback()
         celery_logger.error(database_error)
     finally:
-        session.close()
-        engine.dispose()
-        mat_client.database.cached_session.close()
         analysis_session.close()
         analysis_engine.dispose()
     return True
@@ -569,37 +554,33 @@ def insert_annotation_data(self, chunk: List[int], mat_metadata: dict):
     analysis_version = mat_metadata["analysis_version"]
     annotation_table_name = mat_metadata["annotation_table_name"]
     datastack = mat_metadata["datastack"]
-
     session = sqlalchemy_cache.get(aligned_volume)
     engine = sqlalchemy_cache.get_engine(aligned_volume)
-
-    # build table models
     AnnotationModel = create_annotation_model(mat_metadata, with_crud_columns=False)
+
     SegmentationModel = create_segmentation_model(mat_metadata)
     analysis_table = get_analysis_table(
         aligned_volume, datastack, annotation_table_name, analysis_version
     )
 
-    query_columns = []
-    for col in AnnotationModel.__table__.columns:
-        query_columns.append(col)
+    query_columns = list(AnnotationModel.__table__.columns)
     for col in SegmentationModel.__table__.columns:
-        if not col.name == "id":
+        if col.name != "id":
             query_columns.append(col)
-
     chunked_id_query = query_id_range(AnnotationModel.id, chunk[0], chunk[1])
-
     anno_ids = (
         session.query(AnnotationModel.id)
         .filter(chunked_id_query)
         .filter(AnnotationModel.valid == True)
     )
+
     query = (
         session.query(*query_columns)
         .join(SegmentationModel)
         .filter(SegmentationModel.id == AnnotationModel.id)
         .filter(SegmentationModel.id.in_(anno_ids))
     )
+
     data = query.all()
     mat_df = pd.DataFrame(data)
     mat_df = mat_df.to_dict(orient="records")
@@ -607,10 +588,10 @@ def insert_annotation_data(self, chunk: List[int], mat_metadata: dict):
     analysis_sql_uri = create_analysis_sql_uri(
         SQL_URI_CONFIG, datastack, analysis_version
     )
-    analysis_session, analysis_engine = create_session(analysis_sql_uri)
 
+    analysis_session, analysis_engine = create_session(analysis_sql_uri)
     try:
-        analysis_engine.execute(analysis_table.insert(), [data for data in mat_df])
+        analysis_engine.execute(analysis_table.insert(), list(mat_df))
     except Exception as e:
         celery_logger.error(e)
         analysis_session.rollback()
@@ -650,17 +631,14 @@ def merge_tables(self, mat_metadata: dict):
     temp_table_name = mat_metadata["temp_mat_table_name"]
     schema = mat_metadata["schema"]
     datastack = mat_metadata["datastack"]
-
-    # create dynamic sql_uri
+    mat_time_stamp = mat_metadata["materialization_time_stamp"]
     SQL_URI_CONFIG = get_config_param("SQLALCHEMY_DATABASE_URI")
     analysis_sql_uri = create_analysis_sql_uri(
         SQL_URI_CONFIG, datastack, analysis_version
     )
 
-    # get schema and match column order for sql query
     anno_schema = get_schema(schema)
     flat_schema = create_flattened_schema(anno_schema)
-
     ordered_model_columns = create_table_dict(
         table_name=annotation_table_name,
         Schema=flat_schema,
@@ -669,30 +647,34 @@ def merge_tables(self, mat_metadata: dict):
         with_crud_columns=False,
     )
 
-    AnnotationModel = create_annotation_model(mat_metadata, with_crud_columns=False)
+    AnnotationModel = create_annotation_model(mat_metadata, with_crud_columns=True)
     SegmentationModel = create_segmentation_model(mat_metadata)
-
-    query_columns = {}
     crud_columns = ["created", "deleted", "superceded_id"]
-    for col in AnnotationModel.__table__.columns:
-        if col.name not in crud_columns:
-            query_columns[col.name] = col
-    for col in SegmentationModel.__table__.columns:
-        if not col.name == "id":
-            query_columns[col.name] = col
+    query_columns = {
+        col.name: col
+        for col in AnnotationModel.__table__.columns
+        if col.name not in crud_columns
+    }
 
+    for col in SegmentationModel.__table__.columns:
+        if col.name != "id":
+            query_columns[col.name] = col
     sorted_columns = OrderedDict(
         [
             (key, query_columns[key])
             for key in ordered_model_columns
-            if key in query_columns.keys()
+            if key in query_columns
         ]
     )
+
     sorted_columns_list = list(sorted_columns.values())
+
     columns = [f'"{col.table}".{col.name}' for col in sorted_columns_list]
+    celery_logger.info(
+        f"SORTED COLUMNS: {sorted_columns_list}, COLUMNS: {columns}, ANNOTATION_COLS: {AnnotationModel.__table__.columns}"
+    )
 
     mat_session, mat_engine = create_session(analysis_sql_uri)
-
     query = f"""
         SELECT 
             {', '.join(columns)}
@@ -703,6 +685,7 @@ def merge_tables(self, mat_metadata: dict):
             ON {AnnotationModel.id} = "{SegmentationModel.__table__.name}".id
         WHERE
             {AnnotationModel.id} = "{SegmentationModel.__table__.name}".id
+        AND {AnnotationModel.created} <= '{mat_time_stamp}'
         AND {AnnotationModel.valid} = true
 
     """
@@ -713,20 +696,22 @@ def merge_tables(self, mat_metadata: dict):
             insert_query = mat_db_connection.execute(
                 f"CREATE TABLE {temp_table_name} AS ({query});"
             )
+
             row_count = insert_query.rowcount
             drop_query = mat_db_connection.execute(
                 f'DROP TABLE {annotation_table_name}, "{segmentation_table_name}" CASCADE;'
             )
+
             alter_query = mat_db_connection.execute(
                 f"ALTER TABLE {temp_table_name} RENAME TO {annotation_table_name};"
             )
+
         mat_session.close()
         mat_engine.dispose()
-
         return f"Number of rows copied: {row_count}"
     except Exception as e:
         celery_logger.error(e)
-        raise (e)
+        raise e
 
 
 def insert_chunked_data(
@@ -788,21 +773,20 @@ def check_tables(self, mat_info: list, analysis_version: int):
     engine = sqlalchemy_cache.get_engine(aligned_volume)
     mat_session = sqlalchemy_cache.get(analysis_database)
     mat_engine = sqlalchemy_cache.get_engine(analysis_database)
+    live_client = dynamic_annotation_cache.get_db(aligned_volume)
     mat_client = dynamic_annotation_cache.get_db(analysis_database)
     versioned_database = (
         session.query(AnalysisVersion)
         .filter(AnalysisVersion.version == analysis_version)
         .one()
     )
-
     valid_table_count = 0
     for mat_metadata in mat_info:
         annotation_table_name = mat_metadata["annotation_table_name"]
+        mat_timestamp = mat_metadata["materialization_time_stamp"]
 
-        live_table_row_count = (
-            mat_session.query(MaterializedMetadata.row_count)
-            .filter(MaterializedMetadata.table_name == annotation_table_name)
-            .scalar()
+        live_table_row_count = live_client.database.get_table_row_count(
+            annotation_table_name, filter_valid=True, filter_timestamp=mat_timestamp
         )
         mat_row_count = mat_client.database.get_table_row_count(
             annotation_table_name, filter_valid=True

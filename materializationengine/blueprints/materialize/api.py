@@ -1,8 +1,9 @@
+import datetime
 import logging
 
-import requests
-from dynamicannotationdb.models import AnalysisTable, AnalysisVersion, Base
-from flask import abort, current_app
+from dynamicannotationdb.models import AnalysisTable, Base
+from flask import abort, current_app, request
+from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import (
@@ -10,17 +11,21 @@ from materializationengine.database import (
     dynamic_annotation_cache,
     sqlalchemy_cache,
 )
-from materializationengine.info_client import get_aligned_volumes
+from materializationengine.info_client import (
+    get_aligned_volumes,
+    get_datastack_info,
+    get_relevant_datastack_info,
+)
+from dynamicannotationdb.models import AnalysisVersion
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
-from middle_auth_client import auth_required, auth_requires_admin
+from middle_auth_client import auth_requires_admin
 from sqlalchemy import MetaData, Table
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoSuchTableError
 
+from materializationengine.blueprints.materialize.schemas import VirtualVersionSchema
 
-__version__ = "4.0.22"
-
-
+__version__ = "4.0.33"
 
 
 bulk_upload_parser = reqparse.RequestParser()
@@ -48,6 +53,7 @@ get_roots_parser.add_argument(
 
 materialize_parser = reqparse.RequestParser()
 materialize_parser.add_argument("days_to_expire", required=True, default=None, type=int)
+materialize_parser.add_argument("merge_tables", required=True, type=inputs.boolean)
 
 
 authorizations = {
@@ -65,21 +71,6 @@ def check_aligned_volume(aligned_volume):
     aligned_volumes = get_aligned_volumes()
     if aligned_volume not in aligned_volumes:
         abort(400, f"aligned volume: {aligned_volume} not valid")
-
-
-def get_datastack_info(datastack_name: str) -> dict:
-    INFOSERVICE_ENDPOINT = current_app.config["INFOSERVICE_ENDPOINT"]
-    url = INFOSERVICE_ENDPOINT + f"/api/v2/datastack/full/{datastack_name}"
-    try:
-        auth_header = {"Authorization": f"Bearer {current_app.config['AUTH_TOKEN']}"}
-        r = requests.get(url, headers=auth_header)
-        r.raise_for_status()
-        logging.info(url)
-        datastack_info = r.json()
-        datastack_info["datastack"] = datastack_name
-        return datastack_info
-    except requests.exceptions.RequestException as e:
-        logging.error(f"ERROR {e}. Cannot connect to {INFOSERVICE_ENDPOINT}")
 
 
 @mat_bp.route("/celery/test/<int:iterator_length>")
@@ -210,12 +201,16 @@ class CompleteWorkflowResource(Resource):
         )
 
         datastack_info = get_datastack_info(datastack_name)
+
         args = materialize_parser.parse_args()
         days_to_expire = args["days_to_expire"]
+        merge_tables = args["merge_tables"]
 
         datastack_info["database_expires"] = days_to_expire
-
-        run_complete_workflow.s(datastack_info, days_to_expire).apply_async()
+        datastack_info["merge_tables"] = merge_tables
+        run_complete_workflow.s(
+            datastack_info, days_to_expire, merge_tables
+        ).apply_async()
         return 200
 
 
@@ -237,10 +232,11 @@ class CreateFrozenMaterializationResource(Resource):
 
         args = materialize_parser.parse_args()
         days_to_expire = args["days_to_expire"]
+        merge_tables = args["merge_tables"]
 
         datastack_info = get_datastack_info(datastack_name)
         create_versioned_materialization_workflow.s(
-            datastack_info, days_to_expire
+            datastack_info, days_to_expire, merge_tables
         ).apply_async()
         return 200
 
@@ -399,7 +395,9 @@ class DatasetResource(Resource):
     @mat_bp.doc("get_aligned_volume_versions", security="apikey")
     def get(self, aligned_volume_name: str):
         db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        response = db.database.cached_session.query(AnalysisVersion.datastack).distinct()
+        response = db.database.cached_session.query(
+            AnalysisVersion.datastack
+        ).distinct()
         aligned_volumes = [r._asdict() for r in response]
         return aligned_volumes
 
@@ -470,13 +468,13 @@ class TableResource(Resource):
 
 
 @mat_bp.route(
-    "/aligned_volumes/<aligned_volume_name>/version/<version>/tablename/<tablename>"
+    "/aligned_volumes/<string:aligned_volume_name>/version/<int:version>/tablename/<string:tablename>"
 )
 class AnnotationResource(Resource):
     @reset_auth
     @auth_requires_admin
     @mat_bp.doc("get_top_materialized_annotations", security="apikey")
-    def get(self, aligned_volume_name, version, tablename):
+    def get(self, aligned_volume_name: str, version: int, tablename: str):
         check_aligned_volume(aligned_volume_name)
         SQL_URI_CONFIG = current_app.config["SQLALCHEMY_DATABASE_URI"]
         sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
@@ -487,12 +485,106 @@ class AnnotationResource(Resource):
             annotation_table = Table(
                 tablename, metadata, autoload=True, autoload_with=engine
             )
+
         except NoSuchTableError as e:
             logging.error(f"No table exists {e}")
             return abort(404)
         response = session.query(annotation_table).limit(10).all()
         annotations = [r._asdict() for r in response]
-        if annotations:
-            return annotations, 200
+        return (annotations, 200) if annotations else abort(404)
+
+
+@mat_bp.route("/materialize/run/create_virtual/datastack")
+class CreateVirtualPublicVersionResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("create virtual materialization", security="apikey")
+    @accepts("VirtualVersionSchema", schema=VirtualVersionSchema, api=mat_bp)
+    def post(self):
+        """Create a virtual version from an existing frozen version.
+
+        Args:
+            datastack_name (str): name of datastack
+            version (int): version to make virtual copy
+
+        """
+
+        data = request.parsed_obj
+
+        datastack_name = data.get("datastack_name")
+        target_version = data.get("target_version")
+        tables_to_include = data.get("tables_to_include")
+        virtual_version_name = data.get("virtual_version_name")
+
+        aligned_volume, pcg_table_name = get_relevant_datastack_info(datastack_name)
+
+        if not tables_to_include:
+            return abort(400, "No tables included")
+
+        session = sqlalchemy_cache.get(aligned_volume)
+
+        analysis_version = (
+            session.query(AnalysisVersion)
+            .filter(AnalysisVersion.version == target_version)
+            .filter(AnalysisVersion.datastack == datastack_name)
+            .one()
+        )
+
+        if not analysis_version.valid:
+            return abort(404, f"Version {target_version} is not a valid version")
+
+        included_tables = (
+            session.query(AnalysisTable)
+            .filter(AnalysisTable.analysisversion_id == analysis_version.id)
+            .filter(AnalysisTable.table_name.in_(tables_to_include))
+            .all()
+        )
+        if not included_tables:
+            return abort(
+                404,
+                f"No tables {tables_to_include} found in target version {target_version}",
+            )
+
+        virtual_datastack_name = f"{virtual_version_name}_v{analysis_version.version}"
+
+        time_to_expire = analysis_version.expires_on - datetime.datetime.utcnow()
+        if time_to_expire.days < 1000:
+            expiration_timestamp = str(
+                analysis_version.expires_on + datetime.timedelta(days=36525)
+            )
         else:
-            return abort(404)
+            expiration_timestamp = analysis_version.expires_on
+
+        virtual_analysis_version = AnalysisVersion(
+            datastack=virtual_datastack_name,
+            time_stamp=analysis_version.time_stamp,
+            version=analysis_version.version,
+            valid=True,
+            expires_on=expiration_timestamp,
+            parent_version=analysis_version.id,
+        )
+
+        session.add(virtual_analysis_version)
+        session.flush()
+
+        for table in included_tables:
+            table = AnalysisTable(
+                aligned_volume=aligned_volume,
+                schema=table.schema,
+                table_name=table.table_name,
+                valid=True,
+                created=table.created,
+                analysisversion_id=virtual_analysis_version.id,
+            )
+            session.add(table)
+        analysis_version.expires_on = expiration_timestamp
+
+        try:
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logging.exception(f"SQL Error: {e}")
+            raise e
+        finally:
+            session.close()
+        return f"{virtual_datastack_name} created", 200
