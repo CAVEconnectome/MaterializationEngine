@@ -33,7 +33,7 @@ from materializationengine.schemas import (
     VersionErrorTableSchema,
 )
 
-__version__ = "4.0.29"
+__version__ = "4.0.30"
 
 views_bp = Blueprint("views", __name__, url_prefix="/materialize/views")
 
