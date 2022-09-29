@@ -1,54 +1,36 @@
 import logging
-import os
 import time
-from tkinter import FALSE
 
 import pyarrow as pa
-from cachetools import LRUCache, TTLCache, cached
+from cachetools import LRUCache, cached
 from cloudfiles import compression
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
-from emannotationschemas import get_schema
-from emannotationschemas.models import (
-    Base,
-    create_table_dict,
-    make_annotation_model,
-    make_flat_model,
-    make_segmentation_model,
-    sqlalchemy_models,
-)
-from flask import Response, abort, current_app, request, stream_with_context
-from flask_accepts import accepts, responds
+
+from flask import Response, abort, current_app, request
+from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
-from materializationengine.blueprints.client.query import _execute_query, execute_query_manager, specific_query
+from materializationengine.blueprints.client import query
+from materializationengine.blueprints.client.query import execute_query_manager
+from materializationengine.blueprints.client.new_query import remap_query
+from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.blueprints.client.schemas import (
-    ComplexQuerySchema,
-    CreateTableSchema,
-    GetDeleteAnnotationSchema,
-    Metadata,
-    PostPutAnnotationSchema,
-    SegmentationDataSchema,
-    SegmentationTableSchema,
-    SimpleQuerySchema,
     V2QuerySchema,
 )
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import (
-    create_session,
     dynamic_annotation_cache,
     sqlalchemy_cache,
 )
 from materializationengine.info_client import (
-    get_aligned_volumes,
-    get_datastack_info,
-    get_datastacks,
+    get_aligned_volumes, 
+    get_datastack_info
 )
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from middle_auth_client import (
-    auth_required,
-    auth_requires_admin,
     auth_requires_permission,
 )
-from sqlalchemy.engine.url import make_url
+import pandas as pd
+import datetime
 
 __version__ = "4.0.20"
 
@@ -123,11 +105,176 @@ def after_request(response):
 
     return response
 
+@cached(cache=TTLCache(maxsize=64, ttl=600))
+def get_relevant_datastack_info(datastack_name):
+    ds_info = get_datastack_info(datastack_name=datastack_name)
+    seg_source = ds_info["segmentation_source"]
+    pcg_table_name = seg_source.split("/")[-1]
+    aligned_volume_name = ds_info["aligned_volume"]["name"]
+    return aligned_volume_name, pcg_table_name
 
 def check_aligned_volume(aligned_volume):
     aligned_volumes = get_aligned_volumes()
     if aligned_volume not in aligned_volumes:
         abort(400, f"aligned volume: {aligned_volume} not valid")
+
+def get_closest_versions(datastack_name:str,
+                         timestamp:datetime.datetime):
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+
+    # get session object
+    session = sqlalchemy_cache.get(aligned_volume_name)
+
+    # query analysis versions to get a valid version which is 
+    # the closest to the timestamp while still being older 
+    # than the timestamp
+    past_version = (
+            session.query(AnalysisVersion)
+            .filter(AnalysisVersion.datastack == datastack_name)
+            .filter(AnalysisVersion.valid == True)
+            .filter(AnalysisVersion.time_stamp<timestamp)
+            .order_by(AnalysisVersion.time_stamp.desc())
+            .first()
+        )
+    # query analysis versions to get a valid version which is 
+    # the closest to the timestamp while still being newer 
+    # than the timestamp
+    future_version = (
+            session.query(AnalysisVersion)
+            .filter(AnalysisVersion.datastack == datastack_name)
+            .filter(AnalysisVersion.valid == True)
+            .filter(AnalysisVersion.time_stamp>timestamp)
+            .order_by(AnalysisVersion.time_stamp.asc())
+            .first()
+        )
+    return past_version, future_version, aligned_volume_name
+
+def check_column_for_root_id(col):
+    if type(col)=='str':
+        if col.endswith('root_id'):
+            abort(400, 'we are not presently supporting joins on root_ids')
+    elif type(col)==list:
+        for c in col:
+            if c.endwith('root_id'):
+                abort(400, 'we are not presently supporting joins on root ids')
+        
+def check_joins(joins):
+    for join in joins:
+        check_column_for_root_id(join[1])
+        check_column_for_root_id(join[3])
+
+def execute_materialized_query(datastack:str,
+                               mat_version:int,
+                               user_data:dict)->pd.DataFrame:
+    """_summary_
+
+    Args:
+        datastack (str): datastack to query on
+        mat_version (int): verison to query on
+        user_data (dict): dictionary of query payload including filters
+
+    Returns:
+        pd.DataFrame: a dataframe with the results of the query in the materialized version
+    """
+    mat_db_name = f"{datastack}__mat{mat_version}"
+    # setup a query manager
+    
+    # TODO: get pcg_table_name from datastack
+
+    qm = QueryManager(mat_db_name, segmentation_source=pcg_table_name, split_mode=False)
+    qm.configure_query(user_data)
+
+    # return the result
+    return qm.execute_query()
+
+def execute_production_query(datastack:str,
+                             user_data:dict, 
+                             chosen_timestamp:datetime.datetime)->pd.DataFrame:
+    """_summary_
+
+    Args:
+        datastack (str): _description_
+        user_data (dict): _description_
+        timestamp_start (datetime.datetime): _description_
+        timestamp_end (datetime.datetime): _description_
+
+    Returns:
+        pd.DataFrame: _description_
+    """
+    if chosen_timestamp<user_data['timestamp']:
+        query_forward = True
+        start_time = chosen_timestamp
+        end_time = user_data['timestamp']
+    elif chosen_timestamp>user_data['timestamp']:
+        query_forward = False
+        start_time = user_data['timestamp']
+        end_time = chosen_timestamp
+    else:
+        abort(400, "do not use live live query to query a materialized timestamp")
+    # TODO: get aligned volume name
+    # 
+    # setup a query manager on production database with split tables
+
+    # make sure a vertex isn't added twice
+    # make sure the result is a single component
+    join_graph = make_join_graph(user_data['table'], user_data['joins'])
+
+    df_dict = {}
+    for table in join_graph.vertices:
+        if has_table_change(aligned_volume_name, table, start_time, end_time):
+            qm = QueryManager(aligned_volume_name, datastack_name=datastack, split_mode=True)
+            qm.add_table(table)
+            # remove all root_id based filters
+            stripped_filters= strip_filters(user_data) # make it a 
+            for filter in stripped_filters:
+                qm.add_table_filters(filter.get(table,None))
+            qm.add_timestamp_filter(table, start_time, end_time)
+            df_dict[table]=qm.execute_query()
+        else:
+            df_dict[table]=None
+
+
+
+                    
+    # execute the query
+
+    # lookup root_ids for all non-deleted rows with timestamp
+
+    # return the results
+
+def combine_queries(mat_df:pd.DataFrame, prod_df:pd.DataFrame, user_data:dict)->pd.DataFrame:
+    """combine a materialized query with an production query
+       will remove deleted rows from materialized query, strip deleted entries from prod_df
+       remove any CRUD columns and then append the two dataframes together to be a coherent
+       result. 
+
+    Args:
+        mat_df (pd.DataFrame): _description_
+        prod_df (pd.DataFrame): _description_
+        user_data (dict): _description_
+
+    Returns:
+        pd.DataFrame: _description_
+    """
+    # find deleted rows in production dataframe
+    is_deleted = ~prod_df.deleted.isna()
+
+    # delete those rows from materialized dataframe
+    mat_df = remove_deleted_items(mat_df, prod_df)
+    
+    # remove those rows from the production dataframe
+    prod_df = remove_deleted_items(prod_df, prod_df)
+
+     # remove crud columsn from production dataframe
+    prod_df = remove_crud_columns(prod_df)
+
+    # concatenate dataframes
+    comb_df = pd.concat([mat_df, prod_df])
+    # reapply original filters
+    comb_df = apply_filters(comb_df, user_data)
+    return comb_df
 
 
 
@@ -447,8 +594,8 @@ class LiveTableQuery(Resource):
         Consult the schema of the table for column names and appropriate values
         {
             "table":"table_name",
-            "joins":[[table_name,table_column], [joined_table,joined_column],
-                     [joined_table, joincol2],[third_table, joincol_third]]
+            "joins":[[table_name, table_column, joined_table, joined_column],
+                     [joined_table, joincol2, third_table, joincol_third]]
             "timestamp": "XXXXXXX",
             "offset": 0,
             "limit": 200000,
@@ -482,15 +629,40 @@ class LiveTableQuery(Resource):
         Returns:
             pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
         """
-
-        
-
         args = query_parser.parse_args() 
         user_data = request.parsed_obj
-        mat_version = get_closest_mat_version(datastack, user_data['timestamp'])
-        mat_df = execute_materialized_query(datastack, mat_version, user_data)
-        prod_df = execute_production_query(datastack, user_data, mat_version.timestamp, args['timestamp'])
-        df = combine_queries(mat_df, prod_df, data)
+        joins = user_data.get('joins', None)
+        has_joins = joins is not None
+
+        past_ver, future_ver, aligned_vol = get_closest_versions(datastack_name,
+                                                                 user_data['timestamp'])
+                    
+        if future_ver is None and has_joins:
+            abort(400, 'we do not support joins when there is no future version')
+        elif has_joins:
+            # run a future to past map version of the query
+            check_joins(joins)
+            chosen_version = future_ver
+        elif past_ver is None:
+            abort(400, "there is no future or past version for this timestamp, is materialization broken?")
+        else:
+            chosen_version = past_ver
+
+        cg_client = #TODO: make from an LRU cache
+        modified_user_data = remap_query(user_data, chosen_version.timestamp, cg_client)
+
+        mat_df = execute_materialized_query(datastack_name,
+                                            chosen_version,
+                                            modified_user_data)
+
+        prod_df = execute_production_query(aligned_vol, 
+                                           datastack_name, 
+                                           user_data, 
+                                           chosen_version.timestamp)
+
+        
+                                     
+        df = combine_queries(mat_df, prod_df, chosen_version, user_data)
 
         return format_dataframe(df)
 
