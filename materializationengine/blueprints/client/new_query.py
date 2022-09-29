@@ -1,8 +1,48 @@
+from ast import mod
 from .query import _execute_query
 import datetime
 from cachetools import TTLCache, cached
 from materializationengine.info_client import get_datastack_info
 import numpy as np
+from flask import abort
+from copy import deepcopy
+
+def remap_query(user_data, mat_timestamp, cg_client):
+    query_timestamp =user_data['timestamp']
+
+    # map filters from the user timestamp to the materialized timestamp
+    new_filters, query_map = map_filters(
+            [user_data.get('filter_in_dict', None),
+            user_data.get('filter_out_dict', None),
+            user_data.get('filter_equal_dict', None)],
+            query_timestamp,
+            mat_timestamp,
+            cg_client,
+    )
+
+    new_filter_in_dict, new_filter_out_dict, new_equal_dict = new_filters
+    if new_equal_dict is not None:
+        # when doing a filter equal in the past
+        # we translate it to a filter_in, as 1 ID might
+        # be multiple IDs in the past.
+        # so we want to update the filter_in dict
+        cols = [col for col in new_equal_dict.keys()]
+        for col in cols:
+            if col.endswith("root_id"):
+                if new_filter_in_dict is None:
+                    new_filter_in_dict = {}
+                new_filter_in_dict[col] = new_equal_dict.pop(col)
+        if len(new_equal_dict) == 0:
+            new_equal_dict = None
+
+    modified_user_data = deepcopy(user_data)
+    modified_user_data['filter_equal_dict']=new_equal_dict
+    modified_user_data['filter_in_dict']=new_filter_in_dict
+    modified_user_data['filter_out_dict']=new_filter_out_dict
+
+    return modified_user_data
+
+    
 
 def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_client):
     """translate a list of filter dictionaries
@@ -35,34 +75,33 @@ def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_
     if len(root_ids) == 0:
         return filters, {}
     root_ids = np.unique(np.concatenate(root_ids))
+    is_valid_at_query = cg_client.is_latest_roots(root_ids, timestamp=timestamp_query)
+    if not np.all(is_valid_at_query):
+        invalid_roots = root_ids[~is_valid_at_query]
+        abort(400, f'not all root_ids passed are not valid at the query timestamp: {invalid_roots}')
+
+    # is_valid_at_mat = cg_client.is_latest_roots(root_ids, timestamp=timestamp_mat)
     
-    filter_timed_end = cg_client.is_latest_roots(root_ids, timestamp=timestamp_to)
-    if timestamp_to>timestamp_from:
-        filter_timed_start = cg_client.get_root_timestamps(root_ids) < timestamp_
-    else:
-        filter_timed_start = cg_client.get_root_timestamps(root_ids) < timestamp
-    filter_timestamp = np.logical_and(filter_timed_start, filter_timed_end)
 
-    if not np.all(filter_timestamp):
-        roots_too_old = root_ids[~filter_timed_end]
-        roots_too_recent = root_ids[~filter_timed_start]
-
-        if len(roots_too_old) > 0:
-            too_old_str = f"{roots_too_old} are expired, "
-        else:
-            too_old_str = ""
-        if len(roots_too_recent) > 0:
-            too_recent_str = f"{roots_too_recent} are too recent, "
-        else:
-            too_recent_str = ""
-
-        raise ValueError(
-            f"Timestamp incompatible with IDs: {too_old_str}{too_recent_str}use chunkedgraph client to find valid ID(s)"
+    if (timestamp_mat<timestamp_query):
+        id_mapping = cg_client.get_past_ids(
+            root_ids, timestamp_past=timestamp_mat, timestamp_future=timestamp_query
         )
+        mat_map_str = 'past_id_map'
+        query_map_str = 'future_id_map'
 
-    id_mapping = cg_client.get_past_ids(
-        root_ids, timestamp_past=timestamp_past, timestamp_future=timestamp
-    )
+    elif timestamp_query>timestamp_mat:
+        id_mapping = cg_client.get_past_ids(
+            root_ids, timestamp_past=timestamp_query, timestamp_future=timestamp_mat
+        )
+        mat_map_str = 'future_id_map'
+        query_map_str = 'past_id_map'
+    else:
+        return filters, {}
+    
+    if len(id_mapping[query_map_str])==0:
+        return filters, {}
+
     for filter_dict in filters:
         if filter_dict is None:
             new_filters.append(filter_dict)
@@ -71,16 +110,16 @@ def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_
             for col, root_ids in filter_dict.items():
                 if col.endswith("root_id"):
                     if not isinstance(root_ids, (Iterable, np.ndarray)):
-                        new_dict[col] = id_mapping["past_id_map"][root_ids]
+                        new_dict[col] = id_mapping[mat_map_str][root_ids]
                     else:
                         new_dict[col] = np.concatenate(
-                            [id_mapping["past_id_map"][v] for v in root_ids]
+                            [id_mapping[mat_map_str][v] for v in root_ids]
                         )
                 else:
                     new_dict[col] = root_ids
             new_filters.append(new_dict)
-    return new_filters, id_mapping["future_id_map"]
 
+    return new_filters, id_mapping[query_map_str]
 
 @cached(cache=TTLCache(maxsize=64, ttl=600))
 def get_relevant_datastack_info(datastack_name):
