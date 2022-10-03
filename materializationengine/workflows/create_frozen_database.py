@@ -210,7 +210,7 @@ def create_new_version(
     materialization_time_stamp: datetime.datetime.utcnow,
     days_to_expire: int = None,
     minus_hours: int = 1,
-    merge_tables: bool = True
+    merge_tables: bool = True,
 ):
     """Create new versioned database row in the analysis_version table.
     Sets the expiration date for the database.
@@ -251,7 +251,7 @@ def create_new_version(
         valid=False,
         expires_on=expiration_date,
         status="RUNNING",
-        is_merged=merge_tables
+        is_merged=merge_tables,
     )
 
     try:
@@ -646,8 +646,10 @@ def merge_tables(self, mat_metadata: dict):
         table_metadata=None,
         with_crud_columns=False,
     )
-
-    AnnotationModel = create_annotation_model(mat_metadata, with_crud_columns=True)
+    # reset cache to include crud cols since the model can be stale
+    AnnotationModel = create_annotation_model(
+        mat_metadata, with_crud_columns=True, reset_cache=True
+    )
     SegmentationModel = create_segmentation_model(mat_metadata)
     crud_columns = ["created", "deleted", "superceded_id"]
     query_columns = {
