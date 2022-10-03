@@ -59,17 +59,22 @@ def get_geom_from_wkb(wkb):
         ]
 
 
-def create_segmentation_model(mat_metadata):
+def create_segmentation_model(mat_metadata, reset_cache: bool = False):
     annotation_table_name = mat_metadata.get("annotation_table_name")
     schema_type = mat_metadata.get("schema")
     pcg_table_name = mat_metadata.get("pcg_table_name")
     schema_client = DynamicSchemaClient()
     return schema_client.create_segmentation_model(
-        annotation_table_name, schema_type, pcg_table_name
+        table_name=annotation_table_name,
+        schema_type=schema_type,
+        segmentation_source=pcg_table_name,
+        reset_cache=reset_cache,
     )
 
 
-def create_annotation_model(mat_metadata, with_crud_columns: bool = True):
+def create_annotation_model(
+    mat_metadata, with_crud_columns: bool = True, reset_cache: bool = False
+):
     annotation_table_name = mat_metadata.get("annotation_table_name")
     schema_type = mat_metadata.get("schema")
     table_metadata = {"reference_table": mat_metadata.get("reference_table")}
@@ -80,6 +85,7 @@ def create_annotation_model(mat_metadata, with_crud_columns: bool = True):
         schema_type=schema_type,
         table_metadata=table_metadata,
         with_crud_columns=with_crud_columns,
+        reset_cache=reset_cache,
     )
 
 
