@@ -25,7 +25,7 @@ def argument_signature(
     str_args = json.dumps(task_args or [], sort_keys=True)
     str_kwargs = json.dumps(task_kwargs or {}, sort_keys=True)
     task_hash = md5((task_name + str_args + str_kwargs).encode()).hexdigest()
-    return key_prefix
+    return key_prefix + task_hash
 
 
 class LockedTask(Task):

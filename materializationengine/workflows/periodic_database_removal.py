@@ -39,8 +39,11 @@ def get_all_versions(session):
     versions = session.query(AnalysisVersion).all()
     return [str(version) for version in versions]
 
+
 def get_valid_versions(session):
-    valid_versions = session.query(AnalysisVersion).filter(AnalysisVersion.valid == True).all()
+    valid_versions = (
+        session.query(AnalysisVersion).filter(AnalysisVersion.valid == True).all()
+    )
     return [str(version) for version in valid_versions]
 
 
@@ -105,12 +108,19 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                         valid_versions = get_valid_versions(session)
                         remaining_valid_databases = set(valid_versions).intersection(
                             existing_databases
-                        )                        
-                        if len(remaining_databases) == 1 or len(remaining_valid_databases) == 1:
+                        )
+                        if (
+                            len(remaining_databases) == 1
+                            or len(remaining_valid_databases) == 1
+                        ):
                             celery_logger.info(
                                 f"Only one materialized database remaining: {database}, removal stopped."
                             )
                             break
+
+                        if len(remaining_databases) == delete_threshold:
+                            break
+                        
                         if (len(databases) - len(dropped_dbs)) > delete_threshold:
                             try:
                                 sql = (
@@ -152,6 +162,7 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                                         .one()
                                     )
                                     expired_database.valid = False
+                                    expired_database.status = "EXPIRED"
                                     session.commit()
                                     celery_logger.info(
                                         f"Database '{expired_database}' dropped"
