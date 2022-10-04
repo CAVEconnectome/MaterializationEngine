@@ -152,6 +152,7 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                                         .one()
                                     )
                                     expired_database.valid = False
+                                    expired_database.status = "EXPIRED"
                                     session.commit()
                                     celery_logger.info(
                                         f"Database '{expired_database}' dropped"
