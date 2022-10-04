@@ -118,7 +118,7 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                             )
                             break
 
-                        if len(remaining_valid_databases) == delete_threshold:
+                        if len(remaining_databases) == delete_threshold:
                             break
                         
                         if (len(databases) - len(dropped_dbs)) > delete_threshold:
