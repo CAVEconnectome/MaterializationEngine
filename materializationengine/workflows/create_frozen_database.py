@@ -672,7 +672,7 @@ def merge_tables(self, mat_metadata: dict):
     sorted_columns_list = list(sorted_columns.values())
 
     columns = [f'"{col.table}".{col.name}' for col in sorted_columns_list]
-    celery_logger.info(
+    celery_logger.debug(
         f"SORTED COLUMNS: {sorted_columns_list}, COLUMNS: {columns}, ANNOTATION_COLS: {AnnotationModel.__table__.columns}"
     )
 
