@@ -849,6 +849,7 @@ def check_tables(self, mat_info: list, analysis_version: int):
             f"Valid table amounts don't match {valid_table_count} {table_count}"
         )
     versioned_database.valid = True
+    versioned_database.status = "AVAILABLE"
     try:
         session.commit()
         return "All materialized tables match valid row number from live tables"
