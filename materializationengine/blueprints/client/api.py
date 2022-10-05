@@ -25,7 +25,7 @@ from middle_auth_client import auth_requires_permission
 from materializationengine.blueprints.client.datastack import validate_datastack
 from flask import g
 
-__version__ = "4.1.5"
+__version__ = "4.1.6"
 
 
 authorizations = {
