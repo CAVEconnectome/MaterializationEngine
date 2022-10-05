@@ -23,6 +23,7 @@ from materializationengine.info_client import (
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from middle_auth_client import auth_requires_permission
 from materializationengine.blueprints.client.datastack import validate_datastack
+from flask import g
 
 __version__ = "4.1.4"
 
@@ -500,9 +501,10 @@ class LiveTableQuery(Resource):
         if get_count:
             limit = None
 
-        logging.info("query {}".format(data))
-        logging.info("args - {}".format(args))
-
+        logging.info("query: {}".format(data))
+        logging.info("args: {}".format(args))
+        user_id = str(g.auth_user["id"])
+        logging.info(f"user_id: {user_id}")
         time_d["setup query"] = time.time() - now
         now = time.time()
         seg_table = f"{table_name}__{datastack_name}"
