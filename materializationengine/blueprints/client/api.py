@@ -501,10 +501,10 @@ class LiveTableQuery(Resource):
         if get_count:
             limit = None
 
-        logging.info("query: {}".format(data))
-        logging.info("args: {}".format(args))
+        current_app.logger.info("query: {}".format(data))
+        current_app.logger.info("args: {}".format(args))
         user_id = str(g.auth_user["id"])
-        logging.info(f"user_id: {user_id}")
+        current_app.logger.info(f"user_id: {user_id}")
         time_d["setup query"] = time.time() - now
         now = time.time()
         seg_table = f"{table_name}__{datastack_name}"
