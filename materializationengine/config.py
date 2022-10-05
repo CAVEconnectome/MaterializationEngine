@@ -4,6 +4,8 @@ import logging
 from dynamicannotationdb.models import Base
 from flask_sqlalchemy import SQLAlchemy
 import json
+import sys
+from flask.logging import default_handler
 
 
 class BaseConfig:
@@ -143,6 +145,14 @@ def configure_app(app):
         app.config.from_envvar("MATERIALIZATION_ENGINE_SETTINGS")
     # instance-folders configuration
     app.config.from_pyfile("config.cfg", silent=True)
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(app.config["LOGGING_LEVEL"])
+    app.logger.removeHandler(default_handler)
+    app.logger.addHandler(handler)
+    app.logger.setLevel(app.config["LOGGING_LEVEL"])
+    app.logger.propagate = False
+
     app.logger.debug(app.config)
     db = SQLAlchemy(model_class=Base)
     db.init_app(app)

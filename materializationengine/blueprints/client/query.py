@@ -475,7 +475,6 @@ def _execute_query(
     """
     # logging.info(query.statement)
 
-    print(f"get_count: {get_count}")
     if get_count:
         count = query.count()
         df = pd.DataFrame({"count": [count]})
@@ -527,7 +526,7 @@ def _query(
     :param index_col:
     :return:
     """
-    print(filter_args)
+
     query = _make_query(
         this_sqlalchemy_session,
         query_args=query_args,
