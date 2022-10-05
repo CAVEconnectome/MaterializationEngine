@@ -684,6 +684,11 @@ class FrozenTableQuery(Resource):
         time_d["execute query"] = time.time() - now
         now = time.time()
         headers = None
+        current_app.logger.info("query: {}".format(data))
+        current_app.logger.info("args: {}".format(args))
+        user_id = str(g.auth_user["id"])
+        current_app.logger.info(f"user_id: {user_id}")
+
         if len(df) == limit:
             headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
 
