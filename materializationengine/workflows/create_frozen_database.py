@@ -985,6 +985,7 @@ def add_indices(self, mat_metadata: dict):
                 schema_type=schema,
                 segmentation_source=None,
                 table_metadata=None,
+                reset_cache=True
             )
 
             commands = index_cache.add_indices_sql_commands(
