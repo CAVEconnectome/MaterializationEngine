@@ -15,6 +15,7 @@ from materializationengine.blueprints.client.schemas import (
 )
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
+from materializationengine.utils import check_read_permission
 from materializationengine.info_client import (
     get_aligned_volumes,
     get_datastack_info,
@@ -24,6 +25,8 @@ from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSc
 from middle_auth_client import auth_requires_permission
 from materializationengine.blueprints.client.datastack import validate_datastack
 from flask import g
+
+from materializationengine.utils import check_read_permission
 
 __version__ = "4.2.1"
 
@@ -472,6 +475,8 @@ class LiveTableQuery(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        check_read_permission(db, table_name)
         args = query_parser.parse_args()
         Session = sqlalchemy_cache.get(aligned_volume_name)
         time_d = {}
@@ -628,6 +633,8 @@ class FrozenTableQuery(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        check_read_permission(db, table_name)
         args = query_parser.parse_args()
         Session = sqlalchemy_cache.get(aligned_volume_name)
         time_d = {}
@@ -768,7 +775,8 @@ class FrozenQuery(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        check_read_permission(db, table_name)
         Session = sqlalchemy_cache.get(aligned_volume_name)
         args = query_parser.parse_args()
         data = request.parsed_obj

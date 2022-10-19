@@ -26,7 +26,7 @@ from materializationengine.celery_init import celery
 from celery.result import AsyncResult
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.celery_init import celery
-from materializationengine.database import sqlalchemy_cache
+from materializationengine.database import sqlalchemy_cache, dynamic_annotation_cache
 from materializationengine.info_client import (
     get_datastack_info,
     get_datastacks,
@@ -37,6 +37,7 @@ from materializationengine.schemas import (
     AnalysisVersionSchema,
     VersionErrorTableSchema,
 )
+from materializationengine.utils import check_read_permission
 
 __version__ = "4.2.1"
 
@@ -271,8 +272,12 @@ def version_view(datastack_name: str, id: int):
 @auth_requires_permission("view", table_arg="datastack_name")
 def table_view(datastack_name, id: int):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+    
+    
     session = sqlalchemy_cache.get(aligned_volume_name)
     table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
+    db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    check_read_permission(db, table.table_name)
     mapping = {
         "synapse": url_for(
             "views.synapse_report", id=id, datastack_name=datastack_name
@@ -295,6 +300,9 @@ def cell_type_local_report(datastack_name, id):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
     table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
+    db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    check_read_permission(db, table.table_name)
+
     if not table:
         abort(404, "Table not found")
     if table.schema != "cell_type_local":
@@ -425,6 +433,8 @@ def generic_report(datastack_name, id):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
     table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
+    db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    check_read_permission(db, table.table_name)
     anno_metadata = (
         session.query(AnnoMetadata)
         .filter(AnnoMetadata.table_name == table.table_name)
