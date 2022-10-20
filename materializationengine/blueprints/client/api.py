@@ -386,8 +386,12 @@ class FrozenTableMetadata(Resource):
         ann_md = db.database.get_table_metadata(table_name)
         ann_md.pop("id")
         ann_md.pop("deleted")
+        if ann_md.get("notice_text", None) is not None:
+            headers = {"Warning": f"Table Owner Warning: {ann_md['notice_text']}"}
+        else:
+            headers = None
         tables.update(ann_md)
-        return tables, 200
+        return tables, 200, headers
 
 
 @client_bp.route(
@@ -477,6 +481,12 @@ class LiveTableQuery(Resource):
         )
         db = dynamic_annotation_cache.get_db(aligned_volume_name)
         check_read_permission(db, table_name)
+        ann_md = db.database.get_table_metadata(table_name)
+        if ann_md.get("notice_text", None) is not None:
+            headers = {"Warning": f"Table Owner Warning: {ann_md['notice_text']}"}
+        else:
+            headers = None
+
         args = query_parser.parse_args()
         Session = sqlalchemy_cache.get(aligned_volume_name)
         time_d = {}
@@ -553,9 +563,11 @@ class LiveTableQuery(Resource):
         )
         time_d["execute query"] = time.time() - now
         now = time.time()
-        headers = None
+
         if len(df) == limit:
-            headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
+            if headers is not None:
+                warn = headers.get("Warning", "")
+            headers = {"Warning": f'201 - "Limited query to {max_limit} rows\n {warn}'}
 
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
