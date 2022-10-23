@@ -6,9 +6,10 @@
 {% endblock %}
 
 {% block header %}
-<h1 class="datastack_header">{% block title %}{{dataset}}</h1>
 
-
+{% block title %}
+{% endblock %}
+<h1 class="datastack_header">{{dataset}}</h1>
 <h4 class="datastack_header"> {{table_name}}</h4>
 <h4 class="datastack_header"># of annotations: {{n_annotations}}</h4>
 <h4 class="schema_type"> schema: {{schema_name}}</h4>
@@ -17,7 +18,7 @@
 <h4 class="notice">Table Owner Notice: {{anno_metadata['notice_text']}}</h4>
 {% endif %}
 {% endblock %}</h1>
-{% endblock %}
+
 {% block content %}
 <script type="text/javascript" charset="utf8" src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
 <script type="text/javascript" charset="utf8" src="https://cdn.datatables.net/1.10.25/js/jquery.dataTables.js"></script>
