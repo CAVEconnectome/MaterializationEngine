@@ -28,3 +28,4 @@ flask_cors
 numpy>=1.20
 dynamicannotationdb>=5.2.2
 emannotationschemas>=5.1.5
+nglui>=2.10.1

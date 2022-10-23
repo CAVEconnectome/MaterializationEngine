@@ -1,13 +1,17 @@
 import datetime
+import grp
 import json
 import logging
+from struct import pack
 
 import pandas as pd
+import numpy as np
 from dynamicannotationdb.models import (
     AnalysisTable,
     AnalysisVersion,
     VersionErrorTable,
     AnnoMetadata,
+    MaterializedMetadata,
 )
 from dynamicannotationdb.schema import DynamicSchemaClient
 from flask import (
@@ -26,6 +30,7 @@ from materializationengine.celery_init import celery
 from celery.result import AsyncResult
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.celery_init import celery
+from materializationengine.blueprints.client.query import specific_query
 from materializationengine.database import sqlalchemy_cache, dynamic_annotation_cache
 from materializationengine.info_client import (
     get_datastack_info,
@@ -38,10 +43,25 @@ from materializationengine.schemas import (
     VersionErrorTableSchema,
 )
 from materializationengine.utils import check_read_permission
+from nglui.statebuilder import from_client
+from nglui.statebuilder.helpers import package_state, make_point_statebuilder
+
+import caveclient
 
 __version__ = "4.2.1"
 
 views_bp = Blueprint("views", __name__, url_prefix="/materialize/views")
+
+
+def make_flat_model(db, table: AnalysisTable):
+    anno_metadata = db.database.get_table_metadata(table.table_name)
+    ref_table = anno_metadata.get("reference_table", None)
+    if ref_table:
+        table_metadata = {"reference_table": ref_table}
+    else:
+        table_metadata = None
+    Model = db.schema.create_flat_model(table.table_name, table.schema, table_metadata)
+    return Model, anno_metadata
 
 
 @views_bp.before_request
@@ -272,24 +292,23 @@ def version_view(datastack_name: str, id: int):
 @auth_requires_permission("view", table_arg="datastack_name")
 def table_view(datastack_name, id: int):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
-    
-    
+
     session = sqlalchemy_cache.get(aligned_volume_name)
     table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
     check_read_permission(db, table.table_name)
-    mapping = {
-        "synapse": url_for(
-            "views.synapse_report", id=id, datastack_name=datastack_name
-        ),
-        "cell_type_local": url_for(
-            "views.cell_type_local_report", id=id, datastack_name=datastack_name
-        ),
-    }
-    if table.schema in mapping:
-        return redirect(mapping[table.schema])
-    else:
-        return redirect(
+    # mapping = {
+    #     "synapse": url_for(
+    #         "views.synapse_report", id=id, datastack_name=datastack_name
+    #     ),
+    #     "cell_type_local": url_for(
+    #         "views.cell_type_local_report", id=id, datastack_name=datastack_name
+    #     ),
+    # }
+    # if table.schema in mapping:
+    #     return redirect(mapping[table.schema])
+    # else:
+    return redirect(
             url_for("views.generic_report", datastack_name=datastack_name, id=id)
         )
 
@@ -301,32 +320,39 @@ def cell_type_local_report(datastack_name, id):
     session = sqlalchemy_cache.get(aligned_volume_name)
     table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    check_read_permission(db, table.table_name)
 
     if not table:
         abort(404, "Table not found")
     if table.schema != "cell_type_local":
         abort(504, "this table is not a cell_type_local table")
-    schema_client = DynamicSchemaClient()
+    check_read_permission(db, table.table_name)
 
-    AnnoCellTypeModel, SegCellTypeModel = schema_client.get_split_models(
-        table.table_name, table.schema, pcg_table_name
+    Model, anno_metadata = make_flat_model(db, table)
+    mat_db_name = f"{datastack_name}__mat{table.analysisversion.version}"
+    matsession = sqlalchemy_cache.get(mat_db_name)
+
+    n_annotations = (
+        matsession.query(MaterializedMetadata)
+        .filter(MaterializedMetadata.table_name == table.table_name)
+        .first()
+        .row_count
     )
-    n_annotations = session.query(AnnoCellTypeModel).count()
 
+    # AnnoCellTypeModel, SegCellTypeModel = schema_client.get_split_models(
+    #     table.table_name, table.schema, pcg_table_name
+    # )
     cell_type_merge_query = (
-        session.query(
-            SegCellTypeModel.pt_root_id,
-            AnnoCellTypeModel.cell_type,
-            func.count(SegCellTypeModel.pt_root_id).label("num_cells"),
+        matsession.query(
+            Model.cell_type,
+            func.count(Model.cell_type).label("num_cells"),
         )
-        .group_by(SegCellTypeModel.pt_root_id, AnnoCellTypeModel.cell_type)
+        .group_by(Model.cell_type)
         .order_by(text("num_cells DESC"))
     ).limit(100)
 
     df = pd.read_sql(
         cell_type_merge_query.statement,
-        sqlalchemy_cache.get_engine(aligned_volume_name),
+        sqlalchemy_cache.get_engine(mat_db_name),
         coerce_float=False,
     )
     classes = ["table table-borderless"]
@@ -427,36 +453,87 @@ def get_synapse_info(self, datastack_name, id):
     }
 
 
-@views_bp.route("/datastack/<datastack_name>/table/<int:id>/generic")
+@views_bp.route(
+    "/datastack/<datastack_name>/table/<int:id>/generic", methods=("GET", "POST")
+)
 @auth_requires_permission("view", table_arg="datastack_name")
 def generic_report(datastack_name, id):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     session = sqlalchemy_cache.get(aligned_volume_name)
     table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
+    if table is None:
+        abort(404, "this table does not exist")
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
     check_read_permission(db, table.table_name)
-    anno_metadata = (
-        session.query(AnnoMetadata)
-        .filter(AnnoMetadata.table_name == table.table_name)
+    Model, anno_metadata = make_flat_model(db, table)
+
+    mat_db_name = f"{datastack_name}__mat{table.analysisversion.version}"
+    matsession = sqlalchemy_cache.get(mat_db_name)
+    engine = sqlalchemy_cache.get_engine(mat_db_name)
+
+    n_annotations = (
+        matsession.query(MaterializedMetadata)
+        .filter(MaterializedMetadata.table_name == table.table_name)
         .first()
+        .row_count
     )
-    if anno_metadata.reference_table:
-        table_metadata = {"reference_table": anno_metadata.reference_table}
-    else:
-        table_metadata = None
-    schema_client = DynamicSchemaClient()
-    Model = schema_client.create_annotation_model(
-        table.table_name, table.schema, table_metadata
+    df = specific_query(
+        matsession,
+        engine,
+        {table.table_name: Model},
+        [table.table_name],
+        consolidate_positions=True,
+        limit=current_app.config.get("MAX_VIEW_ROWS", 1000),
     )
+    if request.method == "POST":
+        pos_column = request.form["position"]
+        grp_column = request.form["group"]
+        if not grp_column:
+            grp_column = None
 
-    n_annotations = session.query(Model).count()
+        linked_cols = request.form.get('linked', None)
+        print(pos_column, grp_column, linked_cols)
+        data_res = [anno_metadata['voxel_resolution_x'], anno_metadata['voxel_resolution_y'],anno_metadata['voxel_resolution_z']]
+        client = caveclient.CAVEclient(datastack_name, server_address=current_app.config['GLOBAL_SERVER'])
+        sb=make_point_statebuilder(client, point_column=pos_column,
+            group_column=grp_column, linked_seg_column=linked_cols, 
+            data_resolution=data_res)
+        url = package_state(df, sb, client, shorten='always', 
+                    return_as='url',ngl_url= None, link_text="link")
+        
+        return redirect(url)
 
+
+    classes = ["table table-borderless"]
+    with pd.option_context("display.max_colwidth", -1):
+        output_html = df.to_html(
+            escape=False,
+            classes=classes,
+            index=False,
+            justify="left",
+            border=0,
+            table_id="datatable",
+        )
+
+    root_columns = [c for c in df.columns if c.endswith("_root_id")]
+    pt_columns = [c for c in df.columns if c.endswith("_position")]
+    sv_id_columns = [c for c in df.columns if c.endswith("_supervoxel_id")]
+    id_valid = ["id", "valid"]
+    all_system_cols = np.concatenate(
+        [root_columns, pt_columns, sv_id_columns, id_valid]
+    )
+    other_columns = df.columns[~df.columns.isin(all_system_cols)]
     return render_template(
         "generic.html",
+        pt_columns=pt_columns,
+        root_columns=root_columns,
+        other_columns=other_columns,
         dataset=datastack_name,
         analysisversion=table.analysisversion.version,
         version=__version__,
         table_name=table.table_name,
         schema_name=table.schema,
         n_annotations=n_annotations,
+        anno_metadata=anno_metadata,
+        table=output_html,
     )
