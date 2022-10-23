@@ -1,15 +1,15 @@
 {% extends 'base.html' %}
+{% block title %}
+{{table_name}}
+{% endblock %}
 {% block html_head %}
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.1/dist/css/bootstrap.min.css" rel="stylesheet"
     integrity="sha384-+0n0xVW2eSR5OomGNYDnhzAbDsOXxcvSN1TPprVMTNDbiYZCxYbOOl7+AMvyTG2x" crossorigin="anonymous">
 <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/1.10.25/css/dataTables.bootstrap5.css">
+
 {% endblock %}
 
 {% block header %}
-
-{% block title %}
-{{table_name}}
-{% endblock %}
 <h1 class="datastack_header">{{dataset}}</h1>
 <h4 class="datastack_header"> {{table_name}}</h4>
 <h4 class="datastack_header"># of annotations: {{n_annotations}}</h4>
