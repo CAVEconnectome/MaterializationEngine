@@ -116,9 +116,9 @@ dill==0.3.4
     #   pathos
 dracopy==1.0.1
     # via cloud-volume
-git+https://github.com/seung-lab/dynamicannotationdb@warning_text
+dynamicannotationdb==5.3.0
     # via -r requirements.in
-git+https://github.com/seung-lab/EMAnnotationSchemas@req_bump
+emannotationschemas==5.2.1
     # via
     #   -r requirements.in
     #   dynamicannotationdb
