@@ -483,7 +483,7 @@ def generic_report(datastack_name, id):
         {table.table_name: Model},
         [table.table_name],
         consolidate_positions=True,
-        limit=current_app.config.get("MAX_VIEW_ROWS", 1000),
+        limit=current_app.config.get("QUERY_LIMIT_SIZE", 1000),
     )
     if request.method == "POST":
         pos_column = request.form["position"]
