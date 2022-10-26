@@ -1,12 +1,65 @@
 {% extends 'base.html' %}
+{% block title %}
+{{table_name}}
+{% endblock %}
+{% block html_head %}
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.1/dist/css/bootstrap.min.css" rel="stylesheet"
+    integrity="sha384-+0n0xVW2eSR5OomGNYDnhzAbDsOXxcvSN1TPprVMTNDbiYZCxYbOOl7+AMvyTG2x" crossorigin="anonymous">
+<link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/1.10.25/css/dataTables.bootstrap5.css">
+
+{% endblock %}
 
 {% block header %}
-<h1 class="datastack_header">{% block title %}{{dataset}}</h1>
-<h4 class="datastack_header">n_annotations: {{n_annotations}}</h4>
-
+<h1 class="datastack_header">{{dataset}}</h1>
 <h4 class="datastack_header"> {{table_name}}</h4>
+<h4 class="datastack_header"># of annotations: {{n_annotations}}</h4>
 <h4 class="schema_type"> schema: {{schema_name}}</h4>
+<h4>description: {{anno_metadata['description']}}</h4>
+{% if anno_metadata['notice_text'] %}
+<h4 class="notice">Table Owner Notice: {{anno_metadata['notice_text']}}</h4>
+{% endif %}
 {% endblock %}</h1>
-{% endblock %}
+
 {% block content %}
+<script type="text/javascript" charset="utf8" src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script type="text/javascript" charset="utf8" src="https://cdn.datatables.net/1.10.25/js/jquery.dataTables.js"></script>
+<script type="text/javascript" charset="utf8"
+    src="https://cdn.datatables.net/1.10.25/js/dataTables.bootstrap5.js"></script>
+<script>
+    $(document).ready(function () {
+        $('#datatable').DataTable();
+    });
+</script>
+
+<form method="post" target="_blank">
+
+    <label for="position">Position column</label>
+    <select name="position">
+        {% for column in pt_columns %}
+        <option value="{{column}}" SELECTED>{{column}}</option>
+        {% endfor %}
+    </select>
+
+    <div style="display:inline-block;margin-right:20px;">
+        <label for="group">group annotations</label>
+        <select name="group">
+            <option value="" SELECTED>no group</option>
+            {% for column in other_columns %}
+            <option value="{{column}}">{{column}}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div style="display:inline-block;margin-right:20px;">
+        <label for="linked">link segids</label>
+        <select name="linked" multiple>
+            {% for column in root_columns %}
+            <option value="{{column}}">{{column}}</option>
+            {% endfor %}
+        </select>
+    </div>
+
+    <button type="Neuroglancer Link">Submit</button>
+</form>
+
+{{table|safe}}
 {% endblock %}
