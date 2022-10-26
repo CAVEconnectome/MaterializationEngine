@@ -60,7 +60,12 @@ def make_flat_model(db, table: AnalysisTable):
         table_metadata = {"reference_table": ref_table}
     else:
         table_metadata = None
-    Model = db.schema.create_flat_model(table.table_name, table.schema, table_metadata)
+    Model = db.schema.create_flat_model(
+        table_name=table.table_name,
+        schema_type=table.schema,
+        segmentation_source=None,
+        table_metadata=table_metadata,
+    )
     return Model, anno_metadata
 
 
@@ -309,8 +314,8 @@ def table_view(datastack_name, id: int):
     #     return redirect(mapping[table.schema])
     # else:
     return redirect(
-            url_for("views.generic_report", datastack_name=datastack_name, id=id)
-        )
+        url_for("views.generic_report", datastack_name=datastack_name, id=id)
+    )
 
 
 @views_bp.route("/datastack/<datastack_name>/table/<int:id>/cell_type_local")
@@ -491,18 +496,34 @@ def generic_report(datastack_name, id):
         if not grp_column:
             grp_column = None
 
-        linked_cols = request.form.get('linked', None)
+        linked_cols = request.form.get("linked", None)
         print(pos_column, grp_column, linked_cols)
-        data_res = [anno_metadata['voxel_resolution_x'], anno_metadata['voxel_resolution_y'],anno_metadata['voxel_resolution_z']]
-        client = caveclient.CAVEclient(datastack_name, server_address=current_app.config['GLOBAL_SERVER_URL'])
-        sb=make_point_statebuilder(client, point_column=pos_column,
-            group_column=grp_column, linked_seg_column=linked_cols, 
-            data_resolution=data_res)
-        url = package_state(df, sb, client, shorten='always', 
-                    return_as='url',ngl_url= None, link_text="link")
-        
-        return redirect(url)
+        data_res = [
+            anno_metadata["voxel_resolution_x"],
+            anno_metadata["voxel_resolution_y"],
+            anno_metadata["voxel_resolution_z"],
+        ]
+        client = caveclient.CAVEclient(
+            datastack_name, server_address=current_app.config["GLOBAL_SERVER_URL"]
+        )
+        sb = make_point_statebuilder(
+            client,
+            point_column=pos_column,
+            group_column=grp_column,
+            linked_seg_column=linked_cols,
+            data_resolution=data_res,
+        )
+        url = package_state(
+            df,
+            sb,
+            client,
+            shorten="always",
+            return_as="url",
+            ngl_url=None,
+            link_text="link",
+        )
 
+        return redirect(url)
 
     classes = ["table table-borderless"]
     with pd.option_context("display.max_colwidth", -1):
