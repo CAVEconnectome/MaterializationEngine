@@ -221,7 +221,6 @@ def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
         table_metadata=table_metadata,
     )
 
-@cached(cache=TTLCache(maxsize=32, ttl=60 * 60 * 12))
 def update_notice_text_headers(ann_md, headers):
     notice_text = ann_md.get("notice_text", None)
     if notice_text is not None:
