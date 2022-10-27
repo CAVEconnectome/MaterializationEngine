@@ -40,20 +40,14 @@ class SimpleQuerySchema(Schema):
     filter_notin_dict = fields.Dict()
     filter_equal_dict = fields.Dict()
     filter_spatial_dict = fields.Dict()
+    filter_like_dict = fields.Dict()
     select_columns = fields.List(fields.Str)
     offset = fields.Integer()
     limit = fields.Integer()
 
 
-class ComplexQuerySchema(Schema):
+class ComplexQuerySchema(SimpleQuerySchema):
     tables = fields.List(
         fields.List(fields.Str, validate=Length(equal=2)), required=True
     )
-    filter_in_dict = fields.Dict()
-    filter_notin_dict = fields.Dict()
-    filter_equal_dict = fields.Dict()
-    filter_spatial_dict = fields.Dict()
-    select_columns = fields.List(fields.Str)
-    offset = fields.Integer()
-    limit = fields.Integer()
     suffixes = fields.List(fields.Str)
