@@ -23,6 +23,7 @@ asynctest==0.13.0
 attrs==21.4.0
     # via
     #   aiohttp
+    #   caveclient
     #   jsonschema
     #   pytest
 backcall==0.2.0
@@ -49,7 +50,7 @@ cachetools==5.0.0
     #   caveclient
     #   google-auth
     #   middle-auth-client
-caveclient==4.11.0
+caveclient==4.16.2
     # via -r requirements.in
 celery==5.2.5
     # via -r requirements.in
@@ -116,9 +117,9 @@ dill==0.3.4
     #   pathos
 dracopy==1.0.1
     # via cloud-volume
-dynamicannotationdb==5.2.3
+dynamicannotationdb==5.3.3
     # via -r requirements.in
-emannotationschemas==5.1.5
+emannotationschemas==5.2.2
     # via
     #   -r requirements.in
     #   dynamicannotationdb
@@ -235,7 +236,9 @@ inflection==0.5.1
 iniconfig==1.1.1
     # via pytest
 ipython==7.31.1
-    # via caveclient
+    # via
+    #   caveclient
+    #   nglui
 itsdangerous==2.0.1
     # via flask
 jedi==0.18.1
@@ -251,6 +254,7 @@ json5==0.9.6
 jsonschema==3.2.0
     # via
     #   -r requirements.in
+    #   caveclient
     #   cloud-volume
     #   dynamicannotationdb
     #   emannotationschemas
@@ -291,10 +295,12 @@ multiprocess==0.70.12.2
     # via pathos
 multiwrapper==0.1.1
     # via -r requirements.in
-networkx==2.1
+networkx==2.5
     # via
     #   caveclient
     #   cloud-volume
+nglui==2.10.1
+    # via -r requirements.in
 numpy==1.21.5
     # via
     #   -r requirements.in
@@ -306,6 +312,7 @@ numpy==1.21.5
     #   fastremap
     #   fpzip
     #   multiwrapper
+    #   nglui
     #   pandas
     #   pyarrow
     #   pyspng-seunglab
@@ -326,6 +333,7 @@ pandas==1.3.5
     #   -r requirements.in
     #   caveclient
     #   emannotationschemas
+    #   nglui
 parso==0.8.3
     # via jedi
 pathos==0.2.8
@@ -363,7 +371,7 @@ psutil==5.9.0
     # via
     #   -r requirements.in
     #   cloud-volume
-psycopg2-binary==2.8.5
+psycopg2-binary==2.9.1
     # via
     #   dynamicannotationdb
     #   emannotationschemas
@@ -452,6 +460,7 @@ six==1.16.0
     #   furl
     #   google-auth
     #   jsonschema
+    #   nglui
     #   orderedmultidict
     #   ppft
     #   python-dateutil
@@ -499,6 +508,8 @@ vine==5.0.0
     #   kombu
 wcwidth==0.2.5
     # via prompt-toolkit
+webcolors==1.12
+    # via nglui
 werkzeug==2.0.2
     # via
     #   emannotationschemas
@@ -515,9 +526,9 @@ zipp==3.7.0
     # via
     #   importlib-metadata
     #   importlib-resources
-zope.event==4.5.0
+zope-event==4.5.0
     # via gevent
-zope.interface==5.4.0
+zope-interface==5.4.0
     # via gevent
 zstandard==0.17.0
     # via cloud-files

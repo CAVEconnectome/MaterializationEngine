@@ -15,6 +15,7 @@ from materializationengine.blueprints.client.schemas import (
 )
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
+from materializationengine.utils import check_read_permission
 from materializationengine.info_client import (
     get_aligned_volumes,
     get_datastack_info,
@@ -25,7 +26,9 @@ from middle_auth_client import auth_requires_permission
 from materializationengine.blueprints.client.datastack import validate_datastack
 from flask import g
 
-__version__ = "4.2.2"
+from materializationengine.utils import check_read_permission
+
+__version__ = "4.3.7"
 
 
 authorizations = {
@@ -218,6 +221,15 @@ def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
         table_metadata=table_metadata,
     )
 
+def update_notice_text_headers(ann_md, headers):
+    notice_text = ann_md.get("notice_text", None)
+    if notice_text is not None:
+        msg = f"Table Owner Warning: {notice_text}"
+        if headers is None:
+            headers={'Warning':msg}
+        else:
+            headers['Warning'] =   + "\n" + msg
+    return headers  
 
 @client_bp.route("/datastack/<string:datastack_name>/versions")
 class DatastackVersions(Resource):
@@ -383,8 +395,10 @@ class FrozenTableMetadata(Resource):
         ann_md = db.database.get_table_metadata(table_name)
         ann_md.pop("id")
         ann_md.pop("deleted")
+        headers=update_notice_text_headers(ann_md, None)
+  
         tables.update(ann_md)
-        return tables, 200
+        return tables, 200, headers
 
 
 @client_bp.route(
@@ -472,6 +486,14 @@ class LiveTableQuery(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        check_read_permission(db, table_name)
+        ann_md = db.database.get_table_metadata(table_name)
+        if ann_md.get("notice_text", None) is not None:
+            headers = {"Warning": f"Table Owner Warning: {ann_md['notice_text']}"}
+        else:
+            headers = None
+
         args = query_parser.parse_args()
         Session = sqlalchemy_cache.get(aligned_volume_name)
         time_d = {}
@@ -548,9 +570,12 @@ class LiveTableQuery(Resource):
         )
         time_d["execute query"] = time.time() - now
         now = time.time()
-        headers = None
+
         if len(df) == limit:
-            headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
+            if headers is not None:
+                warn = headers.get("Warning", "")
+            headers = {"Warning": f'201 - "Limited query to {max_limit} rows\n {warn}'}
+        headers=update_notice_text_headers(ann_md, None)
 
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
@@ -628,6 +653,10 @@ class FrozenTableQuery(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        check_read_permission(db, table_name)
+        ann_md = db.database.get_table_metadata(table_name)
+        
         args = query_parser.parse_args()
         Session = sqlalchemy_cache.get(aligned_volume_name)
         time_d = {}
@@ -691,7 +720,8 @@ class FrozenTableQuery(Resource):
 
         if len(df) == limit:
             headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
-
+        headers=update_notice_text_headers(ann_md, headers)
+        
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
             serialized = context.serialize(df).to_buffer().to_pybytes()
@@ -768,18 +798,22 @@ class FrozenQuery(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        
         Session = sqlalchemy_cache.get(aligned_volume_name)
         args = query_parser.parse_args()
         data = request.parsed_obj
         validate_table_args(
             [t[0] for t in data["tables"]], target_datastack, target_version
         )
+        headers=None
         model_dict = {}
         for table_desc in data["tables"]:
             table_name = table_desc[0]
+            ann_md=check_read_permission(db, table_name)
             Model = get_flat_model(datastack_name, table_name, version, Session)
             model_dict[table_name] = Model
+            headers=update_notice_text_headers(ann_md, headers)
 
         db_name = f"{datastack_name}__mat{version}"
         Session = sqlalchemy_cache.get(db_name)
@@ -807,9 +841,13 @@ class FrozenQuery(Resource):
             limit=limit,
             suffixes=data.get("suffixes", None),
         )
-        headers = None
+     
         if len(df) == limit:
-            headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
+            msg = f'201 - "Limited query to {max_limit} rows'
+            if headers is None:
+                headers = {"Warning": msg}
+            else:
+                headers["Warning"]=headers.get("Warning", "") + "\n" + msg
 
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()

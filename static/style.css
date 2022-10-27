@@ -30,7 +30,7 @@ li a:hover {
 
 .schema_type {
   text-align: center;
-  color:rgb(138, 130, 130)
+  color: rgb(138, 130, 130)
 }
 
 .version_num {
@@ -81,6 +81,10 @@ li a:hover {
   z-index: 1;
 }
 
+.notice {
+  background: #ffa0a075;
+}
+
 table {
   font-family: arial, sans-serif;
   border-collapse: collapse;
@@ -115,4 +119,21 @@ tr:nth-child(even) {
   @media (min-width: $bp-md) {
     height: 350px;
   }
+}
+
+form {
+  width: 800px;
+}
+
+
+
+
+
+form section div label {
+  display: block;
+}
+
+input,
+label {
+  display: block;
 }
