@@ -12,10 +12,7 @@ from dynamicannotationdb import DynamicAnnotationInterface
 from dynamicannotationdb.models import Base
 from materializationengine.app import create_app
 from materializationengine.celery_worker import create_celery
-from materializationengine.database import sqlalchemy_cache
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
+from materializationengine.database import dynamic_annotation_cache
 test_logger = logging.getLogger(__name__)
 
 
@@ -161,10 +158,9 @@ def setup_postgis_database(setup_docker_image, mat_metadata, annotation_data) ->
 
 @pytest.fixture(scope="session")
 def db_client(aligned_volume_name):
-    session = sqlalchemy_cache.get(aligned_volume_name)
-    engine = sqlalchemy_cache.get_engine(aligned_volume_name)
-    yield session, engine
-    session.close()
+    db_client = dynamic_annotation_cache.get_db(aligned_volume_name)
+    
+    yield db_client.database.cached_session, db_client.database.engine
 
 
 @pytest.fixture(scope="session")

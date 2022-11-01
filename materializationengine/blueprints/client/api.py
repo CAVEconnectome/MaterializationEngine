@@ -8,13 +8,13 @@ from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 from flask import Response, abort, current_app, request
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
-from materializationengine.blueprints.client.query import specific_query
+from materializationengine.blueprints.client.query import specific_query, _format_filter
 from materializationengine.blueprints.client.schemas import (
     ComplexQuerySchema,
     SimpleQuerySchema,
 )
 from materializationengine.blueprints.reset_auth import reset_auth
-from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
+from materializationengine.database import dynamic_annotation_cache
 from materializationengine.utils import check_read_permission
 from materializationengine.info_client import (
     get_aligned_volumes,
@@ -145,16 +145,17 @@ def get_analysis_version_and_table(
 
 def validate_table_args(tables, datastack_name, version):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
-    session = sqlalchemy_cache.get(aligned_volume_name)
-    for table in tables:
-        analysis_version, analysis_table = get_analysis_version_and_table(
-            datastack_name, table, version, session
-        )
-        if not (analysis_table and analysis_version):
-            abort(
-                404,
-                f"analysis table {table} not found for version {version} in datastack {datastack_name}",
+    db_client = dynamic_annotation_cache.get_db(aligned_volume_name)
+    with db_client.database.session_scope() as session:
+        for table in tables:
+            analysis_version, analysis_table = get_analysis_version_and_table(
+                datastack_name, table, version, session
             )
+            if not (analysis_table and analysis_version):
+                abort(
+                    404,
+                    f"analysis table {table} not found for version {version} in datastack {datastack_name}",
+                )
 
 
 @cached(cache=LRUCache(maxsize=32))
@@ -221,15 +222,17 @@ def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
         table_metadata=table_metadata,
     )
 
+
 def update_notice_text_headers(ann_md, headers):
     notice_text = ann_md.get("notice_text", None)
     if notice_text is not None:
         msg = f"Table Owner Warning: {notice_text}"
         if headers is None:
-            headers={'Warning':msg}
+            headers = {"Warning": msg}
         else:
-            headers['Warning'] =   + "\n" + msg
-    return headers  
+            headers["Warning"] = +"\n" + msg
+    return headers
+
 
 @client_bp.route("/datastack/<string:datastack_name>/versions")
 class DatastackVersions(Resource):
@@ -248,14 +251,14 @@ class DatastackVersions(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        session = sqlalchemy_cache.get(aligned_volume_name)
-
-        response = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.datastack == datastack_name)
-            .filter(AnalysisVersion.valid == True)
-            .all()
-        )
+        db_client = dynamic_annotation_cache.get_db(aligned_volume_name)
+        with db_client.database.session_scope() as session:
+            response = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.datastack == datastack_name)
+                .filter(AnalysisVersion.valid == True)
+                .all()
+            )
 
         versions = [av.version for av in response]
         return versions, 200
@@ -279,14 +282,14 @@ class DatastackVersion(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        session = sqlalchemy_cache.get(aligned_volume_name)
-
-        response = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.datastack == datastack_name)
-            .filter(AnalysisVersion.version == version)
-            .first()
-        )
+        db_client = dynamic_annotation_cache.get_db(aligned_volume_name)
+        with db_client.database.session_scope() as session:
+            response = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.datastack == datastack_name)
+                .filter(AnalysisVersion.version == version)
+                .first()
+            )
         if response is None:
             return "No version found", 404
         schema = AnalysisVersionSchema()
@@ -308,13 +311,14 @@ class DatastackMetadata(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        session = sqlalchemy_cache.get(aligned_volume_name)
-        response = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.datastack == datastack_name)
-            .filter(AnalysisVersion.valid == True)
-            .all()
-        )
+        db_client = dynamic_annotation_cache.get_db(aligned_volume_name)
+        with db_client.database.session_scope() as session:
+            response = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.datastack == datastack_name)
+                .filter(AnalysisVersion.valid == True)
+                .all()
+            )
         if response is None:
             return "No valid versions found", 404
         schema = AnalysisVersionSchema()
@@ -339,22 +343,22 @@ class FrozenTableVersions(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        session = sqlalchemy_cache.get(aligned_volume_name)
-
-        av = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.version == version)
-            .filter(AnalysisVersion.datastack == datastack_name)
-            .first()
-        )
-        if av is None:
-            abort(404, f"version {version} does not exist for {datastack_name} ")
-        response = (
-            session.query(AnalysisTable)
-            .filter(AnalysisTable.analysisversion_id == av.id)
-            .filter(AnalysisTable.valid == True)
-            .all()
-        )
+        db_client = dynamic_annotation_cache.get_db(aligned_volume_name)
+        with db_client.database.session_scope() as session:
+            av = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.version == version)
+                .filter(AnalysisVersion.datastack == datastack_name)
+                .first()
+            )
+            if av is None:
+                abort(404, f"version {version} does not exist for {datastack_name} ")
+            response = (
+                session.query(AnalysisTable)
+                .filter(AnalysisTable.analysisversion_id == av.id)
+                .filter(AnalysisTable.valid == True)
+                .all()
+            )
 
         if response is None:
             return None, 404
@@ -383,20 +387,20 @@ class FrozenTableMetadata(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        session = sqlalchemy_cache.get(aligned_volume_name)
-        analysis_version, analysis_table = get_analysis_version_and_table(
-            datastack_name, table_name, version, session
-        )
+        db_client = dynamic_annotation_cache.get_db(aligned_volume_name)
+        with db_client.database.session_scope() as session:
+            analysis_version, analysis_table = get_analysis_version_and_table(
+                datastack_name, table_name, version, session
+            )
 
         schema = AnalysisTableSchema()
         tables = schema.dump(analysis_table)
 
-        db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        ann_md = db.database.get_table_metadata(table_name)
+        ann_md = db_client.database.get_table_metadata(table_name)
         ann_md.pop("id")
         ann_md.pop("deleted")
-        headers=update_notice_text_headers(ann_md, None)
-  
+        headers = update_notice_text_headers(ann_md, None)
+
         tables.update(ann_md)
         return tables, 200, headers
 
@@ -431,11 +435,17 @@ class FrozenTableCount(Resource):
             datastack_name
         )
         validate_table_args([table_name], target_datastack, target_version)
-        Session = sqlalchemy_cache.get(aligned_volume_name)
-        Model = get_flat_model(datastack_name, table_name, version, Session)
+        db_client = dynamic_annotation_cache.get_db(aligned_volume_name)
 
-        Session = sqlalchemy_cache.get("{}__mat{}".format(datastack_name, version))
-        return Session().query(Model).count(), 200
+        mat_db_name = f"{datastack_name}__mat{version}"
+        mat_db_client = dynamic_annotation_cache.get_db(mat_db_name)
+
+        with db_client.database.session_scope() as session:
+            Model = get_flat_model(datastack_name, table_name, version, session)
+
+        with mat_db_client.database.session_scope() as session:
+            count = session.query(Model).count()
+        return count, 200
 
 
 @client_bp.expect(query_parser)
@@ -486,16 +496,16 @@ class LiveTableQuery(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        check_read_permission(db, table_name)
-        ann_md = db.database.get_table_metadata(table_name)
+        db_client = dynamic_annotation_cache.get_db(aligned_volume_name)
+        check_read_permission(db_client, table_name)
+        ann_md = db_client.database.get_table_metadata(table_name)
         if ann_md.get("notice_text", None) is not None:
             headers = {"Warning": f"Table Owner Warning: {ann_md['notice_text']}"}
         else:
             headers = None
 
         args = query_parser.parse_args()
-        Session = sqlalchemy_cache.get(aligned_volume_name)
+
         time_d = {}
         now = time.time()
 
@@ -505,7 +515,6 @@ class LiveTableQuery(Resource):
         time_d["get Model"] = time.time() - now
         now = time.time()
 
-        engine = sqlalchemy_cache.get_engine(aligned_volume_name)
         time_d["get engine"] = time.time() - now
         now = time.time()
         max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
@@ -530,44 +539,30 @@ class LiveTableQuery(Resource):
         time_d["setup query"] = time.time() - now
         now = time.time()
         seg_table = f"{table_name}__{datastack_name}"
+        with db_client.database.session_scope() as session:
 
-        def _format_filter(filter, table_in, seg_table):
-            if filter is None:
-                return filter
-            else:
-                table_filter = filter.get(table_in, None)
-                root_id_filters = [
-                    c for c in table_filter.keys() if c.endswith("root_id")
-                ]
-                other_filters = [
-                    c for c in table_filter.keys() if not c.endswith("root_id")
-                ]
+            df = specific_query(
+                session,
+                db_client.database.engine,
+                {table_name: AnnModel, seg_table: SegModel},
+                [[table_name, "id"], [seg_table, "id"]],
+                filter_in_dict=_format_filter(
+                    data.get("filter_in_dict", None), table_name, seg_table
+                ),
+                filter_notin_dict=_format_filter(
+                    data.get("filter_notin_dict", None), table_name, seg_table
+                ),
+                filter_equal_dict=_format_filter(
+                    data.get("filter_equal_dict", None), table_name, seg_table
+                ),
+                filter_spatial=data.get("filter_spatial_dict", None),
+                select_columns=data.get("select_columns", None),
+                consolidate_positions=not args["split_positions"],
+                offset=data.get("offset", None),
+                limit=limit,
+                get_count=get_count,
+            )
 
-                filter[seg_table] = {c: table_filter[c] for c in root_id_filters}
-                filter[table_in] = {c: table_filter[c] for c in other_filters}
-                return filter
-
-        df = specific_query(
-            Session,
-            engine,
-            {table_name: AnnModel, seg_table: SegModel},
-            [[table_name, "id"], [seg_table, "id"]],
-            filter_in_dict=_format_filter(
-                data.get("filter_in_dict", None), table_name, seg_table
-            ),
-            filter_notin_dict=_format_filter(
-                data.get("filter_notin_dict", None), table_name, seg_table
-            ),
-            filter_equal_dict=_format_filter(
-                data.get("filter_equal_dict", None), table_name, seg_table
-            ),
-            filter_spatial=data.get("filter_spatial_dict", None),
-            select_columns=data.get("select_columns", None),
-            consolidate_positions=not args["split_positions"],
-            offset=data.get("offset", None),
-            limit=limit,
-            get_count=get_count,
-        )
         time_d["execute query"] = time.time() - now
         now = time.time()
 
@@ -575,7 +570,7 @@ class LiveTableQuery(Resource):
             if headers is not None:
                 warn = headers.get("Warning", "")
             headers = {"Warning": f'201 - "Limited query to {max_limit} rows\n {warn}'}
-        headers=update_notice_text_headers(ann_md, None)
+        headers = update_notice_text_headers(ann_md, None)
 
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
@@ -656,22 +651,24 @@ class FrozenTableQuery(Resource):
         db = dynamic_annotation_cache.get_db(aligned_volume_name)
         check_read_permission(db, table_name)
         ann_md = db.database.get_table_metadata(table_name)
-        
+
         args = query_parser.parse_args()
-        Session = sqlalchemy_cache.get(aligned_volume_name)
+        db_client = dynamic_annotation_cache.get_db(aligned_volume_name)
+
         time_d = {}
         now = time.time()
 
         data = request.parsed_obj
-        Model = get_flat_model(datastack_name, table_name, version, Session)
+        with db_client.database.session_scope() as session:
+            Model = get_flat_model(datastack_name, table_name, version, session)
         time_d["get Model"] = time.time() - now
         now = time.time()
+        mat_db_client = dynamic_annotation_cache.get_db("{datastack_name}__mat{version}")
 
-        Session = sqlalchemy_cache.get(f"{datastack_name}__mat{version}")
         time_d["get Session"] = time.time() - now
         now = time.time()
 
-        engine = sqlalchemy_cache.get_engine(f"{datastack_name}__mat{version}")
+        engine = mat_db_client.database.engine
         time_d["get engine"] = time.time() - now
         now = time.time()
         max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
@@ -694,22 +691,22 @@ class FrozenTableQuery(Resource):
 
         time_d["setup query"] = time.time() - now
         now = time.time()
-
-        df = specific_query(
-            Session,
-            engine,
-            {table_name: Model},
-            [table_name],
-            filter_in_dict=data.get("filter_in_dict", None),
-            filter_notin_dict=data.get("filter_notin_dict", None),
-            filter_equal_dict=data.get("filter_equal_dict", None),
-            filter_spatial=data.get("filter_spatial_dict", None),
-            select_columns=data.get("select_columns", None),
-            consolidate_positions=not args["split_positions"],
-            offset=data.get("offset", None),
-            limit=limit,
-            get_count=get_count,
-        )
+        with db_client.database.session_scope() as session:
+            df = specific_query(
+                session,
+                db_client.database.engine,
+                {table_name: Model},
+                [table_name],
+                filter_in_dict=data.get("filter_in_dict", None),
+                filter_notin_dict=data.get("filter_notin_dict", None),
+                filter_equal_dict=data.get("filter_equal_dict", None),
+                filter_spatial=data.get("filter_spatial_dict", None),
+                select_columns=data.get("select_columns", None),
+                consolidate_positions=not args["split_positions"],
+                offset=data.get("offset", None),
+                limit=limit,
+                get_count=get_count,
+            )
         time_d["execute query"] = time.time() - now
         now = time.time()
         headers = None
@@ -720,8 +717,8 @@ class FrozenTableQuery(Resource):
 
         if len(df) == limit:
             headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
-        headers=update_notice_text_headers(ann_md, headers)
-        
+        headers = update_notice_text_headers(ann_md, headers)
+
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
             serialized = context.serialize(df).to_buffer().to_pybytes()
@@ -799,25 +796,24 @@ class FrozenQuery(Resource):
             datastack_name
         )
         db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        
-        Session = sqlalchemy_cache.get(aligned_volume_name)
+
         args = query_parser.parse_args()
         data = request.parsed_obj
         validate_table_args(
             [t[0] for t in data["tables"]], target_datastack, target_version
         )
-        headers=None
+        headers = None
         model_dict = {}
-        for table_desc in data["tables"]:
-            table_name = table_desc[0]
-            ann_md=check_read_permission(db, table_name)
-            Model = get_flat_model(datastack_name, table_name, version, Session)
-            model_dict[table_name] = Model
-            headers=update_notice_text_headers(ann_md, headers)
+        with db.database.session_scope() as session:
+            for table_desc in data["tables"]:
+                table_name = table_desc[0]
+                ann_md = check_read_permission(db, table_name)
+                Model = get_flat_model(datastack_name, table_name, version, Session)
+                model_dict[table_name] = Model
+                headers = update_notice_text_headers(ann_md, headers)
 
         db_name = f"{datastack_name}__mat{version}"
-        Session = sqlalchemy_cache.get(db_name)
-        engine = sqlalchemy_cache.get_engine(db_name)
+        mat_db = dynamic_annotation_cache.get_db(aligned_volume_name)
         max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
 
         data = request.parsed_obj
@@ -825,29 +821,30 @@ class FrozenQuery(Resource):
         if limit > max_limit:
             limit = max_limit
         logging.debug(f"query {data}")
+        with mat_db.database.session_scope() as session:
 
-        df = specific_query(
-            Session,
-            engine,
-            model_dict,
-            data["tables"],
-            filter_in_dict=data.get("filter_in_dict", None),
-            filter_notin_dict=data.get("filter_notin_dict", None),
-            filter_equal_dict=data.get("filter_equal_dict", None),
-            filter_spatial=data.get("filter_spatial_dict", None),
-            select_columns=data.get("select_columns", None),
-            consolidate_positions=not args["split_positions"],
-            offset=data.get("offset", None),
-            limit=limit,
-            suffixes=data.get("suffixes", None),
-        )
-     
+            df = specific_query(
+                session,
+                mat_db.database.engine,
+                model_dict,
+                data["tables"],
+                filter_in_dict=data.get("filter_in_dict", None),
+                filter_notin_dict=data.get("filter_notin_dict", None),
+                filter_equal_dict=data.get("filter_equal_dict", None),
+                filter_spatial=data.get("filter_spatial_dict", None),
+                select_columns=data.get("select_columns", None),
+                consolidate_positions=not args["split_positions"],
+                offset=data.get("offset", None),
+                limit=limit,
+                suffixes=data.get("suffixes", None),
+            )
+
         if len(df) == limit:
             msg = f'201 - "Limited query to {max_limit} rows'
             if headers is None:
                 headers = {"Warning": msg}
             else:
-                headers["Warning"]=headers.get("Warning", "") + "\n" + msg
+                headers["Warning"] = headers.get("Warning", "") + "\n" + msg
 
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()

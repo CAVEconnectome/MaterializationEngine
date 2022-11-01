@@ -110,7 +110,22 @@ def fix_columns_with_query(
             else:
                 continue
     return df
+    
+def _format_filter(filter, table_in, seg_table):
+    if filter is None:
+        return filter
+    
+    table_filter = filter.get(table_in, None)
+    root_id_filters = [
+        c for c in table_filter.keys() if c.endswith("root_id")
+    ]
+    other_filters = [
+        c for c in table_filter.keys() if not c.endswith("root_id")
+    ]
 
+    filter[seg_table] = {c: table_filter[c] for c in root_id_filters}
+    filter[table_in] = {c: table_filter[c] for c in other_filters}
+    return filter
 
 def _wkb_object_point_to_numpy(wkb):
     """Fixes single geometry element"""

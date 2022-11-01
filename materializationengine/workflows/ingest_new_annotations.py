@@ -10,7 +10,7 @@ from celery.utils.log import get_task_logger
 from dynamicannotationdb.models import SegmentationMetadata
 from materializationengine.celery_init import celery
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
-from materializationengine.database import sqlalchemy_cache
+from materializationengine.database import dynamic_annotation_cache
 from materializationengine.shared_tasks import (
     generate_chunked_model_ids,
     fin,
@@ -65,9 +65,8 @@ def process_new_annotations_workflow(
     )
 
     for mat_metadata in mat_info:
-        if (
-            mat_metadata["row_count"] < 1_000_000
-            and mat_metadata.get("segmentation_table_name")
+        if mat_metadata["row_count"] < 1_000_000 and mat_metadata.get(
+            "segmentation_table_name"
         ):
             annotation_chunks = generate_chunked_model_ids(mat_metadata)
             process_chunks_workflow = chain(
@@ -142,7 +141,7 @@ def get_ids_with_missing_roots(mat_metadata: dict) -> List:
     """
     SegmentationModel = create_segmentation_model(mat_metadata)
     aligned_volume = mat_metadata.get("aligned_volume")
-    session = sqlalchemy_cache.get(aligned_volume)
+    db_client = dynamic_annotation_cache.get_db(aligned_volume)
 
     columns = [seg_column.name for seg_column in SegmentationModel.__table__.columns]
     root_id_columns = [
@@ -152,16 +151,17 @@ def get_ids_with_missing_roots(mat_metadata: dict) -> List:
         getattr(SegmentationModel, root_id_column).is_(None)
         for root_id_column in root_id_columns
     ]
-    max_id = (
-        session.query(func.max(SegmentationModel.id))
-        .filter(or_(*query_columns))
-        .scalar()
-    )
-    min_id = (
-        session.query(func.min(SegmentationModel.id))
-        .filter(or_(*query_columns))
-        .scalar()
-    )
+    with db_client.database.session_scope() as session:
+        max_id = (
+            session.query(func.max(SegmentationModel.id))
+            .filter(or_(*query_columns))
+            .scalar()
+        )
+        min_id = (
+            session.query(func.min(SegmentationModel.id))
+            .filter(or_(*query_columns))
+            .scalar()
+        )
     if min_id and max_id:
         if min_id < max_id:
             id_range = range(min_id, max_id + 1)
@@ -342,37 +342,33 @@ def create_missing_segmentation_table(self, mat_metadata: dict) -> dict:
     """
     segmentation_table_name = mat_metadata.get("segmentation_table_name")
     aligned_volume = mat_metadata.get("aligned_volume")
+    db_client = dynamic_annotation_cache.get_db(aligned_volume)
 
     SegmentationModel = create_segmentation_model(mat_metadata)
 
-    session = sqlalchemy_cache.get(aligned_volume)
-    engine = sqlalchemy_cache.get_engine(aligned_volume)
+    with db_client.database.session_scope() as session:
+        if (
+            not session.query(SegmentationMetadata)
+            .filter(SegmentationMetadata.table_name == segmentation_table_name)
+            .scalar()
+        ):
+            SegmentationModel.__table__.create(
+                bind=db_client.database.engine, checkfirst=True
+            )
+            creation_time = datetime.datetime.utcnow()
+            metadata_dict = {
+                "annotation_table": mat_metadata.get("annotation_table_name"),
+                "schema_type": mat_metadata.get("schema"),
+                "table_name": segmentation_table_name,
+                "valid": True,
+                "created": creation_time,
+                "pcg_table_name": mat_metadata.get("pcg_table_name"),
+            }
 
-    if (
-        not session.query(SegmentationMetadata)
-        .filter(SegmentationMetadata.table_name == segmentation_table_name)
-        .scalar()
-    ):
-        SegmentationModel.__table__.create(bind=engine, checkfirst=True)
-        creation_time = datetime.datetime.utcnow()
-        metadata_dict = {
-            "annotation_table": mat_metadata.get("annotation_table_name"),
-            "schema_type": mat_metadata.get("schema"),
-            "table_name": segmentation_table_name,
-            "valid": True,
-            "created": creation_time,
-            "pcg_table_name": mat_metadata.get("pcg_table_name"),
-        }
+            seg_metadata = SegmentationMetadata(**metadata_dict)
 
-        seg_metadata = SegmentationMetadata(**metadata_dict)
-        try:
             session.add(seg_metadata)
             session.commit()
-        except Exception as e:
-            celery_logger.error(f"SQL ERROR: {e}")
-            session.rollback()
-    else:
-        session.close()
     return True
 
 
@@ -399,33 +395,34 @@ def get_annotations_with_missing_supervoxel_ids(
     SegmentationModel = create_segmentation_model(mat_metadata)
     AnnotationModel = create_annotation_model(mat_metadata)
 
-    session = sqlalchemy_cache.get(aligned_volume)
+    db_client = dynamic_annotation_cache.get_db(aligned_volume)
 
     anno_model_cols, __, supervoxel_columns = get_query_columns_by_suffix(
         AnnotationModel, SegmentationModel, "supervoxel_id"
     )
+    with db_client.database.session_scope() as session:
+        query = session.query(*anno_model_cols)
 
-    query = session.query(*anno_model_cols)
+        chunked_id_query = query_id_range(AnnotationModel.id, chunk[0], chunk[1])
+        annotation_data = [
+            data
+            for data in query.filter(chunked_id_query)
+            .order_by(AnnotationModel.id)
+            .filter(AnnotationModel.valid == True)
+            .join(SegmentationModel, isouter=True)
+            .filter(SegmentationModel.id == None)
+        ]
 
-    chunked_id_query = query_id_range(AnnotationModel.id, chunk[0], chunk[1])
-    annotation_data = [
-        data
-        for data in query.filter(chunked_id_query)
-        .order_by(AnnotationModel.id)
-        .filter(AnnotationModel.valid == True)
-        .join(SegmentationModel, isouter=True)
-        .filter(SegmentationModel.id == None)
-    ]
+        annotation_dataframe = pd.DataFrame(annotation_data, dtype=object)
 
-    annotation_dataframe = pd.DataFrame(annotation_data, dtype=object)
     if not annotation_dataframe.empty:
         wkb_data = annotation_dataframe.loc[
             :, annotation_dataframe.columns.str.endswith("position")
         ]
 
         annotation_dict = {}
-        for column, wkb_points in wkb_data.items():
-            annotation_dict[column] = [
+        for geo_column, wkb_points in wkb_data.items():
+            annotation_dict[geo_column] = [
                 get_geom_from_wkb(wkb_point) for wkb_point in wkb_points
             ]
 
@@ -438,9 +435,6 @@ def get_annotations_with_missing_supervoxel_ids(
         materialization_data = mat_df.to_dict(orient="list")
     else:
         materialization_data = None
-
-    session.close()
-
     return materialization_data
 
 
@@ -515,7 +509,7 @@ def get_sql_supervoxel_ids(chunks: List[int], mat_metadata: dict) -> List[int]:
     """
     SegmentationModel = create_segmentation_model(mat_metadata)
     aligned_volume = mat_metadata.get("aligned_volume")
-    session = sqlalchemy_cache.get(aligned_volume)
+    db_client = dynamic_annotation_cache.get_db(aligned_volume)
 
     columns = [
         model_column.name for model_column in SegmentationModel.__table__.columns
@@ -527,7 +521,7 @@ def get_sql_supervoxel_ids(chunks: List[int], mat_metadata: dict) -> List[int]:
         getattr(SegmentationModel, supervoxel_id_column)
         for supervoxel_id_column in supervoxel_id_columns
     ]
-    try:
+    with db_client.database.session_scope() as session:
         filter_query = session.query(SegmentationModel.id, *mapped_columns)
         if len(chunks) > 1:
             query = filter_query.filter(
@@ -538,12 +532,7 @@ def get_sql_supervoxel_ids(chunks: List[int], mat_metadata: dict) -> List[int]:
 
         data = query.all()
         df = pd.DataFrame(data)
-        return df.to_dict(orient="list")
-    except Exception as e:
-        celery_logger.error(e)
-        session.rollback()
-    finally:
-        session.close()
+    return df.to_dict(orient="list")
 
 
 def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
@@ -581,21 +570,14 @@ def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
     anno_ids = supervoxel_df["id"].to_list()
 
     # get current root ids from database
-    session = sqlalchemy_cache.get(aligned_volume)
+    db_client = dynamic_annotation_cache.get_db(aligned_volume)
 
-    try:
-        current_root_ids = [
-            data
-            for data in session.query(*seg_model_cols).filter(
+    with db_client.database.session_scope() as session:
+        current_root_ids = list(
+            session.query(*seg_model_cols).filter(
                 or_(SegmentationModel.id.in_(anno_ids))
             )
-        ]
-    except SQLAlchemyError as e:
-        session.rollback()
-        current_root_ids = []
-        celery_logger.error(e)
-    finally:
-        session.close()
+        )
 
     supervoxel_col_names = list(
         supervoxel_df.loc[:, supervoxel_df.columns.str.endswith("supervoxel_id")]
@@ -651,17 +633,10 @@ def update_segmentation_data(materialization_data: dict, mat_metadata: dict) -> 
     SegmentationModel = create_segmentation_model(mat_metadata)
     aligned_volume = mat_metadata.get("aligned_volume")
 
-    session = sqlalchemy_cache.get(aligned_volume)
-
-    try:
+    db_client = dynamic_annotation_cache.get_db(aligned_volume)
+    with db_client.database.session_scope() as session:
         session.bulk_update_mappings(SegmentationModel, materialization_data)
         session.commit()
-    except Exception as e:
-        session.rollback()
-        celery_logger.error(f"ERROR: {e}")
-        raise (e)
-    finally:
-        session.close()
     return f"Number of rows updated: {len(materialization_data)}"
 
 
@@ -681,17 +656,9 @@ def insert_segmentation_data(materialization_data: dict, mat_metadata: dict) -> 
     SegmentationModel = create_segmentation_model(mat_metadata)
     aligned_volume = mat_metadata.get("aligned_volume")
 
-    session = sqlalchemy_cache.get(aligned_volume)
-    engine = sqlalchemy_cache.get_engine(aligned_volume)
+    db_client = dynamic_annotation_cache.get_db(aligned_volume)
 
-    try:
-        with engine.begin() as connection:
-            connection.execute(
-                SegmentationModel.__table__.insert(), materialization_data
-            )
-    except SQLAlchemyError as e:
-        session.rollback()
-        celery_logger.error(e)
-    finally:
-        session.close()
+    with db_client.database.engine.begin() as connection:
+        connection.execute(SegmentationModel.__table__.insert(), materialization_data)
+
     return {"Segmentation data inserted": len(materialization_data)}

@@ -7,9 +7,7 @@ from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import (
-    create_session,
     dynamic_annotation_cache,
-    sqlalchemy_cache,
 )
 from materializationengine.info_client import (
     get_aligned_volumes,
@@ -208,6 +206,15 @@ class CompleteWorkflowResource(Resource):
 
         datastack_info["database_expires"] = days_to_expire
         datastack_info["merge_tables"] = merge_tables
+
+        task = run_complete_workflow.s(
+            mat_info,
+            new_version_number,
+            materialization_time_stamp,
+            datastack_info,
+            days_to_expire=days_to_expire,
+            merge_tables=merge_tables,
+        )
         run_complete_workflow.s(
             datastack_info, days_to_expire, merge_tables
         ).apply_async()
@@ -409,21 +416,21 @@ class VersionResource(Resource):
     @mat_bp.doc("get_analysis_versions", security="apikey")
     def get(self, aligned_volume_name):
         check_aligned_volume(aligned_volume_name)
-        session = sqlalchemy_cache.get(aligned_volume_name)
+        db_client = dynamic_annotation_cache.get_db(aligned_volume_name)
 
-        response = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.datastack == aligned_volume_name)
-            .all()
-        )
+        with db_client.database.session_scope() as session:
+            response = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.datastack == aligned_volume_name)
+                .all()
+            )
         schema = AnalysisVersionSchema(many=True)
         versions, error = schema.dump(response)
         logging.info(versions)
         if versions:
             return versions, 200
-        else:
-            logging.error(error)
-            return abort(404)
+        logging.error(error)
+        return abort(404)
 
     @reset_auth
     @auth_requires_admin
@@ -434,10 +441,10 @@ class VersionResource(Resource):
             aligned_volume_name (str): name of aligned_volume from infoservice
         """
         check_aligned_volume(aligned_volume_name)
-        aligned_vol_db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        db_client = dynamic_annotation_cache.get_db(aligned_volume_name)
 
         base = Base
-        base.metadata.bind = aligned_vol_db.engine
+        base.metadata.bind = db_client.database.engine
         base.metadata.create_all()
         return 200
 
@@ -449,22 +456,21 @@ class TableResource(Resource):
     @mat_bp.doc("get_all_tables", security="apikey")
     def get(self, aligned_volume_name, version):
         check_aligned_volume(aligned_volume_name)
-        session = sqlalchemy_cache.get(aligned_volume_name)
-
-        response = (
-            session.query(AnalysisTable)
-            .filter(AnalysisTable.analysisversion)
-            .filter(AnalysisVersion.version == version)
-            .filter(AnalysisVersion.datastack == aligned_volume_name)
-            .all()
-        )
+        db_client = dynamic_annotation_cache.get_db(aligned_volume_name)
+        with db_client.database.session_scope() as session:
+            response = (
+                session.query(AnalysisTable)
+                .filter(AnalysisTable.analysisversion)
+                .filter(AnalysisVersion.version == version)
+                .filter(AnalysisVersion.datastack == aligned_volume_name)
+                .all()
+            )
         schema = AnalysisTableSchema(many=True)
         tables, error = schema.dump(response)
         if tables:
             return tables, 200
-        else:
-            logging.error(error)
-            return abort(404)
+        logging.error(error)
+        return abort(404)
 
 
 @mat_bp.route(
@@ -476,20 +482,22 @@ class AnnotationResource(Resource):
     @mat_bp.doc("get_top_materialized_annotations", security="apikey")
     def get(self, aligned_volume_name: str, version: int, tablename: str):
         check_aligned_volume(aligned_volume_name)
-        SQL_URI_CONFIG = current_app.config["SQLALCHEMY_DATABASE_URI"]
-        sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
-        sql_uri = make_url(f"{sql_base_uri}/{aligned_volume_name}")
-        session, engine = create_session(sql_uri)
+        db_client = dynamic_annotation_cache.get_db(aligned_volume_name)
+
         metadata = MetaData()
         try:
             annotation_table = Table(
-                tablename, metadata, autoload=True, autoload_with=engine
+                tablename,
+                metadata,
+                autoload=True,
+                autoload_with=db_client.database.engine,
             )
 
         except NoSuchTableError as e:
             logging.error(f"No table exists {e}")
             return abort(404)
-        response = session.query(annotation_table).limit(10).all()
+        with db_client.database.session_scope() as session:
+            response = session.query(annotation_table).limit(10).all()
         annotations = [r._asdict() for r in response]
         return (annotations, 200) if annotations else abort(404)
 
@@ -521,70 +529,67 @@ class CreateVirtualPublicVersionResource(Resource):
         if not tables_to_include:
             return abort(400, "No tables included")
 
-        session = sqlalchemy_cache.get(aligned_volume)
+        db_client = dynamic_annotation_cache.get_db(aligned_volume)
+        with db_client.database.session_scope() as session:
 
-        analysis_version = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.version == target_version)
-            .filter(AnalysisVersion.datastack == datastack_name)
-            .one()
-        )
-
-        if not analysis_version.valid:
-            return abort(404, f"Version {target_version} is not a valid version")
-
-        included_tables = (
-            session.query(AnalysisTable)
-            .filter(AnalysisTable.analysisversion_id == analysis_version.id)
-            .filter(AnalysisTable.table_name.in_(tables_to_include))
-            .all()
-        )
-        if not included_tables:
-            return abort(
-                404,
-                f"No tables {tables_to_include} found in target version {target_version}",
+            analysis_version = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.version == target_version)
+                .filter(AnalysisVersion.datastack == datastack_name)
+                .one()
             )
 
-        virtual_datastack_name = f"{virtual_version_name}_v{analysis_version.version}"
+            if not analysis_version.valid:
+                return abort(404, f"Version {target_version} is not a valid version")
 
-        time_to_expire = analysis_version.expires_on - datetime.datetime.utcnow()
-        if time_to_expire.days < 1000:
-            expiration_timestamp = str(
-                analysis_version.expires_on + datetime.timedelta(days=36525)
+            included_tables = (
+                session.query(AnalysisTable)
+                .filter(AnalysisTable.analysisversion_id == analysis_version.id)
+                .filter(AnalysisTable.table_name.in_(tables_to_include))
+                .all()
             )
-        else:
-            expiration_timestamp = analysis_version.expires_on
+            if not included_tables:
+                return abort(
+                    404,
+                    f"No tables {tables_to_include} found in target version {target_version}",
+                )
 
-        virtual_analysis_version = AnalysisVersion(
-            datastack=virtual_datastack_name,
-            time_stamp=analysis_version.time_stamp,
-            version=analysis_version.version,
-            valid=True,
-            expires_on=expiration_timestamp,
-            parent_version=analysis_version.id,
-        )
+            virtual_datastack_name = (
+                f"{virtual_version_name}_v{analysis_version.version}"
+            )
 
-        session.add(virtual_analysis_version)
-        session.flush()
+            time_to_expire = analysis_version.expires_on - datetime.datetime.utcnow()
+            if time_to_expire.days < 1000:
+                expiration_timestamp = str(
+                    analysis_version.expires_on + datetime.timedelta(days=36525)
+                )
+            else:
+                expiration_timestamp = analysis_version.expires_on
 
-        for table in included_tables:
-            table = AnalysisTable(
-                aligned_volume=aligned_volume,
-                schema=table.schema,
-                table_name=table.table_name,
+            virtual_analysis_version = AnalysisVersion(
+                datastack=virtual_datastack_name,
+                time_stamp=analysis_version.time_stamp,
+                version=analysis_version.version,
                 valid=True,
-                created=table.created,
-                analysisversion_id=virtual_analysis_version.id,
+                expires_on=expiration_timestamp,
+                parent_version=analysis_version.id,
             )
-            session.add(table)
-        analysis_version.expires_on = expiration_timestamp
 
-        try:
+            session.add(virtual_analysis_version)
+            session.flush()
+
+            for table in included_tables:
+                table = AnalysisTable(
+                    aligned_volume=aligned_volume,
+                    schema=table.schema,
+                    table_name=table.table_name,
+                    valid=True,
+                    created=table.created,
+                    analysisversion_id=virtual_analysis_version.id,
+                )
+                session.add(table)
+            analysis_version.expires_on = expiration_timestamp
+
             session.commit()
-        except Exception as e:
-            session.rollback()
-            logging.exception(f"SQL Error: {e}")
-            raise e
-        finally:
-            session.close()
+
         return f"{virtual_datastack_name} created", 200
