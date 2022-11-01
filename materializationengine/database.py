@@ -59,46 +59,6 @@ def ping_connection(session):
     return is_database_working
 
 
-class SqlAlchemyCache:
-    def __init__(self):
-        self._engines = {}
-        self._sessions = {}
-
-    def get_engine(self, aligned_volume: str):
-        if aligned_volume not in self._engines:
-            SQL_URI_CONFIG = current_app.config["SQLALCHEMY_DATABASE_URI"]
-            sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
-            sql_uri = make_url(f"{sql_base_uri}/{aligned_volume}")
-            self._engines[aligned_volume] = create_engine(
-                sql_uri,
-                pool_recycle=3600,
-                pool_size=20,
-                max_overflow=50,
-                pool_pre_ping=True,
-            )
-        return self._engines[aligned_volume]
-
-    def get(self, aligned_volume: str):
-        if aligned_volume not in self._sessions:
-            session = self._create_session(aligned_volume)
-        session = self._sessions[aligned_volume]
-        connection_ok = ping_connection(session)
-
-        if not connection_ok:
-            return self._create_session(aligned_volume)
-        return session
-
-    def _create_session(self, aligned_volume: str):
-        engine = self.get_engine(aligned_volume)
-        Session = scoped_session(sessionmaker(bind=engine))
-        self._sessions[aligned_volume] = Session
-        return self._sessions[aligned_volume]
-
-    def invalidate_cache(self):
-        self._engines = {}
-        self._sessions = {}
-
-
 class DynamicMaterializationCache:
     def __init__(self):
         self._clients = {}
@@ -126,4 +86,3 @@ class DynamicMaterializationCache:
 
 
 dynamic_annotation_cache = DynamicMaterializationCache()
-sqlalchemy_cache = SqlAlchemyCache()
