@@ -48,12 +48,13 @@ def run_complete_workflow(
     """
     materialization_time_stamp = datetime.datetime.utcnow()
 
-    new_version_number = create_new_version(
-        datastack_info, materialization_time_stamp, days_to_expire, merge_tables
-    )
-
-    mat_info = get_materialization_info(
-        datastack_info, new_version_number, materialization_time_stamp
+    new_version_number = chain(
+        create_new_version.s(
+            datastack_info, materialization_time_stamp, days_to_expire, merge_tables
+        ),
+        get_materialization_info.s(
+            datastack_info, materialization_time_stamp
+        ),
     )
     celery_logger.info(mat_info)
 
