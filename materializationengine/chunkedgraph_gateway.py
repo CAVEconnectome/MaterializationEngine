@@ -24,6 +24,12 @@ class ChunkedGraphGateway:
             token_file=token_file, server_address=global_server_address
         )
 
+    def get_client(self, table_id: str):
+        if table_id in self._cg.keys():
+            return self._cg[table_id]
+        else:
+            return self.init_pcg(table_id)
+
     def init_pcg(self, table_id: str):
 
         cg_client = ChunkedGraphClient(

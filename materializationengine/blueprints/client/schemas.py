@@ -36,8 +36,8 @@ class SegmentationDataSchema(Schema):
 
 
 class V2QuerySchema(Schema):
-    table = fields.Str()
-    timestamp = fields.DateTime()
+    table = fields.Str(required=True)
+    timestamp = fields.DateTime(required=True)
     join_tables = fields.List(
         fields.List(fields.Str),
         required=False,
