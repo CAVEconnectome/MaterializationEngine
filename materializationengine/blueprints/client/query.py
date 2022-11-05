@@ -533,7 +533,6 @@ def _query(
     :param index_col:
     :return:
     """
-    print(filter_args)
     query = _make_query(
         this_sqlalchemy_session,
         query_args=query_args,
