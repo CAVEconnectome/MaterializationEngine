@@ -1,23 +1,39 @@
 from ast import mod
 from .query import _execute_query
 import datetime
-from cachetools import TTLCache, cached
-from materializationengine.info_client import get_datastack_info
 import numpy as np
 from flask import abort
 from copy import deepcopy
 
+def strip_root_id_filters(user_data):
+    modified_user_data = deepcopy(user_data)
+    def strip_filter(filter):
+        if modified_user_data.get(filter, None):
+            for table in modified_user_data:
+                for k in modified_user_data[table]:
+                    if k.endswith('_root_id'):
+                        modified_user_data[table].pop(k)
+            
+
+    strip_filter("filter_in_dict")
+    strip_filter("filter_out_dict")
+    strip_filter("filter_equal_dict")
+    return modified_user_data
+
 def remap_query(user_data, mat_timestamp, cg_client):
-    query_timestamp =user_data['timestamp']
+
+    query_timestamp = user_data["timestamp"]
 
     # map filters from the user timestamp to the materialized timestamp
     new_filters, query_map = map_filters(
-            [user_data.get('filter_in_dict', None),
-            user_data.get('filter_out_dict', None),
-            user_data.get('filter_equal_dict', None)],
-            query_timestamp,
-            mat_timestamp,
-            cg_client,
+        [
+            user_data.get("filter_in_dict", None),
+            user_data.get("filter_out_dict", None),
+            user_data.get("filter_equal_dict", None),
+        ],
+        query_timestamp,
+        mat_timestamp,
+        cg_client,
     )
 
     new_filter_in_dict, new_filter_out_dict, new_equal_dict = new_filters
@@ -36,13 +52,12 @@ def remap_query(user_data, mat_timestamp, cg_client):
             new_equal_dict = None
 
     modified_user_data = deepcopy(user_data)
-    modified_user_data['filter_equal_dict']=new_equal_dict
-    modified_user_data['filter_in_dict']=new_filter_in_dict
-    modified_user_data['filter_out_dict']=new_filter_out_dict
+    modified_user_data["filter_equal_dict"] = new_equal_dict
+    modified_user_data["filter_in_dict"] = new_filter_in_dict
+    modified_user_data["filter_out_dict"] = new_filter_out_dict
 
     return modified_user_data
 
-    
 
 def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_client):
     """translate a list of filter dictionaries
@@ -78,28 +93,30 @@ def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_
     is_valid_at_query = cg_client.is_latest_roots(root_ids, timestamp=timestamp_query)
     if not np.all(is_valid_at_query):
         invalid_roots = root_ids[~is_valid_at_query]
-        abort(400, f'not all root_ids passed are not valid at the query timestamp: {invalid_roots}')
+        abort(
+            400,
+            f"not all root_ids passed are not valid at the query timestamp: {invalid_roots}",
+        )
 
     # is_valid_at_mat = cg_client.is_latest_roots(root_ids, timestamp=timestamp_mat)
-    
 
-    if (timestamp_mat<timestamp_query):
+    if timestamp_mat < timestamp_query:
         id_mapping = cg_client.get_past_ids(
             root_ids, timestamp_past=timestamp_mat, timestamp_future=timestamp_query
         )
-        mat_map_str = 'past_id_map'
-        query_map_str = 'future_id_map'
+        mat_map_str = "past_id_map"
+        query_map_str = "future_id_map"
 
-    elif timestamp_query>timestamp_mat:
+    elif timestamp_query > timestamp_mat:
         id_mapping = cg_client.get_past_ids(
             root_ids, timestamp_past=timestamp_query, timestamp_future=timestamp_mat
         )
-        mat_map_str = 'future_id_map'
-        query_map_str = 'past_id_map'
+        mat_map_str = "future_id_map"
+        query_map_str = "past_id_map"
     else:
         return filters, {}
-    
-    if len(id_mapping[query_map_str])==0:
+
+    if len(id_mapping[query_map_str]) == 0:
         return filters, {}
 
     for filter_dict in filters:
@@ -121,13 +138,14 @@ def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_
 
     return new_filters, id_mapping[query_map_str]
 
-@cached(cache=TTLCache(maxsize=64, ttl=600))
-def get_relevant_datastack_info(datastack_name):
-    ds_info = get_datastack_info(datastack_name=datastack_name)
-    seg_source = ds_info["segmentation_source"]
-    pcg_table_name = seg_source.split("/")[-1]
-    aligned_volume_name = ds_info["aligned_volume"]["name"]
-    return aligned_volume_name, pcg_table_name
+
+# @cached(cache=TTLCache(maxsize=64, ttl=600))
+# def get_relevant_datastack_info(datastack_name):
+#     ds_info = get_datastack_info(datastack_name=datastack_name)
+#     seg_source = ds_info["segmentation_source"]
+#     pcg_table_name = seg_source.split("/")[-1]
+#     aligned_volume_name = ds_info["aligned_volume"]["name"]
+#     return aligned_volume_name, pcg_table_name
 
 
 #    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
@@ -417,94 +435,92 @@ def get_relevant_datastack_info(datastack_name):
 #             response = Response(dfjson, headers=headers, mimetype="application/json")
 #             return after_request(response)
 
-def map_filters(
+# def map_filters(
 #                 [filter_in_dict, filter_out_dict, filter_equal_dict],
 #                 timestamp,
 #                 timestamp_start,
 #                 cg_client,
 #             )
 #             past_filter_in_dict, past_filter_out_dict, past_equal_dict = past_filters
-def make_materialized_query_manager(
-    datastack_name,
-    mat_version,
-    timestamp=datetime.datetime.utcnow(),
-    table=None,
-    join_tables=None,
-    select_columns=None,
-    filter_in_dict=None,
-    filter_equal_dict=None,
-    filter_out_dict=None,
-    filter_spatial_dict=None,
-    offset=0,
-    limit=None,
-    suffixes=None,
-    joins=None,
-):
-    if table & join_tables:
-        raise ValueError("Cannot specify tables and join statement")
+# def make_materialized_query_manager(
+#     datastack_name,
+#     mat_version,
+#     timestamp=datetime.datetime.utcnow(),
+#     table=None,
+#     join_tables=None,
+#     select_columns=None,
+#     filter_in_dict=None,
+#     filter_equal_dict=None,
+#     filter_out_dict=None,
+#     filter_spatial_dict=None,
+#     offset=0,
+#     limit=None,
+#     suffixes=None,
+#     joins=None,
+# ):
+#     if table & join_tables:
+#         raise ValueError("Cannot specify tables and join statement")
 
-    db_name =  "{}__mat{}".format(datastack_name, mat_version.version)
-    
-    qm = QueryManager(db_name=db_name, split_mode=False)
-    if table:
-        tables=[table]
-    else:
-        tables = [jt[0][0] for jt in join_tables]
-    qm.add_tables(tables)
-    if join_tables:
-        for join_table in join_tables:
-            qm.join_table(*join_table[0])
-        
-    
+#     db_name = "{}__mat{}".format(datastack_name, mat_version.version)
 
-        if select_columns:
-            for table_name, columns in select_columns.items():
-                qm.select_column(table_name, )
-        qm.validate_joins()
-    
+#     qm = QueryManager(db_name=db_name, split_mode=False)
+#     if table:
+#         tables = [table]
+#     else:
+#         tables = [jt[0][0] for jt in join_tables]
+#     qm.add_tables(tables)
+#     if join_tables:
+#         for join_table in join_tables:
+#             qm.join_table(*join_table[0])
 
-    
-
-def execute_query_manager(qm):
-    query = qm.make_query()
-    df = _execute_query(
-        qm.session,
-        qm.engine,
-        query=query,
-        fix_wkb=False,
-        index_col=None,
-        get_count=False,
-    )
-    return df
+#         if select_columns:
+#             for table_name, columns in select_columns.items():
+#                 qm.select_column(
+#                     table_name,
+#                 )
+#         qm.validate_joins()
 
 
-def execute_materialized_query(datastack, mat_version, timestamp, user_data):
-    qm = make_materialized_query_manager(datastack, mat_version, **user_data)
-    df = execute_query_manager(qm)
-    df = update_root_ids(df, start_time=mat_version.timestamp, end_time=timestamp)
-
-    return df
-
-
-def execute_production_query(datastack, user_data, mat_timestamp, timestamp, matdf):
-
-    if timestamp > mat_timestamp:
-        qm = make_production_query_manager(
-            datastack, **user_data, start_time=mat_timestamp, end_time=timestamp
-        )
-    else:
-        qm = make_production_query_manager(
-            datastack, **user_data, start_time=timestamp, end_time=mat_timestamp
-        )
-    prod_df = execute_query_manager(qm)
-    prod_df = lookup_root_ids(prod_df, timestamp)
+# def execute_query_manager(qm):
+#     query = qm.make_query()
+#     df = _execute_query(
+#         qm.session,
+#         qm.engine,
+#         query=query,
+#         fix_wkb=False,
+#         index_col=None,
+#         get_count=False,
+#     )
+#     return df
 
 
-def combine_queries(mat_df, prod_df, user_data):
-    prod_df = remove_deleted_items(prod_df, prod_df)
-    matdf = remove_deleted_items(mat_df, prod_df)
-    prod_df = remove_crud_columns(prod_df)
+# def execute_materialized_query(datastack, mat_version, timestamp, user_data):
+#     qm = make_materialized_query_manager(datastack, mat_version, **user_data)
+#     df = execute_query_manager(qm)
+#     df = update_root_ids(df, start_time=mat_version.timestamp, end_time=timestamp)
 
-    comb_df = pd.concat([mat_df, prod_df])
-    comb_df = apply_filters(comb_df, user_data)
-    return comb_df
+#     return df
+
+
+# def execute_production_query(datastack, user_data, mat_timestamp, timestamp, matdf):
+
+#     if timestamp > mat_timestamp:
+#         qm = make_production_query_manager(
+#             datastack, **user_data, start_time=mat_timestamp, end_time=timestamp
+#         )
+#     else:
+#         qm = make_production_query_manager(
+#             datastack, **user_data, start_time=timestamp, end_time=mat_timestamp
+#         )
+#     prod_df = execute_query_manager(qm)
+#     prod_df = lookup_root_ids(prod_df, timestamp)
+
+
+# def combine_queries(mat_df, prod_df, user_data):
+#     prod_df = remove_deleted_items(prod_df, prod_df)
+#     matdf = remove_deleted_items(mat_df, prod_df)
+#     prod_df = remove_crud_columns(prod_df)
+
+#     comb_df = pd.concat([mat_df, prod_df])
+#     comb_df = apply_filters(comb_df, user_data)
+#     return comb_df
