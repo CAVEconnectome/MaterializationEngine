@@ -45,7 +45,7 @@ class QueryManager:
         self.offset = offset
         self.get_count = get_count
         if suffixes is None:
-            suffixes=defaultdict(lambda: None)
+            suffixes = defaultdict(lambda: None)
         else:
             values = list(suffixes.values())
             if len(values) != len(set(values)):
@@ -293,7 +293,7 @@ class QueryManager:
         if join_args is not None:
             print(join_args)
             for join_arg in join_args:
-                query = query.join(*join_arg, full=False)
+                query = query.join(*join_arg)
 
         if filter_args is not None:
             for f in filter_args:
@@ -325,7 +325,7 @@ class QueryManager:
 
             if self._split_mode:
                 annmodel, segmodel = self._get_split_model(table_name)
-                self._joins.append((segmodel, annmodel.id == segmodel.id))
+                self._joins.append((segmodel, annmodel.id == segmodel.id, None, True))
 
             for column_name in self._selected_columns[table_name]:
                 model = self._find_relevant_model(table_name, column_name)
