@@ -13,6 +13,7 @@ from flask_sqlalchemy import SQLAlchemy
 from materializationengine import __version__
 from materializationengine.admin import setup_admin
 from materializationengine.blueprints.client.api import client_bp
+from materializationengine.blueprints.client.api2 import client_bp as client_bp2
 from materializationengine.blueprints.materialize.api import mat_bp
 from materializationengine.config import config, configure_app
 from materializationengine.database import sqlalchemy_cache
@@ -66,6 +67,7 @@ def create_app(config_name: str = None):
         )
         api.add_namespace(mat_bp, path="/v2")
         api.add_namespace(client_bp, path="/v2")
+        api.add_namespace(client_bp2, path="/v3")
 
         app.register_blueprint(apibp)
         app.register_blueprint(views_bp)

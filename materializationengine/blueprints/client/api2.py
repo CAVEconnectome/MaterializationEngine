@@ -1,30 +1,30 @@
 import logging
 import time
-
+import pytz
 import pyarrow as pa
 from cachetools import LRUCache, cached
 from cloudfiles import compression
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
+from cachetools import LRUCache, TTLCache, cached
 from flask import Response, abort, current_app, request
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
-from materializationengine.blueprints.client import query
-from materializationengine.blueprints.client.query import execute_query_manager
-from materializationengine.blueprints.client.new_query import remap_query
+from materializationengine.blueprints.client.new_query import (
+    remap_query,
+    strip_root_id_filters,
+)
 from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.blueprints.client.schemas import (
     V2QuerySchema,
 )
 from materializationengine.blueprints.reset_auth import reset_auth
+from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import (
     dynamic_annotation_cache,
     sqlalchemy_cache,
 )
-from materializationengine.info_client import (
-    get_aligned_volumes, 
-    get_datastack_info
-)
+from materializationengine.info_client import get_aligned_volumes, get_datastack_info
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from middle_auth_client import (
     auth_requires_permission,
@@ -105,6 +105,7 @@ def after_request(response):
 
     return response
 
+
 @cached(cache=TTLCache(maxsize=64, ttl=600))
 def get_relevant_datastack_info(datastack_name):
     ds_info = get_datastack_info(datastack_name=datastack_name)
@@ -113,61 +114,67 @@ def get_relevant_datastack_info(datastack_name):
     aligned_volume_name = ds_info["aligned_volume"]["name"]
     return aligned_volume_name, pcg_table_name
 
+
 def check_aligned_volume(aligned_volume):
     aligned_volumes = get_aligned_volumes()
     if aligned_volume not in aligned_volumes:
         abort(400, f"aligned volume: {aligned_volume} not valid")
 
-def get_closest_versions(datastack_name:str,
-                         timestamp:datetime.datetime):
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-            datastack_name
-        )
+
+def get_closest_versions(datastack_name: str, timestamp: datetime.datetime):
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
 
     # get session object
     session = sqlalchemy_cache.get(aligned_volume_name)
 
-    # query analysis versions to get a valid version which is 
-    # the closest to the timestamp while still being older 
+    # query analysis versions to get a valid version which is
+    # the closest to the timestamp while still being older
     # than the timestamp
     past_version = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.datastack == datastack_name)
-            .filter(AnalysisVersion.valid == True)
-            .filter(AnalysisVersion.time_stamp<timestamp)
-            .order_by(AnalysisVersion.time_stamp.desc())
-            .first()
-        )
-    # query analysis versions to get a valid version which is 
-    # the closest to the timestamp while still being newer 
+        session.query(AnalysisVersion)
+        .filter(AnalysisVersion.datastack == datastack_name)
+        .filter(AnalysisVersion.valid == True)
+        .filter(AnalysisVersion.time_stamp < timestamp)
+        .order_by(AnalysisVersion.time_stamp.desc())
+        .first()
+    )
+    # query analysis versions to get a valid version which is
+    # the closest to the timestamp while still being newer
     # than the timestamp
     future_version = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.datastack == datastack_name)
-            .filter(AnalysisVersion.valid == True)
-            .filter(AnalysisVersion.time_stamp>timestamp)
-            .order_by(AnalysisVersion.time_stamp.asc())
-            .first()
-        )
+        session.query(AnalysisVersion)
+        .filter(AnalysisVersion.datastack == datastack_name)
+        .filter(AnalysisVersion.valid == True)
+        .filter(AnalysisVersion.time_stamp > timestamp)
+        .order_by(AnalysisVersion.time_stamp.asc())
+        .first()
+    )
     return past_version, future_version, aligned_volume_name
 
+
 def check_column_for_root_id(col):
-    if type(col)=='str':
-        if col.endswith('root_id'):
-            abort(400, 'we are not presently supporting joins on root_ids')
-    elif type(col)==list:
+    if type(col) == "str":
+        if col.endswith("root_id"):
+            abort(400, "we are not presently supporting joins on root_ids")
+    elif type(col) == list:
         for c in col:
-            if c.endwith('root_id'):
-                abort(400, 'we are not presently supporting joins on root ids')
-        
+            if c.endwith("root_id"):
+                abort(400, "we are not presently supporting joins on root ids")
+
+
 def check_joins(joins):
     for join in joins:
         check_column_for_root_id(join[1])
         check_column_for_root_id(join[3])
 
-def execute_materialized_query(datastack:str,
-                               mat_version:int,
-                               user_data:dict)->pd.DataFrame:
+
+def execute_materialized_query(
+    datastack: str,
+    aligned_volume: str,
+    mat_version: int,
+    pcg_table_name: str,
+    user_data: dict,
+) -> pd.DataFrame:
     """_summary_
 
     Args:
@@ -180,18 +187,24 @@ def execute_materialized_query(datastack:str,
     """
     mat_db_name = f"{datastack}__mat{mat_version}"
     # setup a query manager
-    
-    # TODO: get pcg_table_name from datastack
-
-    qm = QueryManager(mat_db_name, segmentation_source=pcg_table_name, split_mode=False)
+    qm = QueryManager(
+        mat_db_name,
+        segmentation_source=pcg_table_name,
+        meta_db_name=aligned_volume,
+        split_mode=False,
+    )
     qm.configure_query(user_data)
 
     # return the result
     return qm.execute_query()
 
-def execute_production_query(datastack:str,
-                             user_data:dict, 
-                             chosen_timestamp:datetime.datetime)->pd.DataFrame:
+
+def execute_production_query(
+    aligned_volume_name: str,
+    segmentation_source: str,
+    user_data: dict,
+    chosen_timestamp: datetime.datetime,
+) -> pd.DataFrame:
     """_summary_
 
     Args:
@@ -203,52 +216,66 @@ def execute_production_query(datastack:str,
     Returns:
         pd.DataFrame: _description_
     """
-    if chosen_timestamp<user_data['timestamp']:
+    user_timestamp = user_data["timestamp"]
+    chosen_timestamp = pytz.utc.localize(chosen_timestamp)
+    print(type(user_timestamp), type(chosen_timestamp))
+    if chosen_timestamp < user_timestamp:
         query_forward = True
         start_time = chosen_timestamp
-        end_time = user_data['timestamp']
-    elif chosen_timestamp>user_data['timestamp']:
+        end_time = user_timestamp
+    elif chosen_timestamp > user_timestamp:
         query_forward = False
-        start_time = user_data['timestamp']
+        start_time = user_timestamp
         end_time = chosen_timestamp
     else:
         abort(400, "do not use live live query to query a materialized timestamp")
-    # TODO: get aligned volume name
-    # 
+
     # setup a query manager on production database with split tables
+    qm = QueryManager(aligned_volume_name, segmentation_source, split_mode=True)
+   
+    user_data_modified = strip_root_id_filters(user_data)
+    print(user_data_modified)
+    qm.configure_query(user_data_modified)
+    qm.apply_table_crud_filter(user_data["table"], start_time, end_time)
+    return qm.execute_query()
 
-    # make sure a vertex isn't added twice
+    # TODO: make sure a vertex isn't added twice
     # make sure the result is a single component
-    join_graph = make_join_graph(user_data['table'], user_data['joins'])
+    # join_graph = make_join_graph(user_data["table"], user_data["joins"])
 
-    df_dict = {}
-    for table in join_graph.vertices:
-        if has_table_change(aligned_volume_name, table, start_time, end_time):
-            qm = QueryManager(aligned_volume_name, datastack_name=datastack, split_mode=True)
-            qm.add_table(table)
-            # remove all root_id based filters
-            stripped_filters= strip_filters(user_data) # make it a 
-            for filter in stripped_filters:
-                qm.add_table_filters(filter.get(table,None))
-            qm.add_timestamp_filter(table, start_time, end_time)
-            df_dict[table]=qm.execute_query()
-        else:
-            df_dict[table]=None
+    # df_dict = {}
+    # for table in join_graph.vertices:
+    #     if has_table_change(aligned_volume_name, table, start_time, end_time):
+    #         qm = QueryManager(
+    #             aligned_volume_name, datastack_name=datastack, split_mode=True
+    #         )
+    #         qm.add_table(table)
+    #         # remove all root_id based filters
+    #         stripped_filters = strip_filters(user_data)  # make it a
+    #         for filter in stripped_filters:
+    #             qm.add_table_filters(filter.get(table, None))
+    #         qm.apply_table_crud_filter(table, start_time, end_time)
+    #         df_dict[table] = qm.execute_query()
+    #     else:
+    #         df_dict[table] = None
 
-
-
-                    
     # execute the query
 
     # lookup root_ids for all non-deleted rows with timestamp
 
     # return the results
 
-def combine_queries(mat_df:pd.DataFrame, prod_df:pd.DataFrame, user_data:dict)->pd.DataFrame:
+
+def combine_queries(
+    mat_df: pd.DataFrame,
+    prod_df: pd.DataFrame,
+    chosen_version: AnalysisVersion,
+    user_data: dict,
+) -> pd.DataFrame:
     """combine a materialized query with an production query
        will remove deleted rows from materialized query, strip deleted entries from prod_df
        remove any CRUD columns and then append the two dataframes together to be a coherent
-       result. 
+       result.
 
     Args:
         mat_df (pd.DataFrame): _description_
@@ -258,25 +285,23 @@ def combine_queries(mat_df:pd.DataFrame, prod_df:pd.DataFrame, user_data:dict)->
     Returns:
         pd.DataFrame: _description_
     """
-    # find deleted rows in production dataframe
-    is_deleted = ~prod_df.deleted.isna()
+    # # find deleted rows in production dataframe
+    # is_deleted = ~prod_df.deleted.isna()
 
-    # delete those rows from materialized dataframe
-    mat_df = remove_deleted_items(mat_df, prod_df)
-    
-    # remove those rows from the production dataframe
-    prod_df = remove_deleted_items(prod_df, prod_df)
+    # # delete those rows from materialized dataframe
+    # mat_df = remove_deleted_items(mat_df, prod_df)
 
-     # remove crud columsn from production dataframe
-    prod_df = remove_crud_columns(prod_df)
+    # # remove those rows from the production dataframe
+    # prod_df = remove_deleted_items(prod_df, prod_df)
 
-    # concatenate dataframes
-    comb_df = pd.concat([mat_df, prod_df])
-    # reapply original filters
-    comb_df = apply_filters(comb_df, user_data)
-    return comb_df
+    # # remove crud columsn from production dataframe
+    # prod_df = remove_crud_columns(prod_df)
 
-
+    # # concatenate dataframes
+    # comb_df = pd.concat([mat_df, prod_df])
+    # # reapply original filters
+    # comb_df = apply_filters(comb_df, user_data)
+    return pd.concat([prod_df, mat_df])
 
 
 @cached(cache=LRUCache(maxsize=64))
@@ -312,71 +337,6 @@ def get_analysis_version_and_table(
     if analysis_version is None:
         return analysis_version, None
     return analysis_version, analysis_table
-
-
-@cached(cache=LRUCache(maxsize=32))
-def get_split_models(datastack_name: str, table_name: str):
-    """get split models
-
-    Args:
-        datastack_name (str): datastack name
-        table_name (str): table_name
-        Session (_type_): session to live database
-
-    Returns:
-        (Model, Model): get annotation and segmentation model
-    """
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
-    db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    schema_type = db.database.get_table_metadata(table_name, filter_col="schema_type")
-
-    SegModel = db.schema.create_annotation_model(
-        table_name, schema_type, segmentation_source=pcg_table_name
-    )
-    AnnModel = db.schema.create_annotation_model(table_name, schema_type)
-    return AnnModel, SegModel
-
-
-@cached(cache=LRUCache(maxsize=32))
-def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
-    """get a flat model for a frozen table
-
-    Args:
-        datastack_name (str): datastack name
-        table_name (str): table name
-        version (int): version of table
-        Session (Sqlalchemy session): session to connect to database
-
-    Returns:
-        sqlalchemy.Model: model of table
-    """
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
-    analysis_version, analysis_table = get_analysis_version_and_table(
-        datastack_name, table_name, version, Session
-    )
-    if analysis_table is None:
-        abort(
-            404,
-            "Cannot find table {} in datastack {} at version {}".format(
-                table_name, datastack_name, version
-            ),
-        )
-    if not analysis_version.valid:
-        abort(410, "This materialization version is not available")
-
-    db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    metadata = db.database.get_table_metadata(table_name)
-    reference_table = metadata.get("reference_table")
-    if reference_table:
-        table_metadata = {"reference_table": reference_table}
-    else:
-        table_metadata = None
-    return db.schema.create_flat_model(
-        table_name=table_name,
-        schema_type=analysis_table.schema,
-        segmentation_source=None,
-        table_metadata=table_metadata,
-    )
 
 
 @client_bp.route("/datastack/<string:datastack_name>/versions")
@@ -546,35 +506,6 @@ class FrozenTableMetadata(Resource):
         return tables, 200
 
 
-@client_bp.route(
-    @client_bp.route("/datastack/<string:datastack_name>/query/count")
-)
-class FrozenTableCount(Resource):
-    @reset_auth
-    @auth_requires_permission("view", table_arg="datastack_name")
-    @client_bp.doc("simple_query", security="apikey")
-    def get(self, datastack_name: str, version: int, table_name: str):
-        """get annotation count in table
-
-        Args:
-            datastack_name (str): datastack name of table
-            version (int): version of table
-            table_name (str): table name
-
-        Returns:
-            int: number of rows in this table
-        """
-        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-            datastack_name
-        )
-
-        Session = sqlalchemy_cache.get(aligned_volume_name)
-        Model = get_flat_model(datastack_name, table_name, version, Session)
-
-        Session = sqlalchemy_cache.get("{}__mat{}".format(datastack_name, version))
-        return Session().query(Model).count(), 200
-
-
 @client_bp.expect(query_parser)
 @client_bp.route("/datastack/<string:datastack_name>/query")
 class LiveTableQuery(Resource):
@@ -582,7 +513,7 @@ class LiveTableQuery(Resource):
     @auth_requires_permission("admin_view", table_arg="datastack_name")
     @client_bp.doc("v2_query", security="apikey")
     @accepts("V2QuerySchema", schema=V2QuerySchema, api=client_bp)
-    def post(self, datastack_name: str, table_name: str):
+    def post(self, datastack_name: str):
         """endpoint for doing a query with filters
 
         Args:
@@ -629,168 +560,75 @@ class LiveTableQuery(Resource):
         Returns:
             pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
         """
-        args = query_parser.parse_args() 
+        args = query_parser.parse_args()
         user_data = request.parsed_obj
-        joins = user_data.get('joins', None)
+        joins = user_data.get("joins", None)
         has_joins = joins is not None
 
-        past_ver, future_ver, aligned_vol = get_closest_versions(datastack_name,
-                                                                 user_data['timestamp'])
-                    
-        if future_ver is None and has_joins:
-            abort(400, 'we do not support joins when there is no future version')
-        elif has_joins:
-            # run a future to past map version of the query
-            check_joins(joins)
+        past_ver, future_ver, aligned_vol = get_closest_versions(
+            datastack_name, user_data["timestamp"]
+        )
+
+        if has_joins:
+            abort(400, "we are not supporting joins yet")
+        # if future_ver is None and has_joins:
+        #    abort(400, 'we do not support joings when there is no future version')
+        # elif has_joins:
+        #     # run a future to past map version of the query
+        #     check_joins(joins)
+        #     chosen_version = future_ver
+        elif (past_ver is None) and (future_ver is None):
+            abort(
+                400,
+                "there is no future or past version for this timestamp, is materialization broken?",
+            )
+        elif future_ver is not None:
             chosen_version = future_ver
-        elif past_ver is None:
-            abort(400, "there is no future or past version for this timestamp, is materialization broken?")
         else:
             chosen_version = past_ver
 
-        cg_client = #TODO: make from an LRU cache
-        modified_user_data = remap_query(user_data, chosen_version.timestamp, cg_client)
-
-        mat_df = execute_materialized_query(datastack_name,
-                                            chosen_version,
-                                            modified_user_data)
-
-        prod_df = execute_production_query(aligned_vol, 
-                                           datastack_name, 
-                                           user_data, 
-                                           chosen_version.timestamp)
-
-        
-                                     
-        df = combine_queries(mat_df, prod_df, chosen_version, user_data)
-
-        return format_dataframe(df)
-
-    
-
-
-        if len(df) == limit:
-            headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
-
-        if args["return_pyarrow"]:
-            context = pa.default_serialization_context()
-            serialized = context.serialize(df).to_buffer().to_pybytes()
-            time_d["serialize"] = time.time() - now
-            logging.info(time_d)
-            return Response(
-                serialized, headers=headers, mimetype="x-application/pyarrow"
-            )
-        else:
-            dfjson = df.to_json(orient="records")
-            time_d["serialize"] = time.time() - now
-            logging.info(time_d)
-            response = Response(dfjson, headers=headers, mimetype="application/json")
-            return after_request(response)
-
-        
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        args = query_parser.parse_args()
-        Session = sqlalchemy_cache.get(aligned_volume_name)
-        time_d = {}
-        now = time.time()
+        cg_client = chunkedgraph_cache.get_client(pcg_table_name)
 
-        data = request.parsed_obj
+        modified_user_data = remap_query(
+            user_data, chosen_version.time_stamp, cg_client
+        )
 
-        AnnModel, SegModel = get_split_models(datastack_name, table_name)
-        time_d["get Model"] = time.time() - now
-        now = time.time()
+        mat_df = execute_materialized_query(
+            datastack_name,
+            aligned_volume_name,
+            chosen_version.version,
+            pcg_table_name,
+            modified_user_data,
+        )
 
-        engine = sqlalchemy_cache.get_engine(aligned_volume_name)
-        time_d["get engine"] = time.time() - now
-        now = time.time()
-        max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
+        prod_df = execute_production_query(
+            aligned_volume_name,
+            pcg_table_name,
+            user_data,
+            chosen_version.time_stamp,
+        )
 
-        data = request.parsed_obj
-        time_d["get data"] = time.time() - now
-        now = time.time()
-        limit = data.get("limit", max_limit)
+        df = combine_queries(mat_df, prod_df, chosen_version, user_data)
 
-        if limit > max_limit:
-            limit = max_limit
+        # TODO add table warnings and length warnings
+        # if len(df) == limit:
+        #     headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
 
-        get_count = args.get("count", False)
-
-        if get_count:
-            limit = None
-
-        logging.info("query {}".format(data))
-        logging.info("args - {}".format(args))
-
-        time_d["setup query"] = time.time() - now
-        now = time.time()
-        seg_table = f"{table_name}__{datastack_name}"
-
-        def _format_filter(filter, table_in, seg_table):
-            if filter is None:
-                return filter
-            else:
-                table_filter = filter.get(table_in, None)
-                root_id_filters = [
-                    c for c in table_filter.keys() if c.endswith("root_id")
-                ]
-                other_filters = [
-                    c for c in table_filter.keys() if not c.endswith("root_id")
-                ]
-
-                filter[seg_table] = {c: table_filter[c] for c in root_id_filters}
-                filter[table_in] = {c: table_filter[c] for c in other_filters}
-                return filter
-
-        user_data = request.parsed_obj
-
-        mat_query_manager = QueryManager(mat_engine, mat_Session, live=False)
-        # modify user_data for materialized data
-        # modify filters back in time
-        # add in joins for reference annotations
-        mat_query_manager.parse_request(user_data)
-        mat_df = execute_query_manager(query_manager)
-        # update expired root_ids
-        # reapply orignal filters
-
-        # if timestamp doesn't match materialization
-        live_query_manager = QueryManager(live_engine, live_Session, live=True)
-        user_data = request.parsed_obj
-        # modify user_data for live data
-        # modify filters back in time to last update
-        # modify filters to apply segmenation filters to segmentation tables
-        # add in joins for ann>segmentation tables
-        # add in joins for reference annotations (and ref_ann>ref_seg)
-        # add in filters to exclude things before materialization
-        live_query_manager.parse_request(user_data)
-        live_df = execute_query_manager(query_manager)
-        # update expired root_ids
-        # reapply orignal filters
-        user_data = request.parsed_obj
-        mat_query_manager = QueryManager(mat_engine, matSession)
-        # modify user_data for materialized data
-        mat_query_manager.parse_request(user_data)
-
-        mat_df = execute_query_manager(query_manager)
-
-        time_d["execute query"] = time.time() - now
-        now = time.time()
-        headers = None
-        if len(df) == limit:
-            headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
-
+        headers = {}
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
             serialized = context.serialize(df).to_buffer().to_pybytes()
-            time_d["serialize"] = time.time() - now
-            logging.info(time_d)
+            # time_d["serialize"] = time.time() - now
+            # logging.info(time_d)
             return Response(
                 serialized, headers=headers, mimetype="x-application/pyarrow"
             )
         else:
             dfjson = df.to_json(orient="records")
-            time_d["serialize"] = time.time() - now
-            logging.info(time_d)
+            # time_d["serialize"] = time.time() - now
+            # logging.info(time_d)
             response = Response(dfjson, headers=headers, mimetype="application/json")
             return after_request(response)
