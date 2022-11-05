@@ -72,7 +72,7 @@ def process_new_annotations_workflow(
             annotation_chunks = generate_chunked_model_ids(mat_metadata)
             process_chunks_workflow = chain(
                 ingest_new_annotations_workflow(
-                    mat_metadata, annotation_chunks
+                    mat_metadata
                 ),  # return here is required for chords
                 update_metadata.si(mat_metadata),
             )  # final task which will process a return status/timing etc...
