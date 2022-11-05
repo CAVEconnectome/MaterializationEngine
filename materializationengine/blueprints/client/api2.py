@@ -18,6 +18,7 @@ from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.blueprints.client.schemas import (
     V2QuerySchema,
 )
+from materializationengine.models import MaterializedMetadata
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import (
@@ -186,17 +187,27 @@ def execute_materialized_query(
         pd.DataFrame: a dataframe with the results of the query in the materialized version
     """
     mat_db_name = f"{datastack}__mat{mat_version}"
-    # setup a query manager
-    qm = QueryManager(
-        mat_db_name,
-        segmentation_source=pcg_table_name,
-        meta_db_name=aligned_volume,
-        split_mode=False,
+    session = sqlalchemy_cache.get(mat_db_name)
+    mat_row_count = (
+        session.query(MaterializedMetadata.row_count)
+        .filter(MaterializedMetadata.table_name == user_data['table'])
+        .scalar()
     )
-    qm.configure_query(user_data)
+    print(mat_row_count)
+    if mat_row_count:
+        # setup a query manager
+        qm = QueryManager(
+            mat_db_name,
+            segmentation_source=pcg_table_name,
+            meta_db_name=aligned_volume,
+            split_mode=False,
+        )
+        qm.configure_query(user_data)
 
-    # return the result
-    return qm.execute_query()
+        # return the result
+        return qm.execute_query()
+    else:
+        return None
 
 
 def execute_production_query(
@@ -218,7 +229,6 @@ def execute_production_query(
     """
     user_timestamp = user_data["timestamp"]
     chosen_timestamp = pytz.utc.localize(chosen_timestamp)
-    print(type(user_timestamp), type(chosen_timestamp))
     if chosen_timestamp < user_timestamp:
         query_forward = True
         start_time = chosen_timestamp
@@ -232,7 +242,7 @@ def execute_production_query(
 
     # setup a query manager on production database with split tables
     qm = QueryManager(aligned_volume_name, segmentation_source, split_mode=True)
-   
+
     user_data_modified = strip_root_id_filters(user_data)
     print(user_data_modified)
     qm.configure_query(user_data_modified)
@@ -301,6 +311,12 @@ def combine_queries(
     # comb_df = pd.concat([mat_df, prod_df])
     # # reapply original filters
     # comb_df = apply_filters(comb_df, user_data)
+    if prod_df and mat_df is None:
+        abort(400, f"This query on table {user_data['table']} returned no results")
+    if prod_df is None:
+        return mat_df
+    if mat_df is None:
+        return 
     return pd.concat([prod_df, mat_df])
 
 
