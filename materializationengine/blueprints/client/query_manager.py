@@ -37,7 +37,8 @@ class QueryManager:
         self._split_mode = split_mode
         self._split_models = {}
         self._flat_models = {}
-        self._entities = []
+        self._models = []
+        self._tables = set()
         self._joins = []
         self._filters = []
         self._selected_columns = defaultdict(list)
@@ -101,9 +102,15 @@ class QueryManager:
             return flatmodel
 
     def add_table(self, table_name):
-        if self._split_mode:
-            annmodel, segmodel = self._get_split_model(table_name)
-            self._joins.append((segmodel, annmodel.id == segmodel.id))
+        if table_name not in self._tables:
+            if self._split_mode:
+                annmodel, segmodel = self._get_split_model(table_name)
+                self._models.append(annmodel)
+                self._models.append(segmodel)
+                self._joins.append((segmodel, annmodel.id == segmodel.id))
+            else:
+                model = self._get_flat_model(table_name)
+                self._models.append(model)
 
     def _find_relevant_model(self, table_name, column_name):
         if self._split_mode:
@@ -123,7 +130,8 @@ class QueryManager:
     def join_tables(self, table1, column1, table2, column2):
         model1 = self._find_relevant_model(table1, column1)
         model2 = self._find_relevant_model(table2, column2)
-
+        self.add_table(table1)
+        self.add_table(table2)
         self._joins.append(
             (model2, model1.__dict__[column1] == model2.__dict__[column2])
         )
@@ -186,7 +194,7 @@ class QueryManager:
         if self._split_mode:
             annmodel, segmodel = self._get_split_model(table_name=table_name)
             ann_columns = [c.key for c in annmodel.__table__.columns]
-            seg_columns = [c.key for c in segmodel.__table__.columns]
+            seg_columns = [c.key for c in segmodel.__table__.columns if c.key != "id"]
             columns = ann_columns + seg_columns
         else:
             model = self._get_flat_model(table_name=table_name)
@@ -231,6 +239,7 @@ class QueryManager:
                 "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
             }
         }"""
+        self.add_table(user_data["table"])
         # select the columns the user wants
         if user_data.get("select_columns", None):
             for table_name in user_data["select_columns"].keys():
@@ -287,7 +296,7 @@ class QueryManager:
         Returns:
             SQLAchemy query object
         """
-
+        print(query_args)
         query = self._db.database.session.query(*query_args)
 
         if join_args is not None:
@@ -323,10 +332,6 @@ class QueryManager:
             if suffix is None:
                 suffix = DEFAULT_SUFFIX_LIST[table_num]
 
-            if self._split_mode:
-                annmodel, segmodel = self._get_split_model(table_name)
-                self._joins.append((segmodel, annmodel.id == segmodel.id, None, True))
-
             for column_name in self._selected_columns[table_name]:
                 model = self._find_relevant_model(table_name, column_name)
                 column = model.__dict__[column_name]
@@ -357,10 +362,10 @@ class QueryManager:
                         query_args.append(column)
 
         query = self._make_query(
-            query_args=query_args,
+            query_args=self._models,
             join_args=self._joins,
             filter_args=self._filters,
-            select_columns=None,
+            select_columns=query_args,
             offset=self.offset,
             limit=self.limit,
         )
