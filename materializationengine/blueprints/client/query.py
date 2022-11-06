@@ -485,6 +485,7 @@ def _execute_query(
         count = query.count()
         df = pd.DataFrame({"count": [count]})
     else:
+        print(query.statement.compile(engine, compile_kwargs={"literal_binds": True}))
         df = read_sql_tmpfile(
             query.statement.compile(engine, compile_kwargs={"literal_binds": True}),
             engine,
