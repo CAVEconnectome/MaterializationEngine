@@ -107,7 +107,9 @@ class QueryManager:
                 annmodel, segmodel = self._get_split_model(table_name)
                 self._models.append(annmodel)
                 self._models.append(segmodel)
-                self._joins.append((segmodel, annmodel.id == segmodel.id))
+                self._joins.append(
+                    ((segmodel, annmodel.id == segmodel.id), {"isouter": True})
+                )
             else:
                 model = self._get_flat_model(table_name)
                 self._models.append(model)
@@ -127,13 +129,16 @@ class QueryManager:
             raise ValueError(f"{column_name} not in model or models for {table_name}")
         return model
 
-    def join_tables(self, table1, column1, table2, column2):
+    def join_tables(self, table1, column1, table2, column2, isouter=False):
         model1 = self._find_relevant_model(table1, column1)
         model2 = self._find_relevant_model(table2, column2)
         self.add_table(table1)
         self.add_table(table2)
         self._joins.append(
-            (model2, model1.__dict__[column1] == model2.__dict__[column2])
+            (
+                (model2, model1.__dict__[column1] == model2.__dict__[column2]),
+                {"isouter": isouter},
+            )
         )
 
     def apply_equal_filter(self, table_name, column_name, value):
@@ -295,8 +300,8 @@ class QueryManager:
 
         if join_args is not None:
             print(join_args)
-            for join_arg in join_args:
-                query = query.join(*join_arg)
+            for join_arg, join_kwargs in join_args:
+                query = query.join(*join_arg, **join_kwargs)
 
         if filter_args is not None:
             for f in filter_args:
