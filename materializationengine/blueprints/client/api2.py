@@ -295,29 +295,54 @@ def combine_queries(
     Returns:
         pd.DataFrame: _description_
     """
-    # # find deleted rows in production dataframe
-    # is_deleted = ~prod_df.deleted.isna()
-
-    # # delete those rows from materialized dataframe
-    # mat_df = remove_deleted_items(mat_df, prod_df)
-
-    # # remove those rows from the production dataframe
-    # prod_df = remove_deleted_items(prod_df, prod_df)
-
-    # # remove crud columsn from production dataframe
-    # prod_df = remove_crud_columns(prod_df)
-
-    # # concatenate dataframes
-    # comb_df = pd.concat([mat_df, prod_df])
-    # # reapply original filters
-    # comb_df = apply_filters(comb_df, user_data)
+    user_timestamp = user_data["timestamp"]
+    chosen_timestamp = pytz.utc.localize(chosen_version.time_stamp)
+    if mat_df is not None:
+        mat_df.set_index("id")
+    if prod_df is not None:
+        prod_df.set_index("id")
+    print(mat_df)
+    print(prod_df)
     if (prod_df is None) and (mat_df is None):
         abort(400, f"This query on table {user_data['table']} returned no results")
-    if prod_df is None:
-        return mat_df
-    if mat_df is None:
-        return prod_df
-    return pd.concat([prod_df, mat_df])
+
+    if prod_df is not None:
+        # if we are moving forward in time
+        if chosen_timestamp < user_timestamp:
+
+            deleted_between = (prod_df.deleted > chosen_timestamp) & (
+                prod_df.deleted < user_timestamp
+            )
+            created_between = (prod_df.created > chosen_timestamp) & (
+                prod_df.created < user_timestamp
+            )
+
+            to_delete_in_mat = deleted_between & ~created_between
+            to_add_in_mat = created_between & ~deleted_between
+            prod_df = prod_df.drop(prod_df[deleted_between].index, axis=0)
+        else:
+            deleted_between = (prod_df.deleted > user_timestamp) & (
+                prod_df.deleted < chosen_timestamp
+            )
+            created_between = (prod_df.created > user_timestamp) & (
+                prod_df.created < chosen_timestamp
+            )
+            to_delete_in_mat = created_between & ~deleted_between
+            to_add_in_mat = deleted_between & ~created_between
+            prod_df = prod_df.drop(prod_df[created_between].index, axis=0)
+
+        # # delete those rows from materialized dataframe
+        if mat_df is not None:
+            mat_df = mat_df.drop(prod_df[to_delete_in_mat].index, axis=0)
+            comb_df = pd.concat([prod_df, mat_df])
+        else:
+            comb_df = prod_df[to_add_in_mat]
+    else:
+        comb_df = mat_df
+
+    # # reapply original filters
+    # comb_df = apply_filters(comb_df, user_data)
+    return comb_df
 
 
 @cached(cache=LRUCache(maxsize=64))
