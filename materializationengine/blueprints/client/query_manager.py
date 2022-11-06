@@ -174,7 +174,7 @@ class QueryManager:
         )
         f1 = model.__dict__[created_column].between(str(start_time), str(end_time))
         f2 = model.__dict__[deleted_column].between(str(start_time), str(end_time))
-        self._filters.append(or_(f1, f2))
+        self._filters.append((or_(f1, f2),))
 
     def select_column(self, table_name, column_name):
         model = self._find_relevant_model(
