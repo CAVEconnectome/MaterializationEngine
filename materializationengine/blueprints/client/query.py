@@ -481,11 +481,11 @@ def _execute_query(
     """
     # logging.info(query.statement)
 
-    print(f"get_count: {get_count}")
     if get_count:
         count = query.count()
         df = pd.DataFrame({"count": [count]})
     else:
+        print(query.statement.compile(engine, compile_kwargs={"literal_binds": True}))
         df = read_sql_tmpfile(
             query.statement.compile(engine, compile_kwargs={"literal_binds": True}),
             engine,
