@@ -190,7 +190,7 @@ def execute_materialized_query(
     session = sqlalchemy_cache.get(mat_db_name)
     mat_row_count = (
         session.query(MaterializedMetadata.row_count)
-        .filter(MaterializedMetadata.table_name == user_data['table'])
+        .filter(MaterializedMetadata.table_name == user_data["table"])
         .scalar()
     )
     print(mat_row_count)
@@ -311,12 +311,12 @@ def combine_queries(
     # comb_df = pd.concat([mat_df, prod_df])
     # # reapply original filters
     # comb_df = apply_filters(comb_df, user_data)
-    if prod_df and mat_df is None:
+    if (prod_df is None) and (mat_df is None):
         abort(400, f"This query on table {user_data['table']} returned no results")
     if prod_df is None:
         return mat_df
     if mat_df is None:
-        return 
+        return prod_df
     return pd.concat([prod_df, mat_df])
 
 
