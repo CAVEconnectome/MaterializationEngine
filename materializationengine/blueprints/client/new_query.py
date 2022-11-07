@@ -1,24 +1,99 @@
-from ast import mod
 from .query import _execute_query
 import datetime
 import numpy as np
 from flask import abort
 from copy import deepcopy
+import pandas as pd
+import logging
+
+
+def update_rootids(
+    df: pd.DataFrame, timestamp: datetime.datetime, future_map: dict, cg_client
+):
+    # post process the dataframe to update all the root_ids columns
+    # with the most up to date get roots
+    if len(future_map) == 0:
+        future_map = None
+
+    sv_columns = [c for c in df.columns if c.endswith("supervoxel_id")]
+
+    all_root_ids = np.empty(0, dtype=np.int64)
+
+    # go through the columns and collect all the root_ids to check
+    # to see if they need updating
+    for sv_col in sv_columns:
+        root_id_col = sv_col[: -len("supervoxel_id")] + "root_id"
+        # use the future map to update rootIDs
+        if future_map is not None:
+            df[root_id_col].replace(future_map, inplace=True)
+        all_root_ids = np.append(all_root_ids, df[root_id_col].values.copy())
+
+    uniq_root_ids = np.unique(all_root_ids)
+
+    del all_root_ids
+    uniq_root_ids = uniq_root_ids[uniq_root_ids != 0]
+    # logging.info(f"uniq_root_ids {uniq_root_ids}")
+
+    is_latest_root = cg_client.is_latest_roots(uniq_root_ids, timestamp=timestamp)
+    latest_root_ids = uniq_root_ids[is_latest_root]
+    latest_root_ids = np.concatenate([[0], latest_root_ids])
+
+    # go through the columns and collect all the supervoxel ids to update
+    all_svids = np.empty(0, dtype=np.int64)
+    all_is_latest = []
+    all_svid_lengths = []
+    for sv_col in sv_columns:
+        root_id_col = sv_col[: -len("supervoxel_id")] + "root_id"
+        svids = df[sv_col].values
+        root_ids = df[root_id_col]
+        is_latest_root = np.isin(root_ids, latest_root_ids)
+        all_is_latest.append(is_latest_root)
+        n_svids = len(svids[~is_latest_root])
+        all_svid_lengths.append(n_svids)
+        logging.info(f"{sv_col} has {n_svids} to update")
+        all_svids = np.append(all_svids, svids[~is_latest_root])
+    logging.info(f"num zero svids: {np.sum(all_svids==0)}")
+    logging.info(f"all_svids dtype {all_svids.dtype}")
+    logging.info(f"all_svid_lengths {all_svid_lengths}")
+
+    # find the up to date root_ids for those supervoxels
+    updated_root_ids = cg_client.get_roots(all_svids, timestamp=timestamp)
+    del all_svids
+
+    # loop through the columns again replacing the root ids with their updated
+    # supervoxelids
+    k = 0
+    for is_latest_root, n_svids, sv_col in zip(
+        all_is_latest, all_svid_lengths, sv_columns
+    ):
+        root_id_col = sv_col[: -len("supervoxel_id")] + "root_id"
+        root_ids = df[root_id_col].values.copy()
+
+        uroot_id = updated_root_ids[k : k + n_svids]
+        k += n_svids
+        root_ids[~is_latest_root] = uroot_id
+        # ran into an isssue with pyarrow producing read only columns
+        df[root_id_col] = None
+        df[root_id_col] = root_ids
+
+    return df
+
 
 def strip_root_id_filters(user_data):
     modified_user_data = deepcopy(user_data)
+
     def strip_filter(filter):
         if modified_user_data.get(filter, None):
             for table in modified_user_data:
                 for k in modified_user_data[table]:
-                    if k.endswith('_root_id'):
+                    if k.endswith("_root_id"):
                         modified_user_data[table].pop(k)
-            
 
     strip_filter("filter_in_dict")
     strip_filter("filter_out_dict")
     strip_filter("filter_equal_dict")
     return modified_user_data
+
 
 def remap_query(user_data, mat_timestamp, cg_client):
 
@@ -56,7 +131,7 @@ def remap_query(user_data, mat_timestamp, cg_client):
     modified_user_data["filter_in_dict"] = new_filter_in_dict
     modified_user_data["filter_out_dict"] = new_filter_out_dict
 
-    return modified_user_data
+    return modified_user_data, query_map
 
 
 def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_client):

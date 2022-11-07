@@ -13,6 +13,7 @@ from flask_restx import Namespace, Resource, inputs, reqparse
 from materializationengine.blueprints.client.new_query import (
     remap_query,
     strip_root_id_filters,
+    update_rootids,
 )
 from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.blueprints.client.schemas import (
@@ -175,6 +176,8 @@ def execute_materialized_query(
     mat_version: int,
     pcg_table_name: str,
     user_data: dict,
+    query_map: dict,
+    cg_client,
 ) -> pd.DataFrame:
     """_summary_
 
@@ -193,7 +196,6 @@ def execute_materialized_query(
         .filter(MaterializedMetadata.table_name == user_data["table"])
         .scalar()
     )
-    print(mat_row_count)
     if mat_row_count:
         # setup a query manager
         qm = QueryManager(
@@ -205,7 +207,8 @@ def execute_materialized_query(
         qm.configure_query(user_data)
 
         # return the result
-        return qm.execute_query()
+        df = qm.execute_query()
+        df = update_rootids(df, user_data["timestamp"], query_map, cg_client)
     else:
         return None
 
@@ -215,6 +218,7 @@ def execute_production_query(
     segmentation_source: str,
     user_data: dict,
     chosen_timestamp: datetime.datetime,
+    cg_client,
 ) -> pd.DataFrame:
     """_summary_
 
@@ -244,10 +248,11 @@ def execute_production_query(
     qm = QueryManager(aligned_volume_name, segmentation_source, split_mode=True)
 
     user_data_modified = strip_root_id_filters(user_data)
-    print(user_data_modified)
     qm.configure_query(user_data_modified)
     qm.apply_table_crud_filter(user_data["table"], start_time, end_time)
-    return qm.execute_query()
+    df = qm.execute_query()
+    df = update_rootids(df, user_timestamp, {}, cg_client)
+    return df
 
     # TODO: make sure a vertex isn't added twice
     # make sure the result is a single component
@@ -633,7 +638,7 @@ class LiveTableQuery(Resource):
         )
         cg_client = chunkedgraph_cache.get_client(pcg_table_name)
 
-        modified_user_data = remap_query(
+        modified_user_data, query_map = remap_query(
             user_data, chosen_version.time_stamp, cg_client
         )
 
@@ -643,6 +648,8 @@ class LiveTableQuery(Resource):
             chosen_version.version,
             pcg_table_name,
             modified_user_data,
+            query_map,
+            cg_client,
         )
 
         prod_df = execute_production_query(
@@ -650,6 +657,7 @@ class LiveTableQuery(Resource):
             pcg_table_name,
             user_data,
             chosen_version.time_stamp,
+            cg_client,
         )
 
         df = combine_queries(mat_df, prod_df, chosen_version, user_data)
