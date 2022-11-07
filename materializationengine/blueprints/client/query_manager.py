@@ -108,7 +108,7 @@ class QueryManager:
                 self._models.append(annmodel)
                 self._models.append(segmodel)
                 self._joins.append(
-                    ((segmodel, annmodel.id == segmodel.id), {"isouter": True})
+                    ((segmodel, annmodel.id == segmodel.id), {"isouter": False})
                 )
             else:
                 model = self._get_flat_model(table_name)
