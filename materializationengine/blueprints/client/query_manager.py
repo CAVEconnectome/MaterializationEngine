@@ -295,11 +295,9 @@ class QueryManager:
         Returns:
             SQLAchemy query object
         """
-        print(query_args)
         query = self._db.database.session.query(*query_args)
 
         if join_args is not None:
-            print(join_args)
             for join_arg, join_kwargs in join_args:
                 query = query.join(*join_arg, **join_kwargs)
 
@@ -325,7 +323,9 @@ class QueryManager:
         )
         dup_cols = col_names[col_counts > 1]
         query_args = []
+        column_names = {}
         for table_num, table_name in enumerate(self._selected_columns.keys()):
+            column_names[table_name] = {}
             # lets get the suffix for this table
             suffix = self._suffixes[table_name]
             if suffix is None:
@@ -334,29 +334,31 @@ class QueryManager:
             for column_name in self._selected_columns[table_name]:
                 model = self._find_relevant_model(table_name, column_name)
                 column = model.__dict__[column_name]
-                if isinstance(column.type, Geometry):
-                    if column.key in dup_cols:
+                if column.key in dup_cols:
+                    column_names[table_name][column.key] = column.key + f"{suffix}"
+                    if isinstance(column.type, Geometry):
                         column_args = [
                             column.ST_X()
                             .cast(Integer)
-                            .label(column.key + "_{}_x".format(suffix)),
+                            .label(column.key + "{}_x".format(suffix)),
                             column.ST_Y()
                             .cast(Integer)
-                            .label(column.key + "_{}_y".format(suffix)),
+                            .label(column.key + "{}_y".format(suffix)),
                             column.ST_Z()
                             .cast(Integer)
-                            .label(column.key + "_{}_z".format(suffix)),
+                            .label(column.key + "{}_z".format(suffix)),
                         ]
                     else:
+                        query_args.append(column.label(column.key + suffix))
+                else:
+                    column_names[table_name][column.key] = column.key
+                    if isinstance(column.type, Geometry):
                         column_args = [
                             column.ST_X().cast(Integer).label(column.key + "_x"),
                             column.ST_Y().cast(Integer).label(column.key + "_y"),
                             column.ST_Z().cast(Integer).label(column.key + "_z"),
                         ]
-                    query_args += column_args
-                else:
-                    if column.key in dup_cols:
-                        query_args.append(column.label(column.key + suffix))
+                        query_args += column_args
                     else:
                         query_args.append(column)
 
@@ -376,4 +378,4 @@ class QueryManager:
             index_col=None,
             get_count=self.get_count,
         )
-        return df
+        return df, column_names
