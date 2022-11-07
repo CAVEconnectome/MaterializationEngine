@@ -281,6 +281,28 @@ def execute_production_query(
     # return the results
 
 
+def apply_filters(df, user_data, column_names):
+    filter_in_dict = user_data.get("filter_in_dict", None)
+    filter_out_dict = user_data.get("filter_out_dict", None)
+    filter_equal_dict = user_data.get("filter_equal_dict", None)
+
+    if filter_in_dict:
+        for table, filter in filter_in_dict.items():
+            for col, val in filter.items():
+                colname = column_names[table][col]
+                df = df[df[colname].isin(val)]
+    if filter_out_dict:
+        for table, filter in filter_in_dict.items():
+            for col, val in filter.items():
+                colname = column_names[table][col]
+                df = df[~df[colname].isin(val)]
+    if filter_equal_dict:
+        for table, filter in filter_equal_dict.items():
+            for col, val in filter.items():
+                df = df[df[colname] == val]
+    return df
+
+
 def combine_queries(
     mat_df: pd.DataFrame,
     prod_df: pd.DataFrame,
@@ -345,8 +367,6 @@ def combine_queries(
     else:
         comb_df = mat_df
 
-    # # reapply original filters
-    # comb_df = apply_filters(comb_df, user_data)
     return comb_df
 
 
@@ -641,8 +661,9 @@ class LiveTableQuery(Resource):
         modified_user_data, query_map = remap_query(
             user_data, chosen_version.time_stamp, cg_client
         )
+        headers = {}
 
-        mat_df = execute_materialized_query(
+        mat_df, column_names = execute_materialized_query(
             datastack_name,
             aligned_volume_name,
             chosen_version.version,
@@ -651,8 +672,9 @@ class LiveTableQuery(Resource):
             query_map,
             cg_client,
         )
-
-        prod_df = execute_production_query(
+        if len(df) >= limit:
+            headers = {"Warning": f'201 - "query limited by {max_limit}'}
+        prod_df, column_names = execute_production_query(
             aligned_volume_name,
             pcg_table_name,
             user_data,
@@ -661,10 +683,11 @@ class LiveTableQuery(Resource):
         )
 
         df = combine_queries(mat_df, prod_df, chosen_version, user_data)
-
+        df = apply_filters(df, user_data, column_names)
         # TODO add table warnings and length warnings
-        # if len(df) == limit:
-        #     headers = {"Warning": f'201 - "Limited query to {max_limit} rows'}
+
+        # if len(df) >= limit:
+        #     headers = {"Warning": f'201 - "query limited by {max_limit}'}
 
         headers = {}
         if args["return_pyarrow"]:
