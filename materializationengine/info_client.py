@@ -42,7 +42,6 @@ def get_aligned_volume(aligned_volume):
 def get_datastacks():
     server = current_app.config["GLOBAL_SERVER_URL"]
     auth = AuthClient(server_address=server, token=current_app.config["AUTH_TOKEN"])
-    print(auth.token)
     infoclient = InfoServiceClient(
         server_address=server,
         auth_client=auth,
