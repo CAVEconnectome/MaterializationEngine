@@ -303,6 +303,7 @@ def apply_filters(df, user_data, column_names):
     if filter_equal_dict:
         for table, filter in filter_equal_dict.items():
             for col, val in filter.items():
+                colname = column_names[table][col]
                 df = df[df[colname] == val]
     return df
 
@@ -677,7 +678,7 @@ class LiveTableQuery(Resource):
             cg_client,
         )
         # TODO: ADD LIMIT WARNINGS
-        #if len(mat_df) >= limit:
+        # if len(mat_df) >= limit:
         #    headers = {"Warning": f'201 - "query limited by {max_limit}'}
         prod_df, column_names = execute_production_query(
             aligned_volume_name,
@@ -689,7 +690,7 @@ class LiveTableQuery(Resource):
 
         df = combine_queries(mat_df, prod_df, chosen_version, user_data)
         df = apply_filters(df, user_data, column_names)
-       
+
         headers = {}
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
