@@ -145,26 +145,26 @@ class QueryManager:
         model = self._find_relevant_model(
             table_name=table_name, column_name=column_name
         )
-        self._filters.append(model.__dict__[column_name] == value)
+        self._filters.append((model.__dict__[column_name] == value))
 
     def apply_isin_filter(self, table_name, column_name, value):
         model = self._find_relevant_model(
             table_name=table_name, column_name=column_name
         )
-        self._filters.append(model.__dict__[column_name].in_(value))
+        self._filters.append((model.__dict__[column_name].in_(value)))
 
     def apply_notequal_filter(self, table_name, column_name, value):
         model = self._find_relevant_model(
             table_name=table_name, column_name=column_name
         )
-        self._filters.append(model.__dict__[column_name] != value)
+        self._filters.append((model.__dict__[column_name] != value))
 
     def apply_spatial_filter(self, table_name, column_name, bbox):
         model = self._find_relevant_model(
             table_name=table_name, column_name=column_name
         )
         filter = make_spatial_filter(model, column_name, bbox)
-        self._filters.append(filter)
+        self._filters.append((filter))
 
     def apply_table_crud_filter(
         self,
