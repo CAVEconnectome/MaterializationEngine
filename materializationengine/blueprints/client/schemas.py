@@ -1,6 +1,6 @@
 from marshmallow import fields, Schema
 from marshmallow.validate import Length
-
+import datetime
 
 class Metadata(Schema):
     user_id = fields.Str(required=False)
@@ -37,7 +37,7 @@ class SegmentationDataSchema(Schema):
 
 class V2QuerySchema(Schema):
     table = fields.Str(required=True)
-    timestamp = fields.DateTime(required=True)
+    timestamp = fields.AwareDateTime(default_timezone=datetime.timezone.utc, required=True)
     join_tables = fields.List(
         fields.List(fields.Str),
         required=False,
