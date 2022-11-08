@@ -677,16 +677,27 @@ class LiveTableQuery(Resource):
             query_map,
             cg_client,
         )
+
         # TODO: ADD LIMIT WARNINGS
         # if len(mat_df) >= limit:
         #    headers = {"Warning": f'201 - "query limited by {max_limit}'}
-        prod_df, column_names = execute_production_query(
-            aligned_volume_name,
-            pcg_table_name,
-            user_data,
-            chosen_version.time_stamp,
-            cg_client,
-        )
+        meta_db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        md = meta_db.database.get_table_metadata(user_data["table"])
+
+        last_modified = pytz.utc.localize(md["last_modified"])
+        if (last_modified > pytz.utc.localize(chosen_version.time_stamp)) or (
+            last_modified > user_data["timestamp"]
+        ):
+
+            prod_df, column_names = execute_production_query(
+                aligned_volume_name,
+                pcg_table_name,
+                user_data,
+                chosen_version.time_stamp,
+                cg_client,
+            )
+        else:
+            prod_df = None
 
         df = combine_queries(mat_df, prod_df, chosen_version, user_data)
         df = apply_filters(df, user_data, column_names)
