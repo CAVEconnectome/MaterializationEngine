@@ -188,6 +188,9 @@ def execute_materialized_query(
 
     Returns:
         pd.DataFrame: a dataframe with the results of the query in the materialized version
+        dict[dict]: a dictionary of table names, with values that are a dictionary
+        that has keys of model column names, and values of their name in the dataframe with suffixes added
+        if necessary to disambiguate.
     """
     mat_db_name = f"{datastack}__mat{mat_version}"
     session = sqlalchemy_cache.get(mat_db_name)
@@ -207,10 +210,11 @@ def execute_materialized_query(
         qm.configure_query(user_data)
 
         # return the result
-        df = qm.execute_query()
+        df, column_names = qm.execute_query()
         df = update_rootids(df, user_data["timestamp"], query_map, cg_client)
+        return df, column_names
     else:
-        return None
+        return None, None
 
 
 def execute_production_query(
@@ -250,9 +254,9 @@ def execute_production_query(
     user_data_modified = strip_root_id_filters(user_data)
     qm.configure_query(user_data_modified)
     qm.apply_table_crud_filter(user_data["table"], start_time, end_time)
-    df = qm.execute_query()
+    df, column_names = qm.execute_query()
     df = update_rootids(df, user_timestamp, {}, cg_client)
-    return df
+    return df, column_names
 
     # TODO: make sure a vertex isn't added twice
     # make sure the result is a single component
@@ -672,8 +676,9 @@ class LiveTableQuery(Resource):
             query_map,
             cg_client,
         )
-        if len(df) >= limit:
-            headers = {"Warning": f'201 - "query limited by {max_limit}'}
+        # TODO: ADD LIMIT WARNINGS
+        #if len(mat_df) >= limit:
+        #    headers = {"Warning": f'201 - "query limited by {max_limit}'}
         prod_df, column_names = execute_production_query(
             aligned_volume_name,
             pcg_table_name,
@@ -684,11 +689,7 @@ class LiveTableQuery(Resource):
 
         df = combine_queries(mat_df, prod_df, chosen_version, user_data)
         df = apply_filters(df, user_data, column_names)
-        # TODO add table warnings and length warnings
-
-        # if len(df) >= limit:
-        #     headers = {"Warning": f'201 - "query limited by {max_limit}'}
-
+       
         headers = {}
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
