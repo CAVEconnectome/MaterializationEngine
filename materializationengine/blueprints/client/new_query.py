@@ -84,10 +84,10 @@ def strip_root_id_filters(user_data):
 
     def strip_filter(filter):
         if modified_user_data.get(filter, None):
-            for table in modified_user_data:
-                for k in modified_user_data[table]:
+            for table in modified_user_data.get(filter):
+                for k in modified_user_data[filter][table]:
                     if k.endswith("_root_id"):
-                        modified_user_data[table].pop(k)
+                        modified_user_data[filter][table].pop(k)
 
     strip_filter("filter_in_dict")
     strip_filter("filter_out_dict")
