@@ -642,7 +642,7 @@ class LiveTableQuery(Resource):
             datastack_name, user_data["timestamp"]
         )
         db = dynamic_annotation_cache.get_db(aligned_vol)
-        check_read_permission(db, user_data("table"))
+        check_read_permission(db, user_data["table"])
         if has_joins:
             abort(400, "we are not supporting joins yet")
         # if future_ver is None and has_joins:
