@@ -19,6 +19,7 @@ from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.blueprints.client.schemas import (
     V2QuerySchema,
 )
+from materializationengine.utils import check_read_permission
 from materializationengine.models import MaterializedMetadata
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
@@ -582,7 +583,7 @@ class FrozenTableMetadata(Resource):
 @client_bp.route("/datastack/<string:datastack_name>/query")
 class LiveTableQuery(Resource):
     @reset_auth
-    @auth_requires_permission("admin_view", table_arg="datastack_name")
+    @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("v2_query", security="apikey")
     @accepts("V2QuerySchema", schema=V2QuerySchema, api=client_bp)
     def post(self, datastack_name: str):
@@ -640,7 +641,8 @@ class LiveTableQuery(Resource):
         past_ver, future_ver, aligned_vol = get_closest_versions(
             datastack_name, user_data["timestamp"]
         )
-
+        db = dynamic_annotation_cache.get_db(aligned_vol)
+        check_read_permission(db, user_data("table"))
         if has_joins:
             abort(400, "we are not supporting joins yet")
         # if future_ver is None and has_joins:
