@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import redis
 
 from celery.app.builtins import add_backend_cleanup_task
 from celery.schedules import crontab
@@ -183,3 +184,26 @@ def get_celery_queue_items(queue_name: str):
         return conn.default_channel.queue_declare(
             queue=queue_name, passive=True
         ).message_count
+
+
+def get_activate_tasks():
+    inspector = celery.control.inspect()
+    return inspector.active()
+
+
+def inspect_locked_tasks(release_locks: bool=False):
+    client = redis.StrictRedis(
+    host=get_config_param("REDIS_HOST"),
+    port=get_config_param("REDIS_PORT"),
+    password=get_config_param("REDIS_PASSWORD"),
+    db=0,
+    )
+
+    locked_tasks = list(client.scan_iter(match='LOCKED_WORKFLOW_TASK*'))
+    lock_status_dict = {locked_task: {"locked": True} for locked_task in locked_tasks}
+
+    if release_locks:
+        for locked_task in lock_status_dict:
+            client.delete(locked_task)
+            lock_status_dict[locked_task] = {"locked": False}
+    return lock_status_dict
