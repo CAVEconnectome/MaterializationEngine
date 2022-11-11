@@ -90,6 +90,39 @@ class TestWorkflowResource(Resource):
         return 200
 
 
+@mat_bp.route("/workflow/status/active")
+class ActiveTasksResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("Get current actively running tasks", security="apikey")
+    def get(self):
+        """Get running tasks from celery"""
+        from materializationengine.celery_worker import get_activate_tasks
+
+        return get_activate_tasks()
+
+
+@mat_bp.route("/workflow/status/locks")
+class LockedTasksResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("Get locked tasks", security="apikey")
+    def get(self):
+        """Get locked tasks from redis"""
+        from materializationengine.celery_worker import inspect_locked_tasks
+
+        return inspect_locked_tasks(release_locks=False)
+       
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("Unlock locked tasks", security="apikey")
+    def put(self):
+        "Unlock locked tasks"
+        from materializationengine.celery_worker import inspect_locked_tasks
+
+        return inspect_locked_tasks(release_locks=True)        
+
+
 @mat_bp.route("/celery/status/queue")
 class QueueResource(Resource):
     @reset_auth
