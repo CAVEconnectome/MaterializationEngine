@@ -648,7 +648,7 @@ def merge_tables(self, mat_metadata: dict):
     )
     # reset cache to include crud cols since the model can be stale
     AnnotationModel = create_annotation_model(
-        mat_metadata, with_crud_columns=True, reset_cache=True
+        mat_metadata, with_crud_columns=True
     )
     SegmentationModel = create_segmentation_model(mat_metadata)
     crud_columns = ["created", "deleted", "superceded_id"]
@@ -815,7 +815,6 @@ def check_tables(self, mat_info: list, analysis_version: int):
         anno_model = make_flat_model(
             table_name=annotation_table_name,
             schema_type=schema,
-            segmentation_source=None,
             table_metadata=table_metadata,
         )
         live_mapped_indexes = index_cache.get_index_from_model(
@@ -983,9 +982,7 @@ def add_indices(self, mat_metadata: dict):
             model = make_flat_model(
                 table_name=annotation_table_name,
                 schema_type=schema,
-                segmentation_source=None,
                 table_metadata=None,
-                reset_cache=True
             )
 
             commands = index_cache.add_indices_sql_commands(

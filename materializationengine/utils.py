@@ -63,12 +63,14 @@ def get_geom_from_wkb(wkb):
 def create_segmentation_model(mat_metadata, reset_cache: bool = False):
     annotation_table_name = mat_metadata.get("annotation_table_name")
     schema_type = mat_metadata.get("schema")
+    table_metadata = {"reference_table": mat_metadata.get("reference_table")}
     pcg_table_name = mat_metadata.get("pcg_table_name")
     schema_client = DynamicSchemaClient()
     return schema_client.create_segmentation_model(
         table_name=annotation_table_name,
         schema_type=schema_type,
         segmentation_source=pcg_table_name,
+        table_metadata=table_metadata,
         reset_cache=reset_cache,
     )
 
