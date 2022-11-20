@@ -647,9 +647,7 @@ def merge_tables(self, mat_metadata: dict):
         with_crud_columns=False,
     )
     # reset cache to include crud cols since the model can be stale
-    AnnotationModel = create_annotation_model(
-        mat_metadata, with_crud_columns=True, reset_cache=True
-    )
+    AnnotationModel = create_annotation_model(mat_metadata, with_crud_columns=True)
     SegmentationModel = create_segmentation_model(mat_metadata)
     crud_columns = ["created", "deleted", "superceded_id"]
     query_columns = {
