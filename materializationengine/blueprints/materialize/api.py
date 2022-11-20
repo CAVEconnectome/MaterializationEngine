@@ -112,7 +112,8 @@ class LockedTasksResource(Resource):
         """Get locked tasks from redis"""
         from materializationengine.celery_worker import inspect_locked_tasks
 
-        return inspect_locked_tasks(release_locks=False)
+        ltdict= inspect_locked_tasks(release_locks=False)
+        return {str(k):v for k,v in ltdict.items()}
        
     @reset_auth
     @auth_requires_admin
@@ -121,7 +122,9 @@ class LockedTasksResource(Resource):
         "Unlock locked tasks"
         from materializationengine.celery_worker import inspect_locked_tasks
 
-        return inspect_locked_tasks(release_locks=True)        
+        
+        ltdict= inspect_locked_tasks(release_locks=True)
+        return {str(k):v for k,v in ltdict.items()}     
 
 
 @mat_bp.route("/celery/status/queue")
