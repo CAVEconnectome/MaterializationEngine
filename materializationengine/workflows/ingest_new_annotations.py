@@ -65,9 +65,8 @@ def process_new_annotations_workflow(
     )
 
     for mat_metadata in mat_info:
-        if (
-            mat_metadata["row_count"] < 1_000_000
-            and mat_metadata.get("segmentation_table_name")
+        if mat_metadata["row_count"] < 1_000_000 and mat_metadata.get(
+            "segmentation_table_name"
         ):
             annotation_chunks = generate_chunked_model_ids(mat_metadata)
             process_chunks_workflow = chain(
@@ -344,7 +343,6 @@ def create_missing_segmentation_table(self, mat_metadata: dict) -> dict:
     aligned_volume = mat_metadata.get("aligned_volume")
 
     SegmentationModel = create_segmentation_model(mat_metadata)
-
     session = sqlalchemy_cache.get(aligned_volume)
     engine = sqlalchemy_cache.get_engine(aligned_volume)
 
@@ -396,8 +394,8 @@ def get_annotations_with_missing_supervoxel_ids(
     """
 
     aligned_volume = mat_metadata.get("aligned_volume")
+    AnnotationModel = create_annotation_model(mat_metadata, with_crud_columns=True)
     SegmentationModel = create_segmentation_model(mat_metadata)
-    AnnotationModel = create_annotation_model(mat_metadata)
 
     session = sqlalchemy_cache.get(aligned_volume)
 
@@ -572,7 +570,7 @@ def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
     )
     supervoxel_df = supervoxel_df.drop(drop_col_names, 1)
 
-    AnnotationModel = create_annotation_model(mat_metadata)
+    AnnotationModel = create_annotation_model(mat_metadata, with_crud_columns=True)
     SegmentationModel = create_segmentation_model(mat_metadata)
 
     __, seg_model_cols, __ = get_query_columns_by_suffix(
