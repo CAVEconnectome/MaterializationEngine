@@ -3,6 +3,9 @@ from dynamicannotationdb.schema import DynamicSchemaClient
 from geoalchemy2.shape import to_shape
 from flask import current_app, abort, g
 from middle_auth_client.decorators import users_share_common_group
+from celery.utils.log import get_task_logger
+
+celery_logger = get_task_logger(__name__)
 
 
 def get_app_base_path():
@@ -66,13 +69,18 @@ def create_segmentation_model(mat_metadata, reset_cache: bool = False):
     table_metadata = {"reference_table": mat_metadata.get("reference_table")}
     pcg_table_name = mat_metadata.get("pcg_table_name")
     schema_client = DynamicSchemaClient()
-    return schema_client.create_segmentation_model(
+
+    SegmentationModel = schema_client.create_segmentation_model(
         table_name=annotation_table_name,
         schema_type=schema_type,
         segmentation_source=pcg_table_name,
         table_metadata=table_metadata,
         reset_cache=reset_cache,
     )
+    celery_logger.debug(
+        f"SEGMENTATION----------------------- {SegmentationModel.__table__.columns}"
+    )
+    return SegmentationModel
 
 
 def create_annotation_model(
@@ -83,13 +91,18 @@ def create_annotation_model(
     table_metadata = {"reference_table": mat_metadata.get("reference_table")}
     schema_client = DynamicSchemaClient()
 
-    return schema_client.create_annotation_model(
+    AnnotationModel = schema_client.create_annotation_model(
         table_name=annotation_table_name,
         schema_type=schema_type,
         table_metadata=table_metadata,
         with_crud_columns=with_crud_columns,
         reset_cache=reset_cache,
     )
+
+    celery_logger.debug(
+        f"ANNOTATION----------------------- {AnnotationModel.__table__.columns}"
+    )
+    return AnnotationModel
 
 
 def get_config_param(config_param: str):
