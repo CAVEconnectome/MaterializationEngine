@@ -237,7 +237,6 @@ def execute_production_query(
         pd.DataFrame: _description_
     """
     user_timestamp = user_data["timestamp"]
-    chosen_timestamp = pytz.utc.localize(chosen_timestamp)
     if chosen_timestamp < user_timestamp:
         query_forward = True
         start_time = chosen_timestamp
