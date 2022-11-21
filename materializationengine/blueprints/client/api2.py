@@ -661,13 +661,15 @@ class LiveTableQuery(Resource):
         else:
             chosen_version = past_ver
 
+        chosen_timestamp = pytz.utc.localize(chosen_version.time_stamp)
+
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
         cg_client = chunkedgraph_cache.get_client(pcg_table_name)
 
         modified_user_data, query_map = remap_query(
-            user_data, chosen_version.time_stamp, cg_client
+            user_data, chosen_timestamp, cg_client
         )
         headers = {}
 
@@ -688,7 +690,7 @@ class LiveTableQuery(Resource):
         md = meta_db.database.get_table_metadata(user_data["table"])
 
         last_modified = pytz.utc.localize(md["last_modified"])
-        if (last_modified > pytz.utc.localize(chosen_version.time_stamp)) or (
+        if (last_modified > chosen_timestamp) or (
             last_modified > user_data["timestamp"]
         ):
 
@@ -696,7 +698,7 @@ class LiveTableQuery(Resource):
                 aligned_volume_name,
                 pcg_table_name,
                 user_data,
-                chosen_version.time_stamp,
+                chosen_timestamp,
                 cg_client,
             )
         else:
