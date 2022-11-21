@@ -93,9 +93,8 @@ class QueryManager:
                 table_metadata = None
 
             flatmodel = self._db.schema.create_flat_model(
-                table_name,
-                md["schema_type"],
-                None,
+                table_name=table_name,
+                schema_type=md["schema_type"],
                 table_metadata=table_metadata,
             )
             self._flat_models[table_name] = flatmodel
