@@ -5,7 +5,8 @@ from flask import abort
 from copy import deepcopy
 import pandas as pd
 import logging
-from collections import Iterable
+from typing import Iterable
+
 
 def update_rootids(
     df: pd.DataFrame, timestamp: datetime.datetime, future_map: dict, cg_client
