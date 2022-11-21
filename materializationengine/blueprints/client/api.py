@@ -217,7 +217,6 @@ def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
     return db.schema.create_flat_model(
         table_name=table_name,
         schema_type=analysis_table.schema,
-        segmentation_source=None,
         table_metadata=table_metadata,
     )
 

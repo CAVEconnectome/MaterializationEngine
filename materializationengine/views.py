@@ -63,7 +63,6 @@ def make_flat_model(db, table: AnalysisTable):
     Model = db.schema.create_flat_model(
         table_name=table.table_name,
         schema_type=table.schema,
-        segmentation_source=None,
         table_metadata=table_metadata,
     )
     return Model, anno_metadata
