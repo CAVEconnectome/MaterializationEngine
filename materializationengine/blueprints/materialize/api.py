@@ -25,7 +25,7 @@ from sqlalchemy.exc import NoSuchTableError
 
 from materializationengine.blueprints.materialize.schemas import VirtualVersionSchema
 
-__version__ = "4.3.15"
+__version__ = "4.3.16"
 
 
 bulk_upload_parser = reqparse.RequestParser()
