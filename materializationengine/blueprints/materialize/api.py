@@ -192,7 +192,7 @@ class ProcessNewAnnotationsTableResource(Resource):
         )
 
         datastack_info = get_datastack_info(datastack_name)
-        db = dynamic_annotation_cache[datastack_info["aligned_volume"]["name"]]
+        db = dynamic_annotation_cache.get_db(datastack_info["aligned_volume"]["name"])
         check_write_permission(db, table_name)
 
         process_new_annotations_workflow.s(
