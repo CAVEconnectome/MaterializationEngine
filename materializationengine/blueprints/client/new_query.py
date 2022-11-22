@@ -9,7 +9,11 @@ from typing import Iterable
 
 
 def update_rootids(
-    df: pd.DataFrame, timestamp: datetime.datetime, future_map: dict, cg_client
+    df: pd.DataFrame,
+    timestamp: datetime.datetime,
+    future_map: dict,
+    cg_client,
+    allow_missing_lookups: bool = False,
 ):
     # post process the dataframe to update all the root_ids columns
     # with the most up to date get roots
@@ -19,10 +23,20 @@ def update_rootids(
     sv_columns = [c for c in df.columns if c.endswith("supervoxel_id")]
 
     all_root_ids = np.empty(0, dtype=np.int64)
-
+    warnings = []
     # go through the columns and collect all the root_ids to check
     # to see if they need updating
     for sv_col in sv_columns:
+        num_ones = np.sum(df[sv_col] == 1)
+        if num_ones > 0:
+            msg = f"There are {num_ones} annotations that need supervoxel lookups, wait till new annotation ingest is done or pick an less recent timestamp"
+            if allow_missing_lookups:
+                warnings.append(msg)
+                not_ones = df[sv_col] != 1
+                df=df[not_ones]
+            else:
+                abort(406, msg)
+
         root_id_col = sv_col[: -len("supervoxel_id")] + "root_id"
         # use the future map to update rootIDs
         if future_map is not None:
@@ -77,7 +91,7 @@ def update_rootids(
         df[root_id_col] = None
         df[root_id_col] = root_ids
 
-    return df
+    return df, warnings
 
 
 def strip_root_id_filters(user_data):
@@ -89,8 +103,8 @@ def strip_root_id_filters(user_data):
             for table in modified_user_data.get(filter):
                 for k in modified_user_data[filter][table]:
                     if k.endswith("_root_id"):
-                        to_pop.append((table,k))
-        for table,k in to_pop:
+                        to_pop.append((table, k))
+        for table, k in to_pop:
             modified_user_data[filter][table].pop(k)
 
     strip_filter("filter_in_dict")
