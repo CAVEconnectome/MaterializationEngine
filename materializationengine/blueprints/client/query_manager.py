@@ -9,7 +9,7 @@ from materializationengine.blueprints.client.query import (
 import numpy as np
 from geoalchemy2.types import Geometry
 from sqlalchemy.sql.sqltypes import Integer
-from sqlalchemy import or_, and_
+from sqlalchemy import or_, and_, func
 import datetime
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
@@ -27,6 +27,7 @@ class QueryManager:
         offset: int = 0,
         limit: int = DEFAULT_LIMIT,
         get_count: bool = False,
+        split_mode_outer=False,
     ):
         self._db = dynamic_annotation_cache.get_db(db_name)
         if meta_db_name is None:
@@ -35,6 +36,7 @@ class QueryManager:
             self._meta_db = dynamic_annotation_cache.get_db(meta_db_name)
         self._segmentation_source = segmentation_source
         self._split_mode = split_mode
+        self._split_mode_outer = split_mode_outer
         self._split_models = {}
         self._flat_models = {}
         self._models = []
@@ -107,7 +109,10 @@ class QueryManager:
                 self._models.append(annmodel)
                 self._models.append(segmodel)
                 self._joins.append(
-                    ((segmodel, annmodel.id == segmodel.id), {"isouter": False})
+                    (
+                        (segmodel, annmodel.id == segmodel.id),
+                        {"isouter": self._split_mode_outer},
+                    )
                 )
             else:
                 model = self._get_flat_model(table_name)
@@ -348,7 +353,11 @@ class QueryManager:
                             .label(column.key + "{}_z".format(suffix)),
                         ]
                     else:
-                        query_args.append(column.label(column.key + suffix))
+
+                        if self._split_mode and (column.key.endswith('_root_id') or column.key.endswith('_supervoxel_id')):
+                            query_args.append(func.coalesce(column, 1).label(column.key + suffix))
+                        else:
+                            query_args.append(column.label(column.key + suffix))
                 else:
                     column_names[table_name][column.key] = column.key
                     if isinstance(column.type, Geometry):
@@ -359,7 +368,10 @@ class QueryManager:
                         ]
                         query_args += column_args
                     else:
-                        query_args.append(column)
+                        if self._split_mode and (column.key.endswith('_root_id') or column.key.endswith('_supervoxel_id')):
+                            query_args.append(func.coalesce(column, 1).label(column.key))
+                        else:
+                            query_args.append(column)
 
         query = self._make_query(
             query_args=self._models,
