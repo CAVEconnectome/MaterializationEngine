@@ -82,6 +82,16 @@ query_parser.add_argument(
     location="args",
     help="whether to only return the count of a query",
 )
+query_parser.add_argument(
+    "allow_missing_lookups",
+    type=inputs.boolean,
+    default=False,
+    required=False,
+    location="args",
+    help="whether to return annotation results when there\
+ are new annotations that exist but haven't yet had supervoxel and \
+rootId lookups. A warning will still be returned, but no 406 error thrown.",
+)
 
 
 def after_request(response):
@@ -212,10 +222,10 @@ def execute_materialized_query(
 
         # return the result
         df, column_names = qm.execute_query()
-        df = update_rootids(df, user_data["timestamp"], query_map, cg_client)
-        return df, column_names
+        df, warnings = update_rootids(df, user_data["timestamp"], query_map, cg_client)
+        return df, column_names, warnings
     else:
-        return None, None
+        return None, None, None
 
 
 def execute_production_query(
@@ -224,6 +234,7 @@ def execute_production_query(
     user_data: dict,
     chosen_timestamp: datetime.datetime,
     cg_client,
+    allow_missing_lookups: bool = False,
 ) -> pd.DataFrame:
     """_summary_
 
@@ -249,14 +260,32 @@ def execute_production_query(
         abort(400, "do not use live live query to query a materialized timestamp")
 
     # setup a query manager on production database with split tables
-    qm = QueryManager(aligned_volume_name, segmentation_source, split_mode=True)
-
+    qm = QueryManager(
+        aligned_volume_name, segmentation_source, split_mode=True, split_mode_outer=True
+    )
     user_data_modified = strip_root_id_filters(user_data)
     qm.configure_query(user_data_modified)
     qm.apply_table_crud_filter(user_data["table"], start_time, end_time)
     df, column_names = qm.execute_query()
-    df = update_rootids(df, user_timestamp, {}, cg_client)
-    return df, column_names
+
+    # qm_outer = QueryManager(
+    #     aligned_volume_name, segmentation_source, split_mode=True, split_mode_outer=True
+    # )
+    # qm_outer.configure_query(user_data_modified)
+    # qm_outer.apply_table_crud_filter(user_data["table"], start_time, end_time)
+    # df_outer, column_names = qm.execute_query()
+    #
+    # extra_rows = len(df_outer) - len(df)
+    # if extra_rows > 0:
+    #     abort(
+    #         406,
+    #         f"There are {extra_rows} annotations that need supervoxel lookups, wait till new annotation ingest is done or pick an less recent timestamp",
+    #     )
+
+    df, warnings = update_rootids(
+        df, user_timestamp, {}, cg_client, allow_missing_lookups
+    )
+    return df, column_names, warnings
 
     # TODO: make sure a vertex isn't added twice
     # make sure the result is a single component
@@ -672,7 +701,7 @@ class LiveTableQuery(Resource):
         )
         headers = {}
 
-        mat_df, column_names = execute_materialized_query(
+        mat_df, column_names, mat_warnings = execute_materialized_query(
             datastack_name,
             aligned_volume_name,
             chosen_version.version,
@@ -693,12 +722,13 @@ class LiveTableQuery(Resource):
             last_modified > user_data["timestamp"]
         ):
 
-            prod_df, column_names = execute_production_query(
+            prod_df, column_names, prod_warnings = execute_production_query(
                 aligned_volume_name,
                 pcg_table_name,
                 user_data,
                 chosen_timestamp,
                 cg_client,
+                args["allow_missing_lookups"],
             )
         else:
             prod_df = None
@@ -706,7 +736,8 @@ class LiveTableQuery(Resource):
         df = combine_queries(mat_df, prod_df, chosen_version, user_data)
         df = apply_filters(df, user_data, column_names)
 
-        headers = {}
+        headers = {"Warning": "\n".join(mat_warnings + prod_warnings)}
+
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
             serialized = context.serialize(df).to_buffer().to_pybytes()
