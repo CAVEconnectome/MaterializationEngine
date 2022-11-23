@@ -48,7 +48,7 @@ class BaseConfig:
             AUTH_TOKEN = json.load(f)["token"]
     else:
         AUTH_TOKEN = ""
-
+    KEEP_CREATED_COLUMN = False
     BEAT_SCHEDULES = [
         {
             "name": "Materialized Database Daily (2 Days)",

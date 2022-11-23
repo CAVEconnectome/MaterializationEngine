@@ -651,7 +651,12 @@ def merge_tables(self, mat_metadata: dict):
         mat_metadata, with_crud_columns=True
     )
     SegmentationModel = create_segmentation_model(mat_metadata)
-    crud_columns = ["created", "deleted", "superceded_id"]
+
+    keep_created = mat_metadata["keep_created_column"]
+    crud_columns = ["deleted", "superceded_id"]
+    if keep_created:
+        crud_columns.append("created")
+    
     query_columns = {
         col.name: col
         for col in AnnotationModel.__table__.columns
