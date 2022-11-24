@@ -652,7 +652,7 @@ def merge_tables(self, mat_metadata: dict):
     )
     SegmentationModel = create_segmentation_model(mat_metadata)
 
-    keep_created = mat_metadata["keep_created_column"]
+    keep_created = mat_metadata.get("keep_created_column")
     crud_columns = ["created", "deleted", "superceded_id"] # crud cols to drop
     if keep_created:
         crud_columns.pop(0) # we want to keep the 'created' col
