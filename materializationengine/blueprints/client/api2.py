@@ -312,6 +312,7 @@ def combine_queries(
     prod_df: pd.DataFrame,
     chosen_version: AnalysisVersion,
     user_data: dict,
+    column_names: dict,
 ) -> pd.DataFrame:
     """combine a materialized query with an production query
        will remove deleted rows from materialized query, strip deleted entries from prod_df
@@ -328,10 +329,11 @@ def combine_queries(
     """
     user_timestamp = user_data["timestamp"]
     chosen_timestamp = pytz.utc.localize(chosen_version.time_stamp)
+    table = user_data["table"]
     if mat_df is not None:
-        mat_df = mat_df.set_index("id")
+        mat_df = mat_df.set_index(column_names[table]["id"])
     if prod_df is not None:
-        prod_df = prod_df.set_index("id")
+        prod_df = prod_df.set_index(column_names[table]["id"])
     if (prod_df is None) and (mat_df is None):
         abort(400, f"This query on table {user_data['table']} returned no results")
 
@@ -702,7 +704,7 @@ class LiveTableQuery(Resource):
             prod_df = None
             prod_warnings = []
 
-        df = combine_queries(mat_df, prod_df, chosen_version, user_data)
+        df = combine_queries(mat_df, prod_df, chosen_version, user_data, column_names)
         df = apply_filters(df, user_data, column_names)
 
         headers = {"Warning": "\n".join(mat_warnings + prod_warnings)}
