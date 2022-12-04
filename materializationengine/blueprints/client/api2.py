@@ -631,7 +631,7 @@ class LiveTableQuery(Resource):
         """
         args = query_parser.parse_args()
         user_data = request.parsed_obj
-        joins = user_data.get("joins", None)
+        joins = user_data.get("join_tables", None)
         # has_joins = joins is not None
         user_data["limit"] = min(
             current_app.config["QUERY_LIMIT_SIZE"],
