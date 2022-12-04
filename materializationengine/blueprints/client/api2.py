@@ -362,8 +362,6 @@ def combine_queries(
         mat_df = mat_df.set_index("id")
     if prod_df is not None:
         prod_df = prod_df.set_index("id")
-    print(mat_df)
-    print(prod_df)
     if (prod_df is None) and (mat_df is None):
         abort(400, f"This query on table {user_data['table']} returned no results")
 
