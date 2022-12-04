@@ -248,14 +248,14 @@ class QueryManager:
             for table_name in user_data["select_columns"].keys():
                 for c in user_data["select_columns"][table_name]:
                     self.select_column(table_name, c)
-        if user_data.get("joins", None):
-            for join in user_data["joins"]:
+        if user_data.get("join_tables", None):
+            for join in user_data["join_tables"]:
                 self.join_tables(join[0], join[1], join[2], join[3])
         # if none are specified select all the columns in the tables
         # referred to
         else:
             self.select_all_columns(user_data["table"])
-            joins = user_data.get("joins", [])
+            joins = user_data.get("join_tables", [])
             for join in joins:
                 self.select_all_columns(join[0])
                 self.select_all_columns(join[2])
@@ -354,8 +354,13 @@ class QueryManager:
                         ]
                     else:
 
-                        if self._split_mode and (column.key.endswith('_root_id') or column.key.endswith('_supervoxel_id')):
-                            query_args.append(func.coalesce(column, 1).label(column.key + suffix))
+                        if self._split_mode and (
+                            column.key.endswith("_root_id")
+                            or column.key.endswith("_supervoxel_id")
+                        ):
+                            query_args.append(
+                                func.coalesce(column, 1).label(column.key + suffix)
+                            )
                         else:
                             query_args.append(column.label(column.key + suffix))
                 else:
@@ -368,8 +373,13 @@ class QueryManager:
                         ]
                         query_args += column_args
                     else:
-                        if self._split_mode and (column.key.endswith('_root_id') or column.key.endswith('_supervoxel_id')):
-                            query_args.append(func.coalesce(column, 1).label(column.key))
+                        if self._split_mode and (
+                            column.key.endswith("_root_id")
+                            or column.key.endswith("_supervoxel_id")
+                        ):
+                            query_args.append(
+                                func.coalesce(column, 1).label(column.key)
+                            )
                         else:
                             query_args.append(column)
 
