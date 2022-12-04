@@ -243,14 +243,14 @@ class QueryManager:
             }
         }"""
         self.add_table(user_data["table"])
+        if user_data.get("join_tables", None):
+            for join in user_data["join_tables"]:
+                self.join_tables(join[0], join[1], join[2], join[3])
         # select the columns the user wants
         if user_data.get("select_columns", None):
             for table_name in user_data["select_columns"].keys():
                 for c in user_data["select_columns"][table_name]:
                     self.select_column(table_name, c)
-        if user_data.get("join_tables", None):
-            for join in user_data["join_tables"]:
-                self.join_tables(join[0], join[1], join[2], join[3])
         # if none are specified select all the columns in the tables
         # referred to
         else:
