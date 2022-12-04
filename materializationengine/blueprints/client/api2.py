@@ -628,7 +628,7 @@ class LiveTableQuery(Resource):
             "table":"table_name",
             "joins":[[table_name, table_column, joined_table, joined_column],
                      [joined_table, joincol2, third_table, joincol_third]]
-            "timestamp": "XXXXXXX",
+            "timestamp": datetime.datetime.utcnow(),
             "offset": 0,
             "limit": 200000,
             "suffixes":{
@@ -732,6 +732,7 @@ class LiveTableQuery(Resource):
             )
         else:
             prod_df = None
+            prod_warnings = []
 
         df = combine_queries(mat_df, prod_df, chosen_version, user_data)
         df = apply_filters(df, user_data, column_names)
