@@ -7,7 +7,7 @@ from cloudfiles import compression
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
 from cachetools import LRUCache, TTLCache, cached
-from flask import Response, abort, current_app, request
+from flask import Response, abort, request
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
 from materializationengine.blueprints.client.new_query import (
@@ -268,50 +268,10 @@ def execute_production_query(
     qm.apply_table_crud_filter(user_data["table"], start_time, end_time)
     df, column_names = qm.execute_query()
 
-    # qm_outer = QueryManager(
-    #     aligned_volume_name, segmentation_source, split_mode=True, split_mode_outer=True
-    # )
-    # qm_outer.configure_query(user_data_modified)
-    # qm_outer.apply_table_crud_filter(user_data["table"], start_time, end_time)
-    # df_outer, column_names = qm.execute_query()
-    #
-    # extra_rows = len(df_outer) - len(df)
-    # if extra_rows > 0:
-    #     abort(
-    #         406,
-    #         f"There are {extra_rows} annotations that need supervoxel lookups, wait till new annotation ingest is done or pick an less recent timestamp",
-    #     )
-
     df, warnings = update_rootids(
         df, user_timestamp, {}, cg_client, allow_missing_lookups
     )
     return df, column_names, warnings
-
-    # TODO: make sure a vertex isn't added twice
-    # make sure the result is a single component
-    # join_graph = make_join_graph(user_data["table"], user_data["joins"])
-
-    # df_dict = {}
-    # for table in join_graph.vertices:
-    #     if has_table_change(aligned_volume_name, table, start_time, end_time):
-    #         qm = QueryManager(
-    #             aligned_volume_name, datastack_name=datastack, split_mode=True
-    #         )
-    #         qm.add_table(table)
-    #         # remove all root_id based filters
-    #         stripped_filters = strip_filters(user_data)  # make it a
-    #         for filter in stripped_filters:
-    #             qm.add_table_filters(filter.get(table, None))
-    #         qm.apply_table_crud_filter(table, start_time, end_time)
-    #         df_dict[table] = qm.execute_query()
-    #     else:
-    #         df_dict[table] = None
-
-    # execute the query
-
-    # lookup root_ids for all non-deleted rows with timestamp
-
-    # return the results
 
 
 def apply_filters(df, user_data, column_names):
@@ -669,15 +629,15 @@ class LiveTableQuery(Resource):
         )
         db = dynamic_annotation_cache.get_db(aligned_vol)
         check_read_permission(db, user_data["table"])
-        if has_joins:
-            abort(400, "we are not supporting joins yet")
+        #if has_joins:
+        #    abort(400, "we are not supporting joins yet")
         # if future_ver is None and has_joins:
-        #    abort(400, 'we do not support joings when there is no future version')
+        #    abort(400, 'we do not support joins when there is no future version')
         # elif has_joins:
         #     # run a future to past map version of the query
         #     check_joins(joins)
         #     chosen_version = future_ver
-        elif (past_ver is None) and (future_ver is None):
+        if (past_ver is None) and (future_ver is None):
             abort(
                 400,
                 "there is no future or past version for this timestamp, is materialization broken?",
