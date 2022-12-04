@@ -7,7 +7,7 @@ from cloudfiles import compression
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
 from cachetools import LRUCache, TTLCache, cached
-from flask import Response, abort, request
+from flask import Response, abort, request, current_app
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
 from materializationengine.blueprints.client.new_query import (
@@ -622,8 +622,9 @@ class LiveTableQuery(Resource):
         args = query_parser.parse_args()
         user_data = request.parsed_obj
         joins = user_data.get("joins", None)
-        has_joins = joins is not None
-
+        #has_joins = joins is not None
+        user_data["limit"] = min(current_app.config['QUERY_LIMIT_SIZE'],
+                                user_data.get("limit",current_app.config['QUERY_LIMIT_SIZE']))
         past_ver, future_ver, aligned_vol = get_closest_versions(
             datastack_name, user_data["timestamp"]
         )
