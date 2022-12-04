@@ -223,6 +223,11 @@ def execute_materialized_query(
         # return the result
         df, column_names = qm.execute_query()
         df, warnings = update_rootids(df, user_data["timestamp"], query_map, cg_client)
+        if len(df) >= user_data["limit"]:
+            warnings.append(
+                f"result has {len(df)} entries, which is equal or more \
+than limit of {user_data['limit']} there may be more results which are not shown"
+            )
         return df, column_names, warnings
     else:
         return None, None, None
@@ -271,6 +276,11 @@ def execute_production_query(
     df, warnings = update_rootids(
         df, user_timestamp, {}, cg_client, allow_missing_lookups
     )
+    if len(df) >= user_data["limit"]:
+        warnings.append(
+            f"result has {len(df)} entries, which is equal or more \
+than limit of {user_data['limit']} there may be more results which are not shown"
+        )
     return df, column_names, warnings
 
 
@@ -622,9 +632,11 @@ class LiveTableQuery(Resource):
         args = query_parser.parse_args()
         user_data = request.parsed_obj
         joins = user_data.get("joins", None)
-        #has_joins = joins is not None
-        user_data["limit"] = min(current_app.config['QUERY_LIMIT_SIZE'],
-                                user_data.get("limit",current_app.config['QUERY_LIMIT_SIZE']))
+        # has_joins = joins is not None
+        user_data["limit"] = min(
+            current_app.config["QUERY_LIMIT_SIZE"],
+            user_data.get("limit", current_app.config["QUERY_LIMIT_SIZE"]),
+        )
         past_ver, future_ver, aligned_vol = get_closest_versions(
             datastack_name, user_data["timestamp"]
         )
@@ -670,9 +682,6 @@ class LiveTableQuery(Resource):
             cg_client,
         )
 
-        # TODO: ADD LIMIT WARNINGS
-        # if len(mat_df) >= limit:
-        #    headers = {"Warning": f'201 - "query limited by {max_limit}'}
         meta_db = dynamic_annotation_cache.get_db(aligned_volume_name)
         md = meta_db.database.get_table_metadata(user_data["table"])
 
