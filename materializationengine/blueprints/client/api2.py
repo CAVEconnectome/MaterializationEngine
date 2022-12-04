@@ -629,7 +629,7 @@ class LiveTableQuery(Resource):
         )
         db = dynamic_annotation_cache.get_db(aligned_vol)
         check_read_permission(db, user_data["table"])
-        #if has_joins:
+        # if has_joins:
         #    abort(400, "we are not supporting joins yet")
         # if future_ver is None and has_joins:
         #    abort(400, 'we do not support joins when there is no future version')
