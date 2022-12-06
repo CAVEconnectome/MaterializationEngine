@@ -230,8 +230,7 @@ than limit of {user_data['limit']} there may be more results which are not shown
             )
         return df, column_names, warnings
     else:
-        return None, None, None
-
+        return None, {}, []
 
 def execute_production_query(
     aligned_volume_name: str,
