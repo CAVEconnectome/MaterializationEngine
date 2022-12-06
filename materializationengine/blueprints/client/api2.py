@@ -327,6 +327,8 @@ def combine_queries(
     Returns:
         pd.DataFrame: _description_
     """
+    print(mat_df)
+    print(prod_df)
     user_timestamp = user_data["timestamp"]
     chosen_timestamp = pytz.utc.localize(chosen_version.time_stamp)
     table = user_data["table"]
@@ -365,7 +367,7 @@ def combine_queries(
         # # delete those rows from materialized dataframe
         prod_df = prod_df.drop(columns=["created", "deleted", "superceded_id"])
         if mat_df is not None:
-            mat_df = mat_df.drop(prod_df[to_delete_in_mat].index, axis=0)
+            mat_df = mat_df.drop(to_delete_in_mat.index, axis=0)
             comb_df = pd.concat([prod_df, mat_df])
         else:
             comb_df = prod_df[to_add_in_mat]
