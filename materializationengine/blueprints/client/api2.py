@@ -365,12 +365,14 @@ def combine_queries(
             cut_prod_df = prod_df.drop(prod_df[created_between].index, axis=0)
 
         # # delete those rows from materialized dataframe
-        prod_df = prod_df.drop(columns=["created", "deleted", "superceded_id"])
+        cut_prod_df = cut_prod_df.drop(columns=["created", "deleted", "superceded_id"])
         if mat_df is not None:
             mat_df = mat_df.drop(prod_df[to_delete_in_mat].index, axis=0)
             comb_df = pd.concat([cut_prod_df, mat_df])
         else:
-            comb_df = prod_df[to_add_in_mat]
+            comb_df = prod_df[to_add_in_mat].drop(
+                columns=["created", "deleted", "superceded_id"]
+            )
     else:
         comb_df = mat_df
 
