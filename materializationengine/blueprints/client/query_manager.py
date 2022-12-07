@@ -107,13 +107,14 @@ class QueryManager:
             if self._split_mode:
                 annmodel, segmodel = self._get_split_model(table_name)
                 self._models.append(annmodel)
-                self._models.append(segmodel)
-                self._joins.append(
-                    (
-                        (segmodel, annmodel.id == segmodel.id),
-                        {"isouter": self._split_mode_outer},
+                if segmodel is not None:
+                    self._models.append(segmodel)
+                    self._joins.append(
+                        (
+                            (segmodel, annmodel.id == segmodel.id),
+                            {"isouter": self._split_mode_outer},
+                        )
                     )
-                )
             else:
                 model = self._get_flat_model(table_name)
                 self._models.append(model)
@@ -197,8 +198,13 @@ class QueryManager:
         if self._split_mode:
             annmodel, segmodel = self._get_split_model(table_name=table_name)
             ann_columns = [c.key for c in annmodel.__table__.columns]
-            seg_columns = [c.key for c in segmodel.__table__.columns if c.key != "id"]
-            columns = ann_columns + seg_columns
+            if segmodel is not None:
+                seg_columns = [
+                    c.key for c in segmodel.__table__.columns if c.key != "id"
+                ]
+                columns = ann_columns + seg_columns
+            else:
+                columns = ann_columns
         else:
             model = self._get_flat_model(table_name=table_name)
             columns = [c.key for c in model.__table__.columns]
