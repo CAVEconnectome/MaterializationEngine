@@ -352,7 +352,10 @@ def combine_queries(
 
             to_delete_in_mat = deleted_between & ~created_between
             to_add_in_mat = created_between & ~deleted_between
-            cut_prod_df = prod_df.drop(prod_df[deleted_between].index, axis=0)
+            if len(prod_df[deleted_between].index) > 0:
+                cut_prod_df = prod_df.drop(prod_df[deleted_between].index, axis=0)
+            else:
+                cut_prod_df = prod_df
         else:
             deleted_between = (prod_df.deleted > user_timestamp) & (
                 prod_df.deleted < chosen_timestamp
@@ -362,12 +365,15 @@ def combine_queries(
             )
             to_delete_in_mat = created_between & ~deleted_between
             to_add_in_mat = deleted_between & ~created_between
-            cut_prod_df = prod_df.drop(prod_df[created_between].index, axis=0)
-
+            if len(prod_df[created_between].index) > 0:
+                cut_prod_df = prod_df.drop(prod_df[created_between].index, axis=0)
+            else:
+                cut_prod_df = prod_df
         # # delete those rows from materialized dataframe
         cut_prod_df = cut_prod_df.drop(columns=["created", "deleted", "superceded_id"])
         if mat_df is not None:
-            mat_df = mat_df.drop(prod_df[to_delete_in_mat].index, axis=0)
+            if len(prod_df[to_delete_in_mat].index) > 0:
+                mat_df = mat_df.drop(prod_df[to_delete_in_mat].index, axis=0)
             comb_df = pd.concat([cut_prod_df, mat_df])
         else:
             comb_df = prod_df[to_add_in_mat].drop(
