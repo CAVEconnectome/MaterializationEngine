@@ -213,6 +213,12 @@ class QueryManager:
     def deselect_column(self, table_name, column_name):
         self._selected_columns[table_name].pop(column_name)
 
+    def apply_filter(self, filter, filter_func):
+        if filter:
+            for table_name in filter:
+                for k, v in filter[table_name].items():
+                    filter_func(table_name, k, v)
+
     def configure_query(self, user_data):
         """{
             "table":"table_name",
@@ -275,11 +281,12 @@ class QueryManager:
                 for table_name in user_data[filter_key]:
                     for k, v in user_data[filter_key][table_name].items():
                         filter_func(table_name, k, v)
+                        
+        self.apply_filter(user_data.get("filter_in_dict",None), self.apply_isin_filter)
+        self.apply_filter(user_data.get("filter_out_dict",None), self.apply_notequal_filter)
+        self.apply_filter(user_data.get("filter_equal_dict",None), self.apply_equal_filter)
+        self.apply_filter(user_data.get("filter_spatial_dict",None), self.apply_spatial_filter)
 
-        apply_filter("filter_in_dict", self.apply_isin_filter)
-        apply_filter("filter_out_dict", self.apply_notequal_filter)
-        apply_filter("filter_equal_dict", self.apply_equal_filter)
-        apply_filter("filter_spatial_dict", self.apply_spatial_filter)
 
         if user_data.get("suffices", None):
             self._suffixes.update(user_data["suffixes"])

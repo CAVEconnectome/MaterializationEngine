@@ -13,6 +13,8 @@ from materializationengine.blueprints.client.schemas import (
     ComplexQuerySchema,
     SimpleQuerySchema,
 )
+from materializationengine.blueprints.client.query_manager import QueryManager
+
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
 from materializationengine.utils import check_read_permission
@@ -440,162 +442,6 @@ class FrozenTableCount(Resource):
 
 
 @client_bp.expect(query_parser)
-@client_bp.route("/datastack/<string:datastack_name>/table/<string:table_name>/query")
-class LiveTableQuery(Resource):
-    @reset_auth
-    @auth_requires_permission("admin_view", table_arg="datastack_name")
-    @client_bp.doc("live_simple_query", security="apikey")
-    @accepts("SimpleQuerySchema", schema=SimpleQuerySchema, api=client_bp)
-    def post(self, datastack_name: str, table_name: str):
-        """endpoint for doing a query with filters
-
-        Args:
-            datastack_name (str): datastack name
-            table_name (str): table names
-
-        Payload:
-        All values are optional.  Limit has an upper bound set by the server.
-        Consult the schema of the table for column names and appropriate values
-        {
-            "filter_out_dict": {
-                "tablename":{
-                    "column_name":[excluded,values]
-                }
-            },
-            "offset": 0,
-            "limit": 200000,
-            "select_columns": [
-                "column","names"
-            ],
-            "filter_in_dict": {
-                "tablename":{
-                    "column_name":[included,values]
-                }
-            },
-            "filter_equal_dict": {
-                "tablename":{
-                    "column_name":value
-                }
-            "filter_spatial_dict": {
-                "tablename": {
-                "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
-            }
-        }
-        Returns:
-            pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
-        """
-        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-            datastack_name
-        )
-        db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        check_read_permission(db, table_name)
-        ann_md = db.database.get_table_metadata(table_name)
-        if ann_md.get("notice_text", None) is not None:
-            headers = {"Warning": f"Table Owner Warning: {ann_md['notice_text']}"}
-        else:
-            headers = None
-
-        args = query_parser.parse_args()
-
-        Session = sqlalchemy_cache.get(aligned_volume_name)
-        time_d = {}
-        now = time.time()
-
-        data = request.parsed_obj
-
-        AnnModel, SegModel = get_split_models(datastack_name, table_name)
-        time_d["get Model"] = time.time() - now
-        now = time.time()
-
-        engine = sqlalchemy_cache.get_engine(aligned_volume_name)
-        time_d["get engine"] = time.time() - now
-        now = time.time()
-        max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
-
-        data = request.parsed_obj
-        time_d["get data"] = time.time() - now
-        now = time.time()
-        limit = data.get("limit", max_limit)
-
-        if limit > max_limit:
-            limit = max_limit
-
-        get_count = args.get("count", False)
-
-        if get_count:
-            limit = None
-
-        current_app.logger.info("query: {}".format(data))
-        current_app.logger.info("args: {}".format(args))
-        user_id = str(g.auth_user["id"])
-        current_app.logger.info(f"user_id: {user_id}")
-        time_d["setup query"] = time.time() - now
-        now = time.time()
-        seg_table = f"{table_name}__{datastack_name}"
-
-        def _format_filter(filter, table_in, seg_table):
-            if filter is None:
-                return filter
-            else:
-                table_filter = filter.get(table_in, None)
-                root_id_filters = [
-                    c for c in table_filter.keys() if c.endswith("root_id")
-                ]
-                other_filters = [
-                    c for c in table_filter.keys() if not c.endswith("root_id")
-                ]
-
-                filter[seg_table] = {c: table_filter[c] for c in root_id_filters}
-                filter[table_in] = {c: table_filter[c] for c in other_filters}
-                return filter
-
-        df = specific_query(
-            Session,
-            engine,
-            {table_name: AnnModel, seg_table: SegModel},
-            [[table_name, "id"], [seg_table, "id"]],
-            filter_in_dict=_format_filter(
-                data.get("filter_in_dict", None), table_name, seg_table
-            ),
-            filter_notin_dict=_format_filter(
-                data.get("filter_notin_dict", None), table_name, seg_table
-            ),
-            filter_equal_dict=_format_filter(
-                data.get("filter_equal_dict", None), table_name, seg_table
-            ),
-            filter_spatial=data.get("filter_spatial_dict", None),
-            select_columns=data.get("select_columns", None),
-            consolidate_positions=not args["split_positions"],
-            offset=data.get("offset", None),
-            limit=limit,
-            get_count=get_count,
-        )
-        time_d["execute query"] = time.time() - now
-        now = time.time()
-
-        if len(df) == limit:
-            if headers is not None:
-                warn = headers.get("Warning", "")
-            headers = {"Warning": f'201 - "Limited query to {limit} rows\n {warn}'}
-        headers = update_notice_text_headers(ann_md, None)
-
-        if args["return_pyarrow"]:
-            context = pa.default_serialization_context()
-            serialized = context.serialize(df).to_buffer().to_pybytes()
-            time_d["serialize"] = time.time() - now
-            logging.info(time_d)
-            return Response(
-                serialized, headers=headers, mimetype="x-application/pyarrow"
-            )
-        else:
-            dfjson = df.to_json(orient="records")
-            time_d["serialize"] = time.time() - now
-            logging.info(time_d)
-            response = Response(dfjson, headers=headers, mimetype="application/json")
-            return after_request(response)
-
-
-@client_bp.expect(query_parser)
 @client_bp.route(
     "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/query"
 )
@@ -657,63 +503,52 @@ class FrozenTableQuery(Resource):
         )
         db = dynamic_annotation_cache.get_db(aligned_volume_name)
         check_read_permission(db, table_name)
+
         ann_md = db.database.get_table_metadata(table_name)
 
         args = query_parser.parse_args()
+
         Session = sqlalchemy_cache.get(aligned_volume_name)
-        time_d = {}
-        now = time.time()
-
-        data = request.parsed_obj
-        Model = get_flat_model(datastack_name, table_name, version, Session)
-        time_d["get Model"] = time.time() - now
-        now = time.time()
-
-        Session = sqlalchemy_cache.get(f"{datastack_name}__mat{version}")
-        time_d["get Session"] = time.time() - now
-        now = time.time()
-
-        engine = sqlalchemy_cache.get_engine(f"{datastack_name}__mat{version}")
-        time_d["get engine"] = time.time() - now
-        now = time.time()
+        analysis_version = (
+            Session.query(AnalysisVersion)
+            .filter(AnalysisVersion.version == version)
+            .one()
+        )
         max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
-
-        data = request.parsed_obj
-        time_d["get data"] = time.time() - now
-        now = time.time()
         limit = data.get("limit", max_limit)
-
         if limit > max_limit:
             limit = max_limit
 
         get_count = args.get("count", False)
-
         if get_count:
             limit = None
 
-        logging.debug("query {}".format(data))
-        logging.debug("args - {}".format(args))
-
-        time_d["setup query"] = time.time() - now
-        now = time.time()
-
-        df = specific_query(
-            Session,
-            engine,
-            {table_name: Model},
-            [table_name],
-            filter_in_dict=data.get("filter_in_dict", None),
-            filter_notin_dict=data.get("filter_notin_dict", None),
-            filter_equal_dict=data.get("filter_equal_dict", None),
-            filter_spatial=data.get("filter_spatial_dict", None),
-            select_columns=data.get("select_columns", None),
-            consolidate_positions=not args["split_positions"],
-            offset=data.get("offset", None),
+        mat_db_name = f"{datastack_name}__mat{version}"
+        data = request.parsed_obj
+        qm = QueryManager(
+            mat_db_name,
+            segmentation_source=pcg_table_name,
+            meta_db_name=aligned_volume_name,
+            split_mode=~analysis_version.is_merged,
             limit=limit,
-            get_count=get_count,
+            offset=data.get("offset", 0),
+            get_count=get_count
         )
-        time_d["execute query"] = time.time() - now
-        now = time.time()
+        qm.add_table(table_name)
+        qm.apply_filter(data.get("filter_in_dict", None), qm.apply_isin_filter)
+        qm.apply_filter(data.get("filter_out_dict", None), qm.apply_notequal_filter)
+        qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
+        qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
+
+        select_columns = data.get("select_columns", None)
+        if select_columns:
+            for column in select_columns:
+                qm.select_column(table_name, column)
+        else:
+            qm.select_all_columns(table_name)
+
+        df, column_names = qm.execute_query()
+
         headers = None
         current_app.logger.info("query: {}".format(data))
         current_app.logger.info("args: {}".format(args))
@@ -727,15 +562,11 @@ class FrozenTableQuery(Resource):
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
             serialized = context.serialize(df).to_buffer().to_pybytes()
-            time_d["serialize"] = time.time() - now
-            logging.debug(time_d)
             return Response(
                 serialized, headers=headers, mimetype="x-application/pyarrow"
             )
         else:
             dfjson = df.to_json(orient="records")
-            time_d["serialize"] = time.time() - now
-            logging.debug(time_d)
             response = Response(dfjson, headers=headers, mimetype="application/json")
             return after_request(response)
 
@@ -809,40 +640,65 @@ class FrozenQuery(Resource):
             [t[0] for t in data["tables"]], target_datastack, target_version
         )
         headers = None
-        model_dict = {}
+
         for table_desc in data["tables"]:
             table_name = table_desc[0]
             ann_md = check_read_permission(db, table_name)
-            Model = get_flat_model(datastack_name, table_name, version, Session)
-            model_dict[table_name] = Model
             headers = update_notice_text_headers(ann_md, headers)
 
         db_name = f"{datastack_name}__mat{version}"
-        Session = sqlalchemy_cache.get(db_name)
-        engine = sqlalchemy_cache.get_engine(db_name)
+
+        analysis_version = (
+            Session.query(AnalysisVersion)
+            .filter(AnalysisVersion.version == version)
+            .one()
+        )
         max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
 
         data = request.parsed_obj
         limit = data.get("limit", max_limit)
         if limit > max_limit:
             limit = max_limit
-        logging.debug(f"query {data}")
 
-        df = specific_query(
-            Session,
-            engine,
-            model_dict,
-            data["tables"],
-            filter_in_dict=data.get("filter_in_dict", None),
-            filter_notin_dict=data.get("filter_notin_dict", None),
-            filter_equal_dict=data.get("filter_equal_dict", None),
-            filter_spatial=data.get("filter_spatial_dict", None),
-            select_columns=data.get("select_columns", None),
-            consolidate_positions=not args["split_positions"],
-            offset=data.get("offset", None),
+        data = request.parsed_obj
+        qm = QueryManager(
+            db_name,
+            segmentation_source=pcg_table_name,
+            meta_db_name=aligned_volume_name,
+            split_mode=~analysis_version.is_merged,
             limit=limit,
-            suffixes=data.get("suffixes", None),
+            offset=data.get("offset", 0),
+            get_count=False
         )
+        for table_desc in data["tables"]:
+            qm.join_tables(table_desc[0], table_desc[1], table_desc[2], table_desc[3])
+
+        qm.apply_filter(data.get("filter_in_dict", None), qm.apply_isin_filter)
+        qm.apply_filter(data.get("filter_out_dict", None), qm.apply_notequal_filter)
+        qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
+        qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
+        suffixes = data.get('suffixes', None )
+        if suffixes:
+            if len(suffixes) != len(qm._tables):
+                abort(400, f"You passed {len(suffixes)} suffixes, but there were {len(qm._tables)} tables referenced in your query")
+        select_columns = data.get('select_columns', None )
+        if select_columns:
+            for column in select_columns:
+                found=False
+                for table in qm._tables:
+                    try:
+                        qm.select_column(table, column)
+                        found=True
+                        break
+                    except ValueError:
+                        pass
+                if not found:
+                    abort(400, f"column {column} not found in any table referenced")
+        else:
+            for table in qm._tables:
+                qm.select_all_columns()
+        
+        df, column_names = qm.execute_query()
 
         if len(df) == limit:
             msg = f'201 - "Limited query to {limit} rows'
@@ -862,147 +718,3 @@ class FrozenQuery(Resource):
             response = Response(dfjson, headers=headers, mimetype="application/json")
             return after_request(response)
 
-
-# @client_bp.route("/aligned_volume/<string:aligned_volume_name>/table")
-# class SegmentationTable(Resource):
-#     @auth_required
-#     @client_bp.doc("create_segmentation_table", security="apikey")
-#     @accepts("SegmentationTableSchema", schema=SegmentationTableSchema, api=client_bp)
-#     def post(self, aligned_volume_name: str):
-#         """ Create a new segmentation table"""
-#         check_aligned_volume(aligned_volume_name)
-
-#         data = request.parsed_obj
-#         db = get_db(aligned_volume_name)
-
-#         annotation_table_name = data.get("table_name")
-#         pcg_table_name = data.get("pcg_table_name")
-
-#         table_info = db.create_and_attach_seg_table(
-#             annotation_table_name, pcg_table_name)
-
-#         return table_info, 200
-
-#     @auth_required
-#     @client_bp.doc("get_aligned_volume_tables", security="apikey")
-#     def get(self, aligned_volume_name: str):
-#         """ Get list of segmentation tables for an aligned_volume"""
-#         check_aligned_volume(aligned_volume_name)
-#         db = get_db(aligned_volume_name)
-#         tables = db.get_existing_segmentation_table_ids()
-#         return tables, 200
-
-
-# @client_bp.route(
-#     "/aligned_volume/<string:aligned_volume_name>/table/<string:table_name>/segmentations"
-# )
-# class LinkedSegmentations(Resource):
-#     @auth_required
-#     @client_bp.doc("post linked annotations", security="apikey")
-#     @accepts("SegmentationDataSchema", schema=SegmentationDataSchema, api=client_bp)
-#     def post(self, aligned_volume_name: str, table_name: str, **kwargs):
-#         """ Insert linked segmentations """
-#         check_aligned_volume(aligned_volume_name)
-#         data = request.parsed_obj
-#         segmentations = data.get("segmentations")
-#         pcg_table_name = data.get("pcg_table_name")
-#         db = get_db(aligned_volume_name)
-#         try:
-#             db.insert_linked_segmentation(table_name,
-#                                           pcg_table_name,
-#                                           segmentations)
-#         except Exception as error:
-#             logging.error(f"INSERT FAILED {segmentations}")
-#             abort(404, error)
-
-#         return f"Inserted {len(segmentations)} annotations", 200
-# @client_bp.route(
-#     "/aligned_volume/<string:aligned_volume_name>/table/<string:table_name>/annotations"
-# )
-# class LinkedAnnotations(Resource):
-#     @auth_required
-#     @client_bp.doc("get linked annotations", security="apikey")
-#     @client_bp.expect(annotation_parser)
-#     def get(self, aligned_volume_name: str, table_name: str, **kwargs):
-#         """ Get annotations and segmentation from list of IDs"""
-#         check_aligned_volume(aligned_volume_name)
-#         args = annotation_parser.parse_args()
-
-#         ids = args["annotation_ids"]
-#         pcg_table_name = args["pcg_table_name"]
-
-#         db = get_db(aligned_volume_name)
-#         annotations = db.get_linked_annotations(table_name,
-#                                                 pcg_table_name,
-#                                                 ids)
-
-#         if annotations is None:
-#             msg = f"annotation_id {ids} not in {table_name}"
-#             abort(404, msg)
-
-#         return annotations, 200
-
-#     @auth_required
-#     @client_bp.doc("post linked annotations", security="apikey")
-#     @accepts("PostPutAnnotationSchema", schema=PostPutAnnotationSchema, api=client_bp)
-#     def post(self, aligned_volume_name: str, table_name: str, **kwargs):
-#         """ Insert linked annotations """
-#         check_aligned_volume(aligned_volume_name)
-#         data = request.parsed_obj
-#         annotations = data.get("annotations")
-#         pcg_table_name = data.get("pcg_table_name")
-#         db = get_db(aligned_volume_name)
-#         try:
-#             db.insert_linked_annotations(table_name,
-#                                          pcg_table_name,
-#                                          annotations)
-#         except Exception as error:
-#             logging.error(f"INSERT FAILED {annotations}")
-#             abort(404, error)
-
-#         return f"Inserted {len(annotations)} annotations", 200
-
-#     @auth_required
-#     @client_bp.doc("update linked annotations", security="apikey")
-#     @accepts("PostPutAnnotationSchema", schema=PostPutAnnotationSchema, api=client_bp)
-#     def put(self, aligned_volume_name: str, table_name: str, **kwargs):
-#         """ Update linked annotations """
-#         check_aligned_volume(aligned_volume_name)
-#         data = request.parsed_obj
-#         annotations = data.get("annotations")
-#         pcg_table_name = data.get("pcg_table_name")
-#         db = get_db(aligned_volume_name)
-
-#         metadata = db.get_table_metadata(aligned_volume_name, table_name)
-#         schema = metadata.get("schema_type")
-
-#         if schema:
-#             for annotation in annotations:
-#                 db.update_linked_annotations(table_name,
-#                                              pcg_table_name,
-#                                              annotation)
-
-#         return f"Updated {len(data)} annotations", 200
-
-#     @auth_required
-#     @client_bp.doc("delete linked annotations", security="apikey")
-#     @accepts("GetDeleteAnnotationSchema", schema=GetDeleteAnnotationSchema, api=client_bp)
-#     def delete(self, aligned_volume_name: str, table_name: str, **kwargs):
-#         """ Delete linked annotations """
-#         check_aligned_volume(aligned_volume_name)
-#         data = request.parsed_obj
-
-#         ids = data.get("annotation_ids")
-#         pcg_table_name = data.get("pcg_table_name")
-#         db = get_db(aligned_volume_name)
-
-#         for anno_id in ids:
-#             ann = db.delete_linked_annotation(table_name,
-#                                               pcg_table_name,
-#                                               ids)
-
-#         if ann is None:
-#             msg = f"annotation_id {ids} not in {table_name}"
-#             abort(404, msg)
-
-#         return ann, 200
