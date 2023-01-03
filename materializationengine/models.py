@@ -13,4 +13,4 @@ class MaterializedMetadata(MatBase):
     materialized_timestamp = Column(DateTime, nullable=False)
     segmentation_source = Column(String(255), nullable=True)
     is_merged = Column(Boolean, nullable=True)
-
+    has_created_ts = Column(Boolean, nullable=True)
