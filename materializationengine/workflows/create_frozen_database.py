@@ -403,7 +403,8 @@ def create_materialized_metadata(
             valid_row_count = mat_metadata["row_count"]
             segmentation_source = mat_metadata.get("segmentation_source")
             merge_table = mat_metadata.get("merge_table")
-
+            has_created_ts = mat_metadata.get("keep_created_column", False)
+            
             celery_logger.info(f"Row count {valid_row_count}")
             if valid_row_count == 0:
                 continue
@@ -415,6 +416,7 @@ def create_materialized_metadata(
                 materialized_timestamp=materialization_time_stamp,
                 segmentation_source=segmentation_source,
                 is_merged=merge_table,
+                has_created_ts=has_created_ts
             )
             analysis_session.add(mat_metadata)
             analysis_session.commit()
