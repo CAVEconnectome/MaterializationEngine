@@ -12,7 +12,6 @@ from dynamicannotationdb.models import (
     AnalysisVersion,
     AnnoMetadata,
     Base,
-    MaterializedMetadata,
 )
 from emannotationschemas import get_schema
 from emannotationschemas.flatten import create_flattened_schema
@@ -28,6 +27,7 @@ from materializationengine.database import (
     dynamic_annotation_cache,
     sqlalchemy_cache,
 )
+from materializationengine.models import MaterializedMetadata
 from materializationengine.errors import IndexMatchError
 from materializationengine.index_manager import index_cache
 from materializationengine.shared_tasks import (
