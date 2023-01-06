@@ -28,7 +28,7 @@ from flask import g
 
 from materializationengine.utils import check_read_permission
 
-__version__ = "4.4.1"
+__version__ = "4.4.2"
 
 
 authorizations = {
