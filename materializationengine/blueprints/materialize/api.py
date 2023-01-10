@@ -26,7 +26,7 @@ from materializationengine.utils import check_write_permission
 
 from materializationengine.blueprints.materialize.schemas import VirtualVersionSchema
 
-__version__ = "4.4.0"
+__version__ = "4.4.2"
 
 
 bulk_upload_parser = reqparse.RequestParser()
@@ -112,9 +112,9 @@ class LockedTasksResource(Resource):
         """Get locked tasks from redis"""
         from materializationengine.celery_worker import inspect_locked_tasks
 
-        ltdict= inspect_locked_tasks(release_locks=False)
-        return {str(k):v for k,v in ltdict.items()}
-       
+        ltdict = inspect_locked_tasks(release_locks=False)
+        return {str(k): v for k, v in ltdict.items()}
+
     @reset_auth
     @auth_requires_admin
     @mat_bp.doc("Unlock locked tasks", security="apikey")
@@ -122,9 +122,8 @@ class LockedTasksResource(Resource):
         "Unlock locked tasks"
         from materializationengine.celery_worker import inspect_locked_tasks
 
-        
-        ltdict= inspect_locked_tasks(release_locks=True)
-        return {str(k):v for k,v in ltdict.items()}     
+        ltdict = inspect_locked_tasks(release_locks=True)
+        return {str(k): v for k, v in ltdict.items()}
 
 
 @mat_bp.route("/celery/status/queue")
@@ -170,6 +169,30 @@ class ProcessNewAnnotationsResource(Resource):
 
         datastack_info = get_datastack_info(datastack_name)
         process_new_annotations_workflow.s(datastack_info).apply_async()
+        return 200
+
+
+@mat_bp.route(
+    "/materialize/run/lookup_svid/datastack/<string:datastack_name>/<string:table_name>"
+)
+class ProcessNewSVIDResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("process new svids workflow", security="apikey")
+    def post(self, datastack_name: str, table_name: str):
+        """Process newly added annotations and lookup supervoxel data
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+            table_name (str): name of table
+        """
+        from materializationengine.workflows.ingest_new_annotations import (
+            ingest_table_svids,
+        )
+
+        datastack_info = get_datastack_info(datastack_name)
+
+        info = ingest_table_svids.s(datastack_info, table_name).apply_async()
         return 200
 
 
