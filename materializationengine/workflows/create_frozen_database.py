@@ -197,7 +197,7 @@ def rebuild_reference_tables(self, mat_info: List[dict]):
                 )
             else:
                 reference_table_workflow = add_indices.si(mat_metadata)
-                reference_table_tasks.append(reference_table_workflow)
+            reference_table_tasks.append(reference_table_workflow)
 
     if reference_table_tasks:
         return self.replace(chain(reference_table_tasks))
