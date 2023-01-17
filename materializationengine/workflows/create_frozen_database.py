@@ -403,7 +403,7 @@ def create_materialized_metadata(
             valid_row_count = mat_metadata["row_count"]
             segmentation_source = mat_metadata.get("segmentation_source")
             merge_table = mat_metadata.get("merge_table")
-            has_created_ts = mat_metadata.get("keep_created_column", False)
+            has_created_ts = mat_metadata.get("keep_created_ts_col")
             
             celery_logger.info(f"Row count {valid_row_count}")
             if valid_row_count == 0:
@@ -654,7 +654,7 @@ def merge_tables(self, mat_metadata: dict):
     )
     SegmentationModel = create_segmentation_model(mat_metadata)
 
-    keep_created = mat_metadata.get("keep_created_column")
+    keep_created = mat_metadata.get("keep_created_ts_col")
     crud_columns = ["created", "deleted", "superceded_id"] # crud cols to drop
     if keep_created:
         crud_columns.pop(0) # we want to keep the 'created' col

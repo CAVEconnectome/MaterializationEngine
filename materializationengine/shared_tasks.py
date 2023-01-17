@@ -196,7 +196,7 @@ def get_materialization_info(
                 "reference_table": reference_table,
                 "materialization_time_stamp": str(materialization_time_stamp),
                 "table_count": len(annotation_tables),
-                "keep_created_column": get_config_param("KEEP_CREATED_COLUMN")
+                "keep_created_ts_col": md.get("keep_created_ts_col", False)
             }
             has_segmentation_table = db.schema.is_segmentation_table_required(schema)
             if has_segmentation_table:
