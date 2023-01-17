@@ -6,6 +6,7 @@ from copy import deepcopy
 import pandas as pd
 import logging
 from typing import Iterable
+from collections import defaultdict
 
 
 def update_rootids(
@@ -33,7 +34,7 @@ def update_rootids(
             if allow_missing_lookups:
                 warnings.append(msg)
                 not_ones = df[sv_col] != 1
-                df=df[not_ones]
+                df = df[not_ones]
             else:
                 abort(406, msg)
 
@@ -131,18 +132,21 @@ def remap_query(user_data, mat_timestamp, cg_client):
 
     new_filter_in_dict, new_filter_out_dict, new_equal_dict = new_filters
     if new_equal_dict is not None:
+        if new_filter_in_dict is None:
+            new_filter_in_dict = defaultdict(lambda: None)
         # when doing a filter equal in the past
         # we translate it to a filter_in, as 1 ID might
         # be multiple IDs in the past.
         # so we want to update the filter_in dict
-        cols = [col for col in new_equal_dict.keys()]
-        for col in cols:
-            if col.endswith("root_id"):
-                if new_filter_in_dict is None:
-                    new_filter_in_dict = {}
-                new_filter_in_dict[col] = new_equal_dict.pop(col)
-        if len(new_equal_dict) == 0:
-            new_equal_dict = None
+        for table, filter in new_equal_dict.items():
+            cols = [col for col in filter.keys()]
+            for col in cols:
+                if col.endswith("root_id"):
+                    if new_filter_in_dict[table] is None:
+                        new_filter_in_dict[table] = defaultdict(lambda: None)
+                    new_filter_in_dict[table][col] = new_equal_dict[table].pop(col)
+            if len(new_equal_dict[table]) == 0:
+                new_equal_dict = None
 
     modified_user_data = deepcopy(user_data)
     modified_user_data["filter_equal_dict"] = new_equal_dict
@@ -170,14 +174,16 @@ def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_
 
     new_filters = []
     root_ids = []
-    for filter_dict in filters:
-        if filter_dict is not None:
-            for col, val in filter_dict.items():
-                if col.endswith("root_id"):
-                    if not isinstance(val, (Iterable, np.ndarray)):
-                        root_ids.append([val])
-                    else:
-                        root_ids.append(val)
+    for filter in filters:
+        if filter is not None:
+            for table, filter_dict in filter.items():
+                if filter_dict is not None:
+                    for col, val in filter_dict.items():
+                        if col.endswith("root_id"):
+                            if not isinstance(val, (Iterable, np.ndarray)):
+                                root_ids.append([val])
+                            else:
+                                root_ids.append(val)
 
     # if there are no root_ids then we can safely return now
     if len(root_ids) == 0:
@@ -212,23 +218,29 @@ def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_
     if len(id_mapping[query_map_str]) == 0:
         return filters, {}
 
-    for filter_dict in filters:
-        if filter_dict is None:
-            new_filters.append(filter_dict)
-        else:
-            new_dict = {}
-            for col, root_ids in filter_dict.items():
-                if col.endswith("root_id"):
-                    if not isinstance(root_ids, (Iterable, np.ndarray)):
-                        new_dict[col] = id_mapping[mat_map_str][root_ids]
-                    else:
-                        new_dict[col] = np.concatenate(
-                            [id_mapping[mat_map_str][v] for v in root_ids]
-                        )
+    for filter in filters:
+        if filter is not None:
+            new_filter = defaultdict(lambda: None)
+            for table, filter_dict in filter.items():
+                if filter_dict is None:
+                    new_filter[table] = defaultdict(lambda: None)
                 else:
-                    new_dict[col] = root_ids
-            new_filters.append(new_dict)
-
+                    new_filter[table] = defaultdict(lambda: None)
+                    for col, root_ids in filter_dict.items():
+                        if col.endswith("root_id"):
+                            if not isinstance(root_ids, (Iterable, np.ndarray)):
+                                new_filter[table][col] = id_mapping[mat_map_str][
+                                    root_ids
+                                ]
+                            else:
+                                new_filter[table][col] = np.concatenate(
+                                    [id_mapping[mat_map_str][v] for v in root_ids]
+                                )
+                        else:
+                            new_filter[table][col] = root_ids
+            new_filters.append(new_filter)
+        else:
+            new_filters.append(None)
     return new_filters, id_mapping[query_map_str]
 
 

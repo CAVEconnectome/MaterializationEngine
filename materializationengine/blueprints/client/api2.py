@@ -329,6 +329,8 @@ def combine_queries(
     """
     print(mat_df)
     print(prod_df)
+    if len(mat_df)==0:
+        mat_df=None
     user_timestamp = user_data["timestamp"]
     chosen_timestamp = pytz.utc.localize(chosen_version.time_stamp)
     table = user_data["table"]
@@ -373,7 +375,7 @@ def combine_queries(
         cut_prod_df = cut_prod_df.drop(columns=["created", "deleted", "superceded_id"])
         if mat_df is not None:
             if len(prod_df[to_delete_in_mat].index) > 0:
-                mat_df = mat_df.drop(prod_df[to_delete_in_mat].index, axis=0)
+                mat_df = mat_df.drop(prod_df[to_delete_in_mat].index, axis=0, errors='ignore')
             comb_df = pd.concat([cut_prod_df, mat_df])
         else:
             comb_df = prod_df[to_add_in_mat].drop(
@@ -667,10 +669,10 @@ class LiveTableQuery(Resource):
                 400,
                 "there is no future or past version for this timestamp, is materialization broken?",
             )
-        elif future_ver is not None:
-            chosen_version = future_ver
-        else:
+        elif past_ver is not None:
             chosen_version = past_ver
+        else:
+            chosen_version = future_ver
 
         chosen_timestamp = pytz.utc.localize(chosen_version.time_stamp)
 
