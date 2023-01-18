@@ -18,10 +18,11 @@ from materializationengine.info_client import (
 )
 from dynamicannotationdb.models import AnalysisVersion
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
-from middle_auth_client import auth_requires_admin
+from middle_auth_client import auth_requires_admin, auth_requires_permission
 from sqlalchemy import MetaData, Table
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoSuchTableError
+from materializationengine.utils import check_write_permission
 
 from materializationengine.blueprints.materialize.schemas import VirtualVersionSchema
 
@@ -111,7 +112,8 @@ class LockedTasksResource(Resource):
         """Get locked tasks from redis"""
         from materializationengine.celery_worker import inspect_locked_tasks
 
-        return inspect_locked_tasks(release_locks=False)
+        ltdict = inspect_locked_tasks(release_locks=False)
+        return {str(k): v for k, v in ltdict.items()}
 
     @reset_auth
     @auth_requires_admin
@@ -120,7 +122,8 @@ class LockedTasksResource(Resource):
         "Unlock locked tasks"
         from materializationengine.celery_worker import inspect_locked_tasks
 
-        return inspect_locked_tasks(release_locks=True)
+        ltdict = inspect_locked_tasks(release_locks=True)
+        return {str(k): v for k, v in ltdict.items()}
 
 
 @mat_bp.route("/celery/status/queue")
@@ -186,6 +189,7 @@ class ProcessNewSVIDResource(Resource):
         from materializationengine.workflows.ingest_new_annotations import (
             ingest_table_svids,
         )
+
         datastack_info = get_datastack_info(datastack_name)
 
         info = ingest_table_svids.s(datastack_info, table_name).apply_async()
@@ -197,7 +201,7 @@ class ProcessNewSVIDResource(Resource):
 )
 class ProcessNewAnnotationsTableResource(Resource):
     @reset_auth
-    @auth_requires_admin
+    @auth_requires_permission("edit", table_arg="datastack_name")
     @mat_bp.doc("process new annotations workflow", security="apikey")
     def post(self, datastack_name: str, table_name: str):
         """Process newly added annotations and lookup segmentation data
@@ -211,6 +215,9 @@ class ProcessNewAnnotationsTableResource(Resource):
         )
 
         datastack_info = get_datastack_info(datastack_name)
+        db = dynamic_annotation_cache.get_db(datastack_info["aligned_volume"]["name"])
+        check_write_permission(db, table_name)
+
         process_new_annotations_workflow.s(
             datastack_info, table_name=table_name
         ).apply_async()

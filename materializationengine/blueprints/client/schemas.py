@@ -1,6 +1,6 @@
 from marshmallow import fields, Schema
 from marshmallow.validate import Length
-
+import datetime
 
 class Metadata(Schema):
     user_id = fields.Str(required=False)
@@ -33,6 +33,23 @@ class PostPutAnnotationSchema(SegmentationInfoSchema):
 class SegmentationDataSchema(Schema):
     pcg_table_name = fields.Str(required=True)
     segmentations = fields.List(fields.Dict, required=True)
+
+
+class V2QuerySchema(Schema):
+    table = fields.Str(required=True)
+    timestamp = fields.AwareDateTime(default_timezone=datetime.timezone.utc, required=True)
+    join_tables = fields.List(
+        fields.List(fields.Str),
+        required=False,
+    )
+    filter_in_dict = fields.Dict()
+    filter_notin_dict = fields.Dict()
+    filter_equal_dict = fields.Dict()
+    filter_spatial_dict = fields.Dict()
+    select_columns = fields.Dict()
+    offset = fields.Integer()
+    limit = fields.Integer()
+    suffixes = fields.Dict()
 
 
 class SimpleQuerySchema(Schema):

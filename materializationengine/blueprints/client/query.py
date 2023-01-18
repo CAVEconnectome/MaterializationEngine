@@ -16,7 +16,7 @@ from geoalchemy2.types import Geometry
 from multiwrapper import multiprocessing_utils as mu
 from sqlalchemy import func, not_
 from sqlalchemy.orm import Query, Session
-from sqlalchemy.sql.sqltypes import Boolean, Integer
+from sqlalchemy.sql.sqltypes import Boolean, Integer, DateTime
 from sqlalchemy.ext.declarative import DeclarativeMeta
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
@@ -97,14 +97,16 @@ def fix_columns_with_query(
             if coltype is Boolean:
                 pass
             #    df[colname] = _fix_boolean_column(df[colname])
-
+            elif coltype is DateTime:
+                df[colname] = pd.to_datetime(
+                    df[colname], utc=True, infer_datetime_format=True
+                )
             elif coltype is Geometry and fix_wkb is True:
                 df[colname] = fix_wkb_column(
                     df[colname],
                     wkb_data_start_ind=wkb_data_start_ind,
                     n_threads=n_threads,
                 )
-
             elif isinstance(df[colname].loc[0], Decimal) and fix_decimal is True:
                 df[colname] = _fix_decimal_column(df[colname])
             else:
@@ -479,6 +481,7 @@ def _execute_query(
         count = query.count()
         df = pd.DataFrame({"count": [count]})
     else:
+        # print(query.statement.compile(engine, compile_kwargs={"literal_binds": True}))
         df = read_sql_tmpfile(
             query.statement.compile(engine, compile_kwargs={"literal_binds": True}),
             engine,
@@ -526,7 +529,6 @@ def _query(
     :param index_col:
     :return:
     """
-
     query = _make_query(
         this_sqlalchemy_session,
         query_args=query_args,
