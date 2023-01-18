@@ -68,12 +68,12 @@ class TestUpdateRootIds:
             {
                 "pre_pt_root_id": "SELECT test_synapse_table__test_pcg.id, test_synapse_table__test_pcg.pre_pt_root_id, test_synapse_table__test_pcg.pre_pt_supervoxel_id \n"
                 "FROM test_synapse_table__test_pcg \n"
-                "WHERE test_synapse_table__test_pcg.pre_pt_root_id IN (10000000000000000, 40000000000000000, 50000000000000000)"
+                "WHERE test_synapse_table__test_pcg.pre_pt_root_id IN (10000000000000000, 40000000000000000, 50000000000000000) OR test_synapse_table__test_pcg.pre_pt_root_id IS NULL"
             },
             {
                 "post_pt_root_id": "SELECT test_synapse_table__test_pcg.id, test_synapse_table__test_pcg.post_pt_root_id, test_synapse_table__test_pcg.post_pt_supervoxel_id \n"
                 "FROM test_synapse_table__test_pcg \n"
-                "WHERE test_synapse_table__test_pcg.post_pt_root_id IN (10000000000000000, 40000000000000000, 50000000000000000)"
+                "WHERE test_synapse_table__test_pcg.post_pt_root_id IN (10000000000000000, 40000000000000000, 50000000000000000) OR test_synapse_table__test_pcg.post_pt_root_id IS NULL"
             },
         ]
 
