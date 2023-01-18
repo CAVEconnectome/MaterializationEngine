@@ -183,11 +183,13 @@ def get_supervoxel_id_queries(root_id_chunk: list, mat_metadata: dict):
     for root_id_column in root_id_columns:
         prefix = root_id_column.rsplit("_", 2)[0]
         supervoxel_name = f"{prefix}_supervoxel_id"
+        root_id_att = getattr(SegmentationModel, root_id_column)
+        sv_id_att = getattr(SegmentationModel, supervoxel_name)
         sv_ids_query = session.query(
             SegmentationModel.id,
-            getattr(SegmentationModel, root_id_column),
-            getattr(SegmentationModel, supervoxel_name),
-        ).filter(or_(getattr(SegmentationModel, root_id_column)).in_(root_id_chunk))
+            root_id_att,
+            sv_id_att,
+        ).filter(or_(or_(root_id_att).in_(root_id_chunk),root_id_att==None))
 
         sv_ids_query = sv_ids_query.statement.compile(
             compile_kwargs={"literal_binds": True}
