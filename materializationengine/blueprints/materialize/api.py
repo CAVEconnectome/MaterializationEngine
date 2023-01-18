@@ -26,7 +26,7 @@ from materializationengine.utils import check_write_permission
 
 from materializationengine.blueprints.materialize.schemas import VirtualVersionSchema
 
-__version__ = "4.5.0"
+__version__ = "4.5.1"
 
 
 bulk_upload_parser = reqparse.RequestParser()
