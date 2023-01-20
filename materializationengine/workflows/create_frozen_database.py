@@ -643,7 +643,7 @@ def merge_tables(self, mat_metadata: dict):
         table_name=annotation_table_name,
         Schema=flat_schema,
         segmentation_source=None,
-        table_metadata=None,
+        table_metadata={"reference_table": mat_metadata.get("reference_table")},
         with_crud_columns=False,
     )
     # reset cache to include crud cols since the model can be stale
