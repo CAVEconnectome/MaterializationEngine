@@ -5,7 +5,7 @@ import requests
 from cachetools import LRUCache, TTLCache, cached
 from caveclient.auth import AuthClient
 from caveclient.infoservice import InfoServiceClient
-from flask import current_app
+from flask import current_app, abort
 
 from materializationengine.errors import (
     AlignedVolumeNotFoundException,
@@ -59,6 +59,8 @@ def get_datastacks():
 
 @cachetools.func.ttl_cache(maxsize=10, ttl=5 * 60)
 def get_datastack_info(datastack_name):
+    if datastack_name not in current_app.config["DATASTACKS"]:
+        abort(404, f"datastack {datastack_name} not configured for materialization")
     server = current_app.config["GLOBAL_SERVER_URL"]
     auth = AuthClient(server_address=server, token=current_app.config["AUTH_TOKEN"])
     info_client = InfoServiceClient(
