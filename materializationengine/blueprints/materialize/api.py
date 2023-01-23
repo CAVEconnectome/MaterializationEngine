@@ -26,7 +26,7 @@ from materializationengine.utils import check_write_permission
 
 from materializationengine.blueprints.materialize.schemas import VirtualVersionSchema
 
-__version__ = "4.5.2"
+__version__ = "4.5.0"
 
 
 bulk_upload_parser = reqparse.RequestParser()
@@ -189,9 +189,9 @@ class ProcessNewSVIDResource(Resource):
         from materializationengine.workflows.ingest_new_annotations import (
             ingest_table_svids,
         )
-
+ 
         datastack_info = get_datastack_info(datastack_name)
-
+      
         info = ingest_table_svids.s(datastack_info, table_name).apply_async()
         return 200
 
