@@ -26,7 +26,9 @@ from materializationengine.utils import check_write_permission
 
 from materializationengine.blueprints.materialize.schemas import VirtualVersionSchema
 
+
 __version__ = "4.5.3"
+
 
 
 bulk_upload_parser = reqparse.RequestParser()
@@ -190,6 +192,8 @@ class ProcessNewSVIDResource(Resource):
             ingest_table_svids,
         )
 
+        if datastack_name not in current_app.config["DATASTACKS"]:
+            abort(404, f"datastack {datastack_name} not configured for materialization")
         datastack_info = get_datastack_info(datastack_name)
 
         info = ingest_table_svids.s(datastack_info, table_name).apply_async()
