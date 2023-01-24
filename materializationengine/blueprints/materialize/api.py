@@ -30,7 +30,6 @@ from materializationengine.blueprints.materialize.schemas import VirtualVersionS
 __version__ = "4.5.4"
 
 
-
 bulk_upload_parser = reqparse.RequestParser()
 bulk_upload_parser.add_argument(
     "column_mapping", required=True, type=dict, location="json"
@@ -179,7 +178,7 @@ class ProcessNewAnnotationsResource(Resource):
 )
 class ProcessNewSVIDResource(Resource):
     @reset_auth
-    @auth_requires_admin
+    @auth_requires_permission("edit", table_arg="datastack_name")
     @mat_bp.doc("process new svids workflow", security="apikey")
     def post(self, datastack_name: str, table_name: str):
         """Process newly added annotations and lookup supervoxel data
