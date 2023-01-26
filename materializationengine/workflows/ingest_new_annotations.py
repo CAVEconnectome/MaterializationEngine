@@ -116,7 +116,7 @@ def ingest_table_svids(self, datastack_info: dict, table_name: str):
 
 
 @celery.task(
-    name="workflow:ingest_new_supervoxel_ids",
+    name="process:ingest_new_supervoxel_ids",
     acks_late=True,
     bind=True,
     autoretry_for=(Exception,),
