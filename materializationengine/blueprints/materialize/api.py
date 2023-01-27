@@ -57,6 +57,8 @@ materialize_parser = reqparse.RequestParser()
 materialize_parser.add_argument("days_to_expire", required=True, default=None, type=int)
 materialize_parser.add_argument("merge_tables", required=True, type=inputs.boolean)
 
+supervoxel_lookup_parser = reqparse.RequestParser()
+supervoxel_lookup_parser.add_argument("data", required=False)
 
 authorizations = {
     "apikey": {"type": "apiKey", "in": "query", "name": "middle_auth_token"}
@@ -179,6 +181,7 @@ class ProcessNewAnnotationsResource(Resource):
 class ProcessNewSVIDResource(Resource):
     @reset_auth
     @auth_requires_permission("edit", table_arg="datastack_name")
+    @mat_bp.expect(supervoxel_lookup_parser)
     @mat_bp.doc("process new svids workflow", security="apikey")
     def post(self, datastack_name: str, table_name: str):
         """Process newly added annotations and lookup supervoxel data
@@ -190,12 +193,13 @@ class ProcessNewSVIDResource(Resource):
         from materializationengine.workflows.ingest_new_annotations import (
             ingest_table_svids,
         )
-
+        args = materialize_parser.parse_args()
+        annotation_ids = args.get("data")
         if datastack_name not in current_app.config["DATASTACKS"]:
             abort(404, f"datastack {datastack_name} not configured for materialization")
         datastack_info = get_datastack_info(datastack_name)
 
-        info = ingest_table_svids.s(datastack_info, table_name).apply_async()
+        info = ingest_table_svids.s(datastack_info, table_name, annotation_ids).apply_async()
         return 200
 
 

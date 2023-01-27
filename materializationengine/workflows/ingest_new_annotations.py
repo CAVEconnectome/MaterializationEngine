@@ -82,11 +82,13 @@ def process_new_annotations_workflow(
 
 
 @celery.task(
-    name="workflow:ingest_table_svids",
+    name="process:ingest_table_svids",
     bind=True,
     acks_late=True,
 )
-def ingest_table_svids(self, datastack_info: dict, table_name: str):
+def ingest_table_svids(
+    self, datastack_info: dict, table_name: str, annotation_ids: list = None
+):
     mat_info = get_materialization_info(
         datastack_info=datastack_info,
         materialization_time_stamp=None,
@@ -94,27 +96,26 @@ def ingest_table_svids(self, datastack_info: dict, table_name: str):
         table_name=table_name,
     )
     mat_metadata = mat_info[0]  # only one entry for a single table
-    annotation_chunks = generate_chunked_model_ids(mat_metadata)
     table_created = create_missing_segmentation_table(mat_metadata)
     if table_created:
         celery_logger.info(f'Table created: {mat_metadata["segmentation_table_name"]}')
+    if annotation_ids:
+        annotation_chunks = generate_chunked_model_ids(mat_metadata)
+        ingest_workflow = chain(
+            chord(
+                [
+                    chain(
+                        ingest_new_supervoxel_ids.si(annotation_chunk, mat_metadata),
+                    )
+                    for annotation_chunk in annotation_chunks
+                ],
+                fin.si(),
+            )
+        ).apply_async()
+    else:
+        pass #TODO fix logic
 
-    ingest_workflow = chain(
-        chord(
-            [
-                chain(
-                    ingest_new_supervoxel_ids.si(annotation_chunk, mat_metadata),
-                )
-                for annotation_chunk in annotation_chunks
-            ],
-            fin.si(),
-        )
-    ).apply_async()
-    tasks_completed = monitor_workflow_state(ingest_workflow)
-    if tasks_completed:
-        return True
-
-
+        
 @celery.task(
     name="process:ingest_new_supervoxel_ids",
     acks_late=True,
