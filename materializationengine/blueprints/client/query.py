@@ -22,6 +22,20 @@ from sqlalchemy.ext.declarative import DeclarativeMeta
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
 
 
+def add_warnings_to_headers(headers, warnings):
+    if len(warnings) > 0:
+        headers["Warning"] = "\n".join(warnings)
+    return headers
+
+
+def update_notice_text_warnings(ann_md, warnings):
+    notice_text = ann_md.get("notice_text", None)
+    if notice_text is not None:
+        msg = f"Table Owner Warning: {notice_text}"
+        warnings.append(msg)
+
+    return warnings
+    
 def concatenate_position_columns(df):
     grps = itertools.groupby(df.columns, key=lambda x: x[:-2])
     for base, g in grps:

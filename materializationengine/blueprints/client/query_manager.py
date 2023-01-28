@@ -39,6 +39,7 @@ class QueryManager:
         self._split_mode_outer = split_mode_outer
         self._split_models = {}
         self._flat_models = {}
+        self._voxel_resolutions = {}
         self._models = []
         self._tables = set()
         self._joins = []
@@ -67,6 +68,16 @@ class QueryManager:
             return self._split_models[table_name]
         else:
             md = self._meta_db.database.get_table_metadata(table_name)
+            vox_res = np.array(
+                [
+                    md["voxel_resolution_x"],
+                    md["voxel_resolution_y"],
+                    md["voxel_resolution_z"],
+                ]
+            )
+
+            self._voxel_resolutions[table_name] = vox_res
+
             reference_table = md.get("reference_table")
             if reference_table:
                 table_metadata = {"reference_table": reference_table}
@@ -87,6 +98,15 @@ class QueryManager:
         else:
             # schema = self._meta_db.database.get_table_schema(table_name)
             md = self._meta_db.database.get_table_metadata(table_name)
+            vox_res = np.array(
+                [
+                    md["voxel_resolution_x"],
+                    md["voxel_resolution_y"],
+                    md["voxel_resolution_z"],
+                ]
+            )
+
+            self._voxel_resolutions[table_name] = vox_res
 
             reference_table = md.get("reference_table")
             if reference_table:
@@ -281,12 +301,17 @@ class QueryManager:
                 for table_name in user_data[filter_key]:
                     for k, v in user_data[filter_key][table_name].items():
                         filter_func(table_name, k, v)
-                        
-        self.apply_filter(user_data.get("filter_in_dict",None), self.apply_isin_filter)
-        self.apply_filter(user_data.get("filter_out_dict",None), self.apply_notequal_filter)
-        self.apply_filter(user_data.get("filter_equal_dict",None), self.apply_equal_filter)
-        self.apply_filter(user_data.get("filter_spatial_dict",None), self.apply_spatial_filter)
 
+        self.apply_filter(user_data.get("filter_in_dict", None), self.apply_isin_filter)
+        self.apply_filter(
+            user_data.get("filter_out_dict", None), self.apply_notequal_filter
+        )
+        self.apply_filter(
+            user_data.get("filter_equal_dict", None), self.apply_equal_filter
+        )
+        self.apply_filter(
+            user_data.get("filter_spatial_dict", None), self.apply_spatial_filter
+        )
 
         if user_data.get("suffices", None):
             self._suffixes.update(user_data["suffixes"])
@@ -332,7 +357,7 @@ class QueryManager:
 
         return query
 
-    def execute_query(self):
+    def execute_query(self, desired_resolution=None):
         column_lists = self._selected_columns.values()
 
         col_names, col_counts = np.unique(
@@ -342,6 +367,14 @@ class QueryManager:
         query_args = []
         column_names = {}
         for table_num, table_name in enumerate(self._selected_columns.keys()):
+            if desired_resolution is not None:
+                vox_ratio = (
+                    np.array(desired_resolution) / self._voxel_resolutions[table_name]
+                )
+                if np.all(vox_ratio==1):
+                    vox_ratio = None
+            else:
+                vox_ratio = None
             column_names[table_name] = {}
             # lets get the suffix for this table
             suffix = self._suffixes[table_name]
@@ -365,6 +398,8 @@ class QueryManager:
                             .cast(Integer)
                             .label(column.key + "{}_z".format(suffix)),
                         ]
+                        if vox_ratio is not None:
+                            column_args = [c*r for c,r in zip(column_args, vox_ratio)]
                     else:
 
                         if self._split_mode and (
@@ -384,6 +419,8 @@ class QueryManager:
                             column.ST_Y().cast(Integer).label(column.key + "_y"),
                             column.ST_Z().cast(Integer).label(column.key + "_z"),
                         ]
+                        if vox_ratio is not None:
+                            column_args = [c*r for c,r in zip(column_args, vox_ratio)]
                         query_args += column_args
                     else:
                         if self._split_mode and (

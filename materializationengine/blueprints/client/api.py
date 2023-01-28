@@ -1,6 +1,3 @@
-import logging
-import time
-
 import pyarrow as pa
 from cachetools import LRUCache, TTLCache, cached
 from cloudfiles import compression
@@ -8,13 +5,15 @@ from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 from flask import Response, abort, current_app, request
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
-from materializationengine.blueprints.client.query import specific_query
 from materializationengine.blueprints.client.schemas import (
     ComplexQuerySchema,
     SimpleQuerySchema,
 )
 from materializationengine.blueprints.client.query_manager import QueryManager
-
+from materializationengine.blueprints.client.utils import (
+    add_warnings_to_headers,
+    update_notice_text_warnings,
+)
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
 from materializationengine.utils import check_read_permission
@@ -27,8 +26,9 @@ from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSc
 from middle_auth_client import auth_requires_permission
 from materializationengine.blueprints.client.datastack import validate_datastack
 from flask import g
-
+import numpy as np
 from materializationengine.utils import check_read_permission
+import textwrap
 
 __version__ = "4.3.17"
 
@@ -223,17 +223,6 @@ def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
     )
 
 
-def update_notice_text_headers(ann_md, headers):
-    notice_text = ann_md.get("notice_text", None)
-    if notice_text is not None:
-        msg = f"Table Owner Warning: {notice_text}"
-        if headers is None:
-            headers = {"Warning": msg}
-        else:
-            headers["Warning"] = +"\n" + msg
-    return headers
-
-
 @client_bp.route("/datastack/<string:datastack_name>/versions")
 class DatastackVersions(Resource):
     @reset_auth
@@ -398,7 +387,9 @@ class FrozenTableMetadata(Resource):
         ann_md = db.database.get_table_metadata(table_name)
         ann_md.pop("id")
         ann_md.pop("deleted")
-        headers = update_notice_text_headers(ann_md, None)
+
+        warnings = update_notice_text_warnings(ann_md, [])
+        headers = add_warnings_to_headers({}, warnings)
 
         tables.update(ann_md)
         return tables, 200, headers
@@ -525,6 +516,14 @@ class FrozenTableQuery(Resource):
 
         mat_db_name = f"{datastack_name}__mat{version}"
         data = request.parsed_obj
+        if data["desired_resolution"] is None:
+            des_res = [
+                ann_md["voxel_resolution_x"],
+                ann_md["voxel_resolution_y"],
+                ann_md["voxel_resolution_z"],
+            ]
+            data["desired_resolution"] = des_res
+
         qm = QueryManager(
             mat_db_name,
             segmentation_source=pcg_table_name,
@@ -532,7 +531,7 @@ class FrozenTableQuery(Resource):
             split_mode=~analysis_version.is_merged,
             limit=limit,
             offset=data.get("offset", 0),
-            get_count=get_count
+            get_count=get_count,
         )
         qm.add_table(table_name)
         qm.apply_filter(data.get("filter_in_dict", None), qm.apply_isin_filter)
@@ -547,17 +546,22 @@ class FrozenTableQuery(Resource):
         else:
             qm.select_all_columns(table_name)
 
-        df, column_names = qm.execute_query()
+        df, column_names = qm.execute_query(
+            desired_resolution=data["desired_resolution"]
+        )
 
-        headers = None
+        warnings = []
         current_app.logger.info("query: {}".format(data))
         current_app.logger.info("args: {}".format(args))
         user_id = str(g.auth_user["id"])
         current_app.logger.info(f"user_id: {user_id}")
 
         if len(df) == limit:
-            headers = {"Warning": f'201 - "Limited query to {limit} rows'}
-        headers = update_notice_text_headers(ann_md, headers)
+            warnings.append(f'201 - "Limited query to {limit} rows')
+        warnings = update_notice_text_warnings(ann_md, warnings)
+        df.attrs["columns_names"] = column_names
+        df.attrs["data_resolution"] = data["desired_resolution"]
+        headers = add_warnings_to_headers({}, warnings)
 
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
@@ -639,12 +643,12 @@ class FrozenQuery(Resource):
         validate_table_args(
             [t[0] for t in data["tables"]], target_datastack, target_version
         )
-        headers = None
+        warnings = []
 
         for table_desc in data["tables"]:
             table_name = table_desc[0]
             ann_md = check_read_permission(db, table_name)
-            headers = update_notice_text_headers(ann_md, headers)
+            warnings = update_notice_text_warnings(ann_md, warnings)
 
         db_name = f"{datastack_name}__mat{version}"
 
@@ -661,6 +665,28 @@ class FrozenQuery(Resource):
             limit = max_limit
 
         data = request.parsed_obj
+        suffixes = data.get("suffixes", None)
+
+        if suffixes is not None:
+            warn_text = textwrap.dedent(
+                """\
+                Suffixes is deprecated for complex queries as it
+                can be ambiguous what you desire, 
+                please pass suffix_map as a dictionary to explicitly
+                set suffixes for individual tables.
+                Upgrade caveclient to >X.X.X """
+            )
+            warnings.append(warn_text)
+            all_tables = []
+            for table_desc in data["tables"]:
+                all_tables.append(table_desc[0])
+                all_tables.append(table_desc[1])
+            u, ind = np.unique(all_tables, return_index=True)
+            uniq_tables = u[np.argsort(ind)]
+            suffixes = {t: s for t, s in zip(uniq_tables, suffixes)}
+        else:
+            suffixes = data.get("suffix_map")
+
         qm = QueryManager(
             db_name,
             segmentation_source=pcg_table_name,
@@ -668,8 +694,16 @@ class FrozenQuery(Resource):
             split_mode=~analysis_version.is_merged,
             limit=limit,
             offset=data.get("offset", 0),
-            get_count=False
+            get_count=False,
         )
+        if data["desired_resolution"] is None:
+            ann_md = db.database.get_table_metadata(data["tables"][0][0])
+            des_res = [
+                ann_md["voxel_resolution_x"],
+                ann_md["voxel_resolution_y"],
+                ann_md["voxel_resolution_z"],
+            ]
+            data["desired_resolution"] = des_res
         for table_desc in data["tables"]:
             qm.join_tables(table_desc[0], table_desc[1], table_desc[2], table_desc[3])
 
@@ -677,35 +711,50 @@ class FrozenQuery(Resource):
         qm.apply_filter(data.get("filter_out_dict", None), qm.apply_notequal_filter)
         qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
         qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
-        suffixes = data.get('suffixes', None )
-        if suffixes:
-            if len(suffixes) != len(qm._tables):
-                abort(400, f"You passed {len(suffixes)} suffixes, but there were {len(qm._tables)} tables referenced in your query")
-        select_columns = data.get('select_columns', None )
+
+        select_columns = data.get("select_columns", None)
+        select_column_map = data.get("select_column_map", None)
         if select_columns:
+            warn_text = textwrap.dedent(
+                """\
+                Select_columns is deprecated for join queries,
+                please use select_column_map a dictionary which is more explicit
+                about what columns to select from what tables.
+                This query result will attempt to select the first column it finds
+                of this name in any table, but if there are more than one such column
+                it will not select both.
+                Upgrade caveclient to >X.X.X ."""
+            )
+            warnings.append(warn_text)
+
             for column in select_columns:
-                found=False
+                found = False
                 for table in qm._tables:
                     try:
                         qm.select_column(table, column)
-                        found=True
+                        found = True
                         break
                     except ValueError:
                         pass
                 if not found:
                     abort(400, f"column {column} not found in any table referenced")
+        elif select_column_map:
+            for table, column in select_column_map.items():
+                try:
+                    qm.select_column(table, column)
+                except ValueError:
+                    abort(400, f"column {column} not found in {table}")
         else:
             for table in qm._tables:
                 qm.select_all_columns()
-        
-        df, column_names = qm.execute_query()
 
+        df, column_names = qm.execute_query(desired_resolution=data["desired_resolution"])
+        df.attrs["columns_names"] = column_names
+        df.attrs["data_resolution"] = data["desired_resolution"]
         if len(df) == limit:
-            msg = f'201 - "Limited query to {limit} rows'
-            if headers is None:
-                headers = {"Warning": msg}
-            else:
-                headers["Warning"] = headers.get("Warning", "") + "\n" + msg
+            warnings.append(f'201 - "Limited query to {limit} rows')
+
+        headers = add_warnings_to_headers({}, warnings)
 
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
@@ -717,4 +766,3 @@ class FrozenQuery(Resource):
             dfjson = df.to_json(orient="records")
             response = Response(dfjson, headers=headers, mimetype="application/json")
             return after_request(response)
-

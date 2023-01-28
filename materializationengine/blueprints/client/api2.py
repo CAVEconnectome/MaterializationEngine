@@ -16,6 +16,7 @@ from materializationengine.blueprints.client.new_query import (
     update_rootids,
 )
 from materializationengine.blueprints.client.query_manager import QueryManager
+from materializationengine.blueprints.client.utils import add_warnings_to_headers, update_notice_text_warnings
 from materializationengine.blueprints.client.schemas import (
     V2QuerySchema,
 )
@@ -717,7 +718,7 @@ class LiveTableQuery(Resource):
         df = combine_queries(mat_df, prod_df, chosen_version, user_data, column_names)
         df = apply_filters(df, user_data, column_names)
 
-        headers = {"Warning": "\n".join(mat_warnings + prod_warnings)}
+        headers = add_warnings_to_headers({}, mat_warnings + prod_warnings)
 
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
