@@ -757,13 +757,13 @@ class FrozenQuery(Resource):
         df, column_names = qm.execute_query(
             desired_resolution=data["desired_resolution"]
         )
-        df.attrs["columns_names"] = column_names
-        df.attrs["data_resolution"] = data["desired_resolution"]
+  
         if len(df) == limit:
             warnings.append(f'201 - "Limited query to {limit} rows')
 
         headers = add_warnings_to_headers({}, warnings)
-
+        headers["data_resolution"] = data["desired_resolution"]
+        headers["columns_names"] = column_names
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
             serialized = context.serialize(df).to_buffer().to_pybytes()
