@@ -13,6 +13,8 @@ from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.blueprints.client.utils import (
     add_warnings_to_headers,
     update_notice_text_warnings,
+    after_request,
+    create_query_response,
 )
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
@@ -77,31 +79,6 @@ query_parser.add_argument(
     location="args",
     help="whether to only return the count of a query",
 )
-
-
-def after_request(response):
-
-    accept_encoding = request.headers.get("Accept-Encoding", "")
-
-    if "gzip" not in accept_encoding.lower():
-        return response
-
-    response.direct_passthrough = False
-
-    if (
-        response.status_code < 200
-        or response.status_code >= 300
-        or "Content-Encoding" in response.headers
-    ):
-        return response
-
-    response.data = compression.gzip_compress(response.data)
-
-    response.headers["Content-Encoding"] = "gzip"
-    response.headers["Vary"] = "Accept-Encoding"
-    response.headers["Content-Length"] = len(response.data)
-
-    return response
 
 
 def check_aligned_volume(aligned_volume):
@@ -560,20 +537,13 @@ class FrozenTableQuery(Resource):
         if len(df) == limit:
             warnings.append(f'201 - "Limited query to {limit} rows')
         warnings = update_notice_text_warnings(ann_md, warnings)
-
-        headers = add_warnings_to_headers({}, warnings)
-        headers["data_resolution"] = data["desired_resolution"]
-        headers["columns_names"] = column_names
-        if args["return_pyarrow"]:
-            context = pa.default_serialization_context()
-            serialized = context.serialize(df).to_buffer().to_pybytes()
-            return Response(
-                serialized, headers=headers, mimetype="x-application/pyarrow"
-            )
-        else:
-            dfjson = df.to_json(orient="records")
-            response = Response(dfjson, headers=headers, mimetype="application/json")
-            return after_request(response)
+        return create_query_response(
+            df,
+            warnings=warnings,
+            column_names=column_names,
+            desired_resolution=data["desired_resolution"],
+            return_pyarrow=args["return_pyarrow"],
+        )
 
 
 @client_bp.expect(query_parser)
@@ -757,20 +727,14 @@ class FrozenQuery(Resource):
         df, column_names = qm.execute_query(
             desired_resolution=data["desired_resolution"]
         )
-  
+
         if len(df) == limit:
             warnings.append(f'201 - "Limited query to {limit} rows')
 
-        headers = add_warnings_to_headers({}, warnings)
-        headers["data_resolution"] = data["desired_resolution"]
-        headers["columns_names"] = column_names
-        if args["return_pyarrow"]:
-            context = pa.default_serialization_context()
-            serialized = context.serialize(df).to_buffer().to_pybytes()
-            return Response(
-                serialized, headers=headers, mimetype="x-application/pyarrow"
-            )
-        else:
-            dfjson = df.to_json(orient="records")
-            response = Response(dfjson, headers=headers, mimetype="application/json")
-            return after_request(response)
+        return create_query_response(
+            df,
+            warnings=warnings,
+            column_names=column_names,
+            desired_resolution=data["desired_resolution"],
+            return_pyarrow=args["return_pyarrow"],
+        )

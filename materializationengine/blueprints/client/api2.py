@@ -19,6 +19,8 @@ from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.blueprints.client.utils import (
     add_warnings_to_headers,
     update_notice_text_warnings,
+    create_query_response,
+    after_request
 )
 from materializationengine.blueprints.client.schemas import (
     V2QuerySchema,
@@ -98,29 +100,7 @@ rootId lookups. A warning will still be returned, but no 406 error thrown.",
 )
 
 
-def after_request(response):
 
-    accept_encoding = request.headers.get("Accept-Encoding", "")
-
-    if "gzip" not in accept_encoding.lower():
-        return response
-
-    response.direct_passthrough = False
-
-    if (
-        response.status_code < 200
-        or response.status_code >= 300
-        or "Content-Encoding" in response.headers
-    ):
-        return response
-
-    response.data = compression.gzip_compress(response.data)
-
-    response.headers["Content-Encoding"] = "gzip"
-    response.headers["Vary"] = "Accept-Encoding"
-    response.headers["Content-Length"] = len(response.data)
-
-    return response
 
 
 @cached(cache=TTLCache(maxsize=64, ttl=600))
@@ -735,19 +715,9 @@ class LiveTableQuery(Resource):
         df = combine_queries(mat_df, prod_df, chosen_version, user_data, column_names)
         df = apply_filters(df, user_data, column_names)
 
-        headers = add_warnings_to_headers({}, mat_warnings + prod_warnings)
-
-        if args["return_pyarrow"]:
-            context = pa.default_serialization_context()
-            serialized = context.serialize(df).to_buffer().to_pybytes()
-            # time_d["serialize"] = time.time() - now
-            # logging.info(time_d)
-            return Response(
-                serialized, headers=headers, mimetype="x-application/pyarrow"
-            )
-        else:
-            dfjson = df.to_json(orient="records")
-            # time_d["serialize"] = time.time() - now
-            # logging.info(time_d)
-            response = Response(dfjson, headers=headers, mimetype="application/json")
-            return after_request(response)
+        return create_query_response(df, 
+        warnings=mat_warnings + prod_warnings, 
+        column_names=column_names, 
+        desired_resolution=user_data["desired_resolution"],
+        return_pyarrow=args["return_pyarrow"])
+        
