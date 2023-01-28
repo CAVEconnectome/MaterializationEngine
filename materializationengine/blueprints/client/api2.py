@@ -16,7 +16,10 @@ from materializationengine.blueprints.client.new_query import (
     update_rootids,
 )
 from materializationengine.blueprints.client.query_manager import QueryManager
-from materializationengine.blueprints.client.utils import add_warnings_to_headers, update_notice_text_warnings
+from materializationengine.blueprints.client.utils import (
+    add_warnings_to_headers,
+    update_notice_text_warnings,
+)
 from materializationengine.blueprints.client.schemas import (
     V2QuerySchema,
 )
@@ -190,6 +193,7 @@ def execute_materialized_query(
     user_data: dict,
     query_map: dict,
     cg_client,
+    split_mode=False,
 ) -> pd.DataFrame:
     """_summary_
 
@@ -211,18 +215,21 @@ def execute_materialized_query(
         .filter(MaterializedMetadata.table_name == user_data["table"])
         .scalar()
     )
+
     if mat_row_count:
         # setup a query manager
         qm = QueryManager(
             mat_db_name,
             segmentation_source=pcg_table_name,
             meta_db_name=aligned_volume,
-            split_mode=False,
+            split_mode=split_mode,
         )
         qm.configure_query(user_data)
 
         # return the result
-        df, column_names = qm.execute_query(desired_resolution=user_data['desired_resolution'])
+        df, column_names = qm.execute_query(
+            desired_resolution=user_data["desired_resolution"]
+        )
         df, warnings = update_rootids(df, user_data["timestamp"], query_map, cg_client)
         if len(df) >= user_data["limit"]:
             warnings.append(
@@ -272,7 +279,9 @@ def execute_production_query(
     user_data_modified = strip_root_id_filters(user_data)
     qm.configure_query(user_data_modified)
     qm.apply_table_crud_filter(user_data["table"], start_time, end_time)
-    df, column_names = qm.execute_query(desired_resolution=user_data['desired_resolution'])
+    df, column_names = qm.execute_query(
+        desired_resolution=user_data["desired_resolution"]
+    )
 
     df, warnings = update_rootids(
         df, user_timestamp, {}, cg_client, allow_missing_lookups
@@ -680,10 +689,10 @@ class LiveTableQuery(Resource):
             datastack_name
         )
         cg_client = chunkedgraph_cache.get_client(pcg_table_name)
-        
+
         meta_db = dynamic_annotation_cache.get_db(aligned_volume_name)
         md = meta_db.database.get_table_metadata(user_data["table"])
-        if not user_data.get("desired_resolution",None):
+        if not user_data.get("desired_resolution", None):
             des_res = [
                 md["voxel_resolution_x"],
                 md["voxel_resolution_y"],
@@ -694,7 +703,7 @@ class LiveTableQuery(Resource):
         modified_user_data, query_map = remap_query(
             user_data, chosen_timestamp, cg_client
         )
-        
+
         mat_df, column_names, mat_warnings = execute_materialized_query(
             datastack_name,
             aligned_volume_name,
@@ -703,6 +712,7 @@ class LiveTableQuery(Resource):
             modified_user_data,
             query_map,
             cg_client,
+            split_mode=not chosen_version.is_merged
         )
 
         last_modified = pytz.utc.localize(md["last_modified"])

@@ -53,7 +53,9 @@ class V2QuerySchema(Schema):
     offset = fields.Integer()
     limit = fields.Integer()
     suffixes = fields.Dict()
-    desired_resolution = fields.List(float, validate=Length(equal=3), required=False)
+    desired_resolution = fields.List(
+        fields.Float, validate=Length(equal=3), required=False
+    )
 
 
 class SimpleQuerySchema(Schema):
@@ -64,7 +66,9 @@ class SimpleQuerySchema(Schema):
     select_columns = fields.List(fields.Str)
     offset = fields.Integer()
     limit = fields.Integer()
-    desired_resolution = fields.List(float, validate=Length(equal=3), required=False)
+    desired_resolution = fields.List(
+        fields.Float, validate=Length(equal=3), required=False
+    )
 
 
 class ComplexQuerySchema(Schema):
@@ -81,4 +85,6 @@ class ComplexQuerySchema(Schema):
     limit = fields.Integer()
     suffixes = fields.List(fields.Str)
     suffix_map = fields.Dict()
-    desired_resolution = fields.List(float, validate=Length(equal=3), required=False)
+    desired_resolution = fields.List(
+        fields.Float, validate=Length(equal=3), required=False
+    )

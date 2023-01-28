@@ -59,7 +59,7 @@ class QueryManager:
 
     def set_suffix(self, table_name, suffix):
         self._suffixes[table_name] = suffix
-        values = list(dict.values())
+        values = list(self._suffixes.values())
         if len(values) != len(set(values)):
             raise ValueError(f"Duplicate suffix set in {self._suffixes}")
 
@@ -138,6 +138,7 @@ class QueryManager:
             else:
                 model = self._get_flat_model(table_name)
                 self._models.append(model)
+            self._tables.add(table_name)
 
     def _find_relevant_model(self, table_name, column_name):
         if self._split_mode:
@@ -369,9 +370,9 @@ class QueryManager:
         for table_num, table_name in enumerate(self._selected_columns.keys()):
             if desired_resolution is not None:
                 vox_ratio = (
-                    np.array(desired_resolution) / self._voxel_resolutions[table_name]
+                    self._voxel_resolutions[table_name]/np.array(desired_resolution) 
                 )
-                if np.all(vox_ratio==1):
+                if np.all(vox_ratio == 1):
                     vox_ratio = None
             else:
                 vox_ratio = None
@@ -399,7 +400,10 @@ class QueryManager:
                             .label(column.key + "{}_z".format(suffix)),
                         ]
                         if vox_ratio is not None:
-                            column_args = [c*r for c,r in zip(column_args, vox_ratio)]
+                            column_args = [
+                                c * r for c, r in zip(column_args, vox_ratio)
+                            ]
+                        column_args = [c.label(column.key + "{}_{}".format(suffix, xyz)) for c, xyz in zip(column_args,["x","y","z"])]
                     else:
 
                         if self._split_mode and (
@@ -415,12 +419,15 @@ class QueryManager:
                     column_names[table_name][column.key] = column.key
                     if isinstance(column.type, Geometry):
                         column_args = [
-                            column.ST_X().cast(Integer).label(column.key + "_x"),
-                            column.ST_Y().cast(Integer).label(column.key + "_y"),
-                            column.ST_Z().cast(Integer).label(column.key + "_z"),
+                            column.ST_X().cast(Integer),
+                            column.ST_Y().cast(Integer),
+                            column.ST_Z().cast(Integer),
                         ]
                         if vox_ratio is not None:
-                            column_args = [c*r for c,r in zip(column_args, vox_ratio)]
+                            column_args = [
+                                c * r for c, r in zip(column_args, vox_ratio)
+                            ]
+                        column_args = [c.label(column.key + s) for c, s in zip(column_args,["_x","_y","_z"])]
                         query_args += column_args
                     else:
                         if self._split_mode and (

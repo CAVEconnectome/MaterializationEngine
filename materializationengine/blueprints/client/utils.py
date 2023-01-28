@@ -1,6 +1,6 @@
 def add_warnings_to_headers(headers, warnings):
     if len(warnings) > 0:
-        headers["Warning"] = "\n".join(warnings)
+        headers["Warning"] = ". ".join([w.replace("\n", " ") for w in warnings])
     return headers
 
 

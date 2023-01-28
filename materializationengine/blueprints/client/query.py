@@ -35,7 +35,9 @@ def update_notice_text_warnings(ann_md, warnings):
         warnings.append(msg)
 
     return warnings
-    
+    d
+
+
 def concatenate_position_columns(df):
     grps = itertools.groupby(df.columns, key=lambda x: x[:-2])
     for base, g in grps:

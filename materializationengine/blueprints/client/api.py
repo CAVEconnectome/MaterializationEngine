@@ -506,6 +506,7 @@ class FrozenTableQuery(Resource):
             .one()
         )
         max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
+        data = request.parsed_obj
         limit = data.get("limit", max_limit)
         if limit > max_limit:
             limit = max_limit
@@ -515,8 +516,8 @@ class FrozenTableQuery(Resource):
             limit = None
 
         mat_db_name = f"{datastack_name}__mat{version}"
-        data = request.parsed_obj
-        if data["desired_resolution"] is None:
+
+        if not data.get("desired_resolution", None):
             des_res = [
                 ann_md["voxel_resolution_x"],
                 ann_md["voxel_resolution_y"],
@@ -528,7 +529,7 @@ class FrozenTableQuery(Resource):
             mat_db_name,
             segmentation_source=pcg_table_name,
             meta_db_name=aligned_volume_name,
-            split_mode=~analysis_version.is_merged,
+            split_mode=not analysis_version.is_merged,
             limit=limit,
             offset=data.get("offset", 0),
             get_count=get_count,
@@ -559,10 +560,10 @@ class FrozenTableQuery(Resource):
         if len(df) == limit:
             warnings.append(f'201 - "Limited query to {limit} rows')
         warnings = update_notice_text_warnings(ann_md, warnings)
-        df.attrs["columns_names"] = column_names
-        df.attrs["data_resolution"] = data["desired_resolution"]
-        headers = add_warnings_to_headers({}, warnings)
 
+        headers = add_warnings_to_headers({}, warnings)
+        headers["data_resolution"] = data["desired_resolution"]
+        headers["columns_names"] = column_names
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()
             serialized = context.serialize(df).to_buffer().to_pybytes()
@@ -691,12 +692,13 @@ class FrozenQuery(Resource):
             db_name,
             segmentation_source=pcg_table_name,
             meta_db_name=aligned_volume_name,
-            split_mode=~analysis_version.is_merged,
+            split_mode=not analysis_version.is_merged,
+            suffixes=suffixes,
             limit=limit,
             offset=data.get("offset", 0),
             get_count=False,
         )
-        if not data.get("desired_resolution",None):
+        if not data.get("desired_resolution", None):
             ann_md = db.database.get_table_metadata(data["tables"][0][0])
             des_res = [
                 ann_md["voxel_resolution_x"],
@@ -704,8 +706,12 @@ class FrozenQuery(Resource):
                 ann_md["voxel_resolution_z"],
             ]
             data["desired_resolution"] = des_res
-        for table_desc in data["tables"]:
-            qm.join_tables(table_desc[0], table_desc[1], table_desc[2], table_desc[3])
+        qm.join_tables(
+            data["tables"][0][0],
+            data["tables"][0][1],
+            data["tables"][1][0],
+            data["tables"][1][1],
+        )
 
         qm.apply_filter(data.get("filter_in_dict", None), qm.apply_isin_filter)
         qm.apply_filter(data.get("filter_out_dict", None), qm.apply_notequal_filter)
@@ -746,9 +752,11 @@ class FrozenQuery(Resource):
                     abort(400, f"column {column} not found in {table}")
         else:
             for table in qm._tables:
-                qm.select_all_columns()
+                qm.select_all_columns(table)
 
-        df, column_names = qm.execute_query(desired_resolution=data["desired_resolution"])
+        df, column_names = qm.execute_query(
+            desired_resolution=data["desired_resolution"]
+        )
         df.attrs["columns_names"] = column_names
         df.attrs["data_resolution"] = data["desired_resolution"]
         if len(df) == limit:
