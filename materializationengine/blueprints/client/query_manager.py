@@ -378,7 +378,7 @@ class QueryManager:
                 vox_ratio = None
             column_names[table_name] = {}
             # lets get the suffix for this table
-            suffix = self._suffixes[table_name]
+            suffix = self._suffixes.get(table_name, None)
             if suffix is None:
                 suffix = DEFAULT_SUFFIX_LIST[table_num]
 
@@ -404,6 +404,7 @@ class QueryManager:
                                 c * r for c, r in zip(column_args, vox_ratio)
                             ]
                         column_args = [c.label(column.key + "{}_{}".format(suffix, xyz)) for c, xyz in zip(column_args,["x","y","z"])]
+                        query_args += column_args
                     else:
 
                         if self._split_mode and (
