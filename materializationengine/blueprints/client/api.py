@@ -696,7 +696,7 @@ class FrozenQuery(Resource):
             offset=data.get("offset", 0),
             get_count=False,
         )
-        if data["desired_resolution"] is None:
+        if not data.get("desired_resolution",None):
             ann_md = db.database.get_table_metadata(data["tables"][0][0])
             des_res = [
                 ann_md["voxel_resolution_x"],

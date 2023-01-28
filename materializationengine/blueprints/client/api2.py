@@ -222,7 +222,7 @@ def execute_materialized_query(
         qm.configure_query(user_data)
 
         # return the result
-        df, column_names = qm.execute_query()
+        df, column_names = qm.execute_query(desired_resolution=user_data['desired_resolution'])
         df, warnings = update_rootids(df, user_data["timestamp"], query_map, cg_client)
         if len(df) >= user_data["limit"]:
             warnings.append(
@@ -272,7 +272,7 @@ def execute_production_query(
     user_data_modified = strip_root_id_filters(user_data)
     qm.configure_query(user_data_modified)
     qm.apply_table_crud_filter(user_data["table"], start_time, end_time)
-    df, column_names = qm.execute_query()
+    df, column_names = qm.execute_query(desired_resolution=user_data['desired_resolution'])
 
     df, warnings = update_rootids(
         df, user_timestamp, {}, cg_client, allow_missing_lookups
@@ -655,6 +655,7 @@ class LiveTableQuery(Resource):
         )
         db = dynamic_annotation_cache.get_db(aligned_vol)
         check_read_permission(db, user_data["table"])
+        # TODO add table owner warnings
         # if has_joins:
         #    abort(400, "we are not supporting joins yet")
         # if future_ver is None and has_joins:
@@ -679,12 +680,21 @@ class LiveTableQuery(Resource):
             datastack_name
         )
         cg_client = chunkedgraph_cache.get_client(pcg_table_name)
+        
+        meta_db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        md = meta_db.database.get_table_metadata(user_data["table"])
+        if not user_data.get("desired_resolution",None):
+            des_res = [
+                md["voxel_resolution_x"],
+                md["voxel_resolution_y"],
+                md["voxel_resolution_z"],
+            ]
+            user_data["desired_resolution"] = des_res
 
         modified_user_data, query_map = remap_query(
             user_data, chosen_timestamp, cg_client
         )
-        headers = {}
-
+        
         mat_df, column_names, mat_warnings = execute_materialized_query(
             datastack_name,
             aligned_volume_name,
@@ -694,9 +704,6 @@ class LiveTableQuery(Resource):
             query_map,
             cg_client,
         )
-
-        meta_db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        md = meta_db.database.get_table_metadata(user_data["table"])
 
         last_modified = pytz.utc.localize(md["last_modified"])
         if (last_modified > chosen_timestamp) or (
