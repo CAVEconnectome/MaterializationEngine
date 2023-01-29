@@ -715,11 +715,12 @@ class FrozenQuery(Resource):
                 if not found:
                     abort(400, f"column {column} not found in any table referenced")
         elif select_column_map:
-            for table, column in select_column_map.items():
-                try:
-                    qm.select_column(table, column)
-                except ValueError:
-                    abort(400, f"column {column} not found in {table}")
+            for table, columns in select_column_map.items():
+                for column in columns:
+                    try:
+                        qm.select_column(table, column)
+                    except ValueError:
+                        abort(400, f"column {column} not found in {table}")
         else:
             for table in qm._tables:
                 qm.select_all_columns(table)
