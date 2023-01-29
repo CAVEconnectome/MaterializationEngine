@@ -32,6 +32,8 @@ from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.celery_init import celery
 from materializationengine.blueprints.client.query import specific_query
 from materializationengine.database import sqlalchemy_cache, dynamic_annotation_cache
+from materializationengine.blueprints.client.query_manager import QueryManager
+
 from materializationengine.info_client import (
     get_datastack_info,
     get_datastacks,
@@ -469,11 +471,17 @@ def generic_report(datastack_name, id):
         abort(404, "this table does not exist")
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
     check_read_permission(db, table.table_name)
-    Model, anno_metadata = make_flat_model(db, table)
-
     mat_db_name = f"{datastack_name}__mat{table.analysisversion.version}"
+    anno_metadata = db.database.get_table_metadata(table.table_name)
+
+    qm = QueryManager(
+        mat_db_name,
+        segmentation_source=pcg_table_name,
+        meta_db_name=aligned_volume_name,
+        split_mode=not table.analysisversion.is_merged,
+    )
+
     matsession = sqlalchemy_cache.get(mat_db_name)
-    engine = sqlalchemy_cache.get_engine(mat_db_name)
 
     n_annotations = (
         matsession.query(MaterializedMetadata)
@@ -481,14 +489,10 @@ def generic_report(datastack_name, id):
         .first()
         .row_count
     )
-    df = specific_query(
-        matsession,
-        engine,
-        {table.table_name: Model},
-        [table.table_name],
-        consolidate_positions=True,
-        limit=current_app.config.get("QUERY_LIMIT_SIZE", 1000),
-    )
+
+    qm.select_all_columns(table.table_name)
+    df = qm.execute_query()
+
     if request.method == "POST":
         pos_column = request.form["position"]
         grp_column = request.form["group"]
