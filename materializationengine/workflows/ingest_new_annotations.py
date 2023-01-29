@@ -89,12 +89,13 @@ def process_new_annotations_workflow(
 def ingest_table_svids(
     self, datastack_info: dict, table_name: str, annotation_ids: list = None
 ):
+
     mat_info = get_materialization_info(
         datastack_info=datastack_info,
         materialization_time_stamp=None,
         skip_table=True,
         table_name=table_name,
-        skip_row_count=True,
+        skip_row_count=True if annotation_ids else False,
     )
     mat_metadata = mat_info[0]  # only one entry for a single table
     table_created = create_missing_segmentation_table(mat_metadata)
