@@ -159,6 +159,7 @@ def get_materialization_info(
     metadata = []
     celery_logger.debug(f"Annotation tables: {annotation_tables}")
     for annotation_table in annotation_tables:
+        max_id = db.database.get_max_id_value(annotation_table)
         if not skip_row_count:
 
             row_count = db.database.get_table_row_count(
@@ -166,7 +167,6 @@ def get_materialization_info(
                 filter_valid=True,
                 filter_timestamp=str(materialization_time_stamp),
             )
-            max_id = db.database.get_max_id_value(annotation_table)
             min_id = db.database.get_min_id_value(annotation_table)
             table_metadata = {
                 "max_id": int(max_id),
