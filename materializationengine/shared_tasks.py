@@ -127,6 +127,7 @@ def get_materialization_info(
     skip_table: bool = False,
     row_size: int = 1_000_000,
     table_name: str = None,
+    skip_row_count: bool = False,
 ) -> List[dict]:
 
     """Initialize materialization by an aligned volume name. Iterates through all
@@ -158,18 +159,28 @@ def get_materialization_info(
     metadata = []
     celery_logger.debug(f"Annotation tables: {annotation_tables}")
     for annotation_table in annotation_tables:
-        row_count = db.database.get_table_row_count(
-            annotation_table,
-            filter_valid=True,
-            filter_timestamp=str(materialization_time_stamp),
-        )
         max_id = db.database.get_max_id_value(annotation_table)
-        min_id = db.database.get_min_id_value(annotation_table)
-        if row_count == 0:
-            continue
 
-        if row_count >= row_size and skip_table:
-            continue
+        if not skip_row_count:
+
+            row_count = db.database.get_table_row_count(
+                annotation_table,
+                filter_valid=True,
+                filter_timestamp=str(materialization_time_stamp),
+            )
+            min_id = db.database.get_min_id_value(annotation_table)
+            table_metadata = {
+                "max_id": int(max_id),
+                "min_id": int(min_id),
+                "row_count": row_count,
+            }
+            if row_count == 0:
+                continue
+
+            if row_count >= row_size and skip_table:
+                continue
+        else:
+            table_metadata = {"max_id": int(max_id)}
 
         md = db.database.get_table_metadata(annotation_table)
         vx = md.get("voxel_resolution_x", None)
@@ -183,20 +194,19 @@ def get_materialization_info(
         reference_table = md.get("reference_table")
         schema = db.database.get_table_schema(annotation_table)
         if max_id and max_id > 0:
-            table_metadata = {
-                "annotation_table_name": annotation_table,
-                "datastack": datastack_info["datastack"],
-                "aligned_volume": str(aligned_volume_name),
-                "schema": schema,
-                "max_id": int(max_id),
-                "min_id": int(min_id),
-                "row_count": row_count,
-                "add_indices": True,
-                "coord_resolution": voxel_resolution,
-                "reference_table": reference_table,
-                "materialization_time_stamp": str(materialization_time_stamp),
-                "table_count": len(annotation_tables),
-            }
+            table_metadata.update(
+                {
+                    "annotation_table_name": annotation_table,
+                    "datastack": datastack_info["datastack"],
+                    "aligned_volume": str(aligned_volume_name),
+                    "schema": schema,
+                    "add_indices": True,
+                    "coord_resolution": voxel_resolution,
+                    "reference_table": reference_table,
+                    "materialization_time_stamp": str(materialization_time_stamp),
+                    "table_count": len(annotation_tables),
+                }
+            )
             has_segmentation_table = db.schema.is_segmentation_table_required(schema)
             if has_segmentation_table:
                 segmentation_table_name = build_segmentation_table_name(
