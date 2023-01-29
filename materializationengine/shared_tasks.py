@@ -160,6 +160,7 @@ def get_materialization_info(
     celery_logger.debug(f"Annotation tables: {annotation_tables}")
     for annotation_table in annotation_tables:
         max_id = db.database.get_max_id_value(annotation_table)
+
         if not skip_row_count:
 
             row_count = db.database.get_table_row_count(
@@ -178,6 +179,8 @@ def get_materialization_info(
 
             if row_count >= row_size and skip_table:
                 continue
+        else:
+            table_metadata = {"max_id": int(max_id)}
 
         md = db.database.get_table_metadata(annotation_table)
         vx = md.get("voxel_resolution_x", None)
@@ -191,17 +194,19 @@ def get_materialization_info(
         reference_table = md.get("reference_table")
         schema = db.database.get_table_schema(annotation_table)
         if max_id and max_id > 0:
-            table_metadata.update({
-                "annotation_table_name": annotation_table,
-                "datastack": datastack_info["datastack"],
-                "aligned_volume": str(aligned_volume_name),
-                "schema": schema,
-                "add_indices": True,
-                "coord_resolution": voxel_resolution,
-                "reference_table": reference_table,
-                "materialization_time_stamp": str(materialization_time_stamp),
-                "table_count": len(annotation_tables),
-            })
+            table_metadata.update(
+                {
+                    "annotation_table_name": annotation_table,
+                    "datastack": datastack_info["datastack"],
+                    "aligned_volume": str(aligned_volume_name),
+                    "schema": schema,
+                    "add_indices": True,
+                    "coord_resolution": voxel_resolution,
+                    "reference_table": reference_table,
+                    "materialization_time_stamp": str(materialization_time_stamp),
+                    "table_count": len(annotation_tables),
+                }
+            )
             has_segmentation_table = db.schema.is_segmentation_table_required(schema)
             if has_segmentation_table:
                 segmentation_table_name = build_segmentation_table_name(
