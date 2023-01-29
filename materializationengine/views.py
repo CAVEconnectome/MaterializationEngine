@@ -11,7 +11,6 @@ from dynamicannotationdb.models import (
     AnalysisVersion,
     VersionErrorTable,
     AnnoMetadata,
-    MaterializedMetadata,
 )
 from dynamicannotationdb.schema import DynamicSchemaClient
 from flask import (
@@ -32,6 +31,7 @@ from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.celery_init import celery
 from materializationengine.blueprints.client.query import specific_query
 from materializationengine.database import sqlalchemy_cache, dynamic_annotation_cache
+from materializationengine.models import MaterializedMetadata
 from materializationengine.info_client import (
     get_datastack_info,
     get_datastacks,

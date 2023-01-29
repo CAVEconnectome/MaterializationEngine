@@ -12,7 +12,6 @@ from dynamicannotationdb.models import (
     AnalysisVersion,
     AnnoMetadata,
     Base,
-    MaterializedMetadata,
 )
 from emannotationschemas import get_schema
 from emannotationschemas.flatten import create_flattened_schema
@@ -28,6 +27,7 @@ from materializationengine.database import (
     dynamic_annotation_cache,
     sqlalchemy_cache,
 )
+from materializationengine.models import MaterializedMetadata
 from materializationengine.errors import IndexMatchError
 from materializationengine.index_manager import index_cache
 from materializationengine.shared_tasks import (
@@ -403,7 +403,8 @@ def create_materialized_metadata(
             valid_row_count = mat_metadata["row_count"]
             segmentation_source = mat_metadata.get("segmentation_source")
             merge_table = mat_metadata.get("merge_table")
-
+            has_created_ts = mat_metadata.get("keep_created_ts_col")
+            
             celery_logger.info(f"Row count {valid_row_count}")
             if valid_row_count == 0:
                 continue
@@ -415,6 +416,7 @@ def create_materialized_metadata(
                 materialized_timestamp=materialization_time_stamp,
                 segmentation_source=segmentation_source,
                 is_merged=merge_table,
+                has_created_ts=has_created_ts
             )
             analysis_session.add(mat_metadata)
             analysis_session.commit()
@@ -649,7 +651,12 @@ def merge_tables(self, mat_metadata: dict):
     # reset cache to include crud cols since the model can be stale
     AnnotationModel = create_annotation_model(mat_metadata, with_crud_columns=True)
     SegmentationModel = create_segmentation_model(mat_metadata)
-    crud_columns = ["created", "deleted", "superceded_id"]
+
+    keep_created = mat_metadata.get("keep_created_ts_col")
+    crud_columns = ["created", "deleted", "superceded_id"] # crud cols to drop
+    if keep_created:
+        crud_columns.pop(0) # we want to keep the 'created' col
+    
     query_columns = {
         col.name: col
         for col in AnnotationModel.__table__.columns
