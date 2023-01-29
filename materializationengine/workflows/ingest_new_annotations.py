@@ -94,12 +94,16 @@ def ingest_table_svids(
         materialization_time_stamp=None,
         skip_table=True,
         table_name=table_name,
+        skip_row_count=True,
     )
     mat_metadata = mat_info[0]  # only one entry for a single table
     table_created = create_missing_segmentation_table(mat_metadata)
     if table_created:
         celery_logger.info(f'Table created: {mat_metadata["segmentation_table_name"]}')
     if annotation_ids:
+        ingest_workflow = ingest_new_annotations.si(None, mat_metadata, annotation_ids)
+        ingest_workflow.apply_async()
+    else:
         annotation_chunks = generate_chunked_model_ids(mat_metadata)
         ingest_workflow = chain(
             chord(
@@ -112,10 +116,8 @@ def ingest_table_svids(
                 fin.si(),
             )
         ).apply_async()
-    else:
-        pass #TODO fix logic
 
-        
+
 @celery.task(
     name="process:ingest_new_supervoxel_ids",
     acks_late=True,
@@ -365,13 +367,15 @@ def ingest_new_annotations_workflow(mat_metadata: dict):
 
 
 @celery.task(
-    name="workflow:ingest_new_annotations",
+    name="process:ingest_new_annotations",
     acks_late=True,
     bind=True,
     autoretry_for=(Exception,),
     max_retries=6,
 )
-def ingest_new_annotations(self, chunk: List[int], mat_metadata: dict):
+def ingest_new_annotations(
+    self, chunk: List[int], mat_metadata: dict, ids_list: List[int] = None
+):
     """Find annotations with missing entries in the segmentation
     table. Lookup supervoxel ids at the spatial point then
     find the current root id at the materialized timestamp.
@@ -390,7 +394,9 @@ def ingest_new_annotations(self, chunk: List[int], mat_metadata: dict):
     """
     try:
         start_time = time.time()
-        missing_data = get_annotations_with_missing_supervoxel_ids(mat_metadata, chunk)
+        missing_data = get_annotations_with_missing_supervoxel_ids(
+            mat_metadata, chunk, ids_list
+        )
 
         if not missing_data:
             celery_logger.info("NO MISSING ANNO IDS")
@@ -456,7 +462,7 @@ def create_missing_segmentation_table(self, mat_metadata: dict) -> dict:
 
 
 def get_annotations_with_missing_supervoxel_ids(
-    mat_metadata: dict, chunk: List[int]
+    mat_metadata: dict, chunk: List[int], ids_list: List[int] = None
 ) -> dict:
     """Get list of valid annotation and their ids to lookup existing supervoxel ids. If there
     are missing supervoxels they will be set as None for cloudvolume lookup.
@@ -485,11 +491,13 @@ def get_annotations_with_missing_supervoxel_ids(
     )
 
     query = session.query(*anno_model_cols)
-
-    chunked_id_query = query_id_range(AnnotationModel.id, chunk[0], chunk[1])
+    if ids_list:
+        id_query = AnnotationModel.id.in_(ids_list)
+    else:
+        id_query = query_id_range(AnnotationModel.id, chunk[0], chunk[1])
     annotation_data = [
         data
-        for data in query.filter(chunked_id_query)
+        for data in query.filter(id_query)
         .order_by(AnnotationModel.id)
         .filter(AnnotationModel.valid == True)
         .join(SegmentationModel, isouter=True)
