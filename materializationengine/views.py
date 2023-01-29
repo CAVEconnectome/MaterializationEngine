@@ -491,7 +491,7 @@ def generic_report(datastack_name, id):
     )
 
     qm.select_all_columns(table.table_name)
-    df = qm.execute_query()
+    df, column_names = qm.execute_query()
 
     if request.method == "POST":
         pos_column = request.form["position"]
