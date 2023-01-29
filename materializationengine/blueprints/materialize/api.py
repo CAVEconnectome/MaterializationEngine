@@ -193,10 +193,10 @@ class ProcessNewSVIDResource(Resource):
         from materializationengine.workflows.ingest_new_annotations import (
             ingest_table_svids,
         )
-          
+
         if datastack_name not in current_app.config["DATASTACKS"]:
             abort(404, f"datastack {datastack_name} not configured for materialization")
-        annotation_ids = request.parsed_obj["annotation_ids"]
+        annotation_ids = request.parsed_obj.get("annotation_ids", None)
         datastack_info = get_datastack_info(datastack_name)
 
         info = ingest_table_svids.s(datastack_info, table_name, annotation_ids).apply_async()
