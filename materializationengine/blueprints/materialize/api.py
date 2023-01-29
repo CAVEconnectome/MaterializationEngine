@@ -25,7 +25,10 @@ from sqlalchemy.exc import NoSuchTableError
 from materializationengine.utils import check_write_permission
 
 
-from materializationengine.blueprints.materialize.schemas import VirtualVersionSchema, AnnotationIDListSchema
+from materializationengine.blueprints.materialize.schemas import (
+    VirtualVersionSchema,
+    AnnotationIDListSchema,
+)
 
 
 __version__ = "4.5.7"
@@ -57,8 +60,6 @@ get_roots_parser.add_argument(
 materialize_parser = reqparse.RequestParser()
 materialize_parser.add_argument("days_to_expire", required=True, default=None, type=int)
 materialize_parser.add_argument("merge_tables", required=True, type=inputs.boolean)
-
-class 
 
 authorizations = {
     "apikey": {"type": "apiKey", "in": "query", "name": "middle_auth_token"}
@@ -199,7 +200,9 @@ class ProcessNewSVIDResource(Resource):
         annotation_ids = request.parsed_obj.get("annotation_ids", None)
         datastack_info = get_datastack_info(datastack_name)
 
-        info = ingest_table_svids.s(datastack_info, table_name, annotation_ids).apply_async()
+        info = ingest_table_svids.s(
+            datastack_info, table_name, annotation_ids
+        ).apply_async()
         return 200
 
 
