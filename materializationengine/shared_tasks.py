@@ -173,11 +173,11 @@ def get_materialization_info(
                 "min_id": int(min_id),
                 "row_count": row_count,
             }
-        if row_count == 0:
-            continue
+            if row_count == 0:
+                continue
 
-        if row_count >= row_size and skip_table:
-            continue
+            if row_count >= row_size and skip_table:
+                continue
 
         md = db.database.get_table_metadata(annotation_table)
         vx = md.get("voxel_resolution_x", None)
