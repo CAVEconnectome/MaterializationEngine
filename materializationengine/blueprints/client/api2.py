@@ -102,7 +102,6 @@ rootId lookups. A warning will still be returned, but no 406 error thrown.",
 
 
 
-
 @cached(cache=TTLCache(maxsize=64, ttl=600))
 def get_relevant_datastack_info(datastack_name):
     ds_info = get_datastack_info(datastack_name=datastack_name)
@@ -195,7 +194,6 @@ def execute_materialized_query(
         .filter(MaterializedMetadata.table_name == user_data["table"])
         .scalar()
     )
-
     if mat_row_count:
         # setup a query manager
         qm = QueryManager(
@@ -363,7 +361,7 @@ def combine_queries(
         cut_prod_df = cut_prod_df.drop(columns=["created", "deleted", "superceded_id"])
         if mat_df is not None:
             if len(prod_df[to_delete_in_mat].index) > 0:
-                mat_df = mat_df.drop(prod_df[to_delete_in_mat].index, axis=0)
+                mat_df = mat_df.drop(prod_df[to_delete_in_mat].index, axis=0, errors='ignore')
             comb_df = pd.concat([cut_prod_df, mat_df])
         else:
             comb_df = prod_df[to_add_in_mat].drop(
@@ -658,10 +656,10 @@ class LiveTableQuery(Resource):
                 400,
                 "there is no future or past version for this timestamp, is materialization broken?",
             )
-        elif future_ver is not None:
-            chosen_version = future_ver
-        else:
+        elif past_ver is not None:
             chosen_version = past_ver
+        else:
+            chosen_version = future_ver
 
         chosen_timestamp = pytz.utc.localize(chosen_version.time_stamp)
 

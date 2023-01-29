@@ -32,7 +32,7 @@ import numpy as np
 from materializationengine.utils import check_read_permission
 import textwrap
 
-__version__ = "4.3.17"
+__version__ = "4.5.4"
 
 
 authorizations = {

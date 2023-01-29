@@ -197,7 +197,7 @@ def rebuild_reference_tables(self, mat_info: List[dict]):
                 )
             else:
                 reference_table_workflow = add_indices.si(mat_metadata)
-                reference_table_tasks.append(reference_table_workflow)
+            reference_table_tasks.append(reference_table_workflow)
 
     if reference_table_tasks:
         return self.replace(chain(reference_table_tasks))
@@ -643,7 +643,7 @@ def merge_tables(self, mat_metadata: dict):
         table_name=annotation_table_name,
         Schema=flat_schema,
         segmentation_source=None,
-        table_metadata=None,
+        table_metadata={"reference_table": mat_metadata.get("reference_table")},
         with_crud_columns=False,
     )
     # reset cache to include crud cols since the model can be stale
