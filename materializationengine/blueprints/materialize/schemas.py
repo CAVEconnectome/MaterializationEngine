@@ -1,6 +1,10 @@
 from marshmallow import fields, Schema
 
 
+class AnnotationIDListSchema(Schema):
+    annotation_ids = fields.List(fields.Int, required=False)
+
+
 class VirtualVersionSchema(Schema):
     datastack_name = fields.Str()
     target_version = fields.Integer()
