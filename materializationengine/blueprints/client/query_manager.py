@@ -243,7 +243,7 @@ class QueryManager:
     def configure_query(self, user_data):
         """{
             "table":"table_name",
-            "joins":[[table_name, table_column, joined_table, joined_column],
+            "join_tables":[[table_name, table_column, joined_table, joined_column],
                      [joined_table, joincol2, third_table, joincol_third]]
             "timestamp": "XXXXXXX",
             "offset": 0,
@@ -369,8 +369,8 @@ class QueryManager:
         column_names = {}
         for table_num, table_name in enumerate(self._selected_columns.keys()):
             if desired_resolution is not None:
-                vox_ratio = (
-                    self._voxel_resolutions[table_name]/np.array(desired_resolution) 
+                vox_ratio = self._voxel_resolutions[table_name] / np.array(
+                    desired_resolution
                 )
                 if np.all(vox_ratio == 1):
                     vox_ratio = None
@@ -403,7 +403,10 @@ class QueryManager:
                             column_args = [
                                 c * r for c, r in zip(column_args, vox_ratio)
                             ]
-                        column_args = [c.label(column.key + "{}_{}".format(suffix, xyz)) for c, xyz in zip(column_args,["x","y","z"])]
+                        column_args = [
+                            c.label(column.key + "{}_{}".format(suffix, xyz))
+                            for c, xyz in zip(column_args, ["x", "y", "z"])
+                        ]
                         query_args += column_args
                     else:
 
@@ -428,7 +431,10 @@ class QueryManager:
                             column_args = [
                                 c * r for c, r in zip(column_args, vox_ratio)
                             ]
-                        column_args = [c.label(column.key + s) for c, s in zip(column_args,["_x","_y","_z"])]
+                        column_args = [
+                            c.label(column.key + s)
+                            for c, s in zip(column_args, ["_x", "_y", "_z"])
+                        ]
                         query_args += column_args
                     else:
                         if self._split_mode and (
