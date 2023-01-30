@@ -160,7 +160,10 @@ def get_materialization_info(
     celery_logger.debug(f"Annotation tables: {annotation_tables}")
     for annotation_table in annotation_tables:
         max_id = db.database.get_max_id_value(annotation_table)
-
+        try:
+            max_id = int(max_id)
+        except TypeError:
+            max_id = None
         if not skip_row_count:
 
             row_count = db.database.get_table_row_count(
@@ -170,7 +173,7 @@ def get_materialization_info(
             )
             min_id = db.database.get_min_id_value(annotation_table)
             table_metadata = {
-                "max_id": int(max_id),
+                "max_id": max_id,
                 "min_id": int(min_id),
                 "row_count": row_count,
             }
@@ -180,7 +183,7 @@ def get_materialization_info(
             if row_count >= row_size and skip_table:
                 continue
         else:
-            table_metadata = {"max_id": int(max_id)}
+            table_metadata = {"max_id": max_id}
 
         md = db.database.get_table_metadata(annotation_table)
         vx = md.get("voxel_resolution_x", None)
