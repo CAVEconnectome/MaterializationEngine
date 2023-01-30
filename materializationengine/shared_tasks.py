@@ -172,9 +172,14 @@ def get_materialization_info(
                 filter_timestamp=str(materialization_time_stamp),
             )
             min_id = db.database.get_min_id_value(annotation_table)
+            try:
+                min_id = int(min_id)
+            except TypeError:
+                min_id = None
+                           
             table_metadata = {
                 "max_id": max_id,
-                "min_id": int(min_id),
+                "min_id": min_id,
                 "row_count": row_count,
             }
             if row_count == 0:
