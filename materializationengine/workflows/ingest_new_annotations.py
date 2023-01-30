@@ -124,7 +124,7 @@ def ingest_table_svids(
 
 
 @celery.task(
-    name="process:ingest_new_supervoxel_ids",
+    name="process:ingest_new_annotations",
     acks_late=True,
     bind=True,
     autoretry_for=(Exception,),
