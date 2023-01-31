@@ -28,7 +28,7 @@ from materializationengine.utils import (
 )
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql import or_
-from sqlalchemy.sql import column, func
+from sqlalchemy.sql import func
 
 celery_logger = get_task_logger(__name__)
 
@@ -102,7 +102,9 @@ def ingest_table_svids(
     if table_created:
         celery_logger.info(f'Table created: {mat_metadata["segmentation_table_name"]}')
     if annotation_ids:
-        ingest_workflow = ingest_new_annotations.si(None, mat_metadata, annotation_ids)
+        ingest_workflow = ingest_new_annotations.si(
+            None, mat_metadata, annotation_ids, lookup_root_ids=False
+        )
         ingest_workflow.apply_async()
     else:
         annotation_chunks = generate_chunked_model_ids(mat_metadata)
@@ -110,7 +112,9 @@ def ingest_table_svids(
             chord(
                 [
                     chain(
-                        ingest_new_supervoxel_ids.si(annotation_chunk, mat_metadata),
+                        ingest_new_annotations.si(
+                            annotation_chunk, mat_metadata, lookup_root_ids=False
+                        ),
                     )
                     for annotation_chunk in annotation_chunks
                 ],
@@ -120,40 +124,65 @@ def ingest_table_svids(
 
 
 @celery.task(
-    name="process:ingest_new_supervoxel_ids",
+    name="process:ingest_new_annotations",
     acks_late=True,
     bind=True,
     autoretry_for=(Exception,),
     max_retries=6,
 )
-def ingest_new_supervoxel_ids(self, chunk: List[int], mat_metadata: dict):
+def ingest_new_annotations(
+    self,
+    chunk: List[int],
+    mat_metadata: dict,
+    ids_list: List[int] = None,
+    lookup_root_ids: bool = True,
+):
     """Find annotations with missing entries in the segmentation
     table. Lookup supervoxel ids at the spatial point then
-    Finally insert the supervoxel into the segmentation table.
+    optionally find the current root id at the materialized timestamp.
+    Finally insert the supervoxel and root ids into the
+    segmentation table.
 
-    Args:
-        mat_metadata (dict): metadata associated with the materialization
-        chunk (List[int]): list of annotation ids
+    Parameters
+    ----------
+    chunk : List[int]
+        list of annotation bounds
+    mat_metadata : dict
+         metadata associated with the materialization
+    lookup_root_ids : True
+        lookup root ids after segmentation ids are resolved
+    ids_list : List[int], optional
+        list of annotation ids, by default None
 
-    Raises:
-        self.retry: re-queue the tasks if failed. Retries 6 times.
+    Returns
+    -------
+    dict
+        Name of table and runtime of task.
 
-    Returns:
-        str: Name of table and runtime of task.
+    Raises
+    ------
+    self.retry
+        re-queue the tasks if failed. Retries 6 times.
     """
     try:
         start_time = time.time()
-        missing_data = get_annotations_with_missing_supervoxel_ids(mat_metadata, chunk)
-        celery_logger.info(f"Missing data {missing_data}")
+        missing_data = get_annotations_with_missing_supervoxel_ids(
+            mat_metadata, chunk, ids_list
+        )
+        celery_logger.debug(f"Missing data {missing_data}")
         if not missing_data:
             celery_logger.debug("NO MISSING SVIDS")
             return fin.si()
         supervoxel_data = get_cloudvolume_supervoxel_ids(missing_data, mat_metadata)
-        df = pd.DataFrame(supervoxel_data, dtype=object)
-        drop_col_names = list(df.loc[:, df.columns.str.endswith("position")])
-        df = df.drop(drop_col_names, 1)
-        result = insert_segmentation_data(df.to_dict(orient="records"), mat_metadata)
-        celery_logger.info(result)
+        if not lookup_root_ids:
+            df = pd.DataFrame(supervoxel_data, dtype=object)
+            drop_col_names = list(df.loc[:, df.columns.str.endswith("position")])
+            df = df.drop(drop_col_names, 1)
+            segmentation_data = df.to_dict(orient="records")
+        else:
+            segmentation_data = get_new_root_ids(supervoxel_data, mat_metadata)
+        result = insert_segmentation_data(segmentation_data, mat_metadata)
+        celery_logger.debug(result)
         run_time = time.time() - start_time
         table_name = mat_metadata["annotation_table_name"]
     except Exception as e:
@@ -161,7 +190,7 @@ def ingest_new_supervoxel_ids(self, chunk: List[int], mat_metadata: dict):
         raise self.retry(exc=e, countdown=3)
     return {
         "Table name": f"{table_name}",
-        "Run time": f"{run_time}, New svids inserted: {len(supervoxel_data)})",
+        "Run time": f"{run_time}",
     }
 
 
@@ -365,53 +394,6 @@ def ingest_new_annotations_workflow(mat_metadata: dict):
     tasks_completed = monitor_workflow_state(ingest_workflow)
     if tasks_completed:
         return fin.si()
-
-
-@celery.task(
-    name="process:ingest_new_annotations",
-    acks_late=True,
-    bind=True,
-    autoretry_for=(Exception,),
-    max_retries=6,
-)
-def ingest_new_annotations(
-    self, chunk: List[int], mat_metadata: dict, ids_list: List[int] = None
-):
-    """Find annotations with missing entries in the segmentation
-    table. Lookup supervoxel ids at the spatial point then
-    find the current root id at the materialized timestamp.
-    Finally insert the supervoxel and root ids into the
-    segmentation table.
-
-    Args:
-        mat_metadata (dict): metadata associated with the materialization
-        chunk (List[int]): list of annotation ids
-
-    Raises:
-        self.retry: re-queue the tasks if failed. Retries 6 times.
-
-    Returns:
-        str: Name of table and runtime of task.
-    """
-    try:
-        start_time = time.time()
-        missing_data = get_annotations_with_missing_supervoxel_ids(
-            mat_metadata, chunk, ids_list
-        )
-
-        if not missing_data:
-            celery_logger.info("NO MISSING ANNO IDS")
-            return fin.si()
-        supervoxel_data = get_cloudvolume_supervoxel_ids(missing_data, mat_metadata)
-        root_id_data = get_new_root_ids(supervoxel_data, mat_metadata)
-        result = insert_segmentation_data(root_id_data, mat_metadata)
-        celery_logger.info(result)
-        run_time = time.time() - start_time
-        table_name = mat_metadata["annotation_table_name"]
-    except Exception as e:
-        celery_logger.error(e)
-        raise self.retry(exc=e, countdown=3)
-    return {"Table name": f"{table_name}", "Run time": f"{run_time}"}
 
 
 @celery.task(name="workflow:create_missing_segmentation_table", bind=True)

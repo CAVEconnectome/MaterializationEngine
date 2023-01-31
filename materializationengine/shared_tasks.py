@@ -201,7 +201,7 @@ def get_materialization_info(
 
         reference_table = md.get("reference_table")
         schema = db.database.get_table_schema(annotation_table)
-        if max_id and max_id > 0:
+        if max_id:
             table_metadata.update(
                 {
                     "annotation_table_name": annotation_table,
