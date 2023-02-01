@@ -9,7 +9,9 @@ from materializationengine.blueprints.client.query import (
 import numpy as np
 from geoalchemy2.types import Geometry
 from sqlalchemy.sql.sqltypes import Integer
+from sqlalchemy.sql.selectable import Alias
 from sqlalchemy import or_, and_, func
+from sqlalchemy.orm import aliased, util
 import datetime
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
@@ -39,7 +41,7 @@ class QueryManager:
         self._split_mode_outer = split_mode_outer
         self._split_models = {}
         self._flat_models = {}
-        self._models = []
+        self._models = {}
         self._tables = set()
         self._joins = []
         self._filters = []
@@ -104,20 +106,30 @@ class QueryManager:
 
     def add_table(self, table_name):
         if table_name not in self._tables:
+            self._tables.add(table_name)
             if self._split_mode:
                 annmodel, segmodel = self._get_split_model(table_name)
-                self._models.append(annmodel)
+
                 if segmodel is not None:
-                    self._models.append(segmodel)
-                    self._joins.append(
-                        (
-                            (segmodel, annmodel.id == segmodel.id),
-                            {"isouter": self._split_mode_outer},
-                        )
+                    # create a subquery joining the segmodel and annmodel
+                    # on the id column
+
+                    subquery = (
+                        self._db.database.session.query(annmodel)
+                        .join(segmodel, annmodel.id == segmodel.id, isouter=True)
+                        .subquery()
                     )
+                    annmodel_alias = aliased(annmodel, subquery, table_name)
+                    segmodel_alias = aliased(segmodel, subquery, segmodel.__tablename__)
+
+                    self._models[table_name] = annmodel_alias
+                    self._models[segmodel.__tablename__] = segmodel_alias
+
+                else:
+                    self._models[table_name] = annmodel
             else:
                 model = self._get_flat_model(table_name)
-                self._models.append(model)
+                self._models[table_name] = model
 
     def _find_relevant_model(self, table_name, column_name):
         if self._split_mode:
@@ -135,13 +147,16 @@ class QueryManager:
         return model
 
     def join_tables(self, table1, column1, table2, column2, isouter=False):
-        model1 = self._find_relevant_model(table1, column1)
-        model2 = self._find_relevant_model(table2, column2)
+
         self.add_table(table1)
         self.add_table(table2)
+        model1 = self._models[table1]
+        model2 = self._models[table2]
+        model1column = model1.__dict__[column1]
+        model2column = model2.__dict__[column2]
         self._joins.append(
             (
-                (model2, model1.__dict__[column1] == model2.__dict__[column2]),
+                (model2, model1column == model2column),
                 {"isouter": isouter},
             )
         )
@@ -390,7 +405,7 @@ class QueryManager:
                             query_args.append(column)
 
         query = self._make_query(
-            query_args=self._models,
+            query_args=self._models.values(),
             join_args=self._joins,
             filter_args=self._filters,
             select_columns=query_args,

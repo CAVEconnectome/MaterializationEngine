@@ -328,8 +328,8 @@ def combine_queries(
         pd.DataFrame: _description_
     """
     if mat_df is not None:
-        if len(mat_df)==0:
-            mat_df=None
+        if len(mat_df) == 0:
+            mat_df = None
     user_timestamp = user_data["timestamp"]
     chosen_timestamp = pytz.utc.localize(chosen_version.time_stamp)
     table = user_data["table"]
@@ -344,12 +344,12 @@ def combine_queries(
         # if we are moving forward in time
         if chosen_timestamp < user_timestamp:
 
-            deleted_between = (prod_df.deleted > chosen_timestamp) & (
-                prod_df.deleted < user_timestamp
-            )
-            created_between = (prod_df.created > chosen_timestamp) & (
-                prod_df.created < user_timestamp
-            )
+            deleted_between = (
+                prod_df[column_names[table]["deleted"]] > chosen_timestamp
+            ) & (prod_df.deleted < user_timestamp)
+            created_between = (
+                prod_df[column_names[table]["created"]] > chosen_timestamp
+            ) & (prod_df.created < user_timestamp)
 
             to_delete_in_mat = deleted_between & ~created_between
             to_add_in_mat = created_between & ~deleted_between
@@ -358,12 +358,12 @@ def combine_queries(
             else:
                 cut_prod_df = prod_df
         else:
-            deleted_between = (prod_df.deleted > user_timestamp) & (
-                prod_df.deleted < chosen_timestamp
-            )
-            created_between = (prod_df.created > user_timestamp) & (
-                prod_df.created < chosen_timestamp
-            )
+            deleted_between = (
+                prod_df[column_names[table]["deleted"]] > user_timestamp
+            ) & (prod_df.deleted < chosen_timestamp)
+            created_between = (
+                prod_df[column_names[table]["created"]] > user_timestamp
+            ) & (prod_df.created < chosen_timestamp)
             to_delete_in_mat = created_between & ~deleted_between
             to_add_in_mat = deleted_between & ~created_between
             if len(prod_df[created_between].index) > 0:
@@ -371,10 +371,18 @@ def combine_queries(
             else:
                 cut_prod_df = prod_df
         # # delete those rows from materialized dataframe
-        cut_prod_df = cut_prod_df.drop(columns=["created", "deleted", "superceded_id"])
+        crud_columns = []
+        for table in column_names.keys():
+            crud_columns.extend([column_names[table]['created'],
+                                 column_names[table]['deleted'],
+                                 column_names[table]['superceded_id']])
+
+        cut_prod_df = cut_prod_df.drop(crud_columns, axis=1)
         if mat_df is not None:
             if len(prod_df[to_delete_in_mat].index) > 0:
-                mat_df = mat_df.drop(prod_df[to_delete_in_mat].index, axis=0, errors='ignore')
+                mat_df = mat_df.drop(
+                    prod_df[to_delete_in_mat].index, axis=0, errors="ignore"
+                )
             comb_df = pd.concat([cut_prod_df, mat_df])
         else:
             comb_df = prod_df[to_add_in_mat].drop(
