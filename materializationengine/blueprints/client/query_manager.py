@@ -119,11 +119,11 @@ class QueryManager:
                         .join(segmodel, annmodel.id == segmodel.id, isouter=True)
                         .subquery()
                     )
-                    annmodel_alias = aliased(annmodel, subquery, table_name)
-                    segmodel_alias = aliased(segmodel, subquery, segmodel.__tablename__)
+                    annmodel_alias = aliased(subquery, name=table_name)
+                    # segmodel_alias = aliased(subquery, name=segmodel.__tablename__)
 
                     self._models[table_name] = annmodel_alias
-                    self._models[segmodel.__tablename__] = segmodel_alias
+                    # self._models[segmodel.__tablename__] = segmodel_alias
 
                 else:
                     self._models[table_name] = annmodel
@@ -133,27 +133,37 @@ class QueryManager:
 
     def _find_relevant_model(self, table_name, column_name):
         if self._split_mode:
-            annmodel, segmodel = self._get_split_model(table_name)
+            annmodel_orig, segmodel_orig = self._get_split_model(table_name)
             if column_name.endswith("pt_root_id") or column_name.endswith(
                 "supervoxel_id"
             ):
-                model = segmodel
+                model = self._models[segmodel_orig.__tablename__]
             else:
-                model = annmodel
+                model = self._models[table_name]
         else:
             model = self._get_flat_model(table_name)
-        if column_name not in model.__dict__.keys():
-            raise ValueError(f"{column_name} not in model or models for {table_name}")
+
         return model
 
     def join_tables(self, table1, column1, table2, column2, isouter=False):
 
         self.add_table(table1)
         self.add_table(table2)
+
         model1 = self._models[table1]
         model2 = self._models[table2]
-        model1column = model1.__dict__[column1]
-        model2column = model2.__dict__[column2]
+        model1column = eval(f"model1.{column1}")
+
+        if isinstance(model2, Alias):
+            model2column = model2.c[column2]
+        else:
+            model2column = model2.__dict__[column2]
+
+        if isinstance(model1, Alias):
+            model1column = model1.c[column1]
+        else:
+            model1column = model1.__dict__[column1]
+
         self._joins.append(
             (
                 (model2, model1column == model2column),
