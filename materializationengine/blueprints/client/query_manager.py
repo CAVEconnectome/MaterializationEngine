@@ -201,21 +201,25 @@ class QueryManager:
         self._filters.append((or_(f1, f2),))
 
     def select_column(self, table_name, column_name):
-        model = self._find_relevant_model(
-            table_name=table_name, column_name=column_name
-        )
-        if isinstance(model, Alias):
-            if column_name not in model.c.keys():
-                raise ValueError(
-                    f"{column_name} not in model or models for {table_name}"
-                )
-        else:
-            if column_name not in model.__dict__.keys():
-                raise ValueError(
-                    f"{column_name} not in model or models for {table_name}"
-                )
+        # if the column_name is not in the table_name list
+        # then we should add it
+        if column_name not in self._selected_columns[table_name]:
 
-        self._selected_columns[table_name].append(column_name)
+            model = self._find_relevant_model(
+                table_name=table_name, column_name=column_name
+            )
+            if isinstance(model, Alias):
+                if column_name not in model.c.keys():
+                    raise ValueError(
+                        f"{column_name} not in model or models for {table_name}"
+                    )
+            else:
+                if column_name not in model.__dict__.keys():
+                    raise ValueError(
+                        f"{column_name} not in model or models for {table_name}"
+                    )
+
+            self._selected_columns[table_name].append(column_name)
 
     def select_all_columns(self, table_name):
         if self._split_mode:
