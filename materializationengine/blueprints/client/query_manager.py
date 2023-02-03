@@ -10,7 +10,7 @@ import numpy as np
 from geoalchemy2.types import Geometry
 from sqlalchemy.sql.sqltypes import Integer
 from sqlalchemy import or_, func
-from sqlalchemy.orm import aliased, with_polymorphic
+from sqlalchemy.orm import aliased
 from sqlalchemy.sql.selectable import Alias
 import datetime
 
@@ -113,7 +113,6 @@ class QueryManager:
                 if segmodel is not None:
                     # create a subquery joining the segmodel and annmodel
                     # on the id column
-                    # model = with_polymorphic(annmodel, [segmodel], aliased=True)
                     seg_columns = [
                         c for c in segmodel.__table__.columns if c.key != "id"
                     ]
@@ -123,7 +122,6 @@ class QueryManager:
                         .subquery()
                     )
                     annmodel_alias = aliased(subquery, name=table_name, flat=True)
-                    # segmodel_alias = aliased(subquery, name=segmodel.__tablename__)
 
                     self._models[table_name] = annmodel_alias
                     # self._models[segmodel.__tablename__] = segmodel_alias

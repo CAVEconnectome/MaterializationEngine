@@ -42,8 +42,10 @@ def process_new_annotations_workflow(
     Workflow paths:
         check if supervoxel column is empty:
             if last_updated is NULL:
-                -> workflow : find missing supervoxels > cloudvolume lookup supervoxels > get root ids >
-                            find missing root_ids > lookup supervoxel ids from sql > get root_ids > merge root_ids list > insert root_ids
+                -> workflow : find missing supervoxels > cloudvolume lookup supervoxels >
+                              get root ids > find missing root_ids >
+                              lookup supervoxel ids from sql >
+                              get root_ids > merge root_ids list > insert root_ids
             else:
                 -> find missing supervoxels > cloudvolume lookup |
                     - > find new root_ids between time stamps  ---> merge root_ids list > upsert root_ids
@@ -291,17 +293,18 @@ def lookup_missing_root_ids_workflow(
     mat_metadata: dict, missing_root_id_chunks: List[int]
 ):
     """Celery workflow that finds and looks up missing root ids.
+
     Workflow:
-            - Lookup supervoxel id(s)
-            - Get root ids from supervoxels
-            - insert into segmentation table
+                - Lookup supervoxel id(s)
+                - Get root ids from supervoxels
+                - insert into segmentation table
 
-    Args:
-        mat_metadata (dict): datastack info for the aligned_volume derived from the infoservice
-        missing_root_id_chunks (List[int]): list of pk ids that have a missing root_id
+        Args:
+            mat_metadata (dict): datastack info for the aligned_volume derived from the infoservice
+            missing_root_id_chunks (List[int]): list of pk ids that have a missing root_id
 
-    Returns:
-        chain: chain of celery tasks
+        Returns:
+            chain: chain of celery tasks
     """
     return chain(
         chord(
@@ -632,7 +635,7 @@ def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
         materialization_time_stamp = datetime.datetime.strptime(
             mat_metadata.get("materialization_time_stamp"), "%Y-%m-%d %H:%M:%S.%f"
         )
-    except:
+    except ValueError:
         materialization_time_stamp = datetime.datetime.strptime(
             mat_metadata.get("materialization_time_stamp"), "%Y-%m-%dT%H:%M:%S.%f"
         )

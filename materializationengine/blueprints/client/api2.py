@@ -1,6 +1,5 @@
 import pytz
 import pyarrow as pa
-from cachetools import LRUCache, cached
 from cloudfiles import compression
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
@@ -62,7 +61,10 @@ query_parser.add_argument(
     default=True,
     required=False,
     location="args",
-    help="whether to return query in pyarrow compatible binary format (faster), false returns json",
+    help=(
+        "whether to return query in pyarrow compatible binary format"
+        "(faster), false returns json"
+    ),
 )
 query_parser.add_argument(
     "split_positions",
@@ -70,7 +72,8 @@ query_parser.add_argument(
     default=False,
     required=False,
     location="args",
-    help="whether to return position columns as seperate x,y,z columns (faster)",
+    help=("whether to return position columns"
+          "as seperate x,y,z columns (faster)"),
 )
 query_parser.add_argument(
     "count",
@@ -133,10 +136,10 @@ def check_aligned_volume(aligned_volume):
 
 
 def get_closest_versions(datastack_name: str, timestamp: datetime.datetime):
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+    avn, _ = get_relevant_datastack_info(datastack_name)
 
     # get session object
-    session = sqlalchemy_cache.get(aligned_volume_name)
+    session = sqlalchemy_cache.get(avn)
 
     # query analysis versions to get a valid version which is
     # the closest to the timestamp while still being older
@@ -160,7 +163,7 @@ def get_closest_versions(datastack_name: str, timestamp: datetime.datetime):
         .order_by(AnalysisVersion.time_stamp.asc())
         .first()
     )
-    return past_version, future_version, aligned_volume_name
+    return past_version, future_version, avn
 
 
 def check_column_for_root_id(col):
@@ -220,7 +223,10 @@ def execute_materialized_query(
 
         # return the result
         df, column_names = qm.execute_query()
-        df, warnings = update_rootids(df, user_data["timestamp"], query_map, cg_client)
+        df, warnings = update_rootids(df,
+                                      user_data["timestamp"],
+                                      query_map,
+                                      cg_client)
         if len(df) >= user_data["limit"]:
             warnings.append(
                 f"result has {len(df)} entries, which is equal or more \
@@ -317,8 +323,9 @@ def combine_queries(
     column_names: dict,
 ) -> pd.DataFrame:
     """combine a materialized query with an production query
-       will remove deleted rows from materialized query, strip deleted entries from prod_df
-       remove any CRUD columns and then append the two dataframes together to be a coherent
+       will remove deleted rows from materialized query,
+       strip deleted entries from prod_df remove any CRUD columns
+       and then append the two dataframes together to be a coherent
        result.
 
     Args:
@@ -390,7 +397,9 @@ def combine_queries(
                 )
             comb_df = pd.concat([cut_prod_df, mat_df])
         else:
-            comb_df = prod_df[to_add_in_mat].drop(columns=crud_columns, axis=1, errors="ignore")
+            comb_df = prod_df[to_add_in_mat].drop(
+                columns=crud_columns, axis=1, errors="ignore"
+            )
     else:
         comb_df = mat_df
 
@@ -655,7 +664,7 @@ class LiveTableQuery(Resource):
         """
         args = query_parser.parse_args()
         user_data = request.parsed_obj
-        joins = user_data.get("join_tables", None)
+        # joins = user_data.get("join_tables", None)
         # has_joins = joins is not None
         user_data["limit"] = min(
             current_app.config["QUERY_LIMIT_SIZE"],
