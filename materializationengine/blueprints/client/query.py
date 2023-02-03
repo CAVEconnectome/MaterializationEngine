@@ -16,6 +16,7 @@ from sqlalchemy import func, not_
 from sqlalchemy.orm import Query
 from sqlalchemy.sql.sqltypes import Boolean, Integer, DateTime
 from sqlalchemy.sql.selectable import Alias
+from sqlalchemy.orm.util import AliasedClass
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
 
@@ -175,6 +176,8 @@ def _fix_decimal_column(df_col):
 def get_column(model, column):
     if isinstance(model, Alias):
         return model.c[column]
+    if isinstance(model, AliasedClass):
+        return eval(f'model.{column}')
     else:
         return model.__dict__[column]
 
