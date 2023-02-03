@@ -537,14 +537,15 @@ class FrozenTableVersions(Resource):
     @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("get_frozen_tables", security="apikey")
     def get(self, datastack_name: str, version: int):
-        """get frozen tables
+        """get frozen tables. Used as-is, it returns a list of tables.
+           If a request argument `return_metadata` is True, it will return as a dictionary of table names with metadata as keys.
 
         Args:
             datastack_name (str): datastack name
             version (int): version number
 
         Returns:
-            list(str): list of frozen tables in this version
+            list(str) or dict(str): list of frozen tables in this version or dict with keys being 
         """
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
@@ -568,8 +569,26 @@ class FrozenTableVersions(Resource):
 
         if response is None:
             return None, 404
-        return [r.table_name for r in response], 200
 
+        table_names = [r.table_name for r in response]
+        if request.args.get("return_metadata", "True") == "True":
+            table_metadata = {}
+            db = dynamic_annotation_cache.get_db(aligned_volume_name)
+            schema = AnalysisTableSchema()
+            for table_name in table_names:
+                analysis_version, analysis_table = get_analysis_version_and_table(
+                    datastack_name, table_name, version, session
+                )
+
+                tbl_md = schema.dump(analysis_table)
+                ann_md = db.database.get_table_metadata(table_name)
+                ann_md.pop("id")
+                ann_md.pop("deleted")
+                tbl_md.update(ann_md)
+                table_metadata[table_name] = tbl_md
+            return table_metadata, 200
+        else:
+            return table_names, 200
 
 @client_bp.route(
     "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/metadata"
