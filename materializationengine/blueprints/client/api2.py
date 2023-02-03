@@ -330,6 +330,16 @@ def combine_queries(
         prod_df = prod_df.set_index(column_names[table]["id"])
     if (prod_df is None) and (mat_df is None):
         abort(400, f"This query on table {user_data['table']} returned no results")
+    crud_columns = []
+    created_columns = []
+    for table in column_names.keys():
+        table_crud_columns = [
+            column_names[table].get("deleted", None),
+            column_names[table].get("superceded_id", None),
+        ]
+        crud_columns.extend([t for t in table_crud_columns if t is not None])
+        if column_names[table].get("created", None):
+            created_columns.append(column_names[table]["created"])
 
     if prod_df is not None:
         # if we are moving forward in time
@@ -362,17 +372,14 @@ def combine_queries(
             else:
                 cut_prod_df = prod_df
         # # delete those rows from materialized dataframe
-        crud_columns = []
-        for table in column_names.keys():
-            table_crud_columns = [
-                column_names[table].get("created", None),
-                column_names[table].get("deleted", None),
-                column_names[table].get("superceded_id", None),
-            ]
-            crud_columns.extend([t for t in table_crud_columns if t is not None])
 
         cut_prod_df = cut_prod_df.drop(crud_columns, axis=1)
+
         if mat_df is not None:
+            created_columns = [c for c in created_columns if c not in mat_df]
+            if len(created_columns) > 0:
+                cut_prod_df = cut_prod_df.drop(created_columns, axis=1)
+
             if len(prod_df[to_delete_in_mat].index) > 0:
                 mat_df = mat_df.drop(
                     prod_df[to_delete_in_mat].index, axis=0, errors="ignore"
@@ -383,7 +390,7 @@ def combine_queries(
                 columns=crud_columns, axis=1, errors="ignore"
             )
     else:
-        comb_df = mat_df
+        comb_df = mat_df.drop(columns=crud_columns, axis=1, errors="ignore")
 
     return comb_df
 
