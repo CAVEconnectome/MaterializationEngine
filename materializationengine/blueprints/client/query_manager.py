@@ -3,13 +3,15 @@ from materializationengine.database import dynamic_annotation_cache
 
 from materializationengine.blueprints.client.query import (
     make_spatial_filter,
-    _make_query,
     _execute_query,
+    get_column,
 )
 import numpy as np
 from geoalchemy2.types import Geometry
 from sqlalchemy.sql.sqltypes import Integer
-from sqlalchemy import or_, and_, func
+from sqlalchemy import or_, func
+from sqlalchemy.orm import aliased
+from sqlalchemy.sql.selectable import Alias
 import datetime
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
@@ -39,7 +41,7 @@ class QueryManager:
         self._split_mode_outer = split_mode_outer
         self._split_models = {}
         self._flat_models = {}
-        self._models = []
+        self._models = {}
         self._tables = set()
         self._joins = []
         self._filters = []
@@ -104,44 +106,54 @@ class QueryManager:
 
     def add_table(self, table_name):
         if table_name not in self._tables:
+            self._tables.add(table_name)
             if self._split_mode:
                 annmodel, segmodel = self._get_split_model(table_name)
-                self._models.append(annmodel)
+
                 if segmodel is not None:
-                    self._models.append(segmodel)
-                    self._joins.append(
-                        (
-                            (segmodel, annmodel.id == segmodel.id),
-                            {"isouter": self._split_mode_outer},
-                        )
+                    # create a subquery joining the segmodel and annmodel
+                    # on the id column
+                    seg_columns = [
+                        c for c in segmodel.__table__.columns if c.key != "id"
+                    ]
+                    subquery = (
+                        self._db.database.session.query(annmodel, *seg_columns)
+                        .join(segmodel, annmodel.id == segmodel.id, isouter=True)
+                        .subquery()
                     )
+                    annmodel_alias = aliased(subquery, name=table_name, flat=True)
+
+                    self._models[table_name] = annmodel_alias
+                    # self._models[segmodel.__tablename__] = segmodel_alias
+
+                else:
+                    self._models[table_name] = annmodel
             else:
                 model = self._get_flat_model(table_name)
-                self._models.append(model)
+                self._models[table_name] = model
 
     def _find_relevant_model(self, table_name, column_name):
         if self._split_mode:
-            annmodel, segmodel = self._get_split_model(table_name)
-            if column_name.endswith("pt_root_id") or column_name.endswith(
-                "supervoxel_id"
-            ):
-                model = segmodel
-            else:
-                model = annmodel
+            model = self._models[table_name]
         else:
             model = self._get_flat_model(table_name)
-        if column_name not in model.__dict__.keys():
-            raise ValueError(f"{column_name} not in model or models for {table_name}")
+
         return model
 
     def join_tables(self, table1, column1, table2, column2, isouter=False):
-        model1 = self._find_relevant_model(table1, column1)
-        model2 = self._find_relevant_model(table2, column2)
+
         self.add_table(table1)
         self.add_table(table2)
+
+        model1 = self._models[table1]
+        model2 = self._models[table2]
+
+        model2column = get_column(model2, column2)
+        model1column = get_column(model1, column1)
+
         self._joins.append(
             (
-                (model2, model1.__dict__[column1] == model2.__dict__[column2]),
+                (model2, model1column == model2column),
                 {"isouter": isouter},
             )
         )
@@ -150,19 +162,19 @@ class QueryManager:
         model = self._find_relevant_model(
             table_name=table_name, column_name=column_name
         )
-        self._filters.append((model.__dict__[column_name] == value,))
+        self._filters.append((get_column(model, column_name) == value,))
 
     def apply_isin_filter(self, table_name, column_name, value):
         model = self._find_relevant_model(
             table_name=table_name, column_name=column_name
         )
-        self._filters.append((model.__dict__[column_name].in_(value),))
+        self._filters.append((get_column(model, column_name).in_(value),))
 
     def apply_notequal_filter(self, table_name, column_name, value):
         model = self._find_relevant_model(
             table_name=table_name, column_name=column_name
         )
-        self._filters.append((model.__dict__[column_name] != value,))
+        self._filters.append((get_column(model, column_name) != value,))
 
     def apply_spatial_filter(self, table_name, column_name, bbox):
         model = self._find_relevant_model(
@@ -182,17 +194,30 @@ class QueryManager:
         model = self._find_relevant_model(
             table_name=table_name, column_name=created_column
         )
-        f1 = model.__dict__[created_column].between(str(start_time), str(end_time))
-        f2 = model.__dict__[deleted_column].between(str(start_time), str(end_time))
+        f1 = get_column(model, created_column).between(str(start_time), str(end_time))
+        f2 = get_column(model, deleted_column).between(str(start_time), str(end_time))
         self._filters.append((or_(f1, f2),))
 
     def select_column(self, table_name, column_name):
-        model = self._find_relevant_model(
-            table_name=table_name, column_name=column_name
-        )
-        if column_name not in model.__dict__.keys():
-            raise ValueError(f"{column_name} not in model or models for {table_name}")
-        self._selected_columns[table_name].append(column_name)
+        # if the column_name is not in the table_name list
+        # then we should add it
+        if column_name not in self._selected_columns[table_name]:
+
+            model = self._find_relevant_model(
+                table_name=table_name, column_name=column_name
+            )
+            if isinstance(model, Alias):
+                if column_name not in model.c.keys():
+                    raise ValueError(
+                        f"{column_name} not in model or models for {table_name}"
+                    )
+            else:
+                if column_name not in model.__dict__.keys():
+                    raise ValueError(
+                        f"{column_name} not in model or models for {table_name}"
+                    )
+
+            self._selected_columns[table_name].append(column_name)
 
     def select_all_columns(self, table_name):
         if self._split_mode:
@@ -343,7 +368,8 @@ class QueryManager:
 
             for column_name in self._selected_columns[table_name]:
                 model = self._find_relevant_model(table_name, column_name)
-                column = model.__dict__[column_name]
+                column = get_column(model, column_name)
+
                 if column.key in dup_cols:
                     column_names[table_name][column.key] = column.key + f"{suffix}"
                     if isinstance(column.type, Geometry):
@@ -390,7 +416,7 @@ class QueryManager:
                             query_args.append(column)
 
         query = self._make_query(
-            query_args=self._models,
+            query_args=self._models.values(),
             join_args=self._joins,
             filter_args=self._filters,
             select_columns=query_args,

@@ -1,8 +1,5 @@
-import logging
-import time
 import pytz
 import pyarrow as pa
-from cachetools import LRUCache, cached
 from cloudfiles import compression
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
@@ -64,7 +61,10 @@ query_parser.add_argument(
     default=True,
     required=False,
     location="args",
-    help="whether to return query in pyarrow compatible binary format (faster), false returns json",
+    help=(
+        "whether to return query in pyarrow compatible binary format"
+        "(faster), false returns json"
+    ),
 )
 query_parser.add_argument(
     "split_positions",
@@ -72,7 +72,8 @@ query_parser.add_argument(
     default=False,
     required=False,
     location="args",
-    help="whether to return position columns as seperate x,y,z columns (faster)",
+    help=("whether to return position columns"
+          "as seperate x,y,z columns (faster)"),
 )
 query_parser.add_argument(
     "count",
@@ -135,10 +136,10 @@ def check_aligned_volume(aligned_volume):
 
 
 def get_closest_versions(datastack_name: str, timestamp: datetime.datetime):
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+    avn, _ = get_relevant_datastack_info(datastack_name)
 
     # get session object
-    session = sqlalchemy_cache.get(aligned_volume_name)
+    session = sqlalchemy_cache.get(avn)
 
     # query analysis versions to get a valid version which is
     # the closest to the timestamp while still being older
@@ -162,7 +163,7 @@ def get_closest_versions(datastack_name: str, timestamp: datetime.datetime):
         .order_by(AnalysisVersion.time_stamp.asc())
         .first()
     )
-    return past_version, future_version, aligned_volume_name
+    return past_version, future_version, avn
 
 
 def check_column_for_root_id(col):
@@ -222,7 +223,10 @@ def execute_materialized_query(
 
         # return the result
         df, column_names = qm.execute_query()
-        df, warnings = update_rootids(df, user_data["timestamp"], query_map, cg_client)
+        df, warnings = update_rootids(df,
+                                      user_data["timestamp"],
+                                      query_map,
+                                      cg_client)
         if len(df) >= user_data["limit"]:
             warnings.append(
                 f"result has {len(df)} entries, which is equal or more \
@@ -269,7 +273,11 @@ def execute_production_query(
         aligned_volume_name, segmentation_source, split_mode=True, split_mode_outer=True
     )
     user_data_modified = strip_root_id_filters(user_data)
+
     qm.configure_query(user_data_modified)
+    qm.select_column(user_data["table"], "created")
+    qm.select_column(user_data["table"], "deleted")
+    qm.select_column(user_data["table"], "superceded_id")
     qm.apply_table_crud_filter(user_data["table"], start_time, end_time)
     df, column_names = qm.execute_query()
 
@@ -315,8 +323,9 @@ def combine_queries(
     column_names: dict,
 ) -> pd.DataFrame:
     """combine a materialized query with an production query
-       will remove deleted rows from materialized query, strip deleted entries from prod_df
-       remove any CRUD columns and then append the two dataframes together to be a coherent
+       will remove deleted rows from materialized query,
+       strip deleted entries from prod_df remove any CRUD columns
+       and then append the two dataframes together to be a coherent
        result.
 
     Args:
@@ -328,8 +337,8 @@ def combine_queries(
         pd.DataFrame: _description_
     """
     if mat_df is not None:
-        if len(mat_df)==0:
-            mat_df=None
+        if len(mat_df) == 0:
+            mat_df = None
     user_timestamp = user_data["timestamp"]
     chosen_timestamp = pytz.utc.localize(chosen_version.time_stamp)
     table = user_data["table"]
@@ -344,12 +353,12 @@ def combine_queries(
         # if we are moving forward in time
         if chosen_timestamp < user_timestamp:
 
-            deleted_between = (prod_df.deleted > chosen_timestamp) & (
-                prod_df.deleted < user_timestamp
-            )
-            created_between = (prod_df.created > chosen_timestamp) & (
-                prod_df.created < user_timestamp
-            )
+            deleted_between = (
+                prod_df[column_names[table]["deleted"]] > chosen_timestamp
+            ) & (prod_df[column_names[table]["deleted"]] < user_timestamp)
+            created_between = (
+                prod_df[column_names[table]["created"]] > chosen_timestamp
+            ) & (prod_df[column_names[table]["created"]] < user_timestamp)
 
             to_delete_in_mat = deleted_between & ~created_between
             to_add_in_mat = created_between & ~deleted_between
@@ -358,12 +367,12 @@ def combine_queries(
             else:
                 cut_prod_df = prod_df
         else:
-            deleted_between = (prod_df.deleted > user_timestamp) & (
-                prod_df.deleted < chosen_timestamp
-            )
-            created_between = (prod_df.created > user_timestamp) & (
-                prod_df.created < chosen_timestamp
-            )
+            deleted_between = (
+                prod_df[column_names[table]["deleted"]] > user_timestamp
+            ) & ([column_names[table]["deleted"]] < chosen_timestamp)
+            created_between = (
+                prod_df[column_names[table]["created"]] > user_timestamp
+            ) & (prod_df[column_names[table]["created"]] < chosen_timestamp)
             to_delete_in_mat = created_between & ~deleted_between
             to_add_in_mat = deleted_between & ~created_between
             if len(prod_df[created_between].index) > 0:
@@ -371,14 +380,25 @@ def combine_queries(
             else:
                 cut_prod_df = prod_df
         # # delete those rows from materialized dataframe
-        cut_prod_df = cut_prod_df.drop(columns=["created", "deleted", "superceded_id"])
+        crud_columns = []
+        for table in column_names.keys():
+            table_crud_columns = [
+                column_names[table].get("created", None),
+                column_names[table].get("deleted", None),
+                column_names[table].get("superceded_id", None),
+            ]
+            crud_columns.extend([t for t in table_crud_columns if t is not None])
+
+        cut_prod_df = cut_prod_df.drop(crud_columns, axis=1)
         if mat_df is not None:
             if len(prod_df[to_delete_in_mat].index) > 0:
-                mat_df = mat_df.drop(prod_df[to_delete_in_mat].index, axis=0, errors='ignore')
+                mat_df = mat_df.drop(
+                    prod_df[to_delete_in_mat].index, axis=0, errors="ignore"
+                )
             comb_df = pd.concat([cut_prod_df, mat_df])
         else:
             comb_df = prod_df[to_add_in_mat].drop(
-                columns=["created", "deleted", "superceded_id"]
+                columns=crud_columns, axis=1, errors="ignore"
             )
     else:
         comb_df = mat_df
@@ -644,7 +664,7 @@ class LiveTableQuery(Resource):
         """
         args = query_parser.parse_args()
         user_data = request.parsed_obj
-        joins = user_data.get("join_tables", None)
+        # joins = user_data.get("join_tables", None)
         # has_joins = joins is not None
         user_data["limit"] = min(
             current_app.config["QUERY_LIMIT_SIZE"],
