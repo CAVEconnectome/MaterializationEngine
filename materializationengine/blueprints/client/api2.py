@@ -1,5 +1,3 @@
-import logging
-import time
 import pytz
 import pyarrow as pa
 from cachetools import LRUCache, cached
@@ -363,7 +361,7 @@ def combine_queries(
             ) & ([column_names[table]["deleted"]] < chosen_timestamp)
             created_between = (
                 prod_df[column_names[table]["created"]] > user_timestamp
-            ) & (prod_df[column_names[table]["created"]]  < chosen_timestamp)
+            ) & (prod_df[column_names[table]["created"]] < chosen_timestamp)
             to_delete_in_mat = created_between & ~deleted_between
             to_add_in_mat = deleted_between & ~created_between
             if len(prod_df[created_between].index) > 0:
@@ -373,9 +371,13 @@ def combine_queries(
         # # delete those rows from materialized dataframe
         crud_columns = []
         for table in column_names.keys():
-            crud_columns.extend([column_names[table]['created'],
-                                 column_names[table]['deleted'],
-                                 column_names[table]['superceded_id']])
+            crud_columns.extend(
+                [
+                    column_names[table]["created"],
+                    column_names[table]["deleted"],
+                    column_names[table]["superceded_id"],
+                ]
+            )
 
         cut_prod_df = cut_prod_df.drop(crud_columns, axis=1)
         if mat_df is not None:
@@ -385,9 +387,7 @@ def combine_queries(
                 )
             comb_df = pd.concat([cut_prod_df, mat_df])
         else:
-            comb_df = prod_df[to_add_in_mat].drop(
-                columns=crud_columns, axis=1
-            )
+            comb_df = prod_df[to_add_in_mat].drop(columns=crud_columns, axis=1)
     else:
         comb_df = mat_df
 
