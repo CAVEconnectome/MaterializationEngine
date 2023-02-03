@@ -28,7 +28,7 @@ from materializationengine.utils import (
 )
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql import or_
-from sqlalchemy.sql import column, func
+from sqlalchemy.sql import func
 
 celery_logger = get_task_logger(__name__)
 
@@ -42,8 +42,10 @@ def process_new_annotations_workflow(
     Workflow paths:
         check if supervoxel column is empty:
             if last_updated is NULL:
-                -> workflow : find missing supervoxels > cloudvolume lookup supervoxels > get root ids >
-                            find missing root_ids > lookup supervoxel ids from sql > get root_ids > merge root_ids list > insert root_ids
+                -> workflow : find missing supervoxels > cloudvolume lookup supervoxels >
+                              get root ids > find missing root_ids >
+                              lookup supervoxel ids from sql >
+                              get root_ids > merge root_ids list > insert root_ids
             else:
                 -> find missing supervoxels > cloudvolume lookup |
                     - > find new root_ids between time stamps  ---> merge root_ids list > upsert root_ids
@@ -82,74 +84,107 @@ def process_new_annotations_workflow(
 
 
 @celery.task(
-    name="workflow:ingest_table_svids",
+    name="process:ingest_table_svids",
     bind=True,
     acks_late=True,
 )
-def ingest_table_svids(self, datastack_info: dict, table_name: str):
+def ingest_table_svids(
+    self, datastack_info: dict, table_name: str, annotation_ids: list = None
+):
+
     mat_info = get_materialization_info(
         datastack_info=datastack_info,
         materialization_time_stamp=None,
         skip_table=True,
         table_name=table_name,
+        skip_row_count=True if annotation_ids else False,
     )
     mat_metadata = mat_info[0]  # only one entry for a single table
-    annotation_chunks = generate_chunked_model_ids(mat_metadata)
     table_created = create_missing_segmentation_table(mat_metadata)
     if table_created:
         celery_logger.info(f'Table created: {mat_metadata["segmentation_table_name"]}')
-
-    ingest_workflow = chain(
-        chord(
-            [
-                chain(
-                    ingest_new_supervoxel_ids.si(annotation_chunk, mat_metadata),
-                )
-                for annotation_chunk in annotation_chunks
-            ],
-            fin.si(),
+    if annotation_ids:
+        ingest_workflow = ingest_new_annotations.si(
+            None, mat_metadata, annotation_ids, lookup_root_ids=False
         )
-    ).apply_async()
-    tasks_completed = monitor_workflow_state(ingest_workflow)
-    if tasks_completed:
-        return True
+        ingest_workflow.apply_async()
+    else:
+        annotation_chunks = generate_chunked_model_ids(mat_metadata)
+        ingest_workflow = chain(
+            chord(
+                [
+                    chain(
+                        ingest_new_annotations.si(
+                            annotation_chunk, mat_metadata, lookup_root_ids=False
+                        ),
+                    )
+                    for annotation_chunk in annotation_chunks
+                ],
+                fin.si(),
+            )
+        ).apply_async()
 
 
 @celery.task(
-    name="workflow:ingest_new_supervoxel_ids",
+    name="process:ingest_new_annotations",
     acks_late=True,
     bind=True,
     autoretry_for=(Exception,),
     max_retries=6,
 )
-def ingest_new_supervoxel_ids(self, chunk: List[int], mat_metadata: dict):
+def ingest_new_annotations(
+    self,
+    chunk: List[int],
+    mat_metadata: dict,
+    ids_list: List[int] = None,
+    lookup_root_ids: bool = True,
+):
     """Find annotations with missing entries in the segmentation
     table. Lookup supervoxel ids at the spatial point then
-    Finally insert the supervoxel into the segmentation table.
+    optionally find the current root id at the materialized timestamp.
+    Finally insert the supervoxel and root ids into the
+    segmentation table.
 
-    Args:
-        mat_metadata (dict): metadata associated with the materialization
-        chunk (List[int]): list of annotation ids
+    Parameters
+    ----------
+    chunk : List[int]
+        list of annotation bounds
+    mat_metadata : dict
+         metadata associated with the materialization
+    lookup_root_ids : True
+        lookup root ids after segmentation ids are resolved
+    ids_list : List[int], optional
+        list of annotation ids, by default None
 
-    Raises:
-        self.retry: re-queue the tasks if failed. Retries 6 times.
+    Returns
+    -------
+    dict
+        Name of table and runtime of task.
 
-    Returns:
-        str: Name of table and runtime of task.
+    Raises
+    ------
+    self.retry
+        re-queue the tasks if failed. Retries 6 times.
     """
     try:
         start_time = time.time()
-        missing_data = get_annotations_with_missing_supervoxel_ids(mat_metadata, chunk)
-        celery_logger.info(f"Missing data {missing_data}")
+        missing_data = get_annotations_with_missing_supervoxel_ids(
+            mat_metadata, chunk, ids_list
+        )
+        celery_logger.debug(f"Missing data {missing_data}")
         if not missing_data:
             celery_logger.debug("NO MISSING SVIDS")
             return fin.si()
         supervoxel_data = get_cloudvolume_supervoxel_ids(missing_data, mat_metadata)
-        df = pd.DataFrame(supervoxel_data, dtype=object)
-        drop_col_names = list(df.loc[:, df.columns.str.endswith("position")])
-        df = df.drop(drop_col_names, 1)
-        result = insert_segmentation_data(df.to_dict(orient="records"), mat_metadata)
-        celery_logger.info(result)
+        if not lookup_root_ids:
+            df = pd.DataFrame(supervoxel_data, dtype=object)
+            drop_col_names = list(df.loc[:, df.columns.str.endswith("position")])
+            df = df.drop(drop_col_names, 1)
+            segmentation_data = df.to_dict(orient="records")
+        else:
+            segmentation_data = get_new_root_ids(supervoxel_data, mat_metadata)
+        result = insert_segmentation_data(segmentation_data, mat_metadata)
+        celery_logger.debug(result)
         run_time = time.time() - start_time
         table_name = mat_metadata["annotation_table_name"]
     except Exception as e:
@@ -157,7 +192,7 @@ def ingest_new_supervoxel_ids(self, chunk: List[int], mat_metadata: dict):
         raise self.retry(exc=e, countdown=3)
     return {
         "Table name": f"{table_name}",
-        "Run time": f"{run_time}, New svids inserted: {len(supervoxel_data)})",
+        "Run time": f"{run_time}",
     }
 
 
@@ -258,17 +293,18 @@ def lookup_missing_root_ids_workflow(
     mat_metadata: dict, missing_root_id_chunks: List[int]
 ):
     """Celery workflow that finds and looks up missing root ids.
+
     Workflow:
-            - Lookup supervoxel id(s)
-            - Get root ids from supervoxels
-            - insert into segmentation table
+                - Lookup supervoxel id(s)
+                - Get root ids from supervoxels
+                - insert into segmentation table
 
-    Args:
-        mat_metadata (dict): datastack info for the aligned_volume derived from the infoservice
-        missing_root_id_chunks (List[int]): list of pk ids that have a missing root_id
+        Args:
+            mat_metadata (dict): datastack info for the aligned_volume derived from the infoservice
+            missing_root_id_chunks (List[int]): list of pk ids that have a missing root_id
 
-    Returns:
-        chain: chain of celery tasks
+        Returns:
+            chain: chain of celery tasks
     """
     return chain(
         chord(
@@ -363,49 +399,6 @@ def ingest_new_annotations_workflow(mat_metadata: dict):
         return fin.si()
 
 
-@celery.task(
-    name="workflow:ingest_new_annotations",
-    acks_late=True,
-    bind=True,
-    autoretry_for=(Exception,),
-    max_retries=6,
-)
-def ingest_new_annotations(self, chunk: List[int], mat_metadata: dict):
-    """Find annotations with missing entries in the segmentation
-    table. Lookup supervoxel ids at the spatial point then
-    find the current root id at the materialized timestamp.
-    Finally insert the supervoxel and root ids into the
-    segmentation table.
-
-    Args:
-        mat_metadata (dict): metadata associated with the materialization
-        chunk (List[int]): list of annotation ids
-
-    Raises:
-        self.retry: re-queue the tasks if failed. Retries 6 times.
-
-    Returns:
-        str: Name of table and runtime of task.
-    """
-    try:
-        start_time = time.time()
-        missing_data = get_annotations_with_missing_supervoxel_ids(mat_metadata, chunk)
-
-        if not missing_data:
-            celery_logger.info("NO MISSING ANNO IDS")
-            return fin.si()
-        supervoxel_data = get_cloudvolume_supervoxel_ids(missing_data, mat_metadata)
-        root_id_data = get_new_root_ids(supervoxel_data, mat_metadata)
-        result = insert_segmentation_data(root_id_data, mat_metadata)
-        celery_logger.info(result)
-        run_time = time.time() - start_time
-        table_name = mat_metadata["annotation_table_name"]
-    except Exception as e:
-        celery_logger.error(e)
-        raise self.retry(exc=e, countdown=3)
-    return {"Table name": f"{table_name}", "Run time": f"{run_time}"}
-
-
 @celery.task(name="workflow:create_missing_segmentation_table", bind=True)
 def create_missing_segmentation_table(self, mat_metadata: dict) -> dict:
     """Create missing segmentation tables associated with an annotation table if it
@@ -455,7 +448,7 @@ def create_missing_segmentation_table(self, mat_metadata: dict) -> dict:
 
 
 def get_annotations_with_missing_supervoxel_ids(
-    mat_metadata: dict, chunk: List[int]
+    mat_metadata: dict, chunk: List[int], ids_list: List[int] = None
 ) -> dict:
     """Get list of valid annotation and their ids to lookup existing supervoxel ids. If there
     are missing supervoxels they will be set as None for cloudvolume lookup.
@@ -484,11 +477,13 @@ def get_annotations_with_missing_supervoxel_ids(
     )
 
     query = session.query(*anno_model_cols)
-
-    chunked_id_query = query_id_range(AnnotationModel.id, chunk[0], chunk[1])
+    if ids_list:
+        id_query = AnnotationModel.id.in_(ids_list)
+    else:
+        id_query = query_id_range(AnnotationModel.id, chunk[0], chunk[1])
     annotation_data = [
         data
-        for data in query.filter(chunked_id_query)
+        for data in query.filter(id_query)
         .order_by(AnnotationModel.id)
         .filter(AnnotationModel.valid == True)
         .join(SegmentationModel, isouter=True)
@@ -640,7 +635,7 @@ def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
         materialization_time_stamp = datetime.datetime.strptime(
             mat_metadata.get("materialization_time_stamp"), "%Y-%m-%d %H:%M:%S.%f"
         )
-    except:
+    except ValueError:
         materialization_time_stamp = datetime.datetime.strptime(
             mat_metadata.get("materialization_time_stamp"), "%Y-%m-%dT%H:%M:%S.%f"
         )

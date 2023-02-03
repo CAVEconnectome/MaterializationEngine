@@ -1,23 +1,21 @@
 import itertools
-import logging
 import tempfile
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from functools import partial
-from typing import List
 
 import numpy as np
 import pandas as pd
 import shapely
 from geoalchemy2.elements import WKBElement
-from geoalchemy2.functions import ST_X, ST_Y, ST_Z
+
 from geoalchemy2.shape import to_shape
 from geoalchemy2.types import Geometry
 from multiwrapper import multiprocessing_utils as mu
 from sqlalchemy import func, not_
-from sqlalchemy.orm import Query, Session
+from sqlalchemy.orm import Query
 from sqlalchemy.sql.sqltypes import Boolean, Integer, DateTime
-from sqlalchemy.ext.declarative import DeclarativeMeta
+from sqlalchemy.sql.selectable import Alias
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
 
@@ -174,6 +172,13 @@ def _fix_decimal_column(df_col):
         return df_col.apply(np.float)
 
 
+def get_column(model, column):
+    if isinstance(model, Alias):
+        return model.c[column]
+    else:
+        return model.__dict__[column]
+
+
 def make_spatial_filter(model, column_name, bounding_box) -> Query:
     """Generate spatial query that finds annotations within a bounding box.
 
@@ -187,7 +192,7 @@ def make_spatial_filter(model, column_name, bounding_box) -> Query:
         Query: [description]
     """
 
-    spatial_column = getattr(model, column_name)
+    spatial_column = get_column(model, column_name)
 
     coord_array = np.array(bounding_box)
     if not (coord_array[0] < coord_array[1]).all():

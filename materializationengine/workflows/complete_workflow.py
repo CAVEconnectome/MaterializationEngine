@@ -73,8 +73,11 @@ def run_complete_workflow(
                 ingest_new_annotations_workflow(mat_metadata),
                 update_root_ids_workflow(mat_metadata),
             )
+        else:
+            workflow = fin.si()
 
         update_live_database_workflow.append(workflow)
+
     celery_logger.debug(f"CHAINED TASKS: {update_live_database_workflow}")
     # copy live database as a materialized version and drop unneeded tables
     setup_versioned_database_workflow = create_materialized_database_workflow(

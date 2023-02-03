@@ -1,5 +1,5 @@
 import pyarrow as pa
-from cachetools import LRUCache, TTLCache, cached
+from cachetools import LRUCache, cached
 from cloudfiles import compression
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 from flask import Response, abort, current_app, request
@@ -21,7 +21,6 @@ from materializationengine.database import dynamic_annotation_cache, sqlalchemy_
 from materializationengine.utils import check_read_permission
 from materializationengine.info_client import (
     get_aligned_volumes,
-    get_datastack_info,
     get_relevant_datastack_info,
 )
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
@@ -29,10 +28,9 @@ from middle_auth_client import auth_requires_permission
 from materializationengine.blueprints.client.datastack import validate_datastack
 from flask import g
 import numpy as np
-from materializationengine.utils import check_read_permission
 import textwrap
 
-__version__ = "4.5.4"
+__version__ = "4.6.10"
 
 
 authorizations = {

@@ -24,10 +24,14 @@ from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoSuchTableError
 from materializationengine.utils import check_write_permission
 
-from materializationengine.blueprints.materialize.schemas import VirtualVersionSchema
+
+from materializationengine.blueprints.materialize.schemas import (
+    VirtualVersionSchema,
+    AnnotationIDListSchema,
+)
 
 
-__version__ = "4.5.4"
+__version__ = "4.6.10"
 
 
 bulk_upload_parser = reqparse.RequestParser()
@@ -56,7 +60,6 @@ get_roots_parser.add_argument(
 materialize_parser = reqparse.RequestParser()
 materialize_parser.add_argument("days_to_expire", required=True, default=None, type=int)
 materialize_parser.add_argument("merge_tables", required=True, type=inputs.boolean)
-
 
 authorizations = {
     "apikey": {"type": "apiKey", "in": "query", "name": "middle_auth_token"}
@@ -180,6 +183,7 @@ class ProcessNewSVIDResource(Resource):
     @reset_auth
     @auth_requires_permission("edit", table_arg="datastack_name")
     @mat_bp.doc("process new svids workflow", security="apikey")
+    @accepts("AnnotationIDList", schema=AnnotationIDListSchema, api=mat_bp)
     def post(self, datastack_name: str, table_name: str):
         """Process newly added annotations and lookup supervoxel data
 
@@ -193,9 +197,12 @@ class ProcessNewSVIDResource(Resource):
 
         if datastack_name not in current_app.config["DATASTACKS"]:
             abort(404, f"datastack {datastack_name} not configured for materialization")
+        annotation_ids = request.parsed_obj.get("annotation_ids", None)
         datastack_info = get_datastack_info(datastack_name)
 
-        info = ingest_table_svids.s(datastack_info, table_name).apply_async()
+        info = ingest_table_svids.s(
+            datastack_info, table_name, annotation_ids
+        ).apply_async()
         return 200
 
 

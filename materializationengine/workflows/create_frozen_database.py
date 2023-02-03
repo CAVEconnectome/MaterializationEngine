@@ -959,7 +959,6 @@ def add_indices(self, mat_metadata: dict):
         analysis_sql_uri = create_analysis_sql_uri(
             SQL_URI_CONFIG, datastack, analysis_version
         )
-        engine = sqlalchemy_cache.get_engine(aligned_volume)
         analysis_session, analysis_engine = create_session(analysis_sql_uri)
 
         annotation_table_name = mat_metadata.get("annotation_table_name")
@@ -973,9 +972,6 @@ def add_indices(self, mat_metadata: dict):
                 segmentation_source=None,
                 with_crud_columns=False,
             )
-            commands = index_cache.add_indices_sql_commands(
-                annotation_table_name, model, engine
-            )
         else:
             model = make_flat_model(
                 table_name=annotation_table_name,
@@ -983,10 +979,9 @@ def add_indices(self, mat_metadata: dict):
                 table_metadata=None,
             )
 
-            commands = index_cache.add_indices_sql_commands(
-                annotation_table_name, model, analysis_engine
-            )
-
+        commands = index_cache.add_indices_sql_commands(
+            annotation_table_name, model, analysis_engine
+        )
         analysis_session.close()
         analysis_engine.dispose()
 
