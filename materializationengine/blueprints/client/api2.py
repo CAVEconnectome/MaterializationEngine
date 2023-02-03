@@ -267,7 +267,11 @@ def execute_production_query(
         aligned_volume_name, segmentation_source, split_mode=True, split_mode_outer=True
     )
     user_data_modified = strip_root_id_filters(user_data)
+
     qm.configure_query(user_data_modified)
+    qm.select_column(user_data["table"], "created")
+    qm.select_column(user_data["table"], "deleted")
+    qm.select_column(user_data["table"], "superceded_id")
     qm.apply_table_crud_filter(user_data["table"], start_time, end_time)
     df, column_names = qm.execute_query()
 
@@ -371,13 +375,12 @@ def combine_queries(
         # # delete those rows from materialized dataframe
         crud_columns = []
         for table in column_names.keys():
-            crud_columns.extend(
-                [
-                    column_names[table]["created"],
-                    column_names[table]["deleted"],
-                    column_names[table]["superceded_id"],
-                ]
-            )
+            table_crud_columns = [
+                column_names[table].get("created", None),
+                column_names[table].get("deleted", None),
+                column_names[table].get("superceded_id", None),
+            ]
+            crud_columns.extend([t for t in table_crud_columns if t is not None])
 
         cut_prod_df = cut_prod_df.drop(crud_columns, axis=1)
         if mat_df is not None:
@@ -387,7 +390,7 @@ def combine_queries(
                 )
             comb_df = pd.concat([cut_prod_df, mat_df])
         else:
-            comb_df = prod_df[to_add_in_mat].drop(columns=crud_columns, axis=1)
+            comb_df = prod_df[to_add_in_mat].drop(columns=crud_columns, axis=1, errors="ignore")
     else:
         comb_df = mat_df
 
