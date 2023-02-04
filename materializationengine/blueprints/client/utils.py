@@ -1,5 +1,5 @@
 import pyarrow as pa
-from flask import Response, abort, current_app, request
+from flask import Response, request
 from cloudfiles import compression
 
 
@@ -45,7 +45,9 @@ def after_request(response):
 
 def add_warnings_to_headers(headers, warnings):
     if len(warnings) > 0:
-        headers["Warning"] = ". ".join([w.replace("\n", " ") for w in warnings])
+        warnings = [w.replace("\n", " ") for w in warnings]
+        print(warnings)
+        headers["Warning"] = warnings
     return headers
 
 
