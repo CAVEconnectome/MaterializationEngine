@@ -72,8 +72,7 @@ query_parser.add_argument(
     default=False,
     required=False,
     location="args",
-    help=("whether to return position columns"
-          "as seperate x,y,z columns (faster)"),
+    help=("whether to return position columns" "as seperate x,y,z columns (faster)"),
 )
 query_parser.add_argument(
     "count",
@@ -223,10 +222,7 @@ def execute_materialized_query(
 
         # return the result
         df, column_names = qm.execute_query()
-        df, warnings = update_rootids(df,
-                                      user_data["timestamp"],
-                                      query_map,
-                                      cg_client)
+        df, warnings = update_rootids(df, user_data["timestamp"], query_map, cg_client)
         if len(df) >= user_data["limit"]:
             warnings.append(
                 f"result has {len(df)} entries, which is equal or more \
@@ -738,7 +734,7 @@ class LiveTableQuery(Resource):
         df = combine_queries(mat_df, prod_df, chosen_version, user_data, column_names)
         df = apply_filters(df, user_data, column_names)
 
-        headers = {"Warning": "\n".join(mat_warnings + prod_warnings)}
+        headers = {"Warning": ". ".join(mat_warnings + prod_warnings)}
 
         if args["return_pyarrow"]:
             context = pa.default_serialization_context()

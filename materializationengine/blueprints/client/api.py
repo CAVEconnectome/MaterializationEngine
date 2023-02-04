@@ -226,7 +226,7 @@ def update_notice_text_headers(ann_md, headers):
         if headers is None:
             headers = {"Warning": msg}
         else:
-            headers["Warning"] = +"\n" + msg
+            headers["Warning"] = +" " + msg
     return headers
 
 
