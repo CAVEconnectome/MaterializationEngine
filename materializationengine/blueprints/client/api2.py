@@ -18,7 +18,7 @@ from materializationengine.blueprints.client.utils import (
     update_notice_text_warnings,
     create_query_response,
     after_request,
-    collect_crud_columns
+    collect_crud_columns,
 )
 from materializationengine.blueprints.client.schemas import (
     V2QuerySchema,
@@ -333,7 +333,7 @@ def combine_queries(
         abort(400, f"This query on table {user_data['table']} returned no results")
 
     crud_columns, created_columns = collect_crud_columns(column_names=column_names)
-    
+
     if prod_df is not None:
         # if we are moving forward in time
         if chosen_timestamp < user_timestamp:

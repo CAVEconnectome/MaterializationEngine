@@ -31,7 +31,7 @@ from flask import g
 import numpy as np
 import textwrap
 
-__version__ = "4.6.10"
+__version__ = "4.6.12"
 
 
 authorizations = {
