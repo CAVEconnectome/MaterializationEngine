@@ -26,7 +26,7 @@ from materializationengine.blueprints.client.datastack import validate_datastack
 from flask import g
 
 
-__version__ = "4.6.10"
+__version__ = "4.6.11"
 
 
 authorizations = {
