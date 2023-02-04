@@ -17,24 +17,9 @@ from sqlalchemy.orm import Query
 from sqlalchemy.sql.sqltypes import Boolean, Integer, DateTime
 from sqlalchemy.sql.selectable import Alias
 from sqlalchemy.orm.util import AliasedClass
+from materializationengine.blueprints.client.utils import update_notice_text_warnings
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
-
-
-def add_warnings_to_headers(headers, warnings):
-    if len(warnings) > 0:
-        headers["Warning"] = "\n".join(warnings)
-    return headers
-
-
-def update_notice_text_warnings(ann_md, warnings):
-    notice_text = ann_md.get("notice_text", None)
-    if notice_text is not None:
-        msg = f"Table Owner Warning: {notice_text}"
-        warnings.append(msg)
-
-    return warnings
-    d
 
 
 def concatenate_position_columns(df):
@@ -177,7 +162,7 @@ def get_column(model, column):
     if isinstance(model, Alias):
         return model.c[column]
     if isinstance(model, AliasedClass):
-        return eval(f'model.{column}')
+        return eval(f"model.{column}")
     else:
         return model.__dict__[column]
 
