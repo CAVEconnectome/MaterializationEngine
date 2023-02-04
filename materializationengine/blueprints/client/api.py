@@ -1,8 +1,6 @@
-import pyarrow as pa
 from cachetools import LRUCache, cached
-from cloudfiles import compression
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
-from flask import Response, abort, current_app, request
+from flask import abort, current_app, request
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
 from materializationengine.blueprints.client.schemas import (
@@ -13,7 +11,6 @@ from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.blueprints.client.utils import (
     add_warnings_to_headers,
     update_notice_text_warnings,
-    after_request,
     create_query_response,
     collect_crud_columns,
 )
@@ -641,7 +638,7 @@ class FrozenQuery(Resource):
             warn_text = textwrap.dedent(
                 """\
                 Suffixes is deprecated for complex queries as it
-                can be ambiguous what you desire, 
+                can be ambiguous what you desire,
                 please pass suffix_map as a dictionary to explicitly
                 set suffixes for individual tables.
                 Upgrade caveclient to >X.X.X """
@@ -729,7 +726,7 @@ class FrozenQuery(Resource):
         )
         crud_columns, created_columns = collect_crud_columns(column_names)
         df.drop(crud_columns, axis=1, errors="ignore", inplace=True)
-        
+
         if len(df) == limit:
             warnings.append(f'201 - "Limited query to {limit} rows')
 

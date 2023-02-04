@@ -17,7 +17,7 @@ from sqlalchemy.orm import Query
 from sqlalchemy.sql.sqltypes import Boolean, Integer, DateTime
 from sqlalchemy.sql.selectable import Alias
 from sqlalchemy.orm.util import AliasedClass
-from materializationengine.blueprints.client.utils import update_notice_text_warnings
+
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
 
