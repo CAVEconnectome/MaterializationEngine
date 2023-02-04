@@ -15,6 +15,7 @@ from materializationengine.blueprints.client.utils import (
     update_notice_text_warnings,
     after_request,
     create_query_response,
+    collect_crud_columns,
 )
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
@@ -525,7 +526,7 @@ class FrozenTableQuery(Resource):
         df, column_names = qm.execute_query(
             desired_resolution=data["desired_resolution"]
         )
-
+        df.drop(columns=["deleted", "superceded"], inplace=True, errors="ignore")
         warnings = []
         current_app.logger.info("query: {}".format(data))
         current_app.logger.info("args: {}".format(args))
@@ -726,7 +727,9 @@ class FrozenQuery(Resource):
         df, column_names = qm.execute_query(
             desired_resolution=data["desired_resolution"]
         )
-
+        crud_columns, created_columns = collect_crud_columns(column_names)
+        df.drop(crud_columns, axis=1, errors="ignore", inplace=True)
+        
         if len(df) == limit:
             warnings.append(f'201 - "Limited query to {limit} rows')
 

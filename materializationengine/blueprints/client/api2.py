@@ -18,6 +18,7 @@ from materializationengine.blueprints.client.utils import (
     update_notice_text_warnings,
     create_query_response,
     after_request,
+    collect_crud_columns
 )
 from materializationengine.blueprints.client.schemas import (
     V2QuerySchema,
@@ -330,17 +331,9 @@ def combine_queries(
         prod_df = prod_df.set_index(column_names[table]["id"])
     if (prod_df is None) and (mat_df is None):
         abort(400, f"This query on table {user_data['table']} returned no results")
-    crud_columns = []
-    created_columns = []
-    for table in column_names.keys():
-        table_crud_columns = [
-            column_names[table].get("deleted", None),
-            column_names[table].get("superceded_id", None),
-        ]
-        crud_columns.extend([t for t in table_crud_columns if t is not None])
-        if column_names[table].get("created", None):
-            created_columns.append(column_names[table]["created"])
 
+    crud_columns, created_columns = collect_crud_columns(column_names=column_names)
+    
     if prod_df is not None:
         # if we are moving forward in time
         if chosen_timestamp < user_timestamp:

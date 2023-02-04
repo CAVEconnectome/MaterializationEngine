@@ -3,6 +3,21 @@ from flask import Response, abort, current_app, request
 from cloudfiles import compression
 
 
+def collect_crud_columns(column_names):
+
+    crud_columns = []
+    created_columns = []
+    for table in column_names.keys():
+        table_crud_columns = [
+            column_names[table].get("deleted", None),
+            column_names[table].get("superceded_id", None),
+        ]
+        crud_columns.extend([t for t in table_crud_columns if t is not None])
+        if column_names[table].get("created", None):
+            created_columns.append(column_names[table]["created"])
+    return crud_columns, created_columns
+
+
 def after_request(response):
 
     accept_encoding = request.headers.get("Accept-Encoding", "")
