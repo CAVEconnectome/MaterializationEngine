@@ -5,6 +5,7 @@ from cachetools import LRUCache, TTLCache, cached
 from flask import abort, request, current_app
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
+from materializationengine.blueprints.client.datastack import validate_datastack
 from materializationengine.blueprints.client.new_query import (
     remap_query,
     strip_root_id_filters,
@@ -16,11 +17,19 @@ from materializationengine.blueprints.client.utils import (
     collect_crud_columns,
 )
 from materializationengine.blueprints.client.schemas import (
+    ComplexQuerySchema,
+    SimpleQuerySchema,
     V2QuerySchema,
 )
 from materializationengine.utils import check_read_permission
 from materializationengine.models import MaterializedMetadata
 from materializationengine.blueprints.reset_auth import reset_auth
+from materializationengine.blueprints.client.common import (
+    handle_complex_query,
+    handle_simple_query,
+    validate_table_args,
+    get_flat_model
+)
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import (
     dynamic_annotation_cache,
@@ -480,6 +489,49 @@ class DatastackVersion(Resource):
         return schema.dump(response), 200
 
 
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/count"
+)
+class FrozenTableCount(Resource):
+    @reset_auth
+    @auth_requires_permission("view", table_arg="datastack_name")
+    @validate_datastack
+    @client_bp.doc("simple_query", security="apikey")
+    def get(
+        self,
+        datastack_name: str,
+        version: int,
+        table_name: str,
+        target_datastack: str = None,
+        target_version: int = None,
+    ):
+        """get annotation count in table
+
+        Args:
+            datastack_name (str): datastack name of table
+            version (int): version of table
+            table_name (str): table name
+
+        Returns:
+            int: number of rows in this table
+        """
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+
+        validate_table_args([table_name], target_datastack, target_version)
+        db_name = f"{datastack_name}__mat{version}"
+        db = dynamic_annotation_cache.get_db(db_name)
+        # if the database is a split database get a split model
+        # and if its not get a flat model
+        md = db.database.g
+        Session = sqlalchemy_cache.get(aligned_volume_name)
+        Model = get_flat_model(datastack_name, table_name, version, Session)
+
+        Session = sqlalchemy_cache.get("{}__mat{}".format(datastack_name, version))
+        return Session().query(Model).count(), 200
+
+
 @client_bp.route("/datastack/<string:datastack_name>/metadata")
 class DatastackMetadata(Resource):
     @reset_auth
@@ -583,6 +635,145 @@ class FrozenTableMetadata(Resource):
         ann_md.pop("deleted")
         tables.update(ann_md)
         return tables, 200
+
+
+@client_bp.expect(query_parser)
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/query"
+)
+class FrozenTableQuery(Resource):
+    @reset_auth
+    @auth_requires_permission("view", table_arg="datastack_name")
+    @validate_datastack
+    @client_bp.doc("simple_query", security="apikey")
+    @accepts("SimpleQuerySchema", schema=SimpleQuerySchema, api=client_bp)
+    def post(
+        self,
+        datastack_name: str,
+        version: int,
+        table_name: str,
+        target_datastack: str = None,
+        target_version: int = None,
+    ):
+        """endpoint for doing a query with filters
+
+        Args:
+            datastack_name (str): datastack name
+            version (int): version number
+            table_name (str): table name
+
+        Payload:
+        All values are optional.  Limit has an upper bound set by the server.
+        Consult the schema of the table for column names and appropriate values
+        {
+            "filter_out_dict": {
+                "tablename":{
+                    "column_name":[excluded,values]
+                }
+            },
+            "offset": 0,
+            "limit": 200000,
+            "desired_resolution: [x,y,z],
+            "select_columns": ["column","names"],
+            "filter_in_dict": {
+                "tablename":{
+                    "column_name":[included,values]
+                }
+            },
+            "filter_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            "filter_spatial_dict": {
+                "tablename": {
+                "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+            }
+        }
+        Returns:
+            pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
+        """
+        args = query_parser.parse_args()
+        data = request.parsed_obj
+        return handle_simple_query(
+            datastack_name,
+            version,
+            table_name,
+            target_datastack,
+            target_version,
+            args,
+            data,
+            convert_desired_resolution=True,
+        )
+
+
+@client_bp.expect(query_parser)
+@client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/query")
+class FrozenQuery(Resource):
+    @reset_auth
+    @auth_requires_permission("view", table_arg="datastack_name")
+    @validate_datastack
+    @client_bp.doc("complex_query", security="apikey")
+    @accepts("ComplexQuerySchema", schema=ComplexQuerySchema, api=client_bp)
+    def post(
+        self,
+        datastack_name: str,
+        version: int,
+        target_datastack: str = None,
+        target_version: int = None,
+    ):
+        """endpoint for doing a query with filters and joins
+
+        Args:
+            datastack_name (str): datastack name
+            version (int): version number
+
+        Payload:
+        All values are optional.  Limit has an upper bound set by the server.
+        Consult the schema of the table for column names and appropriate values
+        {
+            "tables":[["table1", "table1_join_column"],
+                      ["table2", "table2_join_column"]],
+            "filter_out_dict": {
+                "tablename":{
+                    "column_name":[excluded,values]
+                }
+            },
+            "offset": 0,
+            "limit": 200000,
+            "select_columns": [
+                "column","names"
+            ],
+            "filter_in_dict": {
+                "tablename":{
+                    "column_name":[included,values]
+                }
+            },
+            "filter_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            }
+            "filter_spatial_dict": {
+                "tablename":{
+                    "column_name":[[min_x,min_y,minz], [max_x_max_y_max_z]]
+                }
+            }
+        }
+        Returns:
+            pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
+        """
+
+        args = query_parser.parse_args()
+        data = request.parsed_obj
+        return handle_complex_query(
+            datastack_name,
+            version,
+            target_datastack,
+            target_version,
+            args,
+            data,
+            convert_desired_resolution=True,
+        )
 
 
 @client_bp.expect(query_parser)
