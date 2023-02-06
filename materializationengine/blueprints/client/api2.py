@@ -28,7 +28,7 @@ from materializationengine.blueprints.client.common import (
     handle_complex_query,
     handle_simple_query,
     validate_table_args,
-    get_flat_model
+    get_flat_model,
 )
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import (
@@ -389,7 +389,7 @@ def combine_queries(
     else:
         comb_df = mat_df.drop(columns=crud_columns, axis=1, errors="ignore")
 
-    return comb_df
+    return comb_df.reset_index()
 
 
 @cached(cache=LRUCache(maxsize=64))
