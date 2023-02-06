@@ -65,7 +65,8 @@ def create_query_response(
 ):
 
     headers = add_warnings_to_headers({}, warnings)
-    headers["dataframe_resolution"] = desired_resolution
+    if desired_resolution is not None:
+        headers["dataframe_resolution"] = desired_resolution
     headers["column_names"] = column_names
     if return_pyarrow:
         context = pa.default_serialization_context()
