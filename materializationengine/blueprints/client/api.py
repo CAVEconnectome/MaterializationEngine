@@ -23,6 +23,7 @@ from materializationengine.blueprints.client.common import (
     get_analysis_version_and_table,
     get_flat_model,
 )
+from materializationengine.models import MaterializedMetadata
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from middle_auth_client import auth_requires_permission
 from materializationengine.blueprints.client.datastack import validate_datastack
@@ -285,11 +286,16 @@ class FrozenTableCount(Resource):
             datastack_name
         )
         validate_table_args([table_name], target_datastack, target_version)
-        Session = sqlalchemy_cache.get(aligned_volume_name)
-        Model = get_flat_model(datastack_name, table_name, version, Session)
+        mat_db_name = f"{datastack_name}__mat{version}"
 
-        Session = sqlalchemy_cache.get("{}__mat{}".format(datastack_name, version))
-        return Session().query(Model).count(), 200
+        session = sqlalchemy_cache.get(mat_db_name)
+        mat_row_count = (
+            session.query(MaterializedMetadata.row_count)
+            .filter(MaterializedMetadata.table_name == table_name)
+            .scalar()
+        )
+
+        return mat_row_count, 200
 
 
 @client_bp.expect(query_parser)
