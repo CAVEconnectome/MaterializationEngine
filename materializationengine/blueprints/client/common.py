@@ -238,7 +238,7 @@ def handle_complex_query(
             can be ambiguous what you desire,
             please pass suffix_map as a dictionary to explicitly
             set suffixes for individual tables.
-            Upgrade caveclient to >X.X.X """
+            Upgrade caveclient to >=5.0.0 """
         )
         warnings.append(warn_text)
         all_tables = []
@@ -295,7 +295,7 @@ def handle_complex_query(
             This query result will attempt to select the first column it finds
             of this name in any table, but if there are more than one such column
             it will not select both.
-            Upgrade caveclient to >X.X.X ."""
+            Upgrade caveclient to >=5.0.0 ."""
         )
         warnings.append(warn_text)
 
