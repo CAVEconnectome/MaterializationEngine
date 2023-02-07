@@ -1,4 +1,3 @@
-from .query import _execute_query
 import datetime
 import numpy as np
 from flask import abort

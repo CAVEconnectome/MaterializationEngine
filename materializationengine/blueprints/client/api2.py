@@ -1,24 +1,35 @@
 import pytz
-import pyarrow as pa
-from cloudfiles import compression
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
 from cachetools import LRUCache, TTLCache, cached
-from flask import Response, abort, request, current_app
+from flask import abort, request, current_app
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
+from materializationengine.blueprints.client.datastack import validate_datastack
 from materializationengine.blueprints.client.new_query import (
     remap_query,
     strip_root_id_filters,
     update_rootids,
 )
 from materializationengine.blueprints.client.query_manager import QueryManager
+from materializationengine.blueprints.client.utils import (
+    create_query_response,
+    collect_crud_columns,
+)
 from materializationengine.blueprints.client.schemas import (
+    ComplexQuerySchema,
+    SimpleQuerySchema,
     V2QuerySchema,
 )
 from materializationengine.utils import check_read_permission
 from materializationengine.models import MaterializedMetadata
 from materializationengine.blueprints.reset_auth import reset_auth
+from materializationengine.blueprints.client.common import (
+    handle_complex_query,
+    handle_simple_query,
+    validate_table_args,
+    get_flat_model,
+)
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import (
     dynamic_annotation_cache,
@@ -94,31 +105,6 @@ rootId lookups. A warning will still be returned, but no 406 error thrown.",
 )
 
 
-def after_request(response):
-
-    accept_encoding = request.headers.get("Accept-Encoding", "")
-
-    if "gzip" not in accept_encoding.lower():
-        return response
-
-    response.direct_passthrough = False
-
-    if (
-        response.status_code < 200
-        or response.status_code >= 300
-        or "Content-Encoding" in response.headers
-    ):
-        return response
-
-    response.data = compression.gzip_compress(response.data)
-
-    response.headers["Content-Encoding"] = "gzip"
-    response.headers["Vary"] = "Accept-Encoding"
-    response.headers["Content-Length"] = len(response.data)
-
-    return response
-
-
 @cached(cache=TTLCache(maxsize=64, ttl=600))
 def get_relevant_datastack_info(datastack_name):
     ds_info = get_datastack_info(datastack_name=datastack_name)
@@ -189,6 +175,7 @@ def execute_materialized_query(
     user_data: dict,
     query_map: dict,
     cg_client,
+    split_mode=False,
 ) -> pd.DataFrame:
     """_summary_
 
@@ -216,12 +203,14 @@ def execute_materialized_query(
             mat_db_name,
             segmentation_source=pcg_table_name,
             meta_db_name=aligned_volume,
-            split_mode=False,
+            split_mode=split_mode,
         )
         qm.configure_query(user_data)
 
         # return the result
-        df, column_names = qm.execute_query()
+        df, column_names = qm.execute_query(
+            desired_resolution=user_data["desired_resolution"]
+        )
         df, warnings = update_rootids(df, user_data["timestamp"], query_map, cg_client)
         if len(df) >= user_data["limit"]:
             warnings.append(
@@ -275,7 +264,9 @@ def execute_production_query(
     qm.select_column(user_data["table"], "deleted")
     qm.select_column(user_data["table"], "superceded_id")
     qm.apply_table_crud_filter(user_data["table"], start_time, end_time)
-    df, column_names = qm.execute_query()
+    df, column_names = qm.execute_query(
+        desired_resolution=user_data["desired_resolution"]
+    )
 
     df, warnings = update_rootids(
         df, user_timestamp, {}, cg_client, allow_missing_lookups
@@ -345,6 +336,8 @@ def combine_queries(
     if (prod_df is None) and (mat_df is None):
         abort(400, f"This query on table {user_data['table']} returned no results")
 
+    crud_columns, created_columns = collect_crud_columns(column_names=column_names)
+
     if prod_df is not None:
         # if we are moving forward in time
         if chosen_timestamp < user_timestamp:
@@ -376,17 +369,14 @@ def combine_queries(
             else:
                 cut_prod_df = prod_df
         # # delete those rows from materialized dataframe
-        crud_columns = []
-        for table in column_names.keys():
-            table_crud_columns = [
-                column_names[table].get("created", None),
-                column_names[table].get("deleted", None),
-                column_names[table].get("superceded_id", None),
-            ]
-            crud_columns.extend([t for t in table_crud_columns if t is not None])
 
         cut_prod_df = cut_prod_df.drop(crud_columns, axis=1)
+
         if mat_df is not None:
+            created_columns = [c for c in created_columns if c not in mat_df]
+            if len(created_columns) > 0:
+                cut_prod_df = cut_prod_df.drop(created_columns, axis=1)
+
             if len(prod_df[to_delete_in_mat].index) > 0:
                 mat_df = mat_df.drop(
                     prod_df[to_delete_in_mat].index, axis=0, errors="ignore"
@@ -397,9 +387,9 @@ def combine_queries(
                 columns=crud_columns, axis=1, errors="ignore"
             )
     else:
-        comb_df = mat_df
+        comb_df = mat_df.drop(columns=crud_columns, axis=1, errors="ignore")
 
-    return comb_df
+    return comb_df.reset_index()
 
 
 @cached(cache=LRUCache(maxsize=64))
@@ -497,6 +487,49 @@ class DatastackVersion(Resource):
             return "No version found", 404
         schema = AnalysisVersionSchema()
         return schema.dump(response), 200
+
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/count"
+)
+class FrozenTableCount(Resource):
+    @reset_auth
+    @auth_requires_permission("view", table_arg="datastack_name")
+    @validate_datastack
+    @client_bp.doc("simple_query", security="apikey")
+    def get(
+        self,
+        datastack_name: str,
+        version: int,
+        table_name: str,
+        target_datastack: str = None,
+        target_version: int = None,
+    ):
+        """get annotation count in table
+
+        Args:
+            datastack_name (str): datastack name of table
+            version (int): version of table
+            table_name (str): table name
+
+        Returns:
+            int: number of rows in this table
+        """
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+
+        validate_table_args([table_name], target_datastack, target_version)
+        db_name = f"{datastack_name}__mat{version}"
+        db = dynamic_annotation_cache.get_db(db_name)
+        # if the database is a split database get a split model
+        # and if its not get a flat model
+        md = db.database.g
+        Session = sqlalchemy_cache.get(aligned_volume_name)
+        Model = get_flat_model(datastack_name, table_name, version, Session)
+
+        Session = sqlalchemy_cache.get("{}__mat{}".format(datastack_name, version))
+        return Session().query(Model).count(), 200
 
 
 @client_bp.route("/datastack/<string:datastack_name>/metadata")
@@ -605,6 +638,145 @@ class FrozenTableMetadata(Resource):
 
 
 @client_bp.expect(query_parser)
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/query"
+)
+class FrozenTableQuery(Resource):
+    @reset_auth
+    @auth_requires_permission("view", table_arg="datastack_name")
+    @validate_datastack
+    @client_bp.doc("simple_query", security="apikey")
+    @accepts("SimpleQuerySchema", schema=SimpleQuerySchema, api=client_bp)
+    def post(
+        self,
+        datastack_name: str,
+        version: int,
+        table_name: str,
+        target_datastack: str = None,
+        target_version: int = None,
+    ):
+        """endpoint for doing a query with filters
+
+        Args:
+            datastack_name (str): datastack name
+            version (int): version number
+            table_name (str): table name
+
+        Payload:
+        All values are optional.  Limit has an upper bound set by the server.
+        Consult the schema of the table for column names and appropriate values
+        {
+            "filter_out_dict": {
+                "tablename":{
+                    "column_name":[excluded,values]
+                }
+            },
+            "offset": 0,
+            "limit": 200000,
+            "desired_resolution: [x,y,z],
+            "select_columns": ["column","names"],
+            "filter_in_dict": {
+                "tablename":{
+                    "column_name":[included,values]
+                }
+            },
+            "filter_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            "filter_spatial_dict": {
+                "tablename": {
+                "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+            }
+        }
+        Returns:
+            pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
+        """
+        args = query_parser.parse_args()
+        data = request.parsed_obj
+        return handle_simple_query(
+            datastack_name,
+            version,
+            table_name,
+            target_datastack,
+            target_version,
+            args,
+            data,
+            convert_desired_resolution=True,
+        )
+
+
+@client_bp.expect(query_parser)
+@client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/query")
+class FrozenQuery(Resource):
+    @reset_auth
+    @auth_requires_permission("view", table_arg="datastack_name")
+    @validate_datastack
+    @client_bp.doc("complex_query", security="apikey")
+    @accepts("ComplexQuerySchema", schema=ComplexQuerySchema, api=client_bp)
+    def post(
+        self,
+        datastack_name: str,
+        version: int,
+        target_datastack: str = None,
+        target_version: int = None,
+    ):
+        """endpoint for doing a query with filters and joins
+
+        Args:
+            datastack_name (str): datastack name
+            version (int): version number
+
+        Payload:
+        All values are optional.  Limit has an upper bound set by the server.
+        Consult the schema of the table for column names and appropriate values
+        {
+            "tables":[["table1", "table1_join_column"],
+                      ["table2", "table2_join_column"]],
+            "filter_out_dict": {
+                "tablename":{
+                    "column_name":[excluded,values]
+                }
+            },
+            "offset": 0,
+            "limit": 200000,
+            "select_columns": [
+                "column","names"
+            ],
+            "filter_in_dict": {
+                "tablename":{
+                    "column_name":[included,values]
+                }
+            },
+            "filter_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            }
+            "filter_spatial_dict": {
+                "tablename":{
+                    "column_name":[[min_x,min_y,minz], [max_x_max_y_max_z]]
+                }
+            }
+        }
+        Returns:
+            pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
+        """
+
+        args = query_parser.parse_args()
+        data = request.parsed_obj
+        return handle_complex_query(
+            datastack_name,
+            version,
+            target_datastack,
+            target_version,
+            args,
+            data,
+            convert_desired_resolution=True,
+        )
+
+
+@client_bp.expect(query_parser)
 @client_bp.route("/datastack/<string:datastack_name>/query")
 class LiveTableQuery(Resource):
     @reset_auth
@@ -671,6 +843,7 @@ class LiveTableQuery(Resource):
         )
         db = dynamic_annotation_cache.get_db(aligned_vol)
         check_read_permission(db, user_data["table"])
+        # TODO add table owner warnings
         # if has_joins:
         #    abort(400, "we are not supporting joins yet")
         # if future_ver is None and has_joins:
@@ -696,10 +869,19 @@ class LiveTableQuery(Resource):
         )
         cg_client = chunkedgraph_cache.get_client(pcg_table_name)
 
+        meta_db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        md = meta_db.database.get_table_metadata(user_data["table"])
+        if not user_data.get("desired_resolution", None):
+            des_res = [
+                md["voxel_resolution_x"],
+                md["voxel_resolution_y"],
+                md["voxel_resolution_z"],
+            ]
+            user_data["desired_resolution"] = des_res
+
         modified_user_data, query_map = remap_query(
             user_data, chosen_timestamp, cg_client
         )
-        headers = {}
 
         mat_df, column_names, mat_warnings = execute_materialized_query(
             datastack_name,
@@ -709,10 +891,8 @@ class LiveTableQuery(Resource):
             modified_user_data,
             query_map,
             cg_client,
+            split_mode=not chosen_version.is_merged,
         )
-
-        meta_db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        md = meta_db.database.get_table_metadata(user_data["table"])
 
         last_modified = pytz.utc.localize(md["last_modified"])
         if (last_modified > chosen_timestamp) or (
@@ -734,19 +914,10 @@ class LiveTableQuery(Resource):
         df = combine_queries(mat_df, prod_df, chosen_version, user_data, column_names)
         df = apply_filters(df, user_data, column_names)
 
-        headers = {"Warning": ". ".join(mat_warnings + prod_warnings)}
-
-        if args["return_pyarrow"]:
-            context = pa.default_serialization_context()
-            serialized = context.serialize(df).to_buffer().to_pybytes()
-            # time_d["serialize"] = time.time() - now
-            # logging.info(time_d)
-            return Response(
-                serialized, headers=headers, mimetype="x-application/pyarrow"
-            )
-        else:
-            dfjson = df.to_json(orient="records")
-            # time_d["serialize"] = time.time() - now
-            # logging.info(time_d)
-            response = Response(dfjson, headers=headers, mimetype="application/json")
-            return after_request(response)
+        return create_query_response(
+            df,
+            warnings=mat_warnings + prod_warnings,
+            column_names=column_names,
+            desired_resolution=user_data["desired_resolution"],
+            return_pyarrow=args["return_pyarrow"],
+        )

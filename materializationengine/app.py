@@ -1,6 +1,5 @@
 import json
 import logging
-import sys
 from datetime import date, datetime
 
 import numpy as np
@@ -58,6 +57,10 @@ def create_app(config_name: str = None):
     # register blueprints
 
     apibp = Blueprint("api", __name__, url_prefix="/materialize/api")
+
+    @apibp.route("/versions")
+    def versions():
+        return jsonify([2, 3]), 200
 
     db.init_app(app)
     ma.init_app(app)

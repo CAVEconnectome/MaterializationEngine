@@ -2,6 +2,7 @@ from marshmallow import fields, Schema
 from marshmallow.validate import Length
 import datetime
 
+
 class Metadata(Schema):
     user_id = fields.Str(required=False)
     description = fields.Str(required=True)
@@ -37,7 +38,9 @@ class SegmentationDataSchema(Schema):
 
 class V2QuerySchema(Schema):
     table = fields.Str(required=True)
-    timestamp = fields.AwareDateTime(default_timezone=datetime.timezone.utc, required=True)
+    timestamp = fields.AwareDateTime(
+        default_timezone=datetime.timezone.utc, required=True
+    )
     join_tables = fields.List(
         fields.List(fields.Str),
         required=False,
@@ -50,6 +53,9 @@ class V2QuerySchema(Schema):
     offset = fields.Integer()
     limit = fields.Integer()
     suffixes = fields.Dict()
+    desired_resolution = fields.List(
+        fields.Float, validate=Length(equal=3), required=False
+    )
 
 
 class SimpleQuerySchema(Schema):
@@ -60,6 +66,9 @@ class SimpleQuerySchema(Schema):
     select_columns = fields.List(fields.Str)
     offset = fields.Integer()
     limit = fields.Integer()
+    desired_resolution = fields.List(
+        fields.Float, validate=Length(equal=3), required=False
+    )
 
 
 class ComplexQuerySchema(Schema):
@@ -71,6 +80,11 @@ class ComplexQuerySchema(Schema):
     filter_equal_dict = fields.Dict()
     filter_spatial_dict = fields.Dict()
     select_columns = fields.List(fields.Str)
+    select_column_map = fields.Dict()
     offset = fields.Integer()
     limit = fields.Integer()
     suffixes = fields.List(fields.Str)
+    suffix_map = fields.Dict()
+    desired_resolution = fields.List(
+        fields.Float, validate=Length(equal=3), required=False
+    )
