@@ -125,9 +125,8 @@ def handle_simple_query(
     ann_md = db.database.get_table_metadata(table_name)
 
     Session = sqlalchemy_cache.get(aligned_volume_name)
-    analysis_version = (
-        Session.query(AnalysisVersion).filter(AnalysisVersion.version == version).one()
-    )
+    analysis_version, analysis_table = get_analysis_version_and_table(datastack_name, table_name, version, Session)
+    
     max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
 
     limit = data.get("limit", max_limit)
@@ -221,8 +220,14 @@ def handle_complex_query(
     db_name = f"{datastack_name}__mat{version}"
 
     analysis_version = (
-        Session.query(AnalysisVersion).filter(AnalysisVersion.version == version).one()
+        Session.query(AnalysisVersion)
+        .filter(AnalysisVersion.datastack == datastack_name)
+        .filter(AnalysisVersion.version == version)
+        .first()
     )
+    if analysis_version is None:
+        abort(404, f"Analysis version {version} not found")
+
     max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
 
     limit = data.get("limit", max_limit)
