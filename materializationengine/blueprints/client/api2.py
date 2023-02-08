@@ -29,6 +29,7 @@ from materializationengine.blueprints.client.common import (
     handle_simple_query,
     validate_table_args,
     get_flat_model,
+    get_analysis_version_and_table
 )
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import (
@@ -390,41 +391,6 @@ def combine_queries(
         comb_df = mat_df.drop(columns=crud_columns, axis=1, errors="ignore")
 
     return comb_df.reset_index()
-
-
-@cached(cache=LRUCache(maxsize=64))
-def get_analysis_version_and_table(
-    datastack_name: str, table_name: str, version: int, Session
-):
-    """query database for the analysis version and table name
-
-    Args:
-        datastack_name (str): datastack name
-        table_name (str): table name
-        version (int): integer
-        Session ([type]): sqlalchemy session
-
-    Returns:
-        AnalysisVersion, AnalysisTable: tuple of instances of AnalysisVersion and AnalysisTable
-    """
-
-    analysis_version = (
-        Session.query(AnalysisVersion)
-        .filter(AnalysisVersion.datastack == datastack_name)
-        .filter(AnalysisVersion.version == version)
-        .first()
-    )
-    if analysis_version is None:
-        return None, None
-    analysis_table = (
-        Session.query(AnalysisTable)
-        .filter(AnalysisTable.analysisversion_id == AnalysisVersion.id)
-        .filter(AnalysisTable.table_name == table_name)
-        .first()
-    )
-    if analysis_version is None:
-        return analysis_version, None
-    return analysis_version, analysis_table
 
 
 @client_bp.route("/datastack/<string:datastack_name>/versions")
