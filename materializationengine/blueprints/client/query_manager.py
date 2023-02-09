@@ -338,7 +338,7 @@ class QueryManager:
             user_data.get("filter_spatial_dict", None), self.apply_spatial_filter
         )
 
-        if user_data.get("suffices", None):
+        if user_data.get("suffixes", None):
             self._suffixes.update(user_data["suffixes"])
 
     def _make_query(
