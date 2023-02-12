@@ -25,7 +25,9 @@ class TestCreateFrozenVersion:
     def test_create_new_version(self, test_app):
 
         new_version_number = create_new_version(
-            datastack_info, materialization_time_stamp, 7
+            datastack_info=datastack_info,
+            materialization_time_stamp=materialization_time_stamp, 
+            days_to_expire=7
         )
         assert new_version_number == 1
 

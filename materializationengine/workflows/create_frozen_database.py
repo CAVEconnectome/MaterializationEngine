@@ -96,7 +96,10 @@ def create_versioned_materialization_workflow(
     """
     materialization_time_stamp = datetime.datetime.utcnow()
     new_version_number = create_new_version(
-        datastack_info, materialization_time_stamp, days_to_expire, merge_tables
+        datastack_info=datastack_info,
+        materialization_time_stamp=materialization_time_stamp,
+        days_to_expire=days_to_expire,
+        merge_tables=merge_tables
     )
 
     mat_info = get_materialization_info(
