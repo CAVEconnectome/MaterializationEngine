@@ -207,7 +207,7 @@ def execute_materialized_query(
             split_mode=split_mode,
         )
         qm.configure_query(user_data)
-
+        qm.apply_filter({user_data["table"]: {'valid': True}}, qm.apply_equal_filter)
         # return the result
         df, column_names = qm.execute_query(
             desired_resolution=user_data["desired_resolution"]

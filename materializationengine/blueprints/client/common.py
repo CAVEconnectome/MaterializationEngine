@@ -125,8 +125,10 @@ def handle_simple_query(
     ann_md = db.database.get_table_metadata(table_name)
 
     Session = sqlalchemy_cache.get(aligned_volume_name)
-    analysis_version, analysis_table = get_analysis_version_and_table(datastack_name, table_name, version, Session)
-    
+    analysis_version, analysis_table = get_analysis_version_and_table(
+        datastack_name, table_name, version, Session
+    )
+
     max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
 
     limit = data.get("limit", max_limit)
@@ -164,7 +166,7 @@ def handle_simple_query(
     qm.apply_filter(data.get("filter_out_dict", None), qm.apply_notequal_filter)
     qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
     qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
-
+    qm.apply_filter({table_name: {"valid": True}}, qm.apply_equal_filter)
     select_columns = data.get("select_columns", None)
     if select_columns:
         for column in select_columns:
@@ -288,7 +290,7 @@ def handle_complex_query(
     qm.apply_filter(data.get("filter_out_dict", None), qm.apply_notequal_filter)
     qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
     qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
-
+    qm.apply_filter({table_name: {"valid": True}}, qm.apply_equal_filter)
     select_columns = data.get("select_columns", None)
     select_column_map = data.get("select_column_map", None)
     if select_columns:
