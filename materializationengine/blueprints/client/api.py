@@ -249,7 +249,7 @@ class FrozenTableMetadata(Resource):
         ann_md.pop("id")
         ann_md.pop("deleted")
 
-        warnings = update_notice_text_warnings(ann_md, [])
+        warnings = update_notice_text_warnings(ann_md, [], table_name)
         headers = add_warnings_to_headers({}, warnings)
 
         tables.update(ann_md)
