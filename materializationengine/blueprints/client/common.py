@@ -184,7 +184,7 @@ def handle_simple_query(
 
     if len(df) == limit:
         warnings.append(f'201 - "Limited query to {limit} rows')
-    warnings = update_notice_text_warnings(ann_md, warnings)
+    warnings = update_notice_text_warnings(ann_md, warnings, table_name)
     return create_query_response(
         df,
         warnings=warnings,
@@ -217,7 +217,7 @@ def handle_complex_query(
     for table_desc in data["tables"]:
         table_name = table_desc[0]
         ann_md = check_read_permission(db, table_name)
-        warnings = update_notice_text_warnings(ann_md, warnings)
+        warnings = update_notice_text_warnings(ann_md, warnings, table_name)
 
     db_name = f"{datastack_name}__mat{version}"
 

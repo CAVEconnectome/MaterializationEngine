@@ -51,10 +51,10 @@ def add_warnings_to_headers(headers, warnings):
     return headers
 
 
-def update_notice_text_warnings(ann_md, warnings):
+def update_notice_text_warnings(ann_md, warnings, table_name):
     notice_text = ann_md.get("notice_text", None)
     if notice_text is not None:
-        msg = f"Table Owner Warning: {notice_text}"
+        msg = f"Table Owner Notice on {table_name}: {notice_text}"
         warnings.append(msg)
 
     return warnings
