@@ -251,7 +251,6 @@ def handle_complex_query(
         all_tables = []
         for table_desc in data["tables"]:
             all_tables.append(table_desc[0])
-            all_tables.append(table_desc[1])
         u, ind = np.unique(all_tables, return_index=True)
         uniq_tables = u[np.argsort(ind)]
         suffixes = {t: s for t, s in zip(uniq_tables, suffixes)}
@@ -290,6 +289,10 @@ def handle_complex_query(
     qm.apply_filter(data.get("filter_out_dict", None), qm.apply_notequal_filter)
     qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
     qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
+    for table_info in data["tables"]:
+        table_name = table_info[0]
+        qm.apply_filter({table_name: {"valid": True}}, qm.apply_equal_filter)
+
     qm.apply_filter({table_name: {"valid": True}}, qm.apply_equal_filter)
     select_columns = data.get("select_columns", None)
     select_column_map = data.get("select_column_map", None)
