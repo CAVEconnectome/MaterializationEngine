@@ -93,6 +93,8 @@ def run_complete_workflow(
         analysis_database_workflow = chain(
             chord(format_database_workflow, fin.si()),
             rebuild_reference_tables.si(mat_info),
+            check_tables.si(mat_info, new_version_number),
+
         )
     else:
         analysis_database_workflow = chain(fin.si())
@@ -102,7 +104,6 @@ def run_complete_workflow(
         *update_live_database_workflow,
         setup_versioned_database_workflow,
         analysis_database_workflow,
-        check_tables.si(mat_info, new_version_number),
         workflow_complete.si("Materialization workflow"),
     )
     final_workflow = workflow.apply_async(
