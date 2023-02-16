@@ -10,6 +10,7 @@ from materializationengine.shared_tasks import (
     get_materialization_info,
     monitor_workflow_state,
     workflow_complete,
+    fin
 )
 from materializationengine.task import LockedTask
 from materializationengine.utils import get_config_param
@@ -86,8 +87,10 @@ def update_database_workflow(self, datastack_info: dict, **kwargs):
                     update_root_ids_workflow(mat_metadata),
                 )
 
-            update_live_database_workflow.append(workflow)
-
+                update_live_database_workflow.append(workflow)
+            else:
+                update_live_database_workflow.append(fin.si())
+                
         run_update_database_workflow = chain(
             *update_live_database_workflow, workflow_complete.si("update_root_ids")
         ).apply_async(kwargs={"Datastack": datastack_info["datastack"]})
