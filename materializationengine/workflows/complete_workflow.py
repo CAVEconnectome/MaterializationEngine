@@ -16,6 +16,7 @@ from materializationengine.workflows.create_frozen_database import (
     create_new_version,
     format_materialization_database_workflow,
     rebuild_reference_tables,
+    set_version_status
 )
 from materializationengine.workflows.ingest_new_annotations import (
     ingest_new_annotations_workflow,
@@ -104,6 +105,7 @@ def run_complete_workflow(
         *update_live_database_workflow,
         setup_versioned_database_workflow,
         analysis_database_workflow,
+        set_version_status.si(mat_info, new_version_number, "AVAILABLE"),
         workflow_complete.si("Materialization workflow"),
     )
     final_workflow = workflow.apply_async(

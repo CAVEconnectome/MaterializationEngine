@@ -749,6 +749,39 @@ def insert_chunked_data(
 
 
 @celery.task(
+    name="workflow:set_version_status",
+    bind=True,
+    acks_late=True,
+)
+def set_version_status(self, mat_info: list, analysis_version: int, status: str):
+    aligned_volume = mat_info[0][
+        "aligned_volume"
+    ]  #   
+    session = sqlalchemy_cache.get(aligned_volume)
+
+    versioned_database = (
+        session.query(AnalysisVersion)
+        .filter(AnalysisVersion.version == analysis_version)
+        .one()
+    )
+    if status == "AVAILABLE":
+        versioned_database.valid = True
+    else:
+        versioned_database.valid = False
+   
+    versioned_database.status = status
+    
+    try:
+        session.commit()
+        return f"Mat db version {analysis_version} to {status}"
+    except Exception as e:
+        session.rollback()
+        celery_logger.error(e)
+    finally:
+        session.close()    
+
+
+@celery.task(
     name="workflow:check_tables",
     bind=True,
     acks_late=True,
@@ -848,8 +881,7 @@ def check_tables(self, mat_info: list, analysis_version: int):
         raise ValueError(
             f"Valid table amounts don't match {valid_table_count} {table_count}"
         )
-    versioned_database.valid = True
-    versioned_database.status = "AVAILABLE"
+
     try:
         session.commit()
         return "All materialized tables match valid row number from live tables"
