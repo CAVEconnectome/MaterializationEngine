@@ -2,8 +2,8 @@ import pytz
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
 from cachetools import LRUCache, TTLCache, cached
-from flask import abort, request, current_app
-from flask_accepts import accepts
+from flask import abort, request, current_app, g
+from flask_accepts import accepts, responds
 from flask_restx import Namespace, Resource, inputs, reqparse
 from materializationengine.blueprints.client.datastack import validate_datastack
 from materializationengine.blueprints.client.new_query import (
@@ -20,6 +20,7 @@ from materializationengine.blueprints.client.schemas import (
     ComplexQuerySchema,
     SimpleQuerySchema,
     V2QuerySchema,
+    AnalysisViewSchema,
 )
 from materializationengine.utils import check_read_permission
 from materializationengine.models import MaterializedMetadata
@@ -29,7 +30,8 @@ from materializationengine.blueprints.client.common import (
     handle_simple_query,
     validate_table_args,
     get_flat_model,
-    get_analysis_version_and_table
+    get_analysis_version,
+    get_analysis_version_and_table,
 )
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import (
@@ -41,8 +43,10 @@ from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSc
 from middle_auth_client import (
     auth_requires_permission,
 )
+from materializationengine.blueprints.client.utils import update_notice_text_warnings
 import pandas as pd
 import datetime
+from typing import List
 
 __version__ = "4.0.20"
 
@@ -207,7 +211,7 @@ def execute_materialized_query(
             split_mode=split_mode,
         )
         qm.configure_query(user_data)
-        qm.apply_filter({user_data["table"]: {'valid': True}}, qm.apply_equal_filter)
+        qm.apply_filter({user_data["table"]: {"valid": True}}, qm.apply_equal_filter)
         # return the result
         df, column_names = qm.execute_query(
             desired_resolution=user_data["desired_resolution"]
@@ -490,7 +494,7 @@ class FrozenTableCount(Resource):
         db = dynamic_annotation_cache.get_db(db_name)
         # if the database is a split database get a split model
         # and if its not get a flat model
-        md = db.database.g
+
         Session = sqlalchemy_cache.get(aligned_volume_name)
         Model = get_flat_model(datastack_name, table_name, version, Session)
 
@@ -885,5 +889,205 @@ class LiveTableQuery(Resource):
             warnings=mat_warnings + prod_warnings,
             column_names=column_names,
             desired_resolution=user_data["desired_resolution"],
+            return_pyarrow=args["return_pyarrow"],
+        )
+
+
+@client_bp.expect(query_parser)
+@client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/views")
+class AvailableViews(Resource):
+    @reset_auth
+    @auth_requires_permission("view", table_arg="datastack_name")
+    @client_bp.doc("available_views", security="apikey")
+    @responds(schema=AnalysisViewSchema(many=True))
+    def get(self, datastack_name: str, version: int) -> List[AnalysisViewSchema]:
+        """endpoint for getting available views
+
+        Args:
+            datastack_name (str): datastack name
+
+        Returns:
+            dict: a dictionary of views
+        """
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+        if version == 0:
+            mat_db_name = f"{aligned_volume_name}"
+        else:
+            mat_db_name = f"{datastack_name}__mat{version}"
+
+        meta_db = dynamic_annotation_cache.get_db(mat_db_name)
+        views = meta_db.database.get_views(datastack_name)
+        return views
+
+
+@client_bp.expect(query_parser)
+@client_bp.route("/datastack/<string:datastack_name>/views/<string:view_name>/metadata")
+class ViewMetadata(Resource):
+    @reset_auth
+    @auth_requires_permission("view", table_arg="datastack_name")
+    @client_bp.doc("view_metadata", security="apikey")
+    @responds(schema=AnalysisViewSchema)
+    @validate_datastack
+    def get(
+        self,
+        datastack_name: str,
+        view_name: str,
+        target_datastack: str = None,
+        target_version: int = None,
+    ) -> AnalysisViewSchema:
+        """endpoint for getting metadata about a view
+
+        Args:
+            datastack_name (str): datastack name
+            view_name (str): table names
+
+        Returns:
+            dict: a dictionary of metadata about the view
+        """
+
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+
+        meta_db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        md = meta_db.database.get_view_metadata(datastack_name, view_name)
+        return md
+
+
+@client_bp.expect(query_parser)
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int:version>/views/<string:view_name>/query"
+)
+class ViewQuery(Resource):
+    @reset_auth
+    @auth_requires_permission("view", table_arg="datastack_name")
+    @client_bp.doc("view_query", security="apikey")
+    @validate_datastack
+    @accepts("SimpleQuerySchema", schema=SimpleQuerySchema, api=client_bp)
+    def post(
+        self,
+        datastack_name: str,
+        version: int,
+        view_name: str,
+        target_datastack: str = None,
+        target_version: int = None,
+    ):
+        """endpoint for doing a query with filters
+
+        Args:
+            datastack_name (str): datastack name
+            version (int): version number
+            view_name (str): table names
+
+
+        Payload:
+        All values are optional.  Limit has an upper bound set by the server.
+        Consult the schema of the table for column names and appropriate values
+        {
+            "filter_out_dict": {
+                "tablename":{
+                    "column_name":[excluded,values]
+                }
+            },
+            "offset": 0,
+            "limit": 200000,
+            "desired_resolution: [x,y,z],
+            "select_columns": ["column","names"],
+            "filter_in_dict": {
+                "tablename":{
+                    "column_name":[included,values]
+                }
+            },
+            "filter_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            "filter_spatial_dict": {
+                "tablename": {
+                "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+            }
+        }
+        Returns:
+            pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
+        """
+        args = query_parser.parse_args()
+        data = request.parsed_obj
+        # db =  validate_table_args([table_name], target_datastack, target_version)
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+        session = sqlalchemy_cache.get(aligned_volume_name)
+        analysis_version = get_analysis_version(datastack_name, version, session)
+
+        # check_read_permission(db, table_name)
+
+        max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
+
+        limit = data.get("limit", max_limit)
+        if limit > max_limit:
+            limit = max_limit
+
+        get_count = args.get("count", False)
+        if get_count:
+            limit = None
+
+        if version == 0:
+            mat_db_name = f"{aligned_volume_name}"
+        else:
+            mat_db_name = f"{datastack_name}__mat{version}"
+
+        mat_db = dynamic_annotation_cache.get_db(mat_db_name)
+        md = mat_db.database.get_view_metadata(datastack_name, view_name)
+
+        if not data.get("desired_resolution", None):
+            des_res = [
+                md["voxel_resolution_x"],
+                md["voxel_resolution_y"],
+                md["voxel_resolution_z"],
+            ]
+            data["desired_resolution"] = des_res
+
+        qm = QueryManager(
+            mat_db_name,
+            segmentation_source=pcg_table_name,
+            meta_db_name=aligned_volume_name,
+            split_mode=False,
+            limit=limit,
+            offset=data.get("offset", 0),
+            get_count=get_count,
+        )
+        qm.add_view(datastack_name, view_name)
+        qm.apply_filter(data.get("filter_in_dict", None), qm.apply_isin_filter)
+        qm.apply_filter(data.get("filter_out_dict", None), qm.apply_notequal_filter)
+        qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
+        qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
+
+        select_columns = data.get("select_columns", None)
+        if select_columns:
+            for column in select_columns:
+                qm.select_column(view_name, column)
+        else:
+            qm.select_all_columns(view_name)
+
+        df, column_names = qm.execute_query(
+            desired_resolution=data["desired_resolution"]
+        )
+        df.drop(columns=["deleted", "superceded"], inplace=True, errors="ignore")
+        warnings = []
+        current_app.logger.info("query: {}".format(data))
+        current_app.logger.info("args: {}".format(args))
+        user_id = str(g.auth_user["id"])
+        current_app.logger.info(f"user_id: {user_id}")
+
+        if len(df) == limit:
+            warnings.append(f'201 - "Limited query to {limit} rows')
+        warnings = update_notice_text_warnings(md, warnings)
+        return create_query_response(
+            df,
+            warnings=warnings,
+            column_names=column_names,
+            desired_resolution=data["desired_resolution"],
             return_pyarrow=args["return_pyarrow"],
         )

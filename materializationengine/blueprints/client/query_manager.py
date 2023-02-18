@@ -12,6 +12,7 @@ from sqlalchemy.sql.sqltypes import Integer
 from sqlalchemy import or_, func
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.selectable import Alias
+from sqlalchemy.sql.schema import Table
 import datetime
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
@@ -97,6 +98,8 @@ class QueryManager:
     def _get_flat_model(self, table_name):
         if table_name in self._flat_models.keys():
             return self._flat_models[table_name]
+        if table_name in self._models.keys():
+            return self._models[table_name]
         else:
             # schema = self._meta_db.database.get_table_schema(table_name)
             md = self._meta_db.database.get_table_metadata(table_name)
@@ -123,6 +126,21 @@ class QueryManager:
             )
             self._flat_models[table_name] = flatmodel
             return flatmodel
+
+    def add_view(self, datastack_name, view_name):
+        view_table = self._db.database.get_view_table(view_name)
+        self._tables.add(view_table)
+        self._models[view_name] = view_table
+        md = self._meta_db.database.get_view_metadata(datastack_name, view_name)
+        vox_res = np.array(
+            [
+                md["voxel_resolution_x"],
+                md["voxel_resolution_y"],
+                md["voxel_resolution_z"],
+            ]
+        )
+
+        self._voxel_resolutions[view_name] = vox_res
 
     def add_table(self, table_name):
         if table_name not in self._tables:
@@ -252,7 +270,11 @@ class QueryManager:
                 columns = ann_columns
         else:
             model = self._get_flat_model(table_name=table_name)
-            columns = [c.key for c in model.__table__.columns]
+            if isinstance(model, Table):
+                columns = [c for c in model.columns.keys()]
+            else:
+                columns = [c.key for c in model.c.keys()]
+
         self._selected_columns[table_name] = columns
 
     def deselect_column(self, table_name, column_name):
