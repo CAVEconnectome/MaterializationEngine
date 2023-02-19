@@ -56,6 +56,7 @@ def run_periodic_materialization(
             valid_databases = (
                 session.query(AnalysisVersion)
                 .filter(AnalysisVersion.valid == True)
+                .filter(AnalysisVersion.parent_version != None)
                 .order_by(AnalysisVersion.time_stamp)
                 .count()
             )
