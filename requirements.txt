@@ -50,7 +50,7 @@ cachetools==5.0.0
     #   caveclient
     #   google-auth
     #   middle-auth-client
-caveclient==4.16.2
+caveclient==5.1.0
     # via -r requirements.in
 celery==5.2.5
     # via -r requirements.in

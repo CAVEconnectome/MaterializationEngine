@@ -1,4 +1,4 @@
-caveclient>=4.10.0
+caveclient>=5.1.0
 cloud-volume>=8.5.4
 pillow>=8.3.2
 psutil>=5.6.6

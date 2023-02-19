@@ -189,7 +189,7 @@ def get_supervoxel_id_queries(root_id_chunk: list, mat_metadata: dict):
             SegmentationModel.id,
             root_id_att,
             sv_id_att,
-        ).filter(or_(or_(root_id_att).in_(root_id_chunk),root_id_att==None))
+        ).filter(or_(or_(root_id_att).in_(root_id_chunk), root_id_att == None))
 
         sv_ids_query = sv_ids_query.statement.compile(
             compile_kwargs={"literal_binds": True}
