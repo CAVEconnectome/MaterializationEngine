@@ -16,13 +16,15 @@ from materializationengine.workflows.create_frozen_database import (
     create_new_version,
     format_materialization_database_workflow,
     rebuild_reference_tables,
-    set_version_status
+    set_version_status,
 )
 from materializationengine.workflows.ingest_new_annotations import (
     ingest_new_annotations_workflow,
 )
 from materializationengine.task import LockedTask
-from materializationengine.workflows.update_root_ids import update_root_ids_workflow
+from materializationengine.workflows.update_expired_root_ids import (
+    update_root_ids_workflow,
+)
 
 celery_logger = get_task_logger(__name__)
 
@@ -95,10 +97,11 @@ def run_complete_workflow(
             chord(format_database_workflow, fin.si()),
             rebuild_reference_tables.si(mat_info),
             check_tables.si(mat_info, new_version_number),
-
         )
     else:
-        analysis_database_workflow = chain(fin.si())
+        analysis_database_workflow = chain(
+            check_tables.si(mat_info, new_version_number)
+        )
 
     # combine all workflows into final workflow and run
     workflow = chain(
