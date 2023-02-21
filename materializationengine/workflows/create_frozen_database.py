@@ -817,10 +817,9 @@ def check_tables(self, mat_info: list, analysis_version: int):
     valid_table_count = 0
     for mat_metadata in mat_info:
         merge_table = mat_metadata.get("merge_table")
+        annotation_table_name = mat_metadata["annotation_table_name"]
+        mat_timestamp = mat_metadata["materialization_time_stamp"]
         if merge_table:
-            annotation_table_name = mat_metadata["annotation_table_name"]
-            mat_timestamp = mat_metadata["materialization_time_stamp"]
-
             live_table_row_count = live_client.database.get_table_row_count(
                 annotation_table_name, filter_valid=True, filter_timestamp=mat_timestamp
             )
