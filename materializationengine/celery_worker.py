@@ -109,9 +109,6 @@ def setup_periodic_tasks(sender, **kwargs):
     from materializationengine.workflows.update_database_workflow import (
         run_periodic_database_update,
     )
-    from materializationengine.workflows.periodic_materialization import (
-        run_periodic_materialization,
-    )
 
     merge_tables = get_config_param("MERGE_TABLES")
     periodic_tasks = {
@@ -191,15 +188,15 @@ def get_activate_tasks():
     return inspector.active()
 
 
-def inspect_locked_tasks(release_locks: bool=False):
+def inspect_locked_tasks(release_locks: bool = False):
     client = redis.StrictRedis(
-    host=get_config_param("REDIS_HOST"),
-    port=get_config_param("REDIS_PORT"),
-    password=get_config_param("REDIS_PASSWORD"),
-    db=0,
+        host=get_config_param("REDIS_HOST"),
+        port=get_config_param("REDIS_PORT"),
+        password=get_config_param("REDIS_PASSWORD"),
+        db=0,
     )
 
-    locked_tasks = list(client.scan_iter(match='LOCKED_WORKFLOW_TASK*'))
+    locked_tasks = list(client.scan_iter(match="LOCKED_WORKFLOW_TASK*"))
     lock_status_dict = {locked_task: {"locked": True} for locked_task in locked_tasks}
 
     if release_locks:
