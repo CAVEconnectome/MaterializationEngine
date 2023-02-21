@@ -22,7 +22,7 @@ from materializationengine.workflows.ingest_new_annotations import (
     ingest_new_annotations_workflow,
 )
 from materializationengine.task import LockedTask
-from materializationengine.workflows.update_expired_root_ids import (
+from materializationengine.workflows.update_root_ids import (
     update_root_ids_workflow,
 )
 
