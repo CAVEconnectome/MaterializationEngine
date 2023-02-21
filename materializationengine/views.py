@@ -249,7 +249,10 @@ def version_view(datastack_name: str, id: int):
     session = sqlalchemy_cache.get(aligned_volume_name)
 
     version = (
-        session.query(AnalysisVersion).filter(AnalysisVersion.version == id).first()
+        session.query(AnalysisVersion)
+        .filter(AnalysisVersion.version == id)
+        .filter(AnalysisVersion.datastack == datastack_name)
+        .first()
     )
 
     table_query = session.query(AnalysisTable).filter(
