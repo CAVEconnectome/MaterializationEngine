@@ -99,7 +99,7 @@ def create_versioned_materialization_workflow(
         datastack_info=datastack_info,
         materialization_time_stamp=materialization_time_stamp,
         days_to_expire=days_to_expire,
-        merge_tables=merge_tables
+        merge_tables=merge_tables,
     )
 
     mat_info = get_materialization_info(
@@ -754,9 +754,7 @@ def insert_chunked_data(
     acks_late=True,
 )
 def set_version_status(self, mat_info: list, analysis_version: int, status: str):
-    aligned_volume = mat_info[0][
-        "aligned_volume"
-    ]  #   
+    aligned_volume = mat_info[0]["aligned_volume"]  #
     session = sqlalchemy_cache.get(aligned_volume)
 
     versioned_database = (
@@ -768,9 +766,9 @@ def set_version_status(self, mat_info: list, analysis_version: int, status: str)
         versioned_database.valid = True
     else:
         versioned_database.valid = False
-   
+
     versioned_database.status = status
-    
+
     try:
         session.commit()
         return f"Mat db version {analysis_version} to {status}"
@@ -778,7 +776,7 @@ def set_version_status(self, mat_info: list, analysis_version: int, status: str)
         session.rollback()
         celery_logger.error(e)
     finally:
-        session.close()    
+        session.close()
 
 
 @celery.task(
@@ -818,55 +816,60 @@ def check_tables(self, mat_info: list, analysis_version: int):
     )
     valid_table_count = 0
     for mat_metadata in mat_info:
-        annotation_table_name = mat_metadata["annotation_table_name"]
-        mat_timestamp = mat_metadata["materialization_time_stamp"]
+        merge_table = mat_metadata.get("merge_table")
+        if merge_table:
+            annotation_table_name = mat_metadata["annotation_table_name"]
+            mat_timestamp = mat_metadata["materialization_time_stamp"]
 
-        live_table_row_count = live_client.database.get_table_row_count(
-            annotation_table_name, filter_valid=True, filter_timestamp=mat_timestamp
-        )
-        mat_row_count = mat_client.database.get_table_row_count(
-            annotation_table_name, filter_valid=True
-        )
-        celery_logger.info(f"ROW COUNTS: {live_table_row_count} {mat_row_count}")
-
-        if mat_row_count == 0:
-            celery_logger.warning(
-                f"{annotation_table_name} has {mat_row_count} rows, skipping."
+            live_table_row_count = live_client.database.get_table_row_count(
+                annotation_table_name, filter_valid=True, filter_timestamp=mat_timestamp
             )
-            continue
-
-        if live_table_row_count != mat_row_count:
-            raise ValueError(
-                f"""Row count doesn't match for table '{annotation_table_name}': 
-                    Row count in '{aligned_volume}': {live_table_row_count} - Row count in {analysis_database}: {mat_row_count}"""
+            mat_row_count = mat_client.database.get_table_row_count(
+                annotation_table_name, filter_valid=True
             )
-        celery_logger.info(f"{annotation_table_name} row counts match")
-        schema = mat_metadata["schema"]
-        table_metadata = None
-        if mat_metadata.get("reference_table"):
-            table_metadata = {"reference_table": mat_metadata.get("reference_table")}
+            celery_logger.info(f"ROW COUNTS: {live_table_row_count} {mat_row_count}")
 
-        anno_model = make_flat_model(
-            table_name=annotation_table_name,
-            schema_type=schema,
-            table_metadata=table_metadata,
-        )
-        live_mapped_indexes = index_cache.get_index_from_model(
-            annotation_table_name, anno_model, mat_engine
-        )
-        mat_mapped_indexes = index_cache.get_table_indices(
-            annotation_table_name, mat_engine
-        )
+            if mat_row_count == 0:
+                celery_logger.warning(
+                    f"{annotation_table_name} has {mat_row_count} rows, skipping."
+                )
+                continue
 
-        if live_mapped_indexes.keys() != mat_mapped_indexes.keys():
-            celery_logger.warning(
-                f"Indexes did not match: annotation indexes {live_mapped_indexes}; materialized indexes {mat_mapped_indexes}"
+            if live_table_row_count != mat_row_count:
+                raise ValueError(
+                    f"""Row count doesn't match for table '{annotation_table_name}': 
+                        Row count in '{aligned_volume}': {live_table_row_count} - Row count in {analysis_database}: {mat_row_count}"""
+                )
+            celery_logger.info(f"{annotation_table_name} row counts match")
+            schema = mat_metadata["schema"]
+            table_metadata = None
+            if mat_metadata.get("reference_table"):
+                table_metadata = {
+                    "reference_table": mat_metadata.get("reference_table")
+                }
+
+            anno_model = make_flat_model(
+                table_name=annotation_table_name,
+                schema_type=schema,
+                table_metadata=table_metadata,
+            )
+            live_mapped_indexes = index_cache.get_index_from_model(
+                annotation_table_name, anno_model, mat_engine
+            )
+            mat_mapped_indexes = index_cache.get_table_indices(
+                annotation_table_name, mat_engine
             )
 
-        celery_logger.info(
-            f"Indexes matches: {live_mapped_indexes} {mat_mapped_indexes}"
-        )
+            if live_mapped_indexes.keys() != mat_mapped_indexes.keys():
+                celery_logger.warning(
+                    f"Indexes did not match: annotation indexes {live_mapped_indexes}; materialized indexes {mat_mapped_indexes}"
+                )
 
+            celery_logger.info(
+                f"Indexes matches: {live_mapped_indexes} {mat_mapped_indexes}"
+            )
+
+        valid_table_count += 1
         table_validity = (
             session.query(AnalysisTable)
             .filter(AnalysisTable.analysisversion_id == versioned_database.id)
@@ -874,7 +877,6 @@ def check_tables(self, mat_info: list, analysis_version: int):
             .one()
         )
         table_validity.valid = True
-        valid_table_count += 1
     celery_logger.info(f"Valid tables {valid_table_count}, Mat tables {table_count}")
 
     if valid_table_count != table_count:
