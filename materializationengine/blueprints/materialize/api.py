@@ -635,6 +635,7 @@ class CreateVirtualPublicVersionResource(Resource):
             valid=True,
             expires_on=expiration_timestamp,
             parent_version=analysis_version.id,
+            status="AVAILABLE",
         )
 
         session.add(virtual_analysis_version)
