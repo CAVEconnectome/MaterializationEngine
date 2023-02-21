@@ -252,8 +252,8 @@ def get_materialization_info(
                         ),
                         "queue_length_limit": get_config_param("QUEUE_LENGTH_LIMIT"),
                         "throttle_queues": get_config_param("THROTTLE_QUEUES"),
-                        "find_all_expired_roots": datastack_info.get(
-                            "find_all_expired_roots", False
+                        "lookup_all_root_ids": datastack_info.get(
+                            "lookup_all_root_ids", False
                         ),
                         "merge_table": get_config_param("MERGE_TABLES"),
                     }
