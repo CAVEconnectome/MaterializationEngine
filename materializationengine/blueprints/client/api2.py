@@ -324,9 +324,13 @@ def combine_queries(
     Returns:
         pd.DataFrame: _description_
     """
+    crud_columns, created_columns = collect_crud_columns(column_names=column_names)
     if mat_df is not None:
         if len(mat_df) == 0:
-            mat_df = None
+            if prod_df is None:
+                return mat_df.drop(columns=crud_columns, axis=1, errors="ignore")
+            else:
+                mat_df = None
     user_timestamp = user_data["timestamp"]
     chosen_timestamp = pytz.utc.localize(chosen_version.time_stamp)
     table = user_data["table"]
