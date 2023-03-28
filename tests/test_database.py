@@ -36,6 +36,7 @@ class TestDatabaseUtils:
                 "combined_table_metadata",
                 "analysisversion",
                 "analysistables",
+                "analysisviews",
                 "geography_columns",
                 "geometry_columns",
                 "test_synapse_table",
