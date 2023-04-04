@@ -17,6 +17,7 @@ from materializationengine.workflows.create_frozen_database import (
     format_materialization_database_workflow,
     rebuild_reference_tables,
     set_version_status,
+    clean_split_table_workflow,
 )
 from materializationengine.workflows.ingest_new_annotations import (
     ingest_new_annotations_workflow,
@@ -99,8 +100,10 @@ def run_complete_workflow(
             check_tables.si(mat_info, new_version_number),
         )
     else:
+        clean_split_tables = clean_split_table_workflow(mat_info=mat_info)
         analysis_database_workflow = chain(
-            check_tables.si(mat_info, new_version_number)
+            chord(clean_split_tables, fin.si()),
+            check_tables.si(mat_info, new_version_number),
         )
 
     # combine all workflows into final workflow and run
