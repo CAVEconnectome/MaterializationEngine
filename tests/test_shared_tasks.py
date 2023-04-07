@@ -62,7 +62,7 @@ class TestSharedTasks:
                 "last_updated_time_stamp": None,
                 "chunk_size": 2,
                 "table_count": 1,
-                "find_all_expired_roots": False,
+                "lookup_all_root_ids": False,
                 "analysis_version": 1,
                 "analysis_database": "test_datastack__mat1",
                 "queue_length_limit": 10000,

@@ -54,7 +54,7 @@ missing_chunk_parser.add_argument("schema", required=True, type=str)
 
 get_roots_parser = reqparse.RequestParser()
 get_roots_parser.add_argument(
-    "find_all_expired_roots", default=False, type=inputs.boolean
+    "lookup_all_root_ids", default=False, type=inputs.boolean
 )
 
 materialize_parser = reqparse.RequestParser()
@@ -319,9 +319,9 @@ class UpdateExpiredRootIdsResource(Resource):
     @reset_auth
     @auth_requires_admin
     @mat_bp.expect(get_roots_parser)
-    @mat_bp.doc("update expired root ids", security="apikey")
+    @mat_bp.doc("Lookup root ids", security="apikey")
     def post(self, datastack_name: str):
-        """Update expired root ids
+        """Lookup root ids
 
         Args:
             datastack_name (str): name of datastack from infoservice
@@ -333,7 +333,7 @@ class UpdateExpiredRootIdsResource(Resource):
         datastack_info = get_datastack_info(datastack_name)
 
         args = get_roots_parser.parse_args()
-        datastack_info["find_all_expired_roots"] = args["find_all_expired_roots"]
+        datastack_info["lookup_all_root_ids"] = args["lookup_all_root_ids"]
 
         expired_root_id_workflow.s(datastack_info).apply_async()
         return 200
@@ -358,7 +358,7 @@ class UpdateLiveDatabaseResource(Resource):
         datastack_info = get_datastack_info(datastack_name)
 
         args = get_roots_parser.parse_args()
-        datastack_info["find_all_expired_roots"] = args["find_all_expired_roots"]
+        datastack_info["lookup_all_root_ids"] = args["lookup_all_root_ids"]
 
         update_database_workflow.s(datastack_info).apply_async()
         return 200
