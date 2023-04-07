@@ -2,7 +2,7 @@ import pytz
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
 from cachetools import LRUCache, TTLCache, cached
-from flask import abort, request, current_app
+from flask import abort, request, current_app, g
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
 from materializationengine.blueprints.client.datastack import validate_datastack
@@ -29,9 +29,10 @@ from materializationengine.blueprints.client.common import (
     handle_simple_query,
     validate_table_args,
     get_flat_model,
-    get_analysis_version_and_table
+    get_analysis_version_and_table,
 )
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
+from materializationengine.limiter import limiter
 from materializationengine.database import (
     dynamic_annotation_cache,
     sqlalchemy_cache,
@@ -207,7 +208,7 @@ def execute_materialized_query(
             split_mode=split_mode,
         )
         qm.configure_query(user_data)
-        qm.apply_filter({user_data["table"]: {'valid': True}}, qm.apply_equal_filter)
+        qm.apply_filter({user_data["table"]: {"valid": True}}, qm.apply_equal_filter)
         # return the result
         df, column_names = qm.execute_query(
             desired_resolution=user_data["desired_resolution"]
@@ -534,6 +535,7 @@ class DatastackMetadata(Resource):
 class FrozenTableVersions(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
+    @limiter.limit("1/minute", key_func=lambda: g.auth_user["id"])
     @client_bp.doc("get_frozen_tables", security="apikey")
     def get(self, datastack_name: str, version: int):
         """get frozen tables

@@ -20,6 +20,7 @@ class BaseConfig:
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     REDIS_URL = "redis://"
     CELERY_BROKER_URL = "memory://"
+    RATELIMIT_STORAGE_URI = "memory://"
     CELERY_RESULT_BACKEND = REDIS_URL
     LOCAL_SERVER_URL = os.environ.get("LOCAL_SERVER_URL")
     GLOBAL_SERVER_URL = "https://global.daf-apis.com"
