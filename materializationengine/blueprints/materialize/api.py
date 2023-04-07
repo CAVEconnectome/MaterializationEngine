@@ -618,7 +618,7 @@ class CreateVirtualPublicVersionResource(Resource):
                 f"No tables {tables_to_include} found in target version {target_version}",
             )
 
-        virtual_datastack_name = f"{virtual_version_name}_v{analysis_version.version}"
+        virtual_datastack_name = f"{virtual_version_name}"
 
         time_to_expire = analysis_version.expires_on - datetime.datetime.utcnow()
         if time_to_expire.days < 1000:
