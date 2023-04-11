@@ -50,6 +50,11 @@ class BaseConfig:
     else:
         AUTH_TOKEN = ""
 
+    LIMITER_CATEGORIES = {
+        "query": "1/minute",
+        "fast_query": "100/minute",
+    }
+
     BEAT_SCHEDULES = [
         {
             "name": "Materialized Database Daily (2 Days)",
