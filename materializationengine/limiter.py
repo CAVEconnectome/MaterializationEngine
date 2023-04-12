@@ -25,5 +25,5 @@ def get_rate_limit_from_config(category):
 limiter = Limiter(
     get_remote_address,
     storage_uri=os.environ.get("LIMITER_URI", "memory://"),
-    default_limits=None,
+    default_limits=[get_rate_limit_from_config],
 )
