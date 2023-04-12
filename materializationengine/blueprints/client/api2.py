@@ -32,7 +32,7 @@ from materializationengine.blueprints.client.common import (
     get_analysis_version_and_table,
 )
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
-from materializationengine.limiter import limiter, get_limit_string
+from materializationengine.limiter import limit_by_category
 from materializationengine.database import (
     dynamic_annotation_cache,
     sqlalchemy_cache,
@@ -432,7 +432,7 @@ class DatastackVersions(Resource):
 class DatastackVersion(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
-    @limiter.limit(get_limit_string("query"), key_func=lambda: g.auth_user["id"])
+    @limit_by_category("query")
     @client_bp.doc("version metadata", security="apikey")
     def get(self, datastack_name: str, version: int):
         """get version metadata
@@ -467,7 +467,7 @@ class DatastackVersion(Resource):
 class FrozenTableCount(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
-    @limiter.limit(get_limit_string("query"), key_func=lambda: g.auth_user["id"])
+    @limit_by_category("query")
     @validate_datastack
     @client_bp.doc("simple_query", security="apikey")
     def get(
@@ -509,7 +509,7 @@ class FrozenTableCount(Resource):
 class DatastackMetadata(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
-    @limiter.limit(get_limit_string("query"), key_func=lambda: g.auth_user["id"])
+    @limit_by_category("query")
     @client_bp.doc("all valid version metadata", security="apikey")
     def get(self, datastack_name: str):
         """get materialized metadata for all valid versions
@@ -538,7 +538,7 @@ class DatastackMetadata(Resource):
 class FrozenTableVersions(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
-    @limiter.limit(get_limit_string("query"), key_func=lambda: g.auth_user["id"])
+    @limit_by_category("query")
     @client_bp.doc("get_frozen_tables", security="apikey")
     def get(self, datastack_name: str, version: int):
         """get frozen tables
@@ -581,7 +581,7 @@ class FrozenTableVersions(Resource):
 class FrozenTableMetadata(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
-    @limiter.limit(get_limit_string("query"), key_func=lambda: g.auth_user["id"])
+    @limit_by_category("query")
     @client_bp.doc("get_frozen_table_metadata", security="apikey")
     def get(self, datastack_name: str, version: int, table_name: str):
         """get frozen table metadata
@@ -620,7 +620,7 @@ class FrozenTableMetadata(Resource):
 class FrozenTableQuery(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
-    @limiter.limit(get_limit_string("query"), key_func=lambda: g.auth_user["id"])
+    @limit_by_category("query")
     @validate_datastack
     @client_bp.doc("simple_query", security="apikey")
     @accepts("SimpleQuerySchema", schema=SimpleQuerySchema, api=client_bp)
@@ -688,6 +688,7 @@ class FrozenTableQuery(Resource):
 class FrozenQuery(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
+    @limit_by_category("query")
     @validate_datastack
     @client_bp.doc("complex_query", security="apikey")
     @accepts("ComplexQuerySchema", schema=ComplexQuerySchema, api=client_bp)
@@ -758,7 +759,7 @@ class FrozenQuery(Resource):
 class LiveTableQuery(Resource):
     @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
-    @limiter.limit(get_limit_string("query"), key_func=lambda: g.auth_user["id"])
+    @limit_by_category("query")
     @client_bp.doc("v2_query", security="apikey")
     @accepts("V2QuerySchema", schema=V2QuerySchema, api=client_bp)
     def post(self, datastack_name: str):
