@@ -14,8 +14,14 @@ celery_logger = get_task_logger(__name__)
 
 
 def create_session(sql_uri: str = None):
+    pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 5)
+    max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 5)
     engine = create_engine(
-        sql_uri, pool_recycle=3600, pool_size=20, max_overflow=50, pool_pre_ping=True
+        sql_uri,
+        pool_recycle=3600,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_pre_ping=True,
     )
     Session = scoped_session(
         sessionmaker(bind=engine, autocommit=False, autoflush=False)
@@ -67,13 +73,15 @@ class SqlAlchemyCache:
     def get_engine(self, aligned_volume: str):
         if aligned_volume not in self._engines:
             SQL_URI_CONFIG = current_app.config["SQLALCHEMY_DATABASE_URI"]
+            pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 5)
+            max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 5)
             sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
             sql_uri = make_url(f"{sql_base_uri}/{aligned_volume}")
             self._engines[aligned_volume] = create_engine(
                 sql_uri,
                 pool_recycle=3600,
-                pool_size=20,
-                max_overflow=50,
+                pool_size=pool_size,
+                max_overflow=max_overflow,
                 pool_pre_ping=True,
             )
         return self._engines[aligned_volume]
@@ -117,7 +125,11 @@ class DynamicMaterializationCache:
 
     def _get_mat_client(self, database: str):
         sql_uri_config = get_config_param("SQLALCHEMY_DATABASE_URI")
-        mat_client = DynamicAnnotationInterface(sql_uri_config, database)
+        pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 5)
+        max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 5)
+        mat_client = DynamicAnnotationInterface(
+            sql_uri_config, database, pool_size, max_overflow
+        )
         self._clients[database] = mat_client
         return self._clients[database]
 
