@@ -48,7 +48,7 @@ class TestDatabaseUtils:
 
 class TestCreateSession:
     @pytest.fixture(autouse=True)
-    def setup_method(self, database_uri):
+    def setup_method(self, database_uri, test_app):
         self.session, self.engine = create_session(database_uri)
 
     def test_ping_connection(self):
