@@ -8,11 +8,14 @@ import os
 def limit_by_category(category):
     def decorator(f):
         @wraps(f)
-        @limiter.limit(
-            get_rate_limit_from_config(category), key_func=lambda: g.auth_user["id"]
-        )
         def wrapped(*args, **kwargs):
-            return f(*args, **kwargs)
+            limit = get_rate_limit_from_config(category)
+            if limit is not None:
+                # Apply the limiter.limit decorator to the wrapped function
+                limited_f = limiter.limit(limit, key_func=lambda: g.auth_user["id"])(f)
+                return limited_f(*args, **kwargs)
+            else:
+                return f(*args, **kwargs)
 
         return wrapped
 
@@ -21,7 +24,9 @@ def limit_by_category(category):
 
 def get_rate_limit_from_config(category=None):
     if category:
-        if not current_app or category not in current_app.config["LIMITER_CATEGORIES"]:
+        if not current_app or category not in current_app.config.get(
+            "LIMITER_CATEGORIES", {}
+        ):
             return None  # Default rate limit if not found
     else:
         return None
