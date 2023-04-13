@@ -20,7 +20,7 @@ from materializationengine.database import sqlalchemy_cache
 from materializationengine.schemas import ma
 from materializationengine.utils import get_instance_folder_path
 from materializationengine.views import views_bp
-from materializationengine.limiter import limiter
+from materializationengine.limiter import limiter 
 
 db = SQLAlchemy(model_class=Base)
 
@@ -50,7 +50,6 @@ def create_app(config_name: str = None):
     logging.basicConfig(level=logging.INFO)
     app.json_encoder = AEEncoder
     app.config["RESTX_JSON"] = {"cls": AEEncoder}
-    
 
     # load configuration (from test_config if passed)
     if config_name:
@@ -67,7 +66,7 @@ def create_app(config_name: str = None):
 
     db.init_app(app)
     ma.init_app(app)
-    limiter.init_app(app)
+    
     with app.app_context():
         api = Api(
             apibp, title="Materialization Engine API", version=__version__, doc="/doc"
@@ -78,6 +77,7 @@ def create_app(config_name: str = None):
 
         app.register_blueprint(apibp)
         app.register_blueprint(views_bp)
+        limiter.init_app(app)
 
         db.init_app(app)
         db.create_all()
