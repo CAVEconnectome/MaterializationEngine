@@ -85,7 +85,7 @@ def migrate_annotation_schemas(sql_url: str, aligned_volume: str, dry_run: bool 
 @click.option(
     "--dry_run", prompt="Dry Run", help="Test migration before running", default=True
 )
-def migrate_annotation_schemas(sql_url: str, aligned_volume: str, dry_run: bool = True):
+def migrate_foreign_key_constraints(sql_url: str, aligned_volume: str, dry_run: bool = True):
     migrator = DynamicMigration(sql_url, aligned_volume)
     fkey_constraint_mapping = migrator.apply_cascade_option_to_tables(dry_run=dry_run)
     click.echo(fkey_constraint_mapping)
