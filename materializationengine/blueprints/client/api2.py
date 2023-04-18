@@ -401,8 +401,13 @@ def combine_queries(
 
 @client_bp.route("/datastack/<string:datastack_name>/versions")
 class DatastackVersions(Resource):
-    @reset_auth
-    @auth_requires_permission("view", table_arg="datastack_name")
+    method_decorators = [
+        validate_datastack,
+        limit_by_category("fast_query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+ 
     @client_bp.doc("datastack_versions", security="apikey")
     def get(self, datastack_name: str):
         """get available versions
@@ -431,8 +436,13 @@ class DatastackVersions(Resource):
 
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>")
 class DatastackVersion(Resource):
-    @reset_auth
-    @auth_requires_permission("view", table_arg="datastack_name")
+    method_decorators = [
+        validate_datastack,
+        limit_by_category("fast_query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+        
     @client_bp.doc("version metadata", security="apikey")
     def get(self, datastack_name: str, version: int):
         """get version metadata
@@ -465,10 +475,14 @@ class DatastackVersion(Resource):
     "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/count"
 )
 class FrozenTableCount(Resource):
-    @reset_auth
-    @auth_requires_permission("view", table_arg="datastack_name")
-    @validate_datastack
-    @client_bp.doc("simple_query", security="apikey")
+    method_decorators = [
+        validate_datastack,
+        limit_by_category("fast_query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+        
+    @client_bp.doc("table count", security="apikey")
     def get(
         self,
         datastack_name: str,
@@ -518,8 +532,7 @@ class CustomResource(Resource):
 @client_bp.route("/datastack/<string:datastack_name>/metadata", strict_slashes=False)
 class DatastackMetadata(Resource):
     method_decorators = [
-        # limiter.limit("3/minute", key_func=lambda: g.auth_user["id"]),
-        limit_by_category("query"),
+        limit_by_category("fast_query"),
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
     ]
@@ -550,8 +563,11 @@ class DatastackMetadata(Resource):
 
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/tables")
 class FrozenTableVersions(Resource):
-    @reset_auth
-    @auth_requires_permission("view", table_arg="datastack_name")
+    method_decorators = [
+        limit_by_category("fast_query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
     @client_bp.doc("get_frozen_tables", security="apikey")
     def get(self, datastack_name: str, version: int):
         """get frozen tables
@@ -592,10 +608,11 @@ class FrozenTableVersions(Resource):
     "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/metadata"
 )
 class FrozenTableMetadata(Resource):
-    limit_category = "query"
-
-    @reset_auth
-    @auth_requires_permission("view", table_arg="datastack_name")
+    method_decorators = [
+        limit_by_category("fast_query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
     @client_bp.doc("get_frozen_table_metadata", security="apikey")
     def get(self, datastack_name: str, version: int, table_name: str):
         """get frozen table metadata
@@ -632,11 +649,13 @@ class FrozenTableMetadata(Resource):
     "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/query"
 )
 class FrozenTableQuery(Resource):
-    limit_category = "query"
-
-    @reset_auth
-    @auth_requires_permission("view", table_arg="datastack_name")
-    @validate_datastack
+    method_decorators = [
+        validate_datastack,
+        limit_by_category("query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+    
     @client_bp.doc("simple_query", security="apikey")
     @accepts("SimpleQuerySchema", schema=SimpleQuerySchema, api=client_bp)
     def post(
@@ -701,11 +720,13 @@ class FrozenTableQuery(Resource):
 @client_bp.expect(query_parser)
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/query")
 class FrozenQuery(Resource):
-    limit_category = "query"
+    method_decorators = [
+        validate_datastack,
+        limit_by_category("query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
 
-    @reset_auth
-    @auth_requires_permission("view", table_arg="datastack_name")
-    @validate_datastack
     @client_bp.doc("complex_query", security="apikey")
     @accepts("ComplexQuerySchema", schema=ComplexQuerySchema, api=client_bp)
     def post(
@@ -773,10 +794,13 @@ class FrozenQuery(Resource):
 @client_bp.expect(query_parser)
 @client_bp.route("/datastack/<string:datastack_name>/query")
 class LiveTableQuery(Resource):
-    limit_category = "query"
+    method_decorators = [
+        validate_datastack,
+        limit_by_category("query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
 
-    @reset_auth
-    @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("v2_query", security="apikey")
     @accepts("V2QuerySchema", schema=V2QuerySchema, api=client_bp)
     def post(self, datastack_name: str):
