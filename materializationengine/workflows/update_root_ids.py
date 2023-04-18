@@ -15,6 +15,7 @@ from materializationengine.shared_tasks import (
     monitor_workflow_state,
     update_metadata,
     workflow_complete,
+    generate_chunked_model_ids,
 )
 from materializationengine.throttle import throttle_celery
 from materializationengine.utils import create_segmentation_model
@@ -68,16 +69,19 @@ def update_root_ids_workflow(mat_metadata: dict):
     """
 
     celery_logger.info("Setup expired root id workflow...")
-    chunked_roots = get_expired_root_ids_from_pcg(mat_metadata)
+    if mat_metadata.get("lookup_all_root_ids"):
+        chunked_ids = generate_chunked_model_ids(mat_metadata)
+    else:
+        chunked_ids = get_expired_root_ids_from_pcg(mat_metadata)
 
-    if not chunked_roots:
+    if not chunked_ids:
         return fin.si()
 
     update_root_workflow = chain(
         chord(
             [
                 group(update_root_ids.si(root_ids, mat_metadata))
-                for root_ids in chunked_roots
+                for root_ids in chunked_ids
             ],
             fin.si(),
         ),
@@ -189,11 +193,21 @@ def get_supervoxel_id_queries(root_id_chunk: list, mat_metadata: dict):
             SegmentationModel.id,
             root_id_att,
             sv_id_att,
-        ).filter(or_(or_(root_id_att).in_(root_id_chunk), root_id_att == None))
-
-        sv_ids_query = sv_ids_query.statement.compile(
-            compile_kwargs={"literal_binds": True}
         )
+        if mat_metadata.get("lookup_all_root_ids", False):
+            if root_id_chunk[1] is None:
+                root_id_chunk[1] = mat_metadata.get("max_id")
+            stmt = sv_ids_query.filter(
+                or_(SegmentationModel.id).between(
+                    int(root_id_chunk[0]), int(root_id_chunk[1])
+                )
+            )
+        else:
+            stmt = sv_ids_query.filter(
+                or_(or_(root_id_att).in_(root_id_chunk), root_id_att == None)
+            )
+
+        sv_ids_query = stmt.statement.compile(compile_kwargs={"literal_binds": True})
         supervoxel_queries.append({f"{root_id_column}": str(sv_ids_query)})
 
     return supervoxel_queries or None

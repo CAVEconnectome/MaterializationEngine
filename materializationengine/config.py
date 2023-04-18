@@ -49,6 +49,9 @@ class BaseConfig:
     else:
         AUTH_TOKEN = ""
 
+    DB_CONNECTION_POOL_SIZE = 5
+    DB_CONNECTION_MAX_OVERFLOW = 5
+    
     BEAT_SCHEDULES = [
         {
             "name": "Materialized Database Daily (2 Days)",
