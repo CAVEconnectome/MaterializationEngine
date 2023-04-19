@@ -6,6 +6,7 @@ RUN mkdir -p /home/nginx/.cloudvolume/secrets \
   && usermod -d /home/nginx -s /bin/bash nginx 
 COPY requirements.txt /app/.
 RUN python -m pip install --upgrade pip
+RUN git config --global --unset credential.helper
 RUN pip install -r requirements.txt
 COPY . /app
 COPY override/timeout.conf /etc/nginx/conf.d/timeout.conf
