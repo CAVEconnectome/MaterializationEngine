@@ -117,8 +117,7 @@ dill==0.3.4
     #   pathos
 dracopy==1.0.1
     # via cloud-volume
-dynamicannotationdb @ git+https://github.com/seunglab/DynamicAnnotationDB@remove-metadata-migrate-fix#egg=dynamicannotationdb
-    # via -r requirements.in
+git+https://github.com/seung-lab/DynamicAnnotationDB@remove-metadata-migrate-fix#egg=dynamicannotationdb
 emannotationschemas==5.8.0
     # via
     #   -r requirements.in
