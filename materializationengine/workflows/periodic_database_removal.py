@@ -76,10 +76,18 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                 )
                 expired_versions = [str(expired_db) for expired_db in expired_results]
 
+                non_valid_results = (
+                    session.query(AnalysisVersion)
+                    .filter(AnalysisVersion.valid == False)
+                    .order_by(AnalysisVersion.time_stamp)
+                    .all()
+                ) # some databases might have failed to materialize completely but are still present on disk
+                
+                non_valid_versions = [str(non_valid_version) for non_valid_version in non_valid_results]
+                versions = list(set(expired_versions + non_valid_versions))
             except Exception as sql_error:
                 celery_logger.error(f"Error: {sql_error}")
                 continue
-
             # get databases that exist currently, filter by materialized dbs
             database_list = get_existing_databases(engine)
 
@@ -89,7 +97,7 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
 
             # get databases to delete that are currently present (ordered by timestamp)
             databases_to_delete = [
-                database for database in expired_versions if database in databases
+                database for database in versions if database in databases
             ]
 
             dropped_dbs = []
