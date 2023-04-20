@@ -51,8 +51,8 @@ class BaseConfig:
         AUTH_TOKEN = ""
 
     LIMITER_CATEGORIES = {
-        "query": "1/minute",
-        "fast_query": "100/minute",
+        "query": None,
+        "fast_query": None,
     }
 
     DB_CONNECTION_POOL_SIZE = 5
