@@ -29,3 +29,4 @@ numpy>=1.20
 emannotationschemas>=5.8.0
 dynamicannotationdb>=5.7.2
 nglui>=2.10.1
+Flask-Limiter[redis]

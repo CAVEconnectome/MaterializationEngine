@@ -20,6 +20,7 @@ class BaseConfig:
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     REDIS_URL = "redis://"
     CELERY_BROKER_URL = "memory://"
+    RATELIMIT_STORAGE_URI = "memory://"
     CELERY_RESULT_BACKEND = REDIS_URL
     LOCAL_SERVER_URL = os.environ.get("LOCAL_SERVER_URL")
     GLOBAL_SERVER_URL = "https://global.daf-apis.com"
@@ -51,7 +52,7 @@ class BaseConfig:
 
     DB_CONNECTION_POOL_SIZE = 5
     DB_CONNECTION_MAX_OVERFLOW = 5
-    
+
     BEAT_SCHEDULES = [
         {
             "name": "Materialized Database Daily (2 Days)",
