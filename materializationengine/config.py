@@ -50,11 +50,6 @@ class BaseConfig:
     else:
         AUTH_TOKEN = ""
 
-    LIMITER_CATEGORIES = {
-        "query": None,
-        "fast_query": None,
-    }
-
     DB_CONNECTION_POOL_SIZE = 5
     DB_CONNECTION_MAX_OVERFLOW = 5
 
