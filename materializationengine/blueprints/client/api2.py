@@ -411,7 +411,7 @@ class DatastackVersions(Resource):
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
     ]
- 
+
     @client_bp.doc("datastack_versions", security="apikey")
     def get(self, datastack_name: str):
         """get available versions
@@ -446,7 +446,7 @@ class DatastackVersion(Resource):
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
     ]
-        
+
     @client_bp.doc("version metadata", security="apikey")
     def get(self, datastack_name: str, version: int):
         """get version metadata
@@ -485,7 +485,7 @@ class FrozenTableCount(Resource):
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
     ]
-        
+
     @client_bp.doc("table count", security="apikey")
     def get(
         self,
@@ -573,6 +573,7 @@ class FrozenTableVersions(Resource):
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
     ]
+
     @client_bp.doc("get_frozen_tables", security="apikey")
     def get(self, datastack_name: str, version: int):
         """get frozen tables
@@ -618,6 +619,7 @@ class FrozenTableMetadata(Resource):
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
     ]
+
     @client_bp.doc("get_frozen_table_metadata", security="apikey")
     def get(self, datastack_name: str, version: int, table_name: str):
         """get frozen table metadata
@@ -660,7 +662,7 @@ class FrozenTableQuery(Resource):
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
     ]
-    
+
     @client_bp.doc("simple_query", security="apikey")
     @accepts("SimpleQuerySchema", schema=SimpleQuerySchema, api=client_bp)
     def post(
@@ -951,8 +953,13 @@ class LiveTableQuery(Resource):
 @client_bp.expect(query_parser)
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/views")
 class AvailableViews(Resource):
-    @reset_auth
-    @auth_requires_permission("view", table_arg="datastack_name")
+    method_decorators = [
+        validate_datastack,
+        limit_by_category("query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
     @client_bp.doc("available_views", security="apikey")
     @responds(schema=AnalysisViewSchema(many=True))
     def get(self, datastack_name: str, version: int) -> List[AnalysisViewSchema]:
@@ -980,8 +987,13 @@ class AvailableViews(Resource):
 @client_bp.expect(query_parser)
 @client_bp.route("/datastack/<string:datastack_name>/views/<string:view_name>/metadata")
 class ViewMetadata(Resource):
-    @reset_auth
-    @auth_requires_permission("view", table_arg="datastack_name")
+    method_decorators = [
+        validate_datastack,
+        limit_by_category("query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
     @client_bp.doc("view_metadata", security="apikey")
     @responds(schema=AnalysisViewSchema)
     @validate_datastack
@@ -1016,8 +1028,13 @@ class ViewMetadata(Resource):
     "/datastack/<string:datastack_name>/version/<int:version>/views/<string:view_name>/query"
 )
 class ViewQuery(Resource):
-    @reset_auth
-    @auth_requires_permission("view", table_arg="datastack_name")
+    method_decorators = [
+        validate_datastack,
+        limit_by_category("query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
     @client_bp.doc("view_query", security="apikey")
     @validate_datastack
     @accepts("SimpleQuerySchema", schema=SimpleQuerySchema, api=client_bp)
