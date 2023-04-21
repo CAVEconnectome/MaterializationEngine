@@ -30,4 +30,3 @@ emannotationschemas>=5.4.0
 Flask-Limiter[redis]
 dynamicannotationdb>=5.7.1
 nglui>=2.10.1
-

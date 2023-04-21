@@ -1,7 +1,9 @@
 from marshmallow import fields, Schema
 from marshmallow.validate import Length
 import datetime
-
+from flask_marshmallow import Marshmallow
+from dynamicannotationdb.models import AnalysisView
+ma = Marshmallow()
 
 class Metadata(Schema):
     user_id = fields.Str(required=False)
@@ -88,3 +90,7 @@ class ComplexQuerySchema(Schema):
     desired_resolution = fields.List(
         fields.Float, validate=Length(equal=3), required=False
     )
+
+class AnalysisViewSchema(ma.SQLAlchemyAutoSchema):
+    class Meta:
+        model = AnalysisView
