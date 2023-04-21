@@ -14,7 +14,7 @@ def limit_by_category(category):
 
 def get_rate_limit_from_config(category=None):
     if category:
-        categories = json.loads(os.environ["LIMITER_CATEGORIES"])
+        categories = json.loads(os.environ.get("LIMITER_CATEGORIES", "{}"))
         if category not in categories:
             return None  # Default rate limit if not found
         return categories[category]
