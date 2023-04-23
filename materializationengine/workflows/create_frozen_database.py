@@ -183,6 +183,26 @@ def format_materialization_database_workflow(mat_info: List[dict]):
     return create_frozen_database_tasks
 
 
+def clean_split_table_workflow(mat_info: List[dict]):
+    """Remove rows from all tables that are past the materialization timestamp
+    or deleted or are not valid.
+
+    Workflow:
+        - Iterate through all tables and drop non-valid rows
+
+    Args:
+        mat_info (dict): materialization metadata information
+
+    Returns:
+        chain: chain of celery tasks
+    """
+    clean_table_tasks = []
+    for mat_metadata in mat_info:
+        clean_table_workflow = chain(clean_table.si(mat_metadata))
+        clean_table_tasks.append(clean_table_workflow)
+    return clean_table_tasks
+
+
 @celery.task(
     name="workflow:rebuild_reference_tables",
     bind=True,
@@ -399,7 +419,6 @@ def create_materialized_metadata(
         celery_logger.error(f"Materialized Metadata table creation failed {e}")
     try:
         for mat_metadata in mat_info:
-
             # only create table if marked as valid in the metadata table
             annotation_table_name = mat_metadata["annotation_table_name"]
             schema_type = mat_metadata["schema"]
@@ -713,6 +732,53 @@ def merge_tables(self, mat_metadata: dict):
         mat_engine.dispose()
         return f"Number of rows copied: {row_count}"
     except Exception as e:
+        celery_logger.error(e)
+        raise e
+
+
+@celery.task(
+    name="workflow:clean_table",
+    bind=True,
+    acks_late=True,
+    autoretry_for=(Exception,),
+    max_retries=3,
+)
+def clean_table(self, mat_metadata: dict):
+    """Remove non-valid rows from a table.
+
+    Args:
+        mat_metadata (dict): datastack info for the aligned_volume from the infoservice
+
+
+    Raises:
+        e: error during dropping rows
+
+    Returns:
+        str: number of rows copied
+    """
+    analysis_version = mat_metadata["analysis_version"]
+    datastack = mat_metadata["datastack"]
+    mat_time_stamp = mat_metadata["materialization_time_stamp"]
+    SQL_URI_CONFIG = get_config_param("SQLALCHEMY_DATABASE_URI")
+    analysis_sql_uri = create_analysis_sql_uri(
+        SQL_URI_CONFIG, datastack, analysis_version
+    )
+    mat_session, mat_engine = create_session(analysis_sql_uri)
+
+    AnnotationModel = create_annotation_model(mat_metadata, with_crud_columns=True)
+    non_valid_rows = mat_session.query(AnnotationModel).filter(
+        (AnnotationModel.created > mat_time_stamp) | (AnnotationModel.valid != True)
+    )
+
+    try:
+        num_rows_to_delete = non_valid_rows.delete(synchronize_session=False)
+        mat_session.commit()
+
+        mat_session.close()
+        mat_engine.dispose()
+        return f"Number of rows deleted: {num_rows_to_delete}"
+    except Exception as e:
+        mat_session.rollback()
         celery_logger.error(e)
         raise e
 
