@@ -954,11 +954,10 @@ class LiveTableQuery(Resource):
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/views")
 class AvailableViews(Resource):
     method_decorators = [
-        limit_by_category("query"),
         validate_datastack,
+        limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
-
+        reset_auth
     ]
 
     @client_bp.doc("available_views", security="apikey")
