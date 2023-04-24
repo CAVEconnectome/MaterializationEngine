@@ -954,15 +954,19 @@ class LiveTableQuery(Resource):
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/views")
 class AvailableViews(Resource):
     method_decorators = [
-        validate_datastack,
         limit_by_category("query"),
+        validate_datastack,
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
+
     ]
 
     @client_bp.doc("available_views", security="apikey")
     @responds(schema=AnalysisViewSchema(many=True))
-    def get(self, datastack_name: str, version: int) -> List[AnalysisViewSchema]:
+    def get(self, datastack_name: str,
+             version: int,
+             target_datastack: str = None,
+             target_version: int = None,) -> List[AnalysisViewSchema]:
         """endpoint for getting available views
 
         Args:
@@ -977,10 +981,10 @@ class AvailableViews(Resource):
         if version == 0:
             mat_db_name = f"{aligned_volume_name}"
         else:
-            mat_db_name = f"{datastack_name}__mat{version}"
+            mat_db_name = f"{target_datastack}__mat{target_version}"
 
         meta_db = dynamic_annotation_cache.get_db(mat_db_name)
-        views = meta_db.database.get_views(datastack_name)
+        views = meta_db.database.get_views(target_datastack)
         return views
 
 
@@ -996,7 +1000,6 @@ class ViewMetadata(Resource):
 
     @client_bp.doc("view_metadata", security="apikey")
     @responds(schema=AnalysisViewSchema)
-    @validate_datastack
     def get(
         self,
         datastack_name: str,
@@ -1019,7 +1022,7 @@ class ViewMetadata(Resource):
         )
 
         meta_db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        md = meta_db.database.get_view_metadata(datastack_name, view_name)
+        md = meta_db.database.get_view_metadata(target_datastack, view_name)
         return md
 
 
