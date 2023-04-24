@@ -536,7 +536,7 @@ def drop_tables(self, mat_info: List[dict], analysis_version: int):
         if table.get("segmentation_table_name") is not None
     ]
 
-    filtered_tables = annotation_tables + segmentation_tables
+    filtered_tables = annotation_tables + segmentation_tables + ["analysisviews"]
 
     tables_to_drop = set(mat_table_names) - set(filtered_tables)
     tables_to_drop.remove("spatial_ref_sys")  # keep postgis spatial info table
