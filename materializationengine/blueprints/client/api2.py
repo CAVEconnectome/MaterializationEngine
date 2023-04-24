@@ -1157,7 +1157,7 @@ class ViewQuery(Resource):
 
         if len(df) == limit:
             warnings.append(f'201 - "Limited query to {limit} rows')
-        warnings = update_notice_text_warnings(md, warnings)
+        warnings = update_notice_text_warnings(md, warnings, view_name)
         return create_query_response(
             df,
             warnings=warnings,
