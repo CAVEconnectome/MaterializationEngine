@@ -40,6 +40,34 @@ def get_analysis_version(datastack_name: str, version: int, Session):
 
 
 @cached(cache=LRUCache(maxsize=64))
+def get_analysis_version_and_tables(datastack_name: str, version: int, Session):
+    """query database for the analysis version and table name
+
+    Args:
+        datastack_name (str): datastack name
+        version (int): integer
+        Session ([type]): sqlalchemy session
+
+    Returns:
+        AnalysisVersion, List[AnalysisTable]: tuple of instances of AnalysisVersion and AnalysisTable
+    """
+
+    analysis_version = get_analysis_version(
+        datastack_name=datastack_name, version=version, Session=Session
+    )
+    if analysis_version is None:
+        return None, None
+    analysis_tables = (
+        Session.query(AnalysisTable)
+        .filter(AnalysisTable.analysisversion_id == analysis_version.id)
+        .all()
+    )
+    if analysis_version is None:
+        return analysis_version, None
+    return analysis_version, analysis_tables
+
+
+@cached(cache=LRUCache(maxsize=64))
 def get_analysis_version_and_table(
     datastack_name: str, table_name: str, version: int, Session
 ):
