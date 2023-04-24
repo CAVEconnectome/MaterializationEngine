@@ -32,6 +32,7 @@ from materializationengine.blueprints.client.common import (
     get_flat_model,
     get_analysis_version,
     get_analysis_version_and_table,
+    get_analysis_version_and_tables
 )
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.limiter import limit_by_category, limiter
@@ -611,17 +612,69 @@ class FrozenTableVersions(Resource):
 
 
 @client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int:version>/tables/metadata"
+)
+class FrozenTablesMetadata(Resource):
+    method_decorators = [
+        validate_datastack,
+        limit_by_category("fast_query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    @client_bp.doc("get_frozen_tables_metadata", security="apikey")
+    def get(self,
+            datastack_name: str,
+            version: int,
+            target_datastack: str = None,
+            target_version: int = None):
+        """get frozen tables metadata
+
+        Args:
+            datastack_name (str): datastack name
+            version (int): version number
+         
+
+        Returns:
+            dict: dictionary of table metadata
+        """
+   
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            target_datastack
+        )
+        session = sqlalchemy_cache.get(aligned_volume_name)
+        analysis_version, analysis_tables = get_analysis_version_and_tables(
+            target_datastack, target_version, session
+        )
+
+        schema = AnalysisTableSchema()
+        tables = schema.dump(analysis_tables, many=True)
+
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        for table in tables:
+            table_name = table["table_name"]
+            ann_md = db.database.get_table_metadata(table_name)
+            ann_md.pop("id")
+            ann_md.pop("deleted")
+            table.update(ann_md)
+     
+        return tables, 200
+
+
+@client_bp.route(
     "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/metadata"
 )
 class FrozenTableMetadata(Resource):
     method_decorators = [
+        validate_datastack,
         limit_by_category("fast_query"),
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
     ]
 
     @client_bp.doc("get_frozen_table_metadata", security="apikey")
-    def get(self, datastack_name: str, version: int, table_name: str):
+    def get(self, datastack_name: str, version: int, table_name: str, target_datastack: str = None,
+        target_version: int = None,):
         """get frozen table metadata
 
         Args:
@@ -633,11 +686,11 @@ class FrozenTableMetadata(Resource):
             dict: dictionary of table metadata
         """
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-            datastack_name
+            target_datastack
         )
         session = sqlalchemy_cache.get(aligned_volume_name)
         analysis_version, analysis_table = get_analysis_version_and_table(
-            datastack_name, table_name, version, session
+            target_datastack, table_name, target_version, session
         )
 
         schema = AnalysisTableSchema()
