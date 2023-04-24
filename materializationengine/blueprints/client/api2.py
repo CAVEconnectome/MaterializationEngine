@@ -964,9 +964,9 @@ class AvailableViews(Resource):
     @client_bp.doc("available_views", security="apikey")
     @responds(schema=AnalysisViewSchema(many=True))
     def get(self, datastack_name: str,
-             version: int,
-             target_datastack: str = None,
-             target_version: int = None,) -> List[AnalysisViewSchema]:
+            version: int,
+            target_datastack: str = None,
+            target_version: int = None,) -> List[AnalysisViewSchema]:
         """endpoint for getting available views
 
         Args:
