@@ -1218,3 +1218,42 @@ class ViewQuery(Resource):
             desired_resolution=data["desired_resolution"],
             return_pyarrow=args["return_pyarrow"],
         )
+
+
+
+@client_bp.expect(query_parser)
+@client_bp.route("/datastack/<string:datastack_name>/views/<string:view_name>/schema")
+class ViewSchema(Resource):
+    method_decorators = [
+        validate_datastack,
+        limit_by_category("fast_query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    @client_bp.doc("view_metadata", security="apikey")
+    def get(
+        self,
+        datastack_name: str,
+        view_name: str,
+        target_datastack: str = None,
+        target_version: int = None,
+    ):
+        """endpoint for getting metadata about a view
+
+        Args:
+            datastack_name (str): datastack name
+            view_name (str): table names
+
+        Returns:
+            dict: a jsonschema of the view
+        """
+
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+
+        meta_db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        table=meta_db.database.get_view_table(view_name)
+
+        return table.
