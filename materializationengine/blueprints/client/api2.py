@@ -855,7 +855,6 @@ class FrozenQuery(Resource):
 @client_bp.route("/datastack/<string:datastack_name>/query")
 class LiveTableQuery(Resource):
     method_decorators = [
-        validate_datastack,
         limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
