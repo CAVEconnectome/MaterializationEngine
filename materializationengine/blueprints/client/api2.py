@@ -1,7 +1,7 @@
 import pytz
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
-from cachetools import LRUCache, TTLCache, cached
+from cachetools import TTLCache, cached
 from flask import abort, request, current_app, g
 from flask_accepts import accepts, responds
 from flask_restx import Namespace, Resource, inputs, reqparse
@@ -32,10 +32,10 @@ from materializationengine.blueprints.client.common import (
     get_flat_model,
     get_analysis_version,
     get_analysis_version_and_table,
-    get_analysis_version_and_tables
+    get_analysis_version_and_tables,
 )
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
-from materializationengine.limiter import limit_by_category, limiter
+from materializationengine.limiter import limit_by_category
 from materializationengine.database import (
     dynamic_annotation_cache,
     sqlalchemy_cache,
@@ -49,7 +49,6 @@ from materializationengine.blueprints.client.utils import update_notice_text_war
 import pandas as pd
 import datetime
 from typing import List
-from functools import partial
 
 __version__ = "4.0.20"
 
@@ -623,22 +622,24 @@ class FrozenTablesMetadata(Resource):
     ]
 
     @client_bp.doc("get_frozen_tables_metadata", security="apikey")
-    def get(self,
-            datastack_name: str,
-            version: int,
-            target_datastack: str = None,
-            target_version: int = None):
+    def get(
+        self,
+        datastack_name: str,
+        version: int,
+        target_datastack: str = None,
+        target_version: int = None,
+    ):
         """get frozen tables metadata
 
         Args:
             datastack_name (str): datastack name
             version (int): version number
-         
+
 
         Returns:
             dict: dictionary of table metadata
         """
-   
+
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             target_datastack
         )
@@ -657,7 +658,7 @@ class FrozenTablesMetadata(Resource):
             ann_md.pop("id")
             ann_md.pop("deleted")
             table.update(ann_md)
-     
+
         return tables, 200
 
 
@@ -673,8 +674,14 @@ class FrozenTableMetadata(Resource):
     ]
 
     @client_bp.doc("get_frozen_table_metadata", security="apikey")
-    def get(self, datastack_name: str, version: int, table_name: str, target_datastack: str = None,
-        target_version: int = None,):
+    def get(
+        self,
+        datastack_name: str,
+        version: int,
+        table_name: str,
+        target_datastack: str = None,
+        target_version: int = None,
+    ):
         """get frozen table metadata
 
         Args:
@@ -1010,15 +1017,17 @@ class AvailableViews(Resource):
         validate_datastack,
         limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth
+        reset_auth,
     ]
 
     @client_bp.doc("available_views", security="apikey")
-    @responds(schema=AnalysisViewSchema(many=True))
-    def get(self, datastack_name: str,
-            version: int,
-            target_datastack: str = None,
-            target_version: int = None,) -> List[AnalysisViewSchema]:
+    def get(
+        self,
+        datastack_name: str,
+        version: int,
+        target_datastack: str = None,
+        target_version: int = None,
+    ) -> List[AnalysisViewSchema]:
         """endpoint for getting available views
 
         Args:
@@ -1037,7 +1046,11 @@ class AvailableViews(Resource):
 
         meta_db = dynamic_annotation_cache.get_db(mat_db_name)
         views = meta_db.database.get_views(target_datastack)
-        return views
+        view_d = {}
+        for view in views:
+            name = view.pop("table_name")
+            view_d[name] = view
+        return view_d
 
 
 @client_bp.expect(query_parser)
@@ -1051,7 +1064,6 @@ class ViewMetadata(Resource):
     ]
 
     @client_bp.doc("view_metadata", security="apikey")
-    @responds(schema=AnalysisViewSchema)
     def get(
         self,
         datastack_name: str,
@@ -1075,6 +1087,7 @@ class ViewMetadata(Resource):
 
         meta_db = dynamic_annotation_cache.get_db(aligned_volume_name)
         md = meta_db.database.get_view_metadata(target_datastack, view_name)
+
         return md
 
 
@@ -1220,6 +1233,9 @@ class ViewQuery(Resource):
         )
 
 
+from sqlalchemy.sql.sqltypes import String, Integer, Float, DateTime, Boolean
+from geoalchemy2.types import Geometry
+
 
 @client_bp.expect(query_parser)
 @client_bp.route("/datastack/<string:datastack_name>/views/<string:view_name>/schema")
@@ -1254,6 +1270,29 @@ class ViewSchema(Resource):
         )
 
         meta_db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        table=meta_db.database.get_view_table(view_name)
+        table = meta_db.database.get_view_table(view_name)
 
-        return table.
+        properties = {}
+
+        for column in table.columns:
+            column_type = None
+
+            if isinstance(column.type, String):
+                column_type = "string"
+            elif isinstance(column.type, Integer):
+                column_type = "integer"
+            elif isinstance(column.type, Float):
+                column_type = "number"
+            elif isinstance(column.type, DateTime):
+                column_type = "string"
+                format = "date-time"
+            elif isinstance(column.type, Boolean):
+                column_type = "boolean"
+            elif isinstance(column.type, Geometry):
+                column_type = "SpatialPoint"
+            else:
+                raise ValueError(f"Unsupported column type: {column.type}")
+
+            properties[column.name] = {"type": column_type}
+
+        return properties
