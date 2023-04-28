@@ -13,6 +13,7 @@ from sqlalchemy import or_, func
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.selectable import Alias
 from sqlalchemy.sql.schema import Table
+from sqlalchemy.ext.declarative.api import DeclarativeMeta
 import datetime
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
@@ -270,7 +271,9 @@ class QueryManager:
                 columns = ann_columns
         else:
             model = self._get_flat_model(table_name=table_name)
-            if isinstance(model, Table):
+            if isinstance(model, DeclarativeMeta):
+                columns = [c for c in model.__table__.columns.keys()]
+            elif isinstance(model, Table):
                 columns = [c for c in model.columns.keys()]
             else:
                 columns = [c.key for c in model.c.keys()]
