@@ -31,8 +31,7 @@ from materializationengine.blueprints.materialize.schemas import (
 )
 
 
-
-__version__ = "4.13.6"
+__version__ = "4.14.0"
 
 
 bulk_upload_parser = reqparse.RequestParser()
@@ -54,9 +53,7 @@ missing_chunk_parser.add_argument("file_path", required=True, type=str)
 missing_chunk_parser.add_argument("schema", required=True, type=str)
 
 get_roots_parser = reqparse.RequestParser()
-get_roots_parser.add_argument(
-    "lookup_all_root_ids", default=False, type=inputs.boolean
-)
+get_roots_parser.add_argument("lookup_all_root_ids", default=False, type=inputs.boolean)
 
 materialize_parser = reqparse.RequestParser()
 materialize_parser.add_argument("days_to_expire", required=True, default=None, type=int)
