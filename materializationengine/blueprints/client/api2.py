@@ -1041,10 +1041,10 @@ class AvailableViews(Resource):
         if version == 0:
             mat_db_name = f"{aligned_volume_name}"
         else:
-            mat_db_name = f"{target_datastack}__mat{target_version}"
+            mat_db_name = f"{datastack_name}__mat{version}"
 
         meta_db = dynamic_annotation_cache.get_db(mat_db_name)
-        views = meta_db.database.get_views(target_datastack)
+        views = meta_db.database.get_views(datastack_name)
         views = AnalysisViewSchema().dump(views, many=True)
         view_d = {}
         for view in views:
@@ -1054,7 +1054,9 @@ class AvailableViews(Resource):
 
 
 @client_bp.expect(query_parser)
-@client_bp.route("/datastack/<string:datastack_name>/views/<string:view_name>/metadata")
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<version>/views/<string:view_name>/metadata"
+)
 class ViewMetadata(Resource):
     method_decorators = [
         validate_datastack,
@@ -1067,6 +1069,7 @@ class ViewMetadata(Resource):
     def get(
         self,
         datastack_name: str,
+        version: int,
         view_name: str,
         target_datastack: str = None,
         target_version: int = None,
@@ -1084,9 +1087,13 @@ class ViewMetadata(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
+        if version == 0:
+            mat_db_name = f"{aligned_volume_name}"
+        else:
+            mat_db_name = f"{datastack_name}__mat{version}"
 
-        meta_db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        md = meta_db.database.get_view_metadata(target_datastack, view_name)
+        meta_db = dynamic_annotation_cache.get_db(mat_db_name)
+        md = meta_db.database.get_view_metadata(datastack_name, view_name)
 
         return md
 
@@ -1159,7 +1166,6 @@ class ViewQuery(Resource):
             datastack_name
         )
         session = sqlalchemy_cache.get(aligned_volume_name)
-        analysis_version = get_analysis_version(datastack_name, version, session)
 
         # check_read_permission(db, table_name)
 
@@ -1192,7 +1198,6 @@ class ViewQuery(Resource):
         qm = QueryManager(
             mat_db_name,
             segmentation_source=pcg_table_name,
-            meta_db_name=aligned_volume_name,
             split_mode=False,
             limit=limit,
             offset=data.get("offset", 0),
@@ -1312,7 +1317,7 @@ class ViewSchema(Resource):
         if version == 0:
             mat_db_name = f"{aligned_volume_name}"
         else:
-            mat_db_name = f"{target_datastack}__mat{target_version}"
+            mat_db_name = f"{datastack_name}__mat{version}"
 
         meta_db = dynamic_annotation_cache.get_db(mat_db_name)
         table = meta_db.database.get_view_table(view_name)
@@ -1356,10 +1361,10 @@ class ViewSchemas(Resource):
         if version == 0:
             mat_db_name = f"{aligned_volume_name}"
         else:
-            mat_db_name = f"{target_datastack}__mat{target_version}"
+            mat_db_name = f"{datastack_name}__mat{version}"
 
         meta_db = dynamic_annotation_cache.get_db(mat_db_name)
-        views = meta_db.database.get_views(target_datastack)
+        views = meta_db.database.get_views(datastack_name)
         schemas = {}
         for view in views:
             view_name = view.table_name
