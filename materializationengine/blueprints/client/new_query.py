@@ -141,9 +141,11 @@ def remap_query(user_data, mat_timestamp, cg_client):
             cols = [col for col in filter.keys()]
             for col in cols:
                 if col.endswith("root_id"):
-                    if new_filter_in_dict[table] is None:
-                        new_filter_in_dict[table] = defaultdict(lambda: None)
-                    new_filter_in_dict[table][col] = new_equal_dict[table].pop(col)
+                    # if col is iterable move it over
+                    if isinstance(new_equal_dict[table][col], Iterable):
+                        if new_filter_in_dict[table] is None:
+                            new_filter_in_dict[table] = defaultdict(lambda: None)
+                        new_filter_in_dict[table][col] = new_equal_dict[table].pop(col)
             if len(new_equal_dict[table]) == 0:
                 new_equal_dict = None
 
