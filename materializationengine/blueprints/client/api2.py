@@ -1045,6 +1045,7 @@ class AvailableViews(Resource):
 
         meta_db = dynamic_annotation_cache.get_db(mat_db_name)
         views = meta_db.database.get_views(target_datastack)
+        views = AnalysisViewSchema().dump(views, many=True)
         view_d = {}
         for view in views:
             name = view.pop("table_name")
@@ -1236,8 +1237,46 @@ from sqlalchemy.sql.sqltypes import String, Integer, Float, DateTime, Boolean
 from geoalchemy2.types import Geometry
 
 
-@client_bp.expect(query_parser)
-@client_bp.route("/datastack/<string:datastack_name>/views/<string:view_name>/schema")
+def get_table_schema(table):
+    """
+    Get the schema of a table as a jsonschema
+    Args:
+        table (Table): sqlalchemy table object
+    Returns:
+        dict: jsonschema of the table
+
+    """
+    properties = {}
+
+    for column in table.columns:
+        column_type = None
+        format = None
+        if isinstance(column.type, String):
+            column_type = "string"
+        elif isinstance(column.type, Integer):
+            column_type = "integer"
+        elif isinstance(column.type, Float):
+            column_type = "float"
+        elif isinstance(column.type, DateTime):
+            column_type = "string"
+            format = "date-time"
+        elif isinstance(column.type, Boolean):
+            column_type = "boolean"
+        elif isinstance(column.type, Geometry):
+            column_type = "SpatialPoint"
+        else:
+            raise ValueError(f"Unsupported column type: {column.type}")
+
+        properties[column.name] = {"type": column_type}
+        if format:
+            properties[column.name]["format"] = format
+
+    return properties
+
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int:version>/views/<string:view_name>/schema"
+)
 class ViewSchema(Resource):
     method_decorators = [
         validate_datastack,
@@ -1246,18 +1285,20 @@ class ViewSchema(Resource):
         reset_auth,
     ]
 
-    @client_bp.doc("view_metadata", security="apikey")
+    @client_bp.doc("view_schema", security="apikey")
     def get(
         self,
         datastack_name: str,
+        version: int,
         view_name: str,
         target_datastack: str = None,
         target_version: int = None,
     ):
-        """endpoint for getting metadata about a view
+        """endpoint for getting schema about a view
 
         Args:
             datastack_name (str): datastack name
+            version (int): version number
             view_name (str): table names
 
         Returns:
@@ -1268,30 +1309,60 @@ class ViewSchema(Resource):
             datastack_name
         )
 
-        meta_db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        if version == 0:
+            mat_db_name = f"{aligned_volume_name}"
+        else:
+            mat_db_name = f"{target_datastack}__mat{target_version}"
+
+        meta_db = dynamic_annotation_cache.get_db(mat_db_name)
         table = meta_db.database.get_view_table(view_name)
 
-        properties = {}
+        return get_table_schema(table)
 
-        for column in table.columns:
-            column_type = None
 
-            if isinstance(column.type, String):
-                column_type = "string"
-            elif isinstance(column.type, Integer):
-                column_type = "integer"
-            elif isinstance(column.type, Float):
-                column_type = "number"
-            elif isinstance(column.type, DateTime):
-                column_type = "string"
-                format = "date-time"
-            elif isinstance(column.type, Boolean):
-                column_type = "boolean"
-            elif isinstance(column.type, Geometry):
-                column_type = "SpatialPoint"
-            else:
-                raise ValueError(f"Unsupported column type: {column.type}")
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int:version>/views/schemas"
+)
+class ViewSchemas(Resource):
+    method_decorators = [
+        validate_datastack,
+        limit_by_category("fast_query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
 
-            properties[column.name] = {"type": column_type}
+    @client_bp.doc("view_schemas", security="apikey")
+    def get(
+        self,
+        datastack_name: str,
+        version: int,
+        target_datastack: str = None,
+        target_version: int = None,
+    ):
+        """endpoint for getting view schemas
 
-        return properties
+        Args:
+            datastack_name (str): datastack name
+            version (int): version number
+
+        Returns:
+            dict: a dict of jsonschemas of each view
+        """
+
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+
+        if version == 0:
+            mat_db_name = f"{aligned_volume_name}"
+        else:
+            mat_db_name = f"{target_datastack}__mat{target_version}"
+
+        meta_db = dynamic_annotation_cache.get_db(mat_db_name)
+        views = meta_db.database.get_views(target_datastack)
+        schemas = {}
+        for view in views:
+            view_name = view.table_name
+            table = meta_db.database.get_view_table(view_name)
+            schemas[view_name] = get_table_schema(table)
+        return schemas
