@@ -511,16 +511,19 @@ class FrozenTableCount(Resource):
 
         validate_table_args([table_name], target_datastack, target_version)
         db_name = f"{datastack_name}__mat{version}"
-        db = dynamic_annotation_cache.get_db(db_name)
 
         # if the database is a split database get a split model
         # and if its not get a flat model
 
-        Session = sqlalchemy_cache.get(aligned_volume_name)
-        Model = get_flat_model(datastack_name, table_name, version, Session)
+        session = sqlalchemy_cache.get(db_name)
 
-        Session = sqlalchemy_cache.get("{}__mat{}".format(datastack_name, version))
-        return Session().query(Model).count(), 200
+        mat_row_count = (
+            session.query(MaterializedMetadata.row_count)
+            .filter(MaterializedMetadata.table_name == table_name)
+            .scalar()
+        )
+        
+        return mat_row_count, 200
 
 
 class CustomResource(Resource):
