@@ -493,7 +493,7 @@ def generic_report(datastack_name, id):
         .first()
         .row_count
     )
-
+    qm.add_table(table.table_name)
     qm.select_all_columns(table.table_name)
     df, column_names = qm.execute_query()
 
