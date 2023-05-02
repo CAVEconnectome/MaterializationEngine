@@ -250,6 +250,11 @@ class QueryManager:
                     raise ValueError(
                         f"{column_name} not in model or models for {table_name}"
                     )
+            elif isinstance(model, Table):
+                if column_name not in model.c.keys():
+                    raise ValueError(
+                        f"{column_name} not in model or models for {table_name}"
+                    )  
             else:
                 if column_name not in model.__dict__.keys():
                     raise ValueError(
