@@ -33,6 +33,7 @@ from materializationengine.blueprints.client.common import (
     get_analysis_version,
     get_analysis_version_and_table,
     get_analysis_version_and_tables,
+    unhandled_exception as common_unhandled_exception,
 )
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.limiter import limit_by_category
@@ -49,6 +50,7 @@ from materializationengine.blueprints.client.utils import update_notice_text_war
 import pandas as pd
 import datetime
 from typing import List
+import werkzeug
 
 __version__ = "4.0.20"
 
@@ -62,6 +64,17 @@ client_bp = Namespace(
     authorizations=authorizations,
     description="Materialization Client",
 )
+
+
+@client_bp.errorhandler(werkzeug.exceptions.BadRequest)
+def bad_request_exception(e):
+    raise e
+
+
+@client_bp.errorhandler(Exception)
+def unhandled_exception(e):
+    return common_unhandled_exception(e)
+
 
 annotation_parser = reqparse.RequestParser()
 annotation_parser.add_argument(

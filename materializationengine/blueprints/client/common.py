@@ -14,7 +14,34 @@ from materializationengine.info_client import (
 )
 import numpy as np
 import textwrap
-from flask import g
+from flask import g, request, jsonify
+import traceback
+
+
+def unhandled_exception(e):
+    status_code = 500
+    user_ip = str(request.remote_addr)
+    tb = traceback.format_exception(etype=type(e), value=e, tb=e.__traceback__)
+
+    current_app.logger.error(
+        {
+            "message": str(e),
+            "user_id": user_ip,
+            "user_ip": user_ip,
+            "request_url": request.url,
+            "request_data": request.data,
+            "response_code": status_code,
+            "traceback": tb,
+        }
+    )
+
+    resp = {
+        "code": status_code,
+        "message": str(e),
+        "traceback": tb,
+    }
+
+    return resp, status_code
 
 
 @cached(cache=LRUCache(maxsize=64))

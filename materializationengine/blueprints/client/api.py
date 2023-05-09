@@ -22,6 +22,7 @@ from materializationengine.blueprints.client.common import (
     validate_table_args,
     get_analysis_version_and_table,
     get_flat_model,
+    unhandled_exception as common_unhandled_exception,
 )
 from materializationengine.models import MaterializedMetadata
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
@@ -42,6 +43,12 @@ client_bp = Namespace(
     authorizations=authorizations,
     description="Materialization Client",
 )
+
+
+@client_bp.errorhandler(Exception)
+def unhandled_exception(e):
+    return common_unhandled_exception(e)
+
 
 annotation_parser = reqparse.RequestParser()
 annotation_parser.add_argument(
