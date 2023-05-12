@@ -216,7 +216,7 @@ def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_
     else:
         return filters, {}
 
-    if len(id_mapping[query_map_str]) == 0:
+    if len(id_mapping[mat_map_str]) == 0:
         return filters, {}
 
     for filter in filters:
