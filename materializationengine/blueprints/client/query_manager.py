@@ -85,8 +85,14 @@ class QueryManager:
             reference_table = md.get("reference_table")
             if reference_table:
                 table_metadata = {"reference_table": reference_table}
+                ref_md = self._meta_db.database.get_table_metadata(reference_table)
+                _ = self._db.schema.get_split_models(reference_table,
+                                                     ref_md["schema_type"],
+                                                     self._segmentation_source,
+                                                     table_metadata=None)
             else:
                 table_metadata = None
+        
             annmodel, segmodel = self._db.schema.get_split_models(
                 table_name,
                 md["schema_type"],
@@ -254,7 +260,7 @@ class QueryManager:
                 if column_name not in model.c.keys():
                     raise ValueError(
                         f"{column_name} not in model or models for {table_name}"
-                    )  
+                    )
             else:
                 if column_name not in model.__dict__.keys():
                     raise ValueError(
