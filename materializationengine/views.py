@@ -475,6 +475,14 @@ def generic_report(datastack_name, id):
         abort(404, "this table does not exist")
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
     check_read_permission(db, table.table_name)
+
+    parent_version_id = table.analysisversion.parent_version
+    if parent_version_id is not None:
+        parent_version = session.query(AnalysisVersion).get(parent_version_id)
+        target_version = datastack_name
+        datastack_name = parent_version.datastack
+
+
     mat_db_name = f"{datastack_name}__mat{table.analysisversion.version}"
     anno_metadata = db.database.get_table_metadata(table.table_name)
 
