@@ -953,6 +953,34 @@ class LiveTableQuery(Resource):
 
         chosen_timestamp = pytz.utc.localize(chosen_version.time_stamp)
 
+        # map public version datastacks to their private versions
+        if chosen_version.parent_version is not None:
+            target_datastack = chosen_version.datastack
+            session = sqlalchemy_cache.get(aligned_vol)
+            target_version = (
+                session.query(AnalysisVersion)
+                .filter(
+                    AnalysisVersion.id == chosen_version.parent_version
+                )
+                .one()
+            )
+            datastack_name = target_version.datastack
+
+            
+            # query the AnalysisVersion with the oldest timestamp
+            newest_version = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.datastack == target_datastack)
+                .order_by(AnalysisVersion.time_stamp.desc())
+                .first()
+            )
+
+            # if the users timestamp is newer than the newest version
+            # then we set the users timestamp to the newest version
+            if user_data['timestamp'] > newest_version.time_stamp:
+                user_data['timestamp'] = newest_version.time_stamp
+            
+
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
