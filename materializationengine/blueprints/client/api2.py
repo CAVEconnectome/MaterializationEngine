@@ -522,7 +522,7 @@ class FrozenTableCount(Resource):
             .filter(MaterializedMetadata.table_name == table_name)
             .scalar()
         )
-        
+
         return mat_row_count, 200
 
 
@@ -959,14 +959,11 @@ class LiveTableQuery(Resource):
             session = sqlalchemy_cache.get(aligned_vol)
             target_version = (
                 session.query(AnalysisVersion)
-                .filter(
-                    AnalysisVersion.id == chosen_version.parent_version
-                )
+                .filter(AnalysisVersion.id == chosen_version.parent_version)
                 .one()
             )
             datastack_name = target_version.datastack
 
-            
             # query the AnalysisVersion with the oldest timestamp
             newest_version = (
                 session.query(AnalysisVersion)
@@ -977,9 +974,9 @@ class LiveTableQuery(Resource):
 
             # if the users timestamp is newer than the newest version
             # then we set the users timestamp to the newest version
-            if user_data['timestamp'] > pytz.utc.localize(newest_version.time_stamp):
-                user_data['timestamp'] = pytz.utc.localize(newest_version.time_stamp)
-            
+            if user_data["timestamp"] > pytz.utc.localize(newest_version.time_stamp):
+                user_data["timestamp"] = pytz.utc.localize(newest_version.time_stamp)
+
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
