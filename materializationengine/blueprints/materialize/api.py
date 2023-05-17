@@ -31,7 +31,7 @@ from materializationengine.blueprints.materialize.schemas import (
 )
 
 
-__version__ = "4.14.10"
+__version__ = "4.14.11"
 
 
 bulk_upload_parser = reqparse.RequestParser()
