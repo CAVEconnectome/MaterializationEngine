@@ -102,7 +102,7 @@ def ingest_table_svids(
     mat_metadata = mat_info[0]  # only one entry for a single table
     table_created = create_missing_segmentation_table(mat_metadata)
     if table_created:
-        celery_logger.info(f'Table created: {mat_metadata["segmentation_table_name"]}')
+        celery_logger.info(f'Table created: {mat_metadata.get("segmentation_table_name")}')
     if annotation_ids:
         ingest_workflow = ingest_new_annotations.si(
             None, mat_metadata, annotation_ids, lookup_root_ids=False
@@ -399,8 +399,8 @@ def ingest_new_annotations_workflow(mat_metadata: dict):
         return fin.si()
 
 
-@celery.task(name="workflow:create_missing_segmentation_table", bind=True)
-def create_missing_segmentation_table(self, mat_metadata: dict) -> dict:
+@celery.task(name="workflow:create_missing_segmentation_table")
+def create_missing_segmentation_table(mat_metadata: dict) -> dict:
     """Create missing segmentation tables associated with an annotation table if it
     does not already exist.
 

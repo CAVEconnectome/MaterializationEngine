@@ -52,7 +52,7 @@ def run_periodic_database_update() -> None:
 @celery.task(
     bind=True,
     base=LockedTask,
-    timeout=int(60 * 60 * 24 * 7),  # Task locked for 1 week
+    timeout=int(60 * 60 * 24),  # Task locked for 1 day
     name="workflow:update_database_workflow",
 )
 def update_database_workflow(self, datastack_info: dict, **kwargs):
