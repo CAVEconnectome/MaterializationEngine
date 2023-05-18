@@ -30,7 +30,7 @@ from materializationengine.blueprints.client.datastack import validate_datastack
 
 
 
-__version__ = "4.14.9"
+__version__ = "4.14.11"
 
 
 authorizations = {
