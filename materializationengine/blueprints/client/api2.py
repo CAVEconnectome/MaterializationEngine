@@ -110,7 +110,16 @@ query_parser.add_argument(
  are new annotations that exist but haven't yet had supervoxel and \
 rootId lookups. A warning will still be returned, but no 406 error thrown.",
 )
-
+query_parser.add_argument(
+    "allow_invalid_root_ids",
+    type=inputs.boolean,
+    default=False,
+    required=False,
+    location="args",
+    help="whether to let a query proceed when passed a set of root ids\
+ that are not valid at the timestamp that is queried. If True the filter will likely \
+not be relevant and the user might not be getting data back that they expect, but it will not error.",
+)
 
 @cached(cache=TTLCache(maxsize=64, ttl=600))
 def get_relevant_datastack_info(datastack_name):
@@ -932,7 +941,7 @@ class LiveTableQuery(Resource):
         )
         db = dynamic_annotation_cache.get_db(aligned_vol)
         check_read_permission(db, user_data["table"])
-        allow_invalid_root_ids = user_data.get("allow_invalid_root_ids", False)
+        allow_invalid_root_ids = args.get("allow_invalid_root_ids", False)
 
         # TODO add table owner warnings
         # if has_joins:

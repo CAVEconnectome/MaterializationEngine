@@ -195,7 +195,7 @@ def map_filters(
 
     # if there are no root_ids then we can safely return now
     if len(root_ids) == 0:
-        return filters, {}
+        return filters, {}, []
     root_ids = np.unique(np.concatenate(root_ids))
     is_valid_at_query = cg_client.is_latest_roots(root_ids, timestamp=timestamp_query)
     warnings = []
@@ -228,10 +228,10 @@ def map_filters(
         mat_map_str = "future_id_map"
         query_map_str = "past_id_map"
     else:
-        return filters, {}
+        return filters, {}, warnings
 
     if len(id_mapping[mat_map_str]) == 0:
-        return filters, {}
+        return filters, {}, warnings
 
     for filter in filters:
         if filter is not None:
@@ -244,12 +244,15 @@ def map_filters(
                     for col, root_ids in filter_dict.items():
                         if col.endswith("root_id"):
                             if not isinstance(root_ids, (Iterable, np.ndarray)):
-                                new_filter[table][col] = id_mapping[mat_map_str][
-                                    root_ids
-                                ]
+                                new_filter[table][col] = id_mapping[mat_map_str].get(
+                                    root_ids, None
+                                )
                             else:
                                 new_filter[table][col] = np.concatenate(
-                                    [id_mapping[mat_map_str][v] for v in root_ids]
+                                    [
+                                        id_mapping[mat_map_str].get(v, [])
+                                        for v in root_ids
+                                    ]
                                 )
                         else:
                             new_filter[table][col] = root_ids
