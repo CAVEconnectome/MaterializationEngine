@@ -1,6 +1,6 @@
 from collections import defaultdict
 from materializationengine.database import dynamic_annotation_cache
-
+from flask import abort
 from materializationengine.blueprints.client.query import (
     make_spatial_filter,
     _execute_query,
@@ -72,6 +72,8 @@ class QueryManager:
             return self._split_models[table_name]
         else:
             md = self._meta_db.database.get_table_metadata(table_name)
+            if md is None:
+                abort(404, f"Table {table_name} not found in metadata database")
             vox_res = np.array(
                 [
                     md["voxel_resolution_x"],
