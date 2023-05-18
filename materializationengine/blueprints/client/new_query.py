@@ -113,7 +113,7 @@ def strip_root_id_filters(user_data):
     return modified_user_data
 
 
-def remap_query(user_data, mat_timestamp, cg_client):
+def remap_query(user_data, mat_timestamp, cg_client, allow_invalid_root_ids=False):
 
     query_timestamp = user_data["timestamp"]
 
@@ -127,6 +127,7 @@ def remap_query(user_data, mat_timestamp, cg_client):
         query_timestamp,
         mat_timestamp,
         cg_client,
+        allow_invalid_root_ids,
     )
 
     new_filter_in_dict, new_filter_out_dict, new_equal_dict = new_filters
@@ -157,7 +158,7 @@ def remap_query(user_data, mat_timestamp, cg_client):
     return modified_user_data, query_map
 
 
-def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_client):
+def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_client, allow_invalid_root_ids=False):
     """translate a list of filter dictionaries
        from a point in the future, to a point in the past
 
@@ -193,10 +194,13 @@ def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_
     is_valid_at_query = cg_client.is_latest_roots(root_ids, timestamp=timestamp_query)
     if not np.all(is_valid_at_query):
         invalid_roots = root_ids[~is_valid_at_query]
-        abort(
-            400,
-            f"not all root_ids passed are not valid at the query timestamp: {invalid_roots}",
-        )
+        if not allow_invalid_root_ids:
+            abort(
+                400,
+                f"Some root_ids passed are not valid at the query timestamp: {invalid_roots}",
+            )
+        else:
+            root_ids = root_ids[is_valid_at_query]
 
     # is_valid_at_mat = cg_client.is_latest_roots(root_ids, timestamp=timestamp_mat)
 

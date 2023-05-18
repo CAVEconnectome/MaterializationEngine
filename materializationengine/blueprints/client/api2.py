@@ -932,6 +932,8 @@ class LiveTableQuery(Resource):
         )
         db = dynamic_annotation_cache.get_db(aligned_vol)
         check_read_permission(db, user_data["table"])
+        allow_invalid_root_ids = user_data.get("allow_invalid_root_ids", False)
+
         # TODO add table owner warnings
         # if has_joins:
         #    abort(400, "we are not supporting joins yet")
@@ -993,7 +995,7 @@ class LiveTableQuery(Resource):
             user_data["desired_resolution"] = des_res
 
         modified_user_data, query_map = remap_query(
-            user_data, chosen_timestamp, cg_client
+            user_data, chosen_timestamp, cg_client, allow_invalid_root_ids,
         )
 
         mat_df, column_names, mat_warnings = execute_materialized_query(
