@@ -113,12 +113,12 @@ def strip_root_id_filters(user_data):
     return modified_user_data
 
 
-def remap_query(user_data, mat_timestamp, cg_client):
+def remap_query(user_data, mat_timestamp, cg_client, allow_invalid_root_ids=False):
 
     query_timestamp = user_data["timestamp"]
 
     # map filters from the user timestamp to the materialized timestamp
-    new_filters, query_map = map_filters(
+    new_filters, query_map, warnings = map_filters(
         [
             user_data.get("filter_in_dict", None),
             user_data.get("filter_out_dict", None),
@@ -127,6 +127,7 @@ def remap_query(user_data, mat_timestamp, cg_client):
         query_timestamp,
         mat_timestamp,
         cg_client,
+        allow_invalid_root_ids,
     )
 
     new_filter_in_dict, new_filter_out_dict, new_equal_dict = new_filters
@@ -154,10 +155,16 @@ def remap_query(user_data, mat_timestamp, cg_client):
     modified_user_data["filter_in_dict"] = new_filter_in_dict
     modified_user_data["filter_out_dict"] = new_filter_out_dict
 
-    return modified_user_data, query_map
+    return modified_user_data, query_map, warnings
 
 
-def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_client):
+def map_filters(
+    filters,
+    timestamp_query: datetime,
+    timestamp_mat: datetime,
+    cg_client,
+    allow_invalid_root_ids=False,
+):
     """translate a list of filter dictionaries
        from a point in the future, to a point in the past
 
@@ -188,15 +195,22 @@ def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_
 
     # if there are no root_ids then we can safely return now
     if len(root_ids) == 0:
-        return filters, {}
+        return filters, {}, []
     root_ids = np.unique(np.concatenate(root_ids))
     is_valid_at_query = cg_client.is_latest_roots(root_ids, timestamp=timestamp_query)
+    warnings = []
     if not np.all(is_valid_at_query):
         invalid_roots = root_ids[~is_valid_at_query]
-        abort(
-            400,
-            f"not all root_ids passed are not valid at the query timestamp: {invalid_roots}",
-        )
+        if not allow_invalid_root_ids:
+            abort(
+                400,
+                f"Some root_ids passed are not valid at the query timestamp: {invalid_roots}",
+            )
+        else:
+            warnings.append(
+                f"Some root_ids passed are not valid at the query timestamp: {invalid_roots}"
+            )
+            root_ids = root_ids[is_valid_at_query]
 
     # is_valid_at_mat = cg_client.is_latest_roots(root_ids, timestamp=timestamp_mat)
 
@@ -214,10 +228,10 @@ def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_
         mat_map_str = "future_id_map"
         query_map_str = "past_id_map"
     else:
-        return filters, {}
+        return filters, {}, warnings
 
     if len(id_mapping[mat_map_str]) == 0:
-        return filters, {}
+        return filters, {}, warnings
 
     for filter in filters:
         if filter is not None:
@@ -230,19 +244,22 @@ def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_
                     for col, root_ids in filter_dict.items():
                         if col.endswith("root_id"):
                             if not isinstance(root_ids, (Iterable, np.ndarray)):
-                                new_filter[table][col] = id_mapping[mat_map_str][
-                                    root_ids
-                                ]
+                                new_filter[table][col] = id_mapping[mat_map_str].get(
+                                    root_ids, None
+                                )
                             else:
                                 new_filter[table][col] = np.concatenate(
-                                    [id_mapping[mat_map_str][v] for v in root_ids]
+                                    [
+                                        id_mapping[mat_map_str].get(v, [])
+                                        for v in root_ids
+                                    ]
                                 )
                         else:
                             new_filter[table][col] = root_ids
             new_filters.append(new_filter)
         else:
             new_filters.append(None)
-    return new_filters, id_mapping[query_map_str]
+    return new_filters, id_mapping[query_map_str], warnings
 
 
 # @cached(cache=TTLCache(maxsize=64, ttl=600))

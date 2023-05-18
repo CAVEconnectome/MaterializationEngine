@@ -110,7 +110,16 @@ query_parser.add_argument(
  are new annotations that exist but haven't yet had supervoxel and \
 rootId lookups. A warning will still be returned, but no 406 error thrown.",
 )
-
+query_parser.add_argument(
+    "allow_invalid_root_ids",
+    type=inputs.boolean,
+    default=False,
+    required=False,
+    location="args",
+    help="whether to let a query proceed when passed a set of root ids\
+ that are not valid at the timestamp that is queried. If True the filter will likely \
+not be relevant and the user might not be getting data back that they expect, but it will not error.",
+)
 
 @cached(cache=TTLCache(maxsize=64, ttl=600))
 def get_relevant_datastack_info(datastack_name):
@@ -932,6 +941,8 @@ class LiveTableQuery(Resource):
         )
         db = dynamic_annotation_cache.get_db(aligned_vol)
         check_read_permission(db, user_data["table"])
+        allow_invalid_root_ids = args.get("allow_invalid_root_ids", False)
+
         # TODO add table owner warnings
         # if has_joins:
         #    abort(400, "we are not supporting joins yet")
@@ -992,8 +1003,8 @@ class LiveTableQuery(Resource):
             ]
             user_data["desired_resolution"] = des_res
 
-        modified_user_data, query_map = remap_query(
-            user_data, chosen_timestamp, cg_client
+        modified_user_data, query_map, remap_warnings = remap_query(
+            user_data, chosen_timestamp, cg_client, allow_invalid_root_ids,
         )
 
         mat_df, column_names, mat_warnings = execute_materialized_query(
@@ -1029,7 +1040,7 @@ class LiveTableQuery(Resource):
 
         return create_query_response(
             df,
-            warnings=mat_warnings + prod_warnings,
+            warnings=remap_warnings + mat_warnings + prod_warnings,
             column_names=column_names,
             desired_resolution=user_data["desired_resolution"],
             return_pyarrow=args["return_pyarrow"],
