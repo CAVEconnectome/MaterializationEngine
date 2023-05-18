@@ -508,7 +508,7 @@ class VersionResource(Resource):
         aligned_vol_db = dynamic_annotation_cache.get_db(aligned_volume_name)
 
         base = Base
-        base.metadata.bind = aligned_vol_db.engine
+        base.metadata.bind = aligned_vol_db.database.engine
         base.metadata.create_all()
         return 200
 
