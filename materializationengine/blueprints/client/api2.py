@@ -994,7 +994,7 @@ class LiveTableQuery(Resource):
             ]
             user_data["desired_resolution"] = des_res
 
-        modified_user_data, query_map = remap_query(
+        modified_user_data, query_map, remap_warnings = remap_query(
             user_data, chosen_timestamp, cg_client, allow_invalid_root_ids,
         )
 
@@ -1031,7 +1031,7 @@ class LiveTableQuery(Resource):
 
         return create_query_response(
             df,
-            warnings=mat_warnings + prod_warnings,
+            warnings=remap_warnings + mat_warnings + prod_warnings,
             column_names=column_names,
             desired_resolution=user_data["desired_resolution"],
             return_pyarrow=args["return_pyarrow"],

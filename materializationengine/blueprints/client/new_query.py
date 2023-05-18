@@ -118,7 +118,7 @@ def remap_query(user_data, mat_timestamp, cg_client, allow_invalid_root_ids=Fals
     query_timestamp = user_data["timestamp"]
 
     # map filters from the user timestamp to the materialized timestamp
-    new_filters, query_map = map_filters(
+    new_filters, query_map, warnings = map_filters(
         [
             user_data.get("filter_in_dict", None),
             user_data.get("filter_out_dict", None),
@@ -155,10 +155,16 @@ def remap_query(user_data, mat_timestamp, cg_client, allow_invalid_root_ids=Fals
     modified_user_data["filter_in_dict"] = new_filter_in_dict
     modified_user_data["filter_out_dict"] = new_filter_out_dict
 
-    return modified_user_data, query_map
+    return modified_user_data, query_map, warnings
 
 
-def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_client, allow_invalid_root_ids=False):
+def map_filters(
+    filters,
+    timestamp_query: datetime,
+    timestamp_mat: datetime,
+    cg_client,
+    allow_invalid_root_ids=False,
+):
     """translate a list of filter dictionaries
        from a point in the future, to a point in the past
 
@@ -192,6 +198,7 @@ def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_
         return filters, {}
     root_ids = np.unique(np.concatenate(root_ids))
     is_valid_at_query = cg_client.is_latest_roots(root_ids, timestamp=timestamp_query)
+    warnings = []
     if not np.all(is_valid_at_query):
         invalid_roots = root_ids[~is_valid_at_query]
         if not allow_invalid_root_ids:
@@ -200,6 +207,9 @@ def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_
                 f"Some root_ids passed are not valid at the query timestamp: {invalid_roots}",
             )
         else:
+            warnings.append(
+                f"Some root_ids passed are not valid at the query timestamp: {invalid_roots}"
+            )
             root_ids = root_ids[is_valid_at_query]
 
     # is_valid_at_mat = cg_client.is_latest_roots(root_ids, timestamp=timestamp_mat)
@@ -246,7 +256,7 @@ def map_filters(filters, timestamp_query: datetime, timestamp_mat: datetime, cg_
             new_filters.append(new_filter)
         else:
             new_filters.append(None)
-    return new_filters, id_mapping[query_map_str]
+    return new_filters, id_mapping[query_map_str], warnings
 
 
 # @cached(cache=TTLCache(maxsize=64, ttl=600))
