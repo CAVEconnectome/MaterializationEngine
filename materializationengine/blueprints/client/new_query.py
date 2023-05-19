@@ -243,7 +243,9 @@ def map_filters(
                     new_filter[table] = defaultdict(lambda: None)
                     for col, root_ids_filt in filter_dict.items():
                         if allow_invalid_root_ids:
-                            root_ids_filt = root_ids_filt[np.isin(root_ids_filt, root_ids)]
+                            root_ids_filt = root_ids_filt[
+                                np.isin(root_ids_filt, root_ids)
+                            ]
                         if col.endswith("root_id"):
                             if not isinstance(root_ids_filt, (Iterable, np.ndarray)):
                                 new_filter[table][col] = id_mapping[mat_map_str].get(
