@@ -3,7 +3,7 @@ from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
 from cachetools import TTLCache, cached
 from flask import abort, request, current_app, g
-from flask_accepts import accepts, responds
+from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
 from materializationengine.blueprints.client.datastack import validate_datastack
 from materializationengine.blueprints.client.new_query import (
@@ -29,8 +29,6 @@ from materializationengine.blueprints.client.common import (
     handle_complex_query,
     handle_simple_query,
     validate_table_args,
-    get_flat_model,
-    get_analysis_version,
     get_analysis_version_and_table,
     get_analysis_version_and_tables,
     unhandled_exception as common_unhandled_exception,

@@ -20,7 +20,7 @@ from materializationengine.database import sqlalchemy_cache
 from materializationengine.schemas import ma
 from materializationengine.utils import get_instance_folder_path
 from materializationengine.views import views_bp
-from materializationengine.limiter import limiter 
+from materializationengine.limiter import limiter
 
 db = SQLAlchemy(model_class=Base)
 
@@ -66,7 +66,7 @@ def create_app(config_name: str = None):
 
     db.init_app(app)
     ma.init_app(app)
-    
+
     with app.app_context():
         api = Api(
             apibp, title="Materialization Engine API", version=__version__, doc="/doc"
