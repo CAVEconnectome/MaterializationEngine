@@ -10,7 +10,7 @@ from materializationengine.shared_tasks import (
     get_materialization_info,
     monitor_workflow_state,
     workflow_complete,
-    fin
+    fin,
 )
 from materializationengine.task import LockedTask
 from materializationengine.utils import get_config_param
@@ -72,6 +72,7 @@ def update_database_workflow(self, datastack_info: dict, **kwargs):
         analysis_version=None,
         materialization_time_stamp=materialization_time_stamp,
     )
+    
     celery_logger.info(mat_info)
 
     update_live_database_workflow = []
@@ -81,6 +82,7 @@ def update_database_workflow(self, datastack_info: dict, **kwargs):
     # skip tables that are larger than 1,000,000 rows due to performance.
     try:
         for mat_metadata in mat_info:
+            mat_metadata["process_all"] = datastack_info.get("lookup_all_root_ids", False)
             if mat_metadata.get("segmentation_table_name"):
                 workflow = chain(
                     ingest_new_annotations_workflow(mat_metadata),
@@ -90,7 +92,7 @@ def update_database_workflow(self, datastack_info: dict, **kwargs):
                 update_live_database_workflow.append(workflow)
             else:
                 update_live_database_workflow.append(fin.si())
-                
+
         run_update_database_workflow = chain(
             *update_live_database_workflow, workflow_complete.si("update_root_ids")
         ).apply_async(kwargs={"Datastack": datastack_info["datastack"]})

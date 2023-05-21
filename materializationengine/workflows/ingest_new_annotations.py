@@ -102,7 +102,9 @@ def ingest_table_svids(
     mat_metadata = mat_info[0]  # only one entry for a single table
     table_created = create_missing_segmentation_table(mat_metadata)
     if table_created:
-        celery_logger.info(f'Table created: {mat_metadata.get("segmentation_table_name")}')
+        celery_logger.info(
+            f'Table created: {mat_metadata.get("segmentation_table_name")}'
+        )
     if annotation_ids:
         ingest_workflow = ingest_new_annotations.si(
             None, mat_metadata, annotation_ids, lookup_root_ids=False
@@ -377,7 +379,8 @@ def ingest_new_annotations_workflow(mat_metadata: dict):
     """
     celery_logger.info("Ingesting new annotations...")
     if mat_metadata["row_count"] >= 1_000_000:
-        return fin.si()
+        if not mat_metadata.get("process_all", False):
+            return fin.si()
     annotation_chunks = generate_chunked_model_ids(mat_metadata)
     table_created = create_missing_segmentation_table(mat_metadata)
     if table_created:
