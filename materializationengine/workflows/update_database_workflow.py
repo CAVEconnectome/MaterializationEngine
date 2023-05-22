@@ -72,7 +72,7 @@ def update_database_workflow(self, datastack_info: dict, **kwargs):
         analysis_version=None,
         materialization_time_stamp=materialization_time_stamp,
     )
-    
+
     celery_logger.info(mat_info)
 
     update_live_database_workflow = []
@@ -82,7 +82,6 @@ def update_database_workflow(self, datastack_info: dict, **kwargs):
     # skip tables that are larger than 1,000,000 rows due to performance.
     try:
         for mat_metadata in mat_info:
-            mat_metadata["process_all"] = datastack_info.get("lookup_all_root_ids", False)
             if mat_metadata.get("segmentation_table_name"):
                 workflow = chain(
                     ingest_new_annotations_workflow(mat_metadata),
