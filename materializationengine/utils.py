@@ -127,6 +127,15 @@ def check_write_permission(db, table_name):
 
 
 def check_read_permission(db, table_name):
+    """Check if user has read permission for table
+
+    Args:
+        db (DynamicAnnotationInterface): db to check
+        table_name (str): table to check
+
+    Returns:
+        dict: metadata of table
+    """
     metadata = db.database.get_table_metadata(table_name)
     if metadata is None:
         abort(404, f"Table {table_name} not found in {db.aligned_volume} database")
@@ -144,6 +153,8 @@ def check_read_permission(db, table_name):
 
 def check_ownership(db, table_name):
     metadata = db.database.get_table_metadata(table_name)
+    if metadata is None:
+        abort(404, f"Table {table_name} not found in {db.aligned_volume} database")
     if metadata["user_id"] != str(g.auth_user["id"]):
         abort(401, "You cannot do this because you are not the owner of this table")
     return metadata
