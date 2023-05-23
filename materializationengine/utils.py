@@ -128,6 +128,8 @@ def check_write_permission(db, table_name):
 
 def check_read_permission(db, table_name):
     metadata = db.database.get_table_metadata(table_name)
+    if metadata is None:
+        abort(404, f"Table {table_name} not found in {db.aligned_volume} database")
     if metadata["read_permission"] == "GROUP":
         if not users_share_common_group(metadata["user_id"]):
             abort(
