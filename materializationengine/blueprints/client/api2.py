@@ -1276,7 +1276,7 @@ class ViewQuery(Resource):
         )
 
 
-from sqlalchemy.sql.sqltypes import String, Integer, Float, DateTime, Boolean
+from sqlalchemy.sql.sqltypes import String, Integer, Float, DateTime, Boolean, Numeric
 from geoalchemy2.types import Geometry
 
 
@@ -1307,6 +1307,8 @@ def get_table_schema(table):
             column_type = "boolean"
         elif isinstance(column.type, Geometry):
             column_type = "SpatialPoint"
+        elif isinstance(column.type, Numeric):
+            column_type = "number"
         else:
             raise ValueError(f"Unsupported column type: {column.type}")
 
