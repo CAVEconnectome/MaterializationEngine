@@ -36,6 +36,8 @@ def get_analysis_version(datastack_name: str, version: int, Session):
         .filter(AnalysisVersion.version == version)
         .first()
     )
+    if analysis_version is None:
+        abort(404, f"Version {version} not found in datastack {datastack_name}")
     return analysis_version
 
 
