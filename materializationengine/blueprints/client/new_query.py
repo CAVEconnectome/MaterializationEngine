@@ -249,14 +249,14 @@ def map_filters(
                         if col.endswith("root_id"):
                             if not isinstance(root_ids_filt, (Iterable, np.ndarray)):
                                 new_filter[table][col] = id_mapping[mat_map_str].get(
-                                    root_ids_filt, None
+                                    root_ids_filt, np.empty(dtype=np.int64, shape=0)
                                 )
                             else:
                                 new_filter[table][col] = np.concatenate(
                                     [
-                                        id_mapping[mat_map_str].get(v, [])
+                                        id_mapping[mat_map_str].get(v, np.empty(dtype=np.int64, shape=0))
                                         for v in root_ids_filt
-                                    ]
+                                    ],
                                 )
                         else:
                             new_filter[table][col] = root_ids_filt
