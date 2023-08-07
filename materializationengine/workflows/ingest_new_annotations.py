@@ -399,8 +399,7 @@ def ingest_new_annotations_workflow(mat_metadata: dict):
         return fin.si()
 
 
-@celery.task(name="workflow:create_missing_segmentation_table")
-def create_missing_segmentation_table(mat_metadata: dict) -> dict:
+def create_missing_segmentation_table(mat_metadata: dict) -> bool:
     """Create missing segmentation tables associated with an annotation table if it
     does not already exist.
 
@@ -410,7 +409,7 @@ def create_missing_segmentation_table(mat_metadata: dict) -> dict:
         Materialization metadata
 
     Returns:
-        dict: Materialization metadata
+        bool: if segmentation table was created or already exists
     """
     segmentation_table_name = mat_metadata.get("segmentation_table_name")
     aligned_volume = mat_metadata.get("aligned_volume")
@@ -442,6 +441,8 @@ def create_missing_segmentation_table(mat_metadata: dict) -> dict:
         except Exception as e:
             celery_logger.error(f"SQL ERROR: {e}")
             session.rollback()
+        finally:
+            session.close()
     else:
         session.close()
     return True
