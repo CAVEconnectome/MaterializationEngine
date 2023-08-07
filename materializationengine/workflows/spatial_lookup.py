@@ -1,38 +1,33 @@
-import datetime
-import time
-from typing import List
-from sqlalchemy import select, func
-from geoalchemy2 import Geometry
-import itertools
-import time
-import redis
-import random
-from typing import List
 import collections
-from shapely import wkb
-from sqlalchemy import union_all, literal, text, case
-from sqlalchemy.dialects.postgresql import insert
-from celery import group
+import datetime
+import itertools
+import random
+import time
+from itertools import islice
+from typing import List
+
 import numpy as np
 import pandas as pd
-from flask import current_app
+from celery import group
 from celery.utils.log import get_task_logger
+from geoalchemy2 import Geometry
+from shapely import wkb
+from sqlalchemy import case, func, literal, select, text, union_all
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.sql import func
+
 from materializationengine.celery_init import celery
-from itertools import islice
-from materializationengine.database import sqlalchemy_cache, dynamic_annotation_cache
+from materializationengine.cloudvolume_gateway import cloudvolume_cache
+from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
 from materializationengine.shared_tasks import (
     get_materialization_info,
-    monitor_task_states,
     workflow_complete,
 )
-from materializationengine.cloudvolume_gateway import cloudvolume_cache
 from materializationengine.throttle import throttle_celery
 from materializationengine.workflows.ingest_new_annotations import (
     create_missing_segmentation_table,
     get_new_root_ids,
 )
-from sqlalchemy.sql import func
-
 
 celery_logger = get_task_logger(__name__)
 
@@ -651,7 +646,9 @@ def process_spatially_chunked_svids(
                 if get_root_ids:
                     data = get_new_root_ids(data, mat_info)
                 is_inserted = insert_segmentation_data(data, mat_info)
-                celery_logger.debug(f"Data inserted: {is_inserted}, Number of rows: {len(data)}")
+                celery_logger.debug(
+                    f"Data inserted: {is_inserted}, Number of rows: {len(data)}"
+                )
     except Exception as e:
         celery_logger.error(e)
         self.retry(exc=e, countdown=int(random.uniform(2, 8) ** self.request.retries))
@@ -691,19 +688,19 @@ def insert_segmentation_data(
     # convert the dataframe to a list of dictionaries
     data = df.to_dict(orient="records")
 
-    # create the insert statement with on conflict do update clause 
+    # create the insert statement with on conflict do update clause
     # to update the data if it already exists in the table
     # if the new value is not 0 then update the value, otherwise keep the old (0) value
     stmt = insert(SegmentationModel).values(data)
     do_update_stmt = stmt.on_conflict_do_update(
-        index_elements=['id'],
+        index_elements=["id"],
         set_={
             column.name: case(
                 [(stmt.excluded[column.name] != 0, stmt.excluded[column.name])],
                 else_=column,
             )
             for column in SegmentationModel.__table__.columns
-            if column.name != 'id'
+            if column.name != "id"
         },
     )
 
