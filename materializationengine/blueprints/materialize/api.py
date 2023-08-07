@@ -1,8 +1,8 @@
 import datetime
 import logging
-
+import redis
 from dynamicannotationdb.models import AnalysisTable, Base
-from flask import abort, current_app, request
+from flask import abort, current_app, request, jsonify
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse, fields
 from materializationengine.blueprints.client.utils import get_latest_version
@@ -64,6 +64,12 @@ get_roots_parser.add_argument("lookup_all_root_ids", default=False, type=inputs.
 materialize_parser = reqparse.RequestParser()
 materialize_parser.add_argument("days_to_expire", required=True, default=None, type=int)
 materialize_parser.add_argument("merge_tables", required=True, type=inputs.boolean)
+
+
+spatial_svid_parser = reqparse.RequestParser()
+spatial_svid_parser.add_argument("chunk_scale_factor", default=12, type=int)
+spatial_svid_parser.add_argument("get_root_ids", default=True, type=inputs.boolean)
+
 
 authorizations = {
     "apikey": {"type": "apiKey", "in": "query", "name": "middle_auth_token"}
@@ -239,9 +245,47 @@ class ProcessNewAnnotationsTableResource(Resource):
 
 
 @mat_bp.route(
-    "/materialize/run/dense_lookup_root_ids/datastack/<string:datastack_name>"
+    "/materialize/run/spatial_lookup/datastack/<string:datastack_name>/<string:table_name>"
 )
-class LookupDenseMissingRootIdsResource(Resource):
+class SpatialSVIDLookupTableResource(Resource):
+    @reset_auth
+    @auth_requires_permission("edit", table_arg="datastack_name")
+    @mat_bp.doc("Lookup spatially chunked svid workflow", security="apikey")
+    def post(self, datastack_name: str, table_name: str):
+        """Process newly added annotations and lookup segmentation data using
+        a spatially chunked svid lookup strategy. Optionally also lookups root ids.
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+            table_name (str): name of table
+        """
+        from materializationengine.workflows.spatial_lookup import (
+            run_spatial_lookup_workflow,
+        )
+
+        if datastack_name not in current_app.config["DATASTACKS"]:
+            abort(404, f"datastack {datastack_name} not configured for materialization")
+
+        datastack_info = get_datastack_info(datastack_name)
+
+        args = spatial_svid_parser.parse_args()
+        chunk_scale_factor = args["chunk_scale_factor"]
+        get_root_ids = args.get["get_root_ids"]
+        try:
+            run_spatial_lookup_workflow.si(
+                datastack_info,
+                table_name=table_name,
+                chunk_scale_factor=chunk_scale_factor,
+                get_root_ids=get_root_ids,
+            ).apply_async()
+        except Exception as e:
+            logging.error(e)
+            return abort(400, f"Error running spatial lookup workflow: {e}")
+        return 200
+
+
+@mat_bp.route("/materialize/run/lookup_root_ids/datastack/<string:datastack_name>")
+class LookupMissingRootIdsResource(Resource):
     @reset_auth
     @auth_requires_admin
     @mat_bp.doc("Find all null root ids and lookup new roots", security="apikey")
