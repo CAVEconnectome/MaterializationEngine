@@ -11,6 +11,7 @@ celery = Celery(
         "materializationengine.workflows.dummy_workflow",
         "materializationengine.workflows.periodic_database_removal",
         "materializationengine.workflows.periodic_materialization",
+        "materializationengine.workflows.spatial_lookup",
         "materializationengine.shared_tasks",
         "materializationengine.views",
     ]
