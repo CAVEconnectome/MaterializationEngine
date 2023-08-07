@@ -655,6 +655,7 @@ def ingest_new_annotations_workflow(mat_metadata: dict):
         return fin.si()
 
 
+@celery.task(name="workflow:create_missing_segmentation_table", acks_late=True)
 def create_missing_segmentation_table(mat_metadata: dict) -> bool:
     """Create missing segmentation tables associated with an annotation table if it
     does not already exist.
