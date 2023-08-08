@@ -1,6 +1,7 @@
 import pyarrow as pa
-from flask import Response, request
+from flask import Response, request, send_file
 from cloudfiles import compression
+from io import BytesIO
 
 
 def collect_crud_columns(column_names):
@@ -61,7 +62,12 @@ def update_notice_text_warnings(ann_md, warnings, table_name):
 
 
 def create_query_response(
-    df, warnings, desired_resolution, column_names, return_pyarrow=True
+    df,
+    warnings,
+    desired_resolution,
+    column_names,
+    return_pyarrow=True,
+    arrow_format=False,
 ):
 
     headers = add_warnings_to_headers({}, warnings)
@@ -69,6 +75,15 @@ def create_query_response(
         headers["dataframe_resolution"] = desired_resolution
     headers["column_names"] = column_names
     if return_pyarrow:
+        if arrow_format:
+            batch = pa.RecordBatch.from_pandas(df)
+            sink = pa.BufferOutputStream()
+
+            with pa.ipc.new_stream(sink, batch.schema) as writer:
+                writer.write_batch(batch)
+
+            return send_file(BytesIO(sink.getvalue().to_pybytes()), "data.arrow")
+
         context = pa.default_serialization_context()
         serialized = context.serialize(df).to_buffer().to_pybytes()
         return Response(serialized, headers=headers, mimetype="x-application/pyarrow")

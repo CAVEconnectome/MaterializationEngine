@@ -85,6 +85,16 @@ query_parser.add_argument(
     ),
 )
 query_parser.add_argument(
+    "arrow_format",
+    type=inputs.boolean,
+    default=False,
+    required=False,
+    location="args",
+    help=(
+        "whether to convert dataframe to pyarrow ipc batch format"
+    ),
+)
+query_parser.add_argument(
     "split_positions",
     type=inputs.boolean,
     default=False,
@@ -1044,6 +1054,7 @@ class LiveTableQuery(Resource):
             column_names=column_names,
             desired_resolution=user_data["desired_resolution"],
             return_pyarrow=args["return_pyarrow"],
+            arrow_format = args['arrow_format']
         )
 
 
@@ -1273,6 +1284,7 @@ class ViewQuery(Resource):
             column_names=column_names,
             desired_resolution=data["desired_resolution"],
             return_pyarrow=args["return_pyarrow"],
+            arrow_format = args['arrow_format']
         )
 
 
