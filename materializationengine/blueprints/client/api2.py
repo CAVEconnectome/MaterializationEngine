@@ -90,9 +90,7 @@ query_parser.add_argument(
     default=False,
     required=False,
     location="args",
-    help=(
-        "whether to convert dataframe to pyarrow ipc batch format"
-    ),
+    help=("whether to convert dataframe to pyarrow ipc batch format"),
 )
 query_parser.add_argument(
     "split_positions",
@@ -130,6 +128,7 @@ query_parser.add_argument(
  that are not valid at the timestamp that is queried. If True the filter will likely \
 not be relevant and the user might not be getting data back that they expect, but it will not error.",
 )
+
 
 @cached(cache=TTLCache(maxsize=64, ttl=600))
 def get_relevant_datastack_info(datastack_name):
@@ -1014,7 +1013,10 @@ class LiveTableQuery(Resource):
             user_data["desired_resolution"] = des_res
 
         modified_user_data, query_map, remap_warnings = remap_query(
-            user_data, chosen_timestamp, cg_client, allow_invalid_root_ids,
+            user_data,
+            chosen_timestamp,
+            cg_client,
+            allow_invalid_root_ids,
         )
 
         mat_df, column_names, mat_warnings = execute_materialized_query(
@@ -1054,7 +1056,7 @@ class LiveTableQuery(Resource):
             column_names=column_names,
             desired_resolution=user_data["desired_resolution"],
             return_pyarrow=args["return_pyarrow"],
-            arrow_format = args['arrow_format']
+            arrow_format=args["arrow_format"],
         )
 
 
@@ -1284,7 +1286,7 @@ class ViewQuery(Resource):
             column_names=column_names,
             desired_resolution=data["desired_resolution"],
             return_pyarrow=args["return_pyarrow"],
-            arrow_format = args['arrow_format']
+            arrow_format=args["arrow_format"],
         )
 
 
