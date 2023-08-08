@@ -99,7 +99,9 @@ def create_query_response(
         # )
         context = pa.default_serialization_context()
         serialized = context.serialize(df).to_buffer().to_pybytes()
-        response = Response(serialized, headers=headers, mimetype="x-application/pyarrow")
+        response = Response(
+            serialized, headers=headers, mimetype="x-application/pyarrow"
+        )
         return after_request(response)
     else:
         dfjson = df.to_json(orient="records")
