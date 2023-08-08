@@ -78,10 +78,9 @@ def create_query_response(
         if arrow_format:
             batch = pa.RecordBatch.from_pandas(df)
             sink = pa.BufferOutputStream()
-
-            with pa.ipc.new_stream(sink, batch.schema) as writer:
+            opt = pa.ipc.IpcWriteOptions(allow_64bit=True, compression=pa.Codec("lz4"))
+            with pa.ipc.new_stream(sink, batch.schema, options=opt) as writer:
                 writer.write_batch(batch)
-
             return send_file(BytesIO(sink.getvalue().to_pybytes()), "data.arrow")
 
         context = pa.default_serialization_context()
