@@ -267,7 +267,7 @@ def handle_simple_query(
         column_names=column_names,
         desired_resolution=data["desired_resolution"],
         return_pyarrow=args["return_pyarrow"],
-        arrow_format = args['arrow_format']
+        arrow_format=args['arrow_format']
     )
 
 
@@ -421,5 +421,5 @@ def handle_complex_query(
         column_names=column_names,
         desired_resolution=data["desired_resolution"],
         return_pyarrow=args["return_pyarrow"],
-        arrow_format = args['arrow_format']
+        arrow_format=args['arrow_format']
     )
