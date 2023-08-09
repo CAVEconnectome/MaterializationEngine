@@ -84,7 +84,7 @@ def create_query_response(
             if "zstd" in accept_encoding:
                 compression = "ZSTD"
             else:
-                compression = "UNCOMPRESSED"
+                compression = None
             opt = pa.ipc.IpcWriteOptions(compression=compression)
             with pa.ipc.new_stream(sink, batch.schema, options=opt) as writer:
                 writer.write_batch(batch)
