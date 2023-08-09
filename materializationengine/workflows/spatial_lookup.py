@@ -49,6 +49,7 @@ def get_cloud_volume_info(segmentation_source: str) -> dict:
     except Exception as e:
         celery_logger.error(e)
         raise e
+
     bbox = cv.bounds.expand_to_chunk_size(cv.chunk_size)
     bbox = bbox.to_list()
     chunk_size = cv.chunk_size.tolist()
@@ -60,7 +61,9 @@ def get_cloud_volume_info(segmentation_source: str) -> dict:
     }
 
 
-def get_table_bounding_boxes(aligned_volume: str, table_name: str) -> dict:
+def get_table_bounding_boxes(
+    aligned_volume: str, table_name: str, segmentation_source: str
+) -> dict:
     """Get the bounding boxes of the annotation table.
 
     Args:
@@ -74,7 +77,7 @@ def get_table_bounding_boxes(aligned_volume: str, table_name: str) -> dict:
     schema = db.database.get_table_schema(table_name)
     AnnotationModel = db.schema.create_annotation_model(table_name, schema)
     SegmentationModel = db.schema.create_segmentation_model(
-        table_name, schema, "minnie3_v1"
+        table_name, schema, segmentation_source
     )
     engine = sqlalchemy_cache.get_engine(aligned_volume)
     bbox_data = []
@@ -244,7 +247,6 @@ def calc_min_enclosing_and_sub_volumes(
         # Update min and max corners within global_bbox
         min_corner = np.minimum(min_corner, np.maximum(aligned_bbox[0], global_bbox[0]))
         max_corner = np.maximum(max_corner, np.minimum(aligned_bbox[1], global_bbox[1]))
-        print(f"MIN: {min_corner}, MAX: {max_corner}, {global_bbox}")
     if np.any(min_corner == np.inf) or np.any(max_corner == -np.inf):
         return None, []  # No input bounding boxes were within the global bounding box
 
@@ -271,7 +273,6 @@ def select_3D_points_in_bbox(
 
     # Format raw SQL string
     spatial_column = getattr(table_model, spatial_column_name)
-    # print(spatial_column.name)
     return select(
         [
             table_model.id.label("id"),
@@ -353,7 +354,6 @@ def format_pt_data(pt_array: np.array, chunk_size: List) -> collections.defaultd
         (pt_array).astype(int) // processing_chunk_size * processing_chunk_size
     )  # // is floor division
     for point, chunk_start in zip(pt_array, chunk_starts):
-
         celery_logger.debug(f"POINT: {point}, CHUNK START: {chunk_start}")
         chunk_map_dict[tuple(chunk_start)].add(tuple(point))
     return chunk_map_dict
@@ -422,10 +422,12 @@ def get_svids_from_df(df, mat_info: dict) -> pd.DataFrame:
     Returns:
         pd.DataFrame: Dataframe of points with supervoxel ids
     """
+    start_time = time.time()
     segmentation_source = mat_info["segmentation_source"]
     coord_resolution = mat_info["coord_resolution"]
     cv = cloudvolume_cache.get_cv(segmentation_source)
     pt_pos_data = df["pt_position"].apply(np.array)
+
     pt_array = np.squeeze(np.stack(pt_pos_data.values))
     if pt_array.ndim == 1:
         pt_array = pt_array[np.newaxis, :]
@@ -436,13 +438,14 @@ def get_svids_from_df(df, mat_info: dict) -> pd.DataFrame:
         )
         for k, v in chunk_map_dict.items()
     ]
-    svid_dict = dict(
+    svid_map = dict(
         zip(
             [tuple(p) for svid in svids for p in svid[0]],
             [i for svid in svids for i in svid[1]],
         )
     )
-    df["svids"] = np.array([svid_dict[tuple(pt)] for pt in pt_array])
+    df["svids"] = np.array([svid_map[tuple(pt)] for pt in pt_array])
+    df.drop(columns=["pt_position"], inplace=True)
 
     # Add the supervoxel id column to the type column name
     if df["type"].str.contains("pt").all():
@@ -450,12 +453,12 @@ def get_svids_from_df(df, mat_info: dict) -> pd.DataFrame:
     else:
         df["type"] = df["type"].apply(lambda x: f"{x}_pt_supervoxel_id")
 
-    # Pivot the dataframe
-    df = df.pivot(index="id", columns="type", values="svids")
+    # custom pivot to preserve uint64 dtype values since they are normally converted to float64
+    # add we loose precision when converting back to uint64
+    svid_dict = _safe_pivot_svid_df_to_dict(df)
 
-    # Reset index
-    df.reset_index(inplace=True)
-    return df
+    celery_logger.debug(f"Time to get svids from df: {time.time() - start_time}")
+    return svid_dict
 
 
 def get_min_enclosing_bbox(cv_info: dict, mat_info: dict) -> tuple:
@@ -472,9 +475,12 @@ def get_min_enclosing_bbox(cv_info: dict, mat_info: dict) -> tuple:
     aligned_volume = mat_info["aligned_volume"]
     table_name = mat_info["annotation_table_name"]
     coord_resolution = mat_info["coord_resolution"]
+    segmentation_source = mat_info["pcg_table_name"]
 
     annotation_table_bounding_boxes = get_table_bounding_boxes(
-        aligned_volume=aligned_volume, table_name=table_name
+        aligned_volume=aligned_volume,
+        table_name=table_name,
+        segmentation_source=segmentation_source,
     )
     min_enclosing_bbox, outside_volume = calc_min_enclosing_and_sub_volumes(
         annotation_table_bounding_boxes,
@@ -510,6 +516,7 @@ def run_spatial_lookup_workflow(
     table_name: str,
     chunk_scale_factor: int = 12,
     get_root_ids: bool = True,
+    task_group_chunk_size: int = 10,
 ):
     """Run the spatial lookup workflow.
 
@@ -517,7 +524,7 @@ def run_spatial_lookup_workflow(
         self (celery.task): Celery task
         datastack_info (dict): Datastack info
         table_name (str): Annotation table name
-        chunk_scale_factor (int, optional): Scale factor for chunk size. Defaults to 12.
+        chunk_scale_factor (int, optional): Scale factor for chunk size. Defaults to 10.
 
     Raises:
         e: Exception
@@ -534,7 +541,6 @@ def run_spatial_lookup_workflow(
         skip_row_count=True,
     )
 
-    r = self.app.redis
     for mat_info in table_info:
         try:
             table_created = create_missing_segmentation_table(mat_info)
@@ -551,25 +557,6 @@ def run_spatial_lookup_workflow(
             celery_logger.error(e)
             raise self.retry(exc=e, countdown=3)
 
-        task_group_chunk_size = 100  # define your chunk size here
-
-        chunks = chunk_tasks(
-            chunk_generator(
-                min_enclosing_bbox[0],
-                min_enclosing_bbox[1],
-                cv_info["chunk_size"],
-                chunk_scale_factor,
-            ),
-            task_group_chunk_size,
-        )
-
-        # Count the total number of tasks
-        num_tasks = sum(1 for _ in chunks)
-
-        # Set the counter in Redis
-        r.set("total_tasks", num_tasks * task_group_chunk_size)
-
-        # Reset the chunks generator as it has been consumed
         chunks = chunk_tasks(
             chunk_generator(
                 min_enclosing_bbox[0],
@@ -633,13 +620,16 @@ def process_spatially_chunked_svids(
     """
 
     try:
+        start_time = time.time()
         stmt = text(stmt_str)
         engine = sqlalchemy_cache.get_engine(aligned_volume=mat_info["aligned_volume"])
         with engine.connect() as connection:
             df = pd.read_sql(stmt, connection)
             if not df.empty:
                 df["pt_position"] = df["pt_position"].apply(
-                    lambda geom: np.array(wkb.loads(bytes(geom)).coords, dtype=np.int64)
+                    lambda geom: np.array(
+                        wkb.loads(bytes(geom)).coords, dtype=np.uint64
+                    )
                 )
                 data = get_svids_from_df(df, mat_info)
                 celery_logger.info(f"Number of svids: {len(data)}")
@@ -649,25 +639,36 @@ def process_spatially_chunked_svids(
                 celery_logger.debug(
                     f"Data inserted: {is_inserted}, Number of rows: {len(data)}"
                 )
+            celery_logger.debug(f"Time taken: {time.time() - start_time}")
     except Exception as e:
         celery_logger.error(e)
-        self.retry(exc=e, countdown=int(random.uniform(2, 8) ** self.request.retries))
+        self.retry(exc=e, countdown=int(random.uniform(2, 6) ** self.request.retries))
 
 
 def insert_segmentation_data(
     data: pd.DataFrame,
     mat_info: dict,
 ):
+    """Inserts the segmentation data into the database.
 
+    Args:
+        data (pd.DataFrame): Dataframe containing the segmentation data
+        mat_info (dict): Materialization info for a given table
+
+    Returns:
+        bool: True if the data is inserted, False otherwise
+    """
+
+    start_time = time.time()
     aligned_volume = mat_info["aligned_volume"]
     table_name = mat_info["annotation_table_name"]
-    segmentation_source = mat_info["pcg_table_name"]
+    pcg_table_name = mat_info["pcg_table_name"]
     db = dynamic_annotation_cache.get_db(aligned_volume)
     schema = db.database.get_table_schema(table_name)
     engine = sqlalchemy_cache.get_engine(aligned_volume)
 
     SegmentationModel = db.schema.create_segmentation_model(
-        table_name, schema, segmentation_source
+        table_name, schema, pcg_table_name
     )
     seg_columns = SegmentationModel.__table__.columns.keys()
     segmentation_dataframe = pd.DataFrame(columns=seg_columns, dtype=object)
@@ -675,9 +676,8 @@ def insert_segmentation_data(
 
     # find the common columns between the two dataframes
     common_cols = segmentation_dataframe.columns.intersection(data_df.columns)
-    df_cols = segmentation_dataframe.columns.difference(data_df.columns)
 
-    # merge the dataframes and fill the missing values with -1, data might get updated in the next chunk lookup
+    # merge the dataframes and fill the missing values with 0, data might get updated in the next chunk lookup
     df = pd.merge(
         segmentation_dataframe[common_cols], data_df[common_cols], how="right"
     ).fillna(0)
@@ -707,4 +707,30 @@ def insert_segmentation_data(
     # insert the data or update if it already exists
     with engine.begin() as connection:
         connection.execute(do_update_stmt)
+    celery_logger.info(f"Insertion time: {time.time() - start_time} seconds")
     return True
+
+
+def _safe_pivot_svid_df_to_dict(df: pd.DataFrame) -> dict:
+    """Custom pivot function to preserve uint64 dtype values."""
+
+    # Get the columns names from the dataframe
+    columns = ["id"] + df["type"].unique().tolist()
+
+    # Initialize an output dict with lists for each column
+    output_dict = {col: [] for col in columns}
+    seen_ids = set()
+
+    for _, row in df.iterrows():
+        row_id = row["id"]
+        if row_id not in seen_ids:
+            seen_ids.add(row_id)
+            output_dict["id"].append(row_id)
+            # Initialize other columns with 0
+            for col in columns[1:]:
+                output_dict[col].append(0)
+
+        idx = output_dict["id"].index(row_id)
+        output_dict[row["type"]][idx] = row["svids"]
+
+    return output_dict
