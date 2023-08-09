@@ -264,7 +264,7 @@ class SpatialSVIDLookupTableResource(Resource):
 
         args = spatial_svid_parser.parse_args()
         chunk_scale_factor = args["chunk_scale_factor"]
-        get_root_ids = args.get["get_root_ids"]
+        get_root_ids = args["get_root_ids"]
         try:
             run_spatial_lookup_workflow.si(
                 datastack_info,
