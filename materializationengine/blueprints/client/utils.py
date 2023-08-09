@@ -81,7 +81,7 @@ def create_query_response(
             sink = pa.BufferOutputStream()
             if "lz4" in accept_encoding:
                 compression = "LZ4_FRAME"
-            if "zstd" in accept_encoding:
+            elif "zstd" in accept_encoding:
                 compression = "ZSTD"
             else:
                 compression = None
