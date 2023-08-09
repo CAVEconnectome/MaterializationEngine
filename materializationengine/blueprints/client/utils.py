@@ -69,6 +69,7 @@ def create_query_response(
     return_pyarrow=True,
     arrow_format=False,
 ):
+    accept_encoding = request.headers.get("Accept-Encoding", "")
 
     headers = add_warnings_to_headers({}, warnings)
     if desired_resolution is not None:
@@ -78,11 +79,20 @@ def create_query_response(
         if arrow_format:
             batch = pa.RecordBatch.from_pandas(df)
             sink = pa.BufferOutputStream()
-            opt = pa.ipc.IpcWriteOptions(compression="LZ4_FRAME")
+            if "lz4" in accept_encoding:
+                compression = "LZ4_FRAME"
+            else:
+                compression = None
+            opt = pa.ipc.IpcWriteOptions(compression=compression)
             with pa.ipc.new_stream(sink, batch.schema, options=opt) as writer:
                 writer.write_batch(batch)
             return send_file(BytesIO(sink.getvalue().to_pybytes()), "data.arrow")
-
+        # headers = add_warnings_to_headers(
+        #     headers,
+        #     [
+        #         "Using deprecated pyarrow serialization method, please upgrade CAVEClient with pip install --upgrade caveclient"
+        #     ],
+        # )
         context = pa.default_serialization_context()
         serialized = context.serialize(df).to_buffer().to_pybytes()
         return Response(serialized, headers=headers, mimetype="x-application/pyarrow")
