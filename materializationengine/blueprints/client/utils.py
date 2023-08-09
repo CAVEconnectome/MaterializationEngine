@@ -81,8 +81,10 @@ def create_query_response(
             sink = pa.BufferOutputStream()
             if "lz4" in accept_encoding:
                 compression = "LZ4_FRAME"
+            if "zstd" in accept_encoding:
+                compression = "ZSTD"
             else:
-                compression = None
+                compression = "UNCOMPRESSED"
             opt = pa.ipc.IpcWriteOptions(compression=compression)
             with pa.ipc.new_stream(sink, batch.schema, options=opt) as writer:
                 writer.write_batch(batch)
