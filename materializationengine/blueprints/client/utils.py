@@ -89,7 +89,7 @@ def create_query_response(
             with pa.ipc.new_stream(sink, batch.schema, options=opt) as writer:
                 writer.write_batch(batch)
             response = send_file(BytesIO(sink.getvalue().to_pybytes()), "data.arrow")
-            response.headers = headers
+            response.headers.update(headers)
             return response
         # headers = add_warnings_to_headers(
         #     headers,
