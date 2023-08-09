@@ -90,7 +90,7 @@ def create_query_response(
                 writer.write_batch(batch)
             response = send_file(BytesIO(sink.getvalue().to_pybytes()), "data.arrow")
             response.headers.update(headers)
-            return response
+            return after_request(response)
         # headers = add_warnings_to_headers(
         #     headers,
         #     [
@@ -99,7 +99,8 @@ def create_query_response(
         # )
         context = pa.default_serialization_context()
         serialized = context.serialize(df).to_buffer().to_pybytes()
-        return Response(serialized, headers=headers, mimetype="x-application/pyarrow")
+        response = Response(serialized, headers=headers, mimetype="x-application/pyarrow")
+        return after_request(response)
     else:
         dfjson = df.to_json(orient="records")
         response = Response(dfjson, headers=headers, mimetype="application/json")
