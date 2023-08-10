@@ -93,6 +93,14 @@ query_parser.add_argument(
     help=("whether to convert dataframe to pyarrow ipc batch format"),
 )
 query_parser.add_argument(
+    "random_sample",
+    type=inputs.boolean,
+    default=False,
+    required=False,
+    location="args",
+    help="whether to randomize which rows to select with limit query",
+)
+query_parser.add_argument(
     "split_positions",
     type=inputs.boolean,
     default=False,
@@ -200,6 +208,7 @@ def execute_materialized_query(
     user_data: dict,
     query_map: dict,
     cg_client,
+    random_sample=False,
     split_mode=False,
 ) -> pd.DataFrame:
     """_summary_
@@ -229,6 +238,7 @@ def execute_materialized_query(
             segmentation_source=pcg_table_name,
             meta_db_name=aligned_volume,
             split_mode=split_mode,
+            random_sample=random_sample,
         )
         qm.configure_query(user_data)
         qm.apply_filter({user_data["table"]: {"valid": True}}, qm.apply_equal_filter)
@@ -951,7 +961,7 @@ class LiveTableQuery(Resource):
         db = dynamic_annotation_cache.get_db(aligned_vol)
         check_read_permission(db, user_data["table"])
         allow_invalid_root_ids = args.get("allow_invalid_root_ids", False)
-
+        random_sample = args.get("random_sample")
         # TODO add table owner warnings
         # if has_joins:
         #    abort(400, "we are not supporting joins yet")
@@ -1027,6 +1037,7 @@ class LiveTableQuery(Resource):
             modified_user_data,
             query_map,
             cg_client,
+            random_sample=args["random_sample"],
             split_mode=not chosen_version.is_merged,
         )
 
