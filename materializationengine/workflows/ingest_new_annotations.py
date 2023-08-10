@@ -995,8 +995,10 @@ def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
 
     cg_client = chunkedgraph_cache.init_pcg(pcg_table_name)
 
-    # filter missing root_ids and lookup root_ids if missing
-    mask = np.logical_and.reduce([root_ids_df[col].isna() for col in cols])
+    # filter missing root_ids and lookup root_ids if missing or zero
+    mask = np.logical_and.reduce(
+        [(root_ids_df[col].isna() | (root_ids_df[col] == 0)) for col in cols]
+    )
     missing_root_rows = root_ids_df.loc[mask]
     if not missing_root_rows.empty:
         supervoxel_data = missing_root_rows.loc[:, supervoxel_col_names]
