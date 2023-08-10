@@ -13,6 +13,7 @@ from sqlalchemy import or_, func
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.selectable import Alias
 from sqlalchemy.sql.schema import Table
+from sqlalchemy.sql.expression import tablesample
 from sqlalchemy.ext.declarative.api import DeclarativeMeta
 import datetime
 
@@ -32,6 +33,7 @@ class QueryManager:
         limit: int = DEFAULT_LIMIT,
         get_count: bool = False,
         split_mode_outer=False,
+        random_sample=False,
     ):
         self._db = dynamic_annotation_cache.get_db(db_name)
         if meta_db_name is None:
@@ -40,11 +42,12 @@ class QueryManager:
             self._meta_db = dynamic_annotation_cache.get_db(meta_db_name)
         self._segmentation_source = segmentation_source
         self._split_mode = split_mode
+        self._random_sample = random_sample
         self._split_mode_outer = split_mode_outer
         self._split_models = {}
         self._flat_models = {}
         self._voxel_resolutions = {}
-        self._models = {}
+        self.d_models = {}
         self._tables = set()
         self._joins = []
         self._filters = []
@@ -88,13 +91,15 @@ class QueryManager:
             if reference_table:
                 table_metadata = {"reference_table": reference_table}
                 ref_md = self._meta_db.database.get_table_metadata(reference_table)
-                _ = self._db.schema.get_split_models(reference_table,
-                                                     ref_md["schema_type"],
-                                                     self._segmentation_source,
-                                                     table_metadata=None)
+                _ = self._db.schema.get_split_models(
+                    reference_table,
+                    ref_md["schema_type"],
+                    self._segmentation_source,
+                    table_metadata=None,
+                )
             else:
                 table_metadata = None
-        
+
             annmodel, segmodel = self._db.schema.get_split_models(
                 table_name,
                 md["schema_type"],
@@ -400,6 +405,14 @@ class QueryManager:
         Returns:
             SQLAchemy query object
         """
+        if self._random_sample:
+            sampled_query=[]
+            for k, arg in enumerate(query_args):
+                if k==0:
+                    sampled_query.append(tablesample(arg, limit))
+                else:
+                    sampled_query.append(arg)
+            query_args = sampled_query
         query = self._db.database.session.query(*query_args)
 
         if join_args is not None:
@@ -413,6 +426,8 @@ class QueryManager:
         if select_columns is not None:
             query = query.with_entities(*select_columns)
 
+        
+            query= tablesample(query)query.tablesample()
         if offset is not None:
             query = query.offset(offset)
         if limit is not None:
