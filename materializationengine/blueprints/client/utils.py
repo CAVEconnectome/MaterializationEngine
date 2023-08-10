@@ -1,6 +1,7 @@
 import pyarrow as pa
-from flask import Response, request
+from flask import Response, request, send_file
 from cloudfiles import compression
+from io import BytesIO
 
 
 def collect_crud_columns(column_names):
@@ -61,17 +62,45 @@ def update_notice_text_warnings(ann_md, warnings, table_name):
 
 
 def create_query_response(
-    df, warnings, desired_resolution, column_names, return_pyarrow=True
+    df,
+    warnings,
+    desired_resolution,
+    column_names,
+    return_pyarrow=True,
+    arrow_format=False,
 ):
+    accept_encoding = request.headers.get("Accept-Encoding", "")
 
     headers = add_warnings_to_headers({}, warnings)
     if desired_resolution is not None:
         headers["dataframe_resolution"] = desired_resolution
     headers["column_names"] = column_names
     if return_pyarrow:
+        if arrow_format:
+            batch = pa.RecordBatch.from_pandas(df)
+            sink = pa.BufferOutputStream()
+            if "lz4" in accept_encoding:
+                compression = "LZ4_FRAME"
+            elif "zstd" in accept_encoding:
+                compression = "ZSTD"
+            else:
+                compression = None
+            opt = pa.ipc.IpcWriteOptions(compression=compression)
+            with pa.ipc.new_stream(sink, batch.schema, options=opt) as writer:
+                writer.write_batch(batch)
+            response = send_file(BytesIO(sink.getvalue().to_pybytes()), "data.arrow")
+            response.headers.update(headers)
+            return after_request(response)
+        # headers = add_warnings_to_headers(
+        #     headers,
+        #     [
+        #         "Using deprecated pyarrow serialization method, please upgrade CAVEClient with pip install --upgrade caveclient"
+        #     ],
+        # )
         context = pa.default_serialization_context()
         serialized = context.serialize(df).to_buffer().to_pybytes()
-        return Response(serialized, headers=headers, mimetype="x-application/pyarrow")
+        response = Response(serialized, headers=headers, mimetype="x-application/pyarrow")
+        return after_request(response)
     else:
         dfjson = df.to_json(orient="records")
         response = Response(dfjson, headers=headers, mimetype="application/json")
