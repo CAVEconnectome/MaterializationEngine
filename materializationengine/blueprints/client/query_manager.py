@@ -32,8 +32,8 @@ class QueryManager:
         offset: int = 0,
         limit: int = DEFAULT_LIMIT,
         get_count: bool = False,
-        split_mode_outer=False,
-        random_sample=False,
+        split_mode_outer: bool = False,
+        random_sample: float = None,
     ):
         self._db = dynamic_annotation_cache.get_db(db_name)
         if meta_db_name is None:
@@ -43,6 +43,7 @@ class QueryManager:
         self._segmentation_source = segmentation_source
         self._split_mode = split_mode
         self._random_sample = random_sample
+
         self._split_mode_outer = split_mode_outer
         self._split_models = {}
         self._flat_models = {}
@@ -170,7 +171,7 @@ class QueryManager:
                     ]
                     if self._random_sample:
                         annmodel_alias1 = aliased(
-                            annmodel, tablesample(annmodel, 0.001)
+                            annmodel, tablesample(annmodel, self._random_sample)
                         )
                     else:
                         annmodel_alias1 = annmodel
@@ -188,6 +189,8 @@ class QueryManager:
                     self._models[table_name] = annmodel
             else:
                 model = self._get_flat_model(table_name)
+                if self._random_sample:
+                    model = aliased(model, tablesample, self._random_sample)
                 self._models[table_name] = model
 
     def _find_relevant_model(self, table_name, column_name):
@@ -411,14 +414,6 @@ class QueryManager:
         Returns:
             SQLAchemy query object
         """
-        if self._random_sample:
-            sampled_query = []
-            for k, arg in enumerate(query_args):
-                if k == 0:
-                    sampled_query.append(aliased(arg, tablesample(arg, 0.001)))
-                else:
-                    sampled_query.append(arg)
-            query_args = sampled_query
         query = self._db.database.session.query(*query_args)
 
         if join_args is not None:
