@@ -3,7 +3,7 @@ from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
 from cachetools import TTLCache, cached
 from flask import abort, request, current_app, g
-from flask_accepts import accepts, responds
+from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
 from materializationengine.blueprints.client.datastack import validate_datastack
 from materializationengine.blueprints.client.new_query import (
@@ -29,10 +29,9 @@ from materializationengine.blueprints.client.common import (
     handle_complex_query,
     handle_simple_query,
     validate_table_args,
-    get_flat_model,
-    get_analysis_version,
     get_analysis_version_and_table,
     get_analysis_version_and_tables,
+    unhandled_exception as common_unhandled_exception,
 )
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.limiter import limit_by_category
@@ -49,6 +48,7 @@ from materializationengine.blueprints.client.utils import update_notice_text_war
 import pandas as pd
 import datetime
 from typing import List
+import werkzeug
 
 __version__ = "4.0.20"
 
@@ -62,6 +62,17 @@ client_bp = Namespace(
     authorizations=authorizations,
     description="Materialization Client",
 )
+
+
+@client_bp.errorhandler(werkzeug.exceptions.BadRequest)
+def bad_request_exception(e):
+    raise e
+
+
+@client_bp.errorhandler(Exception)
+def unhandled_exception(e):
+    return common_unhandled_exception(e)
+
 
 annotation_parser = reqparse.RequestParser()
 annotation_parser.add_argument(

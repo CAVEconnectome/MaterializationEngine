@@ -199,8 +199,8 @@ def map_filters(
     root_ids = np.unique(np.concatenate(root_ids))
     is_valid_at_query = cg_client.is_latest_roots(root_ids, timestamp=timestamp_query)
     warnings = []
+    invalid_roots = root_ids[~is_valid_at_query]
     if not np.all(is_valid_at_query):
-        invalid_roots = root_ids[~is_valid_at_query]
         if not allow_invalid_root_ids:
             abort(
                 400,
@@ -213,7 +213,13 @@ def map_filters(
             root_ids = root_ids[is_valid_at_query]
 
     # is_valid_at_mat = cg_client.is_latest_roots(root_ids, timestamp=timestamp_mat)
-
+    if len(root_ids) == 0:
+        raise ValueError(
+            f"ALL root id filters passed ({invalid_roots}) \
+                         were invalid at timestamp {timestamp_query}. \
+                         At least one root id must be valid when using \
+                         `allow_invalid_root_ids=True`"
+        )
     if timestamp_mat < timestamp_query:
         id_mapping = cg_client.get_past_ids(
             root_ids, timestamp_past=timestamp_mat, timestamp_future=timestamp_query
