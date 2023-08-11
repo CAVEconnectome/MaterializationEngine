@@ -47,7 +47,7 @@ class QueryManager:
         self._split_models = {}
         self._flat_models = {}
         self._voxel_resolutions = {}
-        self.d_models = {}
+        self._models = {}
         self._tables = set()
         self._joins = []
         self._filters = []
@@ -168,9 +168,13 @@ class QueryManager:
                     seg_columns = [
                         c for c in segmodel.__table__.columns if c.key != "id"
                     ]
+                    if self._random_sample:
+                        annmodel_alias1 = aliased(annmodel, tablesample(annmodel, .001))
+                    else:
+                        annmodel_alias1 = annmodel
                     subquery = (
-                        self._db.database.session.query(annmodel, *seg_columns)
-                        .join(segmodel, annmodel.id == segmodel.id, isouter=True)
+                        self._db.database.session.query(annmodel_alias1, *seg_columns)
+                        .join(segmodel, annmodel_alias1.id == segmodel.id, isouter=True)
                         .subquery()
                     )
                     annmodel_alias = aliased(subquery, name=table_name, flat=True)
@@ -406,10 +410,10 @@ class QueryManager:
             SQLAchemy query object
         """
         if self._random_sample:
-            sampled_query=[]
+            sampled_query = []
             for k, arg in enumerate(query_args):
-                if k==0:
-                    sampled_query.append(tablesample(arg, limit))
+                if k == 0:
+                    sampled_query.append(aliased(arg, tablesample(arg, 0.001)))
                 else:
                     sampled_query.append(arg)
             query_args = sampled_query
@@ -425,13 +429,10 @@ class QueryManager:
 
         if select_columns is not None:
             query = query.with_entities(*select_columns)
-
-        
-            query= tablesample(query)query.tablesample()
         if offset is not None:
             query = query.offset(offset)
-        if limit is not None:
-            query = query.limit(limit)
+        # if limit is not None:
+        #    query = query.limit(limit)
 
         return query
 
