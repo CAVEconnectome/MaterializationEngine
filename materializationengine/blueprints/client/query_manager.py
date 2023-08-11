@@ -429,7 +429,7 @@ class QueryManager:
         if offset is not None:
             query = query.offset(offset)
         if limit is not None:
-           query = query.limit(limit)
+            query = query.limit(limit)
 
         return query
 
