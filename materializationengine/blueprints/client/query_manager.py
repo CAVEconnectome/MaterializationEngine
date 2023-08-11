@@ -169,7 +169,9 @@ class QueryManager:
                         c for c in segmodel.__table__.columns if c.key != "id"
                     ]
                     if self._random_sample:
-                        annmodel_alias1 = aliased(annmodel, tablesample(annmodel, .001))
+                        annmodel_alias1 = aliased(
+                            annmodel, tablesample(annmodel, 0.001)
+                        )
                     else:
                         annmodel_alias1 = annmodel
                     subquery = (
