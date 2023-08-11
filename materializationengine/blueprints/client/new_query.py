@@ -243,7 +243,7 @@ def map_filters(
                     new_filter[table] = defaultdict(lambda: None)
                     for col, root_ids_filt in filter_dict.items():
                         if allow_invalid_root_ids:
-                            root_ids_filt = root_ids_filt[
+                            root_ids_filt = np.array(root_ids_filt)[
                                 np.isin(root_ids_filt, root_ids)
                             ]
                         if col.endswith("root_id"):
@@ -254,7 +254,9 @@ def map_filters(
                             else:
                                 new_filter[table][col] = np.concatenate(
                                     [
-                                        id_mapping[mat_map_str].get(v, np.empty(dtype=np.int64, shape=0))
+                                        id_mapping[mat_map_str].get(
+                                            v, np.empty(dtype=np.int64, shape=0)
+                                        )
                                         for v in root_ids_filt
                                     ],
                                 )
