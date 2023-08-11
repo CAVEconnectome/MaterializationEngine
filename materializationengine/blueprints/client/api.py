@@ -30,8 +30,7 @@ from middle_auth_client import auth_requires_permission
 from materializationengine.blueprints.client.datastack import validate_datastack
 
 
-
-__version__ = "4.17.0"
+__version__ = "4.17.2"
 
 
 authorizations = {
@@ -67,6 +66,14 @@ query_parser.add_argument(
     required=False,
     location="args",
     help="whether to return query in pyarrow compatible binary format (faster), false returns json",
+)
+query_parser.add_argument(
+    "arrow_format",
+    type=inputs.boolean,
+    default=False,
+    required=False,
+    location="args",
+    help=("whether to convert dataframe to pyarrow ipc batch format"),
 )
 query_parser.add_argument(
     "split_positions",
