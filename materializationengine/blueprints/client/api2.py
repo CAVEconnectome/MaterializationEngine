@@ -83,6 +83,18 @@ annotation_parser.add_argument(
 )
 
 
+def float_range(min=0, max=255):
+    def validate(value):
+        if not isinstance(value, float):
+            raise ValueError("Invalid literal for float(): {0}".format(s))
+        length = len(s)
+        if min <= value <= max:
+            return s
+        raise ValueError(f"Value must be in range [{min}, {max}]")
+
+    return validate
+
+
 query_parser = reqparse.RequestParser()
 query_parser.add_argument(
     "return_pyarrow",
@@ -105,11 +117,11 @@ query_parser.add_argument(
 )
 query_parser.add_argument(
     "random_sample",
-    type=inputs.boolean,
-    default=False,
+    type=float_range(0, 100),
+    default=None,
     required=False,
     location="args",
-    help="whether to randomize which rows to select with limit query",
+    help="What percentage to tablesample annotation tables, useful for visualization of large tables",
 )
 query_parser.add_argument(
     "split_positions",
@@ -219,8 +231,8 @@ def execute_materialized_query(
     user_data: dict,
     query_map: dict,
     cg_client,
-    random_sample=False,
-    split_mode=False,
+    random_sample: float = None,
+    split_mode: bool = False,
 ) -> pd.DataFrame:
     """_summary_
 
