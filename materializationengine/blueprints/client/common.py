@@ -209,6 +209,7 @@ def handle_simple_query(
         limit=limit,
         offset=data.get("offset", 0),
         get_count=get_count,
+        random_sample=args.get("random_sample", False),
     )
     qm.add_table(table_name)
     qm.apply_filter(data.get("filter_in_dict", None), qm.apply_isin_filter)
@@ -240,7 +241,7 @@ def handle_simple_query(
         column_names=column_names,
         desired_resolution=data["desired_resolution"],
         return_pyarrow=args["return_pyarrow"],
-        arrow_format=args['arrow_format']
+        arrow_format=args["arrow_format"],
     )
 
 
@@ -316,6 +317,7 @@ def handle_complex_query(
         limit=limit,
         offset=data.get("offset", 0),
         get_count=False,
+        random_sample=args.get("random_sample", False)
     )
     if convert_desired_resolution:
         if not data.get("desired_resolution", None):
@@ -394,5 +396,5 @@ def handle_complex_query(
         column_names=column_names,
         desired_resolution=data["desired_resolution"],
         return_pyarrow=args["return_pyarrow"],
-        arrow_format=args['arrow_format']
+        arrow_format=args["arrow_format"],
     )

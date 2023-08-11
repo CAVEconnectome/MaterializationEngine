@@ -961,7 +961,6 @@ class LiveTableQuery(Resource):
         db = dynamic_annotation_cache.get_db(aligned_vol)
         check_read_permission(db, user_data["table"])
         allow_invalid_root_ids = args.get("allow_invalid_root_ids", False)
-        random_sample = args.get("random_sample")
         # TODO add table owner warnings
         # if has_joins:
         #    abort(400, "we are not supporting joins yet")
