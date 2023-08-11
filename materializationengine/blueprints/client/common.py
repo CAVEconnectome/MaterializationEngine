@@ -209,7 +209,7 @@ def handle_simple_query(
         limit=limit,
         offset=data.get("offset", 0),
         get_count=get_count,
-        random_sample=args.get("random_sample", False),
+        random_sample=args.get("random_sample", None),
     )
     qm.add_table(table_name)
     qm.apply_filter(data.get("filter_in_dict", None), qm.apply_isin_filter)
@@ -317,7 +317,7 @@ def handle_complex_query(
         limit=limit,
         offset=data.get("offset", 0),
         get_count=False,
-        random_sample=args.get("random_sample", False)
+        random_sample=args.get("random_sample",None)
     )
     if convert_desired_resolution:
         if not data.get("desired_resolution", None):
