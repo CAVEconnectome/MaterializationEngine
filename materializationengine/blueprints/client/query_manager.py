@@ -428,8 +428,8 @@ class QueryManager:
             query = query.with_entities(*select_columns)
         if offset is not None:
             query = query.offset(offset)
-        # if limit is not None:
-        #    query = query.limit(limit)
+        if limit is not None:
+           query = query.limit(limit)
 
         return query
 

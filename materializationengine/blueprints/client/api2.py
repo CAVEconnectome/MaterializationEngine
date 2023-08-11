@@ -83,16 +83,37 @@ annotation_parser.add_argument(
 )
 
 
-def float_range(min=0, max=255):
-    def validate(value):
-        if not isinstance(value, float):
-            raise ValueError("Invalid literal for float(): {0}".format(s))
-        length = len(s)
-        if min <= value <= max:
-            return s
-        raise ValueError(f"Value must be in range [{min}, {max}]")
+def _get_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{value} is not a valid float")
 
-    return validate
+
+class float_range(object):
+    """Restrict input to an float in a range (inclusive)"""
+
+    def __init__(self, low, high, argument="argument"):
+        self.low = low
+        self.high = high
+        self.argument = argument
+
+    def __call__(self, value):
+        value = _get_float(value)
+        if value < self.low or value > self.high:
+            msg = "Invalid {arg}: {val}. {arg} must be within the range {lo} - {hi}"
+            raise ValueError(
+                msg.format(arg=self.argument, val=value, lo=self.low, hi=self.high)
+            )
+        return value
+
+    @property
+    def __schema__(self):
+        return {
+            "type": "integer",
+            "minimum": self.low,
+            "maximum": self.high,
+        }
 
 
 query_parser = reqparse.RequestParser()
