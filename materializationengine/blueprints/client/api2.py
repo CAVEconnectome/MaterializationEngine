@@ -138,11 +138,11 @@ query_parser.add_argument(
 )
 query_parser.add_argument(
     "random_sample",
-    type=float_range(0, 100),
+    type=inputs.positive,
     default=None,
     required=False,
     location="args",
-    help="What percentage to tablesample annotation tables, useful for visualization of large tables",
+    help="How many samples to randomly get using tablesample on annotation tables, useful for visualization of large tables does not work as a random sample of query",
 )
 query_parser.add_argument(
     "split_positions",
@@ -252,7 +252,7 @@ def execute_materialized_query(
     user_data: dict,
     query_map: dict,
     cg_client,
-    random_sample: float = None,
+    random_sample: int = None,
     split_mode: bool = False,
 ) -> pd.DataFrame:
     """_summary_
@@ -275,6 +275,7 @@ def execute_materialized_query(
         .filter(MaterializedMetadata.table_name == user_data["table"])
         .scalar()
     )
+
     if mat_row_count:
         # setup a query manager
         qm = QueryManager(
@@ -282,7 +283,7 @@ def execute_materialized_query(
             segmentation_source=pcg_table_name,
             meta_db_name=aligned_volume,
             split_mode=split_mode,
-            random_sample=random_sample,
+            random_sample=(100.0*random_sample)/mat_row_count,
         )
         qm.configure_query(user_data)
         qm.apply_filter({user_data["table"]: {"valid": True}}, qm.apply_equal_filter)
