@@ -91,12 +91,12 @@ def create_query_response(
             response = send_file(BytesIO(sink.getvalue().to_pybytes()), "data.arrow")
             response.headers.update(headers)
             return after_request(response)
-        # headers = add_warnings_to_headers(
-        #     headers,
-        #     [
-        #         "Using deprecated pyarrow serialization method, please upgrade CAVEClient with pip install --upgrade caveclient"
-        #     ],
-        # )
+        headers = add_warnings_to_headers(
+            headers,
+            [
+                "Using deprecated pyarrow serialization method, please upgrade CAVEClient>=5.9.0 with pip install --upgrade caveclient"
+            ],
+        )
         context = pa.default_serialization_context()
         serialized = context.serialize(df).to_buffer().to_pybytes()
         response = Response(serialized, headers=headers, mimetype="x-application/pyarrow")
