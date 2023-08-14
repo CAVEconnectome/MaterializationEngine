@@ -275,7 +275,8 @@ def execute_materialized_query(
         .filter(MaterializedMetadata.table_name == user_data["table"])
         .scalar()
     )
-
+    if random_sample is not None:
+        random_sample = (100.0*random_sample)/mat_row_count
     if mat_row_count:
         # setup a query manager
         qm = QueryManager(
@@ -283,7 +284,7 @@ def execute_materialized_query(
             segmentation_source=pcg_table_name,
             meta_db_name=aligned_volume,
             split_mode=split_mode,
-            random_sample=(100.0*random_sample)/mat_row_count,
+            random_sample=random_sample,
         )
         qm.configure_query(user_data)
         qm.apply_filter({user_data["table"]: {"valid": True}}, qm.apply_equal_filter)
