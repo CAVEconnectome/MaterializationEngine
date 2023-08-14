@@ -157,7 +157,7 @@ class QueryManager:
 
         self._voxel_resolutions[view_name] = vox_res
 
-    def add_table(self, table_name):
+    def add_table(self, table_name, random_sample=False):
         if table_name not in self._tables:
             self._tables.add(table_name)
             if self._split_mode:
@@ -169,7 +169,7 @@ class QueryManager:
                     seg_columns = [
                         c for c in segmodel.__table__.columns if c.key != "id"
                     ]
-                    if self._random_sample:
+                    if random_sample and self._random_sample:
                         annmodel_alias1 = aliased(
                             annmodel, tablesample(annmodel, self._random_sample)
                         )
@@ -186,7 +186,13 @@ class QueryManager:
                     # self._models[segmodel.__tablename__] = segmodel_alias
 
                 else:
-                    self._models[table_name] = annmodel
+                    if random_sample and self._random_sample:
+                        annmodel_alias1 = aliased(
+                            annmodel, tablesample(annmodel, self._random_sample)
+                        )
+                    else:
+                        annmodel_alias1 = annmodel
+                    self._models[table_name] = annmodel_alias1
             else:
                 model = self._get_flat_model(table_name)
                 if self._random_sample:
@@ -203,7 +209,7 @@ class QueryManager:
 
     def join_tables(self, table1, column1, table2, column2, isouter=False):
 
-        self.add_table(table1)
+        self.add_table(table1, random_sample=True)
         self.add_table(table2)
 
         model1 = self._models[table1]
