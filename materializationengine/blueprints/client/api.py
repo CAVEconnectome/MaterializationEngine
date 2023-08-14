@@ -91,6 +91,14 @@ query_parser.add_argument(
     location="args",
     help="whether to only return the count of a query",
 )
+query_parser.add_argument(
+    "random_sample",
+    type=inputs.positive,
+    default=None,
+    required=False,
+    location="args",
+    help="How many samples to randomly get using tablesample on annotation tables, useful for visualization of large tables does not work as a random sample of query",
+)
 
 
 def check_aligned_volume(aligned_volume):
