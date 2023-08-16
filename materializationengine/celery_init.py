@@ -13,5 +13,6 @@ celery = Celery(
         "materializationengine.workflows.periodic_materialization",
         "materializationengine.shared_tasks",
         "materializationengine.views",
+        "materializationengine.monitor",
     ]
 )
