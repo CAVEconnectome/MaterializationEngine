@@ -19,6 +19,8 @@ from materializationengine.shared_tasks import (
     update_metadata,
     get_materialization_info,
     monitor_workflow_state,
+    monitor_task_states,
+    workflow_complete,
 )
 from materializationengine.utils import (
     create_annotation_model,
@@ -28,7 +30,7 @@ from materializationengine.utils import (
 )
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql import or_
-from sqlalchemy.sql import func
+from sqlalchemy.sql import func, text
 
 celery_logger = get_task_logger(__name__)
 
@@ -91,7 +93,6 @@ def process_new_annotations_workflow(
 def ingest_table_svids(
     self, datastack_info: dict, table_name: str, annotation_ids: list = None
 ):
-
     mat_info = get_materialization_info(
         datastack_info=datastack_info,
         materialization_time_stamp=None,
@@ -102,7 +103,9 @@ def ingest_table_svids(
     mat_metadata = mat_info[0]  # only one entry for a single table
     table_created = create_missing_segmentation_table(mat_metadata)
     if table_created:
-        celery_logger.info(f'Table created: {mat_metadata.get("segmentation_table_name")}')
+        celery_logger.info(
+            f'Table created: {mat_metadata.get("segmentation_table_name")}'
+        )
     if annotation_ids:
         ingest_workflow = ingest_new_annotations.si(
             None, mat_metadata, annotation_ids, lookup_root_ids=False
@@ -225,22 +228,36 @@ def process_missing_roots_workflow(datastack_info: dict, **kwargs):
     # filter for missing root ids (min/max ids)
     for mat_metadata in mat_info:
         if mat_metadata.get("segmentation_table_name"):
-            missing_root_id_chunks = get_ids_with_missing_roots(mat_metadata)
-            seg_table = mat_metadata.get("segmentation_table_name")
-            if missing_root_id_chunks:
-                process_chunks_workflow = chain(
-                    lookup_missing_root_ids_workflow(
-                        mat_metadata, missing_root_id_chunks
-                    )  # return here is required for chords
-                )  # final task which will process a return status/timing etc...
+            find_missing_root_ids_workflow(mat_metadata)
 
-                process_chunks_workflow.apply_async(
-                    kwargs={"Datastack": datastack_info["datastack"]}
-                )
-            else:
-                celery_logger.info(
-                    f"Skipped missing root id lookup for '{seg_table}', no missing root ids found"
-                )
+
+def find_missing_root_ids_workflow(mat_metadata: dict):
+    """Find missing root ids in the segmentation table. If missing root ids
+    are found, lookup supervoxel ids and root ids in batches.
+
+    Parameters
+    ----------
+    mat_metadata : dict
+        Materialization metadata
+
+    Returns
+    -------
+    celery task
+        
+    """
+    missing_root_id_chunks = get_ids_with_missing_roots(mat_metadata)
+    seg_table = mat_metadata.get("segmentation_table_name")
+    if missing_root_id_chunks:
+        process_chunks_workflow = chain(
+            lookup_missing_root_ids_workflow(mat_metadata, missing_root_id_chunks)
+        ).apply_async()
+    tasks_completed = monitor_workflow_state(process_chunks_workflow)
+    if tasks_completed:
+        return fin.si()
+    else:
+        celery_logger.info(
+            f"Skipped missing root id lookup for '{seg_table}', no missing root ids found"
+        )
 
 
 def get_ids_with_missing_roots(mat_metadata: dict) -> List:
@@ -354,6 +371,113 @@ def lookup_root_ids(self, mat_metadata: dict, missing_root_id_chunk: List[int]):
         celery_logger.error(e)
         raise self.retry(exc=e, countdown=3)
     return {"Table name": f"{table_name}", "Run time": f"{run_time}"}
+
+
+def find_ids_with_specified_roots(mat_metadata: dict, specific_root_ids=List[int]):
+    SegmentationModel = create_segmentation_model(mat_metadata)
+    aligned_volume = mat_metadata.get("aligned_volume")
+
+    session = sqlalchemy_cache.get(aligned_volume)
+    engine = sqlalchemy_cache.get_engine(aligned_volume)
+    # Columns to check for root_ids
+    columns = [seg_column.name for seg_column in SegmentationModel.__table__.columns]
+    root_id_columns = [
+        root_column for root_column in columns if "root_id" in root_column
+    ]
+
+    root_id_queries = []
+    for root_id_column in root_id_columns:
+        query_columns = session.query(SegmentationModel.id).filter(
+            getattr(SegmentationModel, root_id_column).in_(specific_root_ids)
+        )
+
+        compiled_statement = query_columns.statement.compile(engine)
+        params = compiled_statement.params
+        sql_str_with_params = str(compiled_statement).replace("\n", "")
+        for key, value in params.items():
+            sql_str_with_params = sql_str_with_params.replace(f"%({key})s", str(value))
+
+        root_id_queries.append({f"{root_id_column}": sql_str_with_params})
+
+    return root_id_queries
+
+
+@celery.task(
+    name="workflow:fix_root_id_workflow",
+    bind=True,
+    acks_late=True,
+    autoretry_for=(Exception,),
+    max_retries=3,
+)
+def fix_root_id_workflow(
+    self, datastack_info: dict, table_name: str, bad_synapse_root_ids: List[int]
+):
+    mat_info = get_materialization_info(
+        datastack_info=datastack_info,
+        materialization_time_stamp=None,
+        skip_table=True,
+        table_name=table_name,
+    )
+    for mat_metadata in mat_info:
+        queries = find_ids_with_specified_roots(bad_synapse_root_ids)
+
+        aligned_volume = mat_metadata.get("aligned_volume")
+        query_chunk_size = mat_metadata.get("chunk_size", 100)
+        engine = sqlalchemy_cache.get_engine(aligned_volume)
+        tasks = []
+        for query_dict in queries:
+            root_id_key = list(query_dict.keys())[
+                0
+            ]  # Extracting the root_id key from the dict
+            query_stmt = text(list(query_dict.values())[0])
+            with engine.connect() as conn:
+                proxy = conn.execution_options(stream_results=True).execute(query_stmt)
+                while "batch not empty":
+                    batch = proxy.fetchmany(query_chunk_size)
+                    if not batch:
+                        break
+                    supervoxel_data = pd.DataFrame(
+                        batch, columns=batch[0].keys(), dtype=object
+                    )
+                    supervoxel_data_dict = supervoxel_data.to_dict(orient="list")
+                    task = set_root_id_to_none_task.si(
+                        mat_metadata, root_id_key, supervoxel_data_dict
+                    ).apply_async()
+                    tasks.append(task.id)
+
+        try:
+            tasks_completed = monitor_task_states(tasks)
+        except Exception as e:
+            celery_logger.error(f"Monitor reports task failed: {e}")
+            raise self.retry(exc=e, countdown=3)
+        return workflow_complete.si("fix_root_id_workflow")
+
+
+@celery.task(
+    name="process:set_root_id_to_none_task",
+    bind=True,
+    acks_late=True,
+    max_retries=5,
+    autoretry_for=(Exception,),
+)
+def set_root_id_to_none_task(mat_metadata: dict, root_id_column: str, id_chunk: dict):
+    SegmentationModel = create_segmentation_model(mat_metadata)
+    aligned_volume = mat_metadata.get("aligned_volume")
+
+    session = sqlalchemy_cache.get(aligned_volume)
+    ids = id_chunk["id"]
+    try:
+        session.query(SegmentationModel).filter(SegmentationModel.id.in_(ids)).update(
+            {getattr(SegmentationModel, root_id_column): None},
+            synchronize_session="fetch",
+        )
+
+        session.commit()
+    except Exception as e:
+        celery_logger.error(e)
+        session.rollback()
+    finally:
+        session.close()
 
 
 def ingest_new_annotations_workflow(mat_metadata: dict):
