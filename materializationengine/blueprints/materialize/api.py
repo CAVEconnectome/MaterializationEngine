@@ -43,6 +43,10 @@ bulk_upload_parser.add_argument("file_path", required=True, type=str)
 bulk_upload_parser.add_argument("schema", required=True, type=str)
 bulk_upload_parser.add_argument("materialized_ts", type=float)
 
+bad_roots_parser = reqparse.RequestParser()
+bad_roots_parser.add_argument("bad_roots", required=True, type=list, location="json")
+
+
 missing_chunk_parser = reqparse.RequestParser()
 missing_chunk_parser.add_argument("chunks", required=True, type=list, location="json")
 missing_chunk_parser.add_argument(
@@ -249,6 +253,32 @@ class LookupMissingRootIdsResource(Resource):
 
         datastack_info = get_datastack_info(datastack_name)
         process_missing_roots_workflow.s(datastack_info).apply_async()
+        return 200
+
+
+@mat_bp.route(
+    "/materialize/run/remove_bad_root_ids/datastack/<string:datastack_name>/table/<string:table_name>"
+)
+class SetBadRootsToNullResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.expect(bad_roots_parser)
+    @mat_bp.doc("set bad roots to None", security="apikey")
+    def post(self, datastack_name: str, table_name: str):
+        """Run workflow to lookup missing root ids and insert into database
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+        """
+        from materializationengine.workflows.ingest_new_annotations import (
+            fix_root_id_workflow,
+        )
+
+        args = bad_roots_parser.parse_args()
+        bad_roots_ids = args["bad_roots"]
+
+        datastack_info = get_datastack_info(datastack_name)
+        fix_root_id_workflow.s(datastack_info, table_name, bad_roots_ids).apply_async()
         return 200
 
 
