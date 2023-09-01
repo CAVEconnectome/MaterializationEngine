@@ -243,7 +243,7 @@ def find_missing_root_ids_workflow(mat_metadata: dict):
     Returns
     -------
     celery task
-        
+
     """
     missing_root_id_chunks = get_ids_with_missing_roots(mat_metadata)
     seg_table = mat_metadata.get("segmentation_table_name")
@@ -436,12 +436,10 @@ def fix_root_id_workflow(
                     batch = proxy.fetchmany(query_chunk_size)
                     if not batch:
                         break
-                    supervoxel_data = pd.DataFrame(
-                        batch, columns=batch[0].keys(), dtype=object
-                    )
-                    supervoxel_data_dict = supervoxel_data.to_dict(orient="list")
+                    data = pd.DataFrame(batch, columns=batch[0].keys(), dtype=object)
+                    bad_root_ids = data.to_dict(orient="list")  # list of dicts
                     task = set_root_id_to_none_task.si(
-                        mat_metadata, root_id_key, supervoxel_data_dict
+                        mat_metadata, root_id_key, bad_root_ids
                     ).apply_async()
                     tasks.append(task.id)
 
@@ -460,12 +458,14 @@ def fix_root_id_workflow(
     max_retries=5,
     autoretry_for=(Exception,),
 )
-def set_root_id_to_none_task(mat_metadata: dict, root_id_column: str, id_chunk: dict):
+def set_root_id_to_none_task(
+    mat_metadata: dict, root_id_column: str, bad_root_ids: dict
+):
     SegmentationModel = create_segmentation_model(mat_metadata)
     aligned_volume = mat_metadata.get("aligned_volume")
 
     session = sqlalchemy_cache.get(aligned_volume)
-    ids = id_chunk["id"]
+    ids = bad_root_ids["id"]
     try:
         session.query(SegmentationModel).filter(SegmentationModel.id.in_(ids)).update(
             {getattr(SegmentationModel, root_id_column): None},
