@@ -18,6 +18,7 @@ from materializationengine.info_client import (
 )
 from dynamicannotationdb.models import AnalysisVersion
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
+from materializationengine.blueprints.materialize.schemas import BadRootsSchema
 from middle_auth_client import auth_requires_admin, auth_requires_permission
 from sqlalchemy import MetaData, Table
 from sqlalchemy.engine.url import make_url
@@ -42,9 +43,6 @@ bulk_upload_parser.add_argument("project", required=True, type=str)
 bulk_upload_parser.add_argument("file_path", required=True, type=str)
 bulk_upload_parser.add_argument("schema", required=True, type=str)
 bulk_upload_parser.add_argument("materialized_ts", type=float)
-
-bad_roots_parser = reqparse.RequestParser()
-bad_roots_parser.add_argument("bad_roots", required=True, type=list, location="json")
 
 
 missing_chunk_parser = reqparse.RequestParser()
@@ -262,7 +260,7 @@ class LookupMissingRootIdsResource(Resource):
 class SetBadRootsToNullResource(Resource):
     @reset_auth
     @auth_requires_admin
-    @mat_bp.expect(bad_roots_parser)
+    @accepts("BadRootsSchema", schema=BadRootsSchema, api=mat_bp)
     @mat_bp.doc("set bad roots to None", security="apikey")
     def post(self, datastack_name: str, table_name: str):
         """Run workflow to lookup missing root ids and insert into database
@@ -274,8 +272,8 @@ class SetBadRootsToNullResource(Resource):
             fix_root_id_workflow,
         )
 
-        args = bad_roots_parser.parse_args()
-        bad_roots_ids = args["bad_roots"]
+        data = request.parsed_obj
+        bad_roots_ids = data["bad_roots"]
 
         datastack_info = get_datastack_info(datastack_name)
         fix_root_id_workflow.s(datastack_info, table_name, bad_roots_ids).apply_async()
