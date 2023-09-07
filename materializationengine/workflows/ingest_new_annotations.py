@@ -419,7 +419,7 @@ def fix_root_id_workflow(
         table_name=table_name,
     )
     for mat_metadata in mat_info:
-        queries = find_ids_with_specified_roots(bad_synapse_root_ids)
+        queries = find_ids_with_specified_roots(mat_metadata,bad_synapse_root_ids)
 
         aligned_volume = mat_metadata.get("aligned_volume")
         query_chunk_size = mat_metadata.get("chunk_size", 100)
