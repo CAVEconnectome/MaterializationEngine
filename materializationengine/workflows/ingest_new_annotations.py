@@ -251,9 +251,9 @@ def find_missing_root_ids_workflow(mat_metadata: dict):
         process_chunks_workflow = chain(
             lookup_missing_root_ids_workflow(mat_metadata, missing_root_id_chunks)
         ).apply_async()
-    tasks_completed = monitor_workflow_state(process_chunks_workflow)
-    if tasks_completed:
-        return fin.si()
+        tasks_completed = monitor_workflow_state(process_chunks_workflow)
+        if tasks_completed:
+            return fin.si()
     else:
         celery_logger.info(
             f"Skipped missing root id lookup for '{seg_table}', no missing root ids found"
