@@ -415,7 +415,7 @@ def fix_root_id_workflow(
     mat_info = get_materialization_info(
         datastack_info=datastack_info,
         materialization_time_stamp=None,
-        skip_table=True,
+        skip_table=False,
         table_name=table_name,
     )
     for mat_metadata in mat_info:
