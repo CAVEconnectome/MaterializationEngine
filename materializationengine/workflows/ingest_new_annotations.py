@@ -321,7 +321,7 @@ def find_dense_missing_root_ids_workflow(mat_metadata: dict):
     celery task
 
     """
-    missing_root_id_chunks = get_ids_with_missing_roots(mat_metadata)
+    missing_root_id_chunks = get_dense_ids_with_missing_roots(mat_metadata)
     seg_table = mat_metadata.get("segmentation_table_name")
     if missing_root_id_chunks:
         missing_root_id_chunks = [c for c in missing_root_id_chunks]
