@@ -246,11 +246,11 @@ class LookupMissingRootIdsResource(Resource):
             datastack_name (str): name of datastack from infoservice
         """
         from materializationengine.workflows.ingest_new_annotations import (
-            process_missing_roots_workflow,
+            process_dense_missing_roots_workflow,
         )
 
         datastack_info = get_datastack_info(datastack_name)
-        process_missing_roots_workflow.s(datastack_info).apply_async()
+        process_dense_missing_roots_workflow.s(datastack_info).apply_async()
         return 200
 
 
@@ -258,10 +258,10 @@ class LookupMissingRootIdsResource(Resource):
     "/materialize/run/remove_bad_root_ids/datastack/<string:datastack_name>/table/<string:table_name>"
 )
 class SetBadRootsToNullResource(Resource):
-    @reset_auth
-    @auth_requires_admin
+    # @reset_auth
+    # @auth_requires_admin
     @accepts("BadRootsSchema", schema=BadRootsSchema, api=mat_bp)
-    @mat_bp.doc("set bad roots to None", security="apikey")
+    @mat_bp.doc("set bad roots to None") #, security="apikey")
     def post(self, datastack_name: str, table_name: str):
         """Run workflow to lookup missing root ids and insert into database
 
