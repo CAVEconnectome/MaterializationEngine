@@ -11,6 +11,7 @@ from dynamicannotationdb.models import SegmentationMetadata
 from materializationengine.celery_init import celery
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import sqlalchemy_cache
+from materializationengine.throttle import throttle_celery
 from materializationengine.shared_tasks import (
     generate_chunked_model_ids,
     fin,
@@ -231,7 +232,81 @@ def process_missing_roots_workflow(datastack_info: dict, **kwargs):
             find_missing_root_ids_workflow(mat_metadata)
 
 
+def batch_missing_root_ids_query(query, mat_metadata):
+
+    # https://docs.sqlalchemy.org/en/14/core/connections.html#using-server-side-cursors-a-k-a-stream-results
+    engine = sqlalchemy_cache.get_engine(mat_metadata["aligned_volume"])
+    query_stmt = text(query)
+    query_chunk_size = mat_metadata.get("chunk_size", 100)
+    tasks = []
+    with engine.connect() as conn:
+        proxy = conn.execution_options(stream_results=True).execute(query_stmt)
+        while "batch not empty":
+            if mat_metadata.get("throttle_queues"):
+                throttle_celery.wait_if_queue_full(queue_name="process")
+            batch = proxy.fetchmany(query_chunk_size)  # fetch n_rows from chunk_size
+            if not batch:
+                celery_logger.debug(
+                    "No rows left for %s", mat_metadata["annotation_table_name"]
+                )
+                break
+
+            task = lookup_root_ids.si(mat_metadata, batch).apply_async()
+            tasks.append(task.id)
+
+        proxy.close()
+    return tasks
+
+
 def find_missing_root_ids_workflow(mat_metadata: dict):
+    """Find missing root ids in the segmentation table. If missing root ids
+    are found, lookup supervoxel ids and root ids in batches.
+
+    Parameters
+    ----------
+    mat_metadata : dict
+        Materialization metadata
+
+    Returns
+    -------
+    celery task
+
+    """
+    query = get_ids_with_missing_roots(mat_metadata)
+    tasks = batch_missing_root_ids_query(query, mat_metadata)
+    tasks_completed = monitor_task_states(tasks)
+
+    return fin.si()
+
+
+def get_ids_with_missing_roots(mat_metadata: dict):
+    """Get a chunk generator of the primary key ids for rows that contain
+    at least one missing root id. Finds the min and max primary key id values
+    globally across the table where a missing root id is present in a column.
+
+    Args:
+        mat_metadata (dict): materialization metadata
+
+    Returns:
+        query: sqlalchemy query which returns a list of IDs to
+    """
+    SegmentationModel = create_segmentation_model(mat_metadata)
+    aligned_volume = mat_metadata.get("aligned_volume")
+    session = sqlalchemy_cache.get(aligned_volume)
+
+    columns = [seg_column.name for seg_column in SegmentationModel.__table__.columns]
+    root_id_columns = [
+        root_column for root_column in columns if "root_id" in root_column
+    ]
+    query_columns = [
+        getattr(SegmentationModel, root_id_column).is_(None)
+        for root_id_column in root_id_columns
+    ]
+    query = session.query(SegmentationModel.id).filter(or_(*query_columns))
+    return query
+
+
+def find_dense_missing_root_ids_workflow(mat_metadata: dict):
     """Find missing root ids in the segmentation table. If missing root ids
     are found, lookup supervoxel ids and root ids in batches.
 
@@ -250,18 +325,19 @@ def find_missing_root_ids_workflow(mat_metadata: dict):
     if missing_root_id_chunks:
         missing_root_id_chunks = [c for c in missing_root_id_chunks]
         process_chunks_workflow = chain(
-            lookup_missing_root_ids_workflow(mat_metadata, missing_root_id_chunks)
+            lookup_dense_missing_root_ids_workflow(mat_metadata, missing_root_id_chunks)
         ).apply_async()
         tasks_completed = monitor_workflow_state(process_chunks_workflow)
         if tasks_completed:
             return fin.si()
     else:
-        celery_logger.info(
+        celery_logger.debug(
             f"Skipped missing root id lookup for '{seg_table}', no missing root ids found"
         )
+        return fin.si()
 
 
-def get_ids_with_missing_roots(mat_metadata: dict) -> List:
+def get_dense_ids_with_missing_roots(mat_metadata: dict) -> List:
     """Get a chunk generator of the primary key ids for rows that contain
     at least one missing root id. Finds the min and max primary key id values
     globally across the table where a missing root id is present in a column.
@@ -299,7 +375,7 @@ def get_ids_with_missing_roots(mat_metadata: dict) -> List:
             id_range = range(min_id, max_id + 1)
             return create_chunks(id_range, 500)
         elif min_id == max_id:
-            return [min_id]
+            return [min_id, min_id]
     else:
         celery_logger.info(
             f"No missing root_ids found in '{SegmentationModel.__table__.name}'"
@@ -307,7 +383,7 @@ def get_ids_with_missing_roots(mat_metadata: dict) -> List:
         return None
 
 
-def lookup_missing_root_ids_workflow(
+def lookup_dense_missing_root_ids_workflow(
     mat_metadata: dict, missing_root_id_chunks: List[int]
 ):
     """Celery workflow that finds and looks up missing root ids.
@@ -328,7 +404,7 @@ def lookup_missing_root_ids_workflow(
         chord(
             [
                 group(
-                    lookup_root_ids.si(mat_metadata, missing_root_id_chunk),
+                    lookup_root_ids_chunk.si(mat_metadata, missing_root_id_chunk),
                 )
                 for missing_root_id_chunk in missing_root_id_chunks
             ],
@@ -345,7 +421,42 @@ def lookup_missing_root_ids_workflow(
     autoretry_for=(Exception,),
     max_retries=6,
 )
-def lookup_root_ids(self, mat_metadata: dict, missing_root_id_chunk: List[int]):
+def lookup_root_ids(self, mat_metadata: dict, missing_root_ids: List[int]):
+    """Get supervoxel ids with in chunk range. Lookup root_ids
+    and insert into database.
+
+    Args:
+        mat_metadata (dict): metadata associated with the materialization
+        missing_root_ids (List[int]): list of annotation ids
+
+    Raises:
+        self.retry: re-queue the tasks if failed. Retries 6 times.
+
+    Returns:
+        str: Name of table and runtime of task.
+    """
+    try:
+        start_time = time.time()
+        supervoxel_data = get_sql_supervoxel_ids(missing_root_ids, mat_metadata)
+        root_id_data = get_new_root_ids(supervoxel_data, mat_metadata)
+        result = update_segmentation_data(root_id_data, mat_metadata)
+        celery_logger.info(result)
+        run_time = time.time() - start_time
+        table_name = mat_metadata["annotation_table_name"]
+    except Exception as e:
+        celery_logger.error(e)
+        raise self.retry(exc=e, countdown=3)
+    return {"Table name": f"{table_name}", "Run time": f"{run_time}"}
+
+
+@celery.task(
+    name="workflow:lookup_root_ids_chunk",
+    acks_late=True,
+    bind=True,
+    autoretry_for=(Exception,),
+    max_retries=6,
+)
+def lookup_root_ids_chunk(self, mat_metadata: dict, missing_root_id_chunk: List[int]):
     """Get supervoxel ids with in chunk range. Lookup root_ids
     and insert into database.
 
@@ -362,7 +473,7 @@ def lookup_root_ids(self, mat_metadata: dict, missing_root_id_chunk: List[int]):
     try:
         start_time = time.time()
         chunk = [missing_root_id_chunk[0], missing_root_id_chunk[-1]]
-        supervoxel_data = get_sql_supervoxel_ids(chunk, mat_metadata)
+        supervoxel_data = get_sql_supervoxel_ids_chunks(chunk, mat_metadata)
         root_id_data = get_new_root_ids(supervoxel_data, mat_metadata)
         result = update_segmentation_data(root_id_data, mat_metadata)
         celery_logger.info(result)
@@ -695,7 +806,51 @@ def get_sv_id(cv, pos_array: np.array, coord_resolution: list) -> np.array:
     return svid
 
 
-def get_sql_supervoxel_ids(chunks: List[int], mat_metadata: dict) -> List[int]:
+def get_sql_supervoxel_ids(ids: List[int], mat_metadata: dict) -> List[int]:
+    """Iterates over columns with 'supervoxel_id' present in the name and
+    returns supervoxel ids between start and stop ids.
+
+    Parameters
+    ----------
+    ids: List[int]
+        list of IDs to cahnge
+    mat_metadata : dict
+        Materialization metadata
+
+    Returns
+    -------
+    List[int]
+        list of supervoxel ids between 'start_id' and 'end_id'
+    """
+    segmentationModel = create_segmentation_model(mat_metadata)
+    aligned_volume = mat_metadata.get("aligned_volume")
+    session = sqlalchemy_cache.get(aligned_volume)
+
+    columns = [
+        model_column.name for model_column in segmentationModel.__table__.columns
+    ]
+    supervoxel_id_columns = [
+        model_column for model_column in columns if "supervoxel_id" in model_column
+    ]
+    mapped_columns = [
+        getattr(segmentationModel, supervoxel_id_column)
+        for supervoxel_id_column in supervoxel_id_columns
+    ]
+    try:
+        filter_query = session.query(segmentationModel.id, *mapped_columns)
+        query = filter_query.filter(segmentationModel.id.in_(ids))
+
+        data = query.all()
+        df = pd.DataFrame(data)
+        return df.to_dict(orient="list")
+    except Exception as e:
+        celery_logger.error(e)
+        session.rollback()
+    finally:
+        session.close()
+
+
+def get_sql_supervoxel_ids_chunks(chunks: List[int], mat_metadata: dict) -> List[int]:
     """Iterates over columns with 'supervoxel_id' present in the name and
     returns supervoxel ids between start and stop ids.
 
