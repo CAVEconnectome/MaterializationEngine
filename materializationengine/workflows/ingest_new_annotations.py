@@ -201,7 +201,7 @@ def ingest_new_annotations(
 
 
 @celery.task(name="workflow:process_missing_roots_workflow")
-def process_missing_roots_workflow(datastack_info: dict, **kwargs):
+def process_dense_missing_roots_workflow(datastack_info: dict, **kwargs):
     """Chunk supervoxel ids and lookup root ids in batches
 
 
@@ -229,7 +229,7 @@ def process_missing_roots_workflow(datastack_info: dict, **kwargs):
     # filter for missing root ids (min/max ids)
     for mat_metadata in mat_info:
         if mat_metadata.get("segmentation_table_name"):
-            find_missing_root_ids_workflow(mat_metadata)
+            find_dense_missing_root_ids_workflow(mat_metadata)
 
 
 def batch_missing_root_ids_query(query, mat_metadata):
