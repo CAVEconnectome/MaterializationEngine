@@ -248,6 +248,7 @@ def find_missing_root_ids_workflow(mat_metadata: dict):
     missing_root_id_chunks = get_ids_with_missing_roots(mat_metadata)
     seg_table = mat_metadata.get("segmentation_table_name")
     if missing_root_id_chunks:
+        missing_root_id_chunks = [c for c in missing_root_id_chunks]
         process_chunks_workflow = chain(
             lookup_missing_root_ids_workflow(mat_metadata, missing_root_id_chunks)
         ).apply_async()
