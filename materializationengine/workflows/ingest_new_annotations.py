@@ -233,10 +233,9 @@ def process_missing_roots_workflow(datastack_info: dict, **kwargs):
 
 
 def batch_missing_root_ids_query(query, mat_metadata):
-
     # https://docs.sqlalchemy.org/en/14/core/connections.html#using-server-side-cursors-a-k-a-stream-results
     engine = sqlalchemy_cache.get_engine(mat_metadata["aligned_volume"])
-    query_stmt = text(query)
+    query_stmt = text(str(query))
     query_chunk_size = mat_metadata.get("chunk_size", 100)
     tasks = []
     with engine.connect() as conn:
@@ -250,8 +249,8 @@ def batch_missing_root_ids_query(query, mat_metadata):
                     "No rows left for %s", mat_metadata["annotation_table_name"]
                 )
                 break
-
-            task = lookup_root_ids.si(mat_metadata, batch).apply_async()
+            missing_root_data = [row[0] for row in batch] # convert from ResultProxy tuple object to serialize as json
+            task = lookup_root_ids.si(mat_metadata, missing_root_data).apply_async()
             tasks.append(task.id)
 
         proxy.close()
@@ -303,7 +302,9 @@ def get_ids_with_missing_roots(mat_metadata: dict):
         for root_id_column in root_id_columns
     ]
     query = session.query(SegmentationModel.id).filter(or_(*query_columns))
-    return query
+    stmt = query.statement.compile(compile_kwargs={"literal_binds": True})
+
+    return stmt
 
 
 def find_dense_missing_root_ids_workflow(mat_metadata: dict):
@@ -422,8 +423,7 @@ def lookup_dense_missing_root_ids_workflow(
     max_retries=6,
 )
 def lookup_root_ids(self, mat_metadata: dict, missing_root_ids: List[int]):
-    """Get supervoxel ids with in chunk range. Lookup root_ids
-    and insert into database.
+    """Get root ids from supervoxels. Insert into database.
 
     Args:
         mat_metadata (dict): metadata associated with the materialization
