@@ -258,10 +258,10 @@ class LookupMissingRootIdsResource(Resource):
     "/materialize/run/remove_bad_root_ids/datastack/<string:datastack_name>/table/<string:table_name>"
 )
 class SetBadRootsToNullResource(Resource):
-    # @reset_auth
-    # @auth_requires_admin
+    @reset_auth
+    @auth_requires_admin
     @accepts("BadRootsSchema", schema=BadRootsSchema, api=mat_bp)
-    @mat_bp.doc("set bad roots to None") #, security="apikey")
+    @mat_bp.doc("set bad roots to None", security="apikey")
     def post(self, datastack_name: str, table_name: str):
         """Run workflow to lookup missing root ids and insert into database
 
