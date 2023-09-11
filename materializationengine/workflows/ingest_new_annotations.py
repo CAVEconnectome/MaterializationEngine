@@ -10,7 +10,7 @@ from celery.utils.log import get_task_logger
 from dynamicannotationdb.models import SegmentationMetadata
 from materializationengine.celery_init import celery
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
-from materializationengine.database import sqlalchemy_cache
+from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
 from materializationengine.throttle import throttle_celery
 from materializationengine.shared_tasks import (
     generate_chunked_model_ids,
@@ -200,9 +200,10 @@ def ingest_new_annotations(
     }
 
 
-@celery.task(name="workflow:process_missing_roots_workflow")
+@celery.task(name="workflow:process_dense_missing_roots_workflow")
 def process_dense_missing_roots_workflow(datastack_info: dict, **kwargs):
     """Chunk supervoxel ids and lookup root ids in batches
+    for all tables in the database.
 
 
     -> workflow :
@@ -230,6 +231,25 @@ def process_dense_missing_roots_workflow(datastack_info: dict, **kwargs):
     for mat_metadata in mat_info:
         if mat_metadata.get("segmentation_table_name"):
             find_dense_missing_root_ids_workflow(mat_metadata)
+
+
+@celery.task(name="workflow:process_sparse_missing_roots_workflow")
+def process_sparse_missing_roots_workflow(datastack_info: dict, table_name: str, **kwargs):
+    """Find missing (ie NULL) root ids in the segmentation table. If missing root ids
+    are found, lookup root ids. Uses last updated time stamp to find missing
+    root ids.
+    
+    Parameters
+    ----------
+    datastack_info : dict
+        datastack to run this workflow on
+    table_name : str
+        individual table to run this workflow on
+
+    """
+    mat_metadata = get_materialization_info(datastack_info, table_name=table_name)[0]
+    mat_metadata["materialization_time_stamp"] = mat_metadata["last_updated_time_stamp"] # override materialization time stamp
+    find_missing_root_ids_workflow(mat_metadata)
 
 
 def batch_missing_root_ids_query(query, mat_metadata):
