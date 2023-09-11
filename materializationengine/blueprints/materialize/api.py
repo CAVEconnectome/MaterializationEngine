@@ -234,13 +234,14 @@ class ProcessNewAnnotationsTableResource(Resource):
         return 200
 
 
-@mat_bp.route("/materialize/run/lookup_root_ids/datastack/<string:datastack_name>")
-class LookupMissingRootIdsResource(Resource):
+@mat_bp.route("/materialize/run/dense_lookup_root_ids/datastack/<string:datastack_name>")
+class LookupDenseMissingRootIdsResource(Resource):
     @reset_auth
     @auth_requires_admin
-    @mat_bp.doc("process new annotations workflow", security="apikey")
+    @mat_bp.doc("Find all null root ids and lookup new roots", security="apikey")
     def post(self, datastack_name: str):
-        """Run workflow to lookup missing root ids and insert into database
+        """Run workflow to lookup missing root ids and insert into database across
+        all tables in the database.
 
         Args:
             datastack_name (str): name of datastack from infoservice
@@ -251,6 +252,28 @@ class LookupMissingRootIdsResource(Resource):
 
         datastack_info = get_datastack_info(datastack_name)
         process_dense_missing_roots_workflow.s(datastack_info).apply_async()
+        return 200
+
+
+@mat_bp.route("/materialize/run/sparse_lookup_root_ids/datastack/<string:datastack_name>/table/<string:table_name>")
+class LookupSparseMissingRootIdsResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("Find null root ids in table and lookup new root ids", security="apikey")
+    def post(self, datastack_name: str, table_name: str):
+        """Finds null root ids in a given table and lookups new root ids
+        using last updated time stamp.
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+            table_name (str): name of table
+        """
+        from materializationengine.workflows.ingest_new_annotations import (
+            process_sparse_missing_roots_workflow,
+        )
+
+        datastack_info = get_datastack_info(datastack_name)
+        process_sparse_missing_roots_workflow.s(datastack_info, table_name).apply_async()
         return 200
 
 
@@ -345,7 +368,7 @@ class UpdateExpiredRootIdsResource(Resource):
     @reset_auth
     @auth_requires_admin
     @mat_bp.expect(get_roots_parser)
-    @mat_bp.doc("Lookup root ids", security="apikey")
+    @mat_bp.doc("Update expired root ids", security="apikey")
     def post(self, datastack_name: str):
         """Lookup root ids
 
