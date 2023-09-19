@@ -10,12 +10,13 @@ from materializationengine.shared_tasks import (
     get_materialization_info,
     monitor_workflow_state,
     workflow_complete,
-    fin
+    fin,
 )
 from materializationengine.task import LockedTask
 from materializationengine.utils import get_config_param
 from materializationengine.workflows.ingest_new_annotations import (
     ingest_new_annotations_workflow,
+    find_missing_root_ids_workflow,
 )
 from materializationengine.workflows.update_root_ids import (
     update_root_ids_workflow,
@@ -84,13 +85,14 @@ def update_database_workflow(self, datastack_info: dict, **kwargs):
             if mat_metadata.get("segmentation_table_name"):
                 workflow = chain(
                     ingest_new_annotations_workflow(mat_metadata),
+                    # find_missing_root_ids_workflow(mat_metadata), # skip for now
                     update_root_ids_workflow(mat_metadata),
                 )
 
                 update_live_database_workflow.append(workflow)
             else:
                 update_live_database_workflow.append(fin.si())
-                
+
         run_update_database_workflow = chain(
             *update_live_database_workflow, workflow_complete.si("update_root_ids")
         ).apply_async(kwargs={"Datastack": datastack_info["datastack"]})
