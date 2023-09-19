@@ -83,6 +83,39 @@ annotation_parser.add_argument(
 )
 
 
+def _get_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{value} is not a valid float")
+
+
+class float_range(object):
+    """Restrict input to an float in a range (inclusive)"""
+
+    def __init__(self, low, high, argument="argument"):
+        self.low = low
+        self.high = high
+        self.argument = argument
+
+    def __call__(self, value):
+        value = _get_float(value)
+        if value < self.low or value > self.high:
+            msg = "Invalid {arg}: {val}. {arg} must be within the range {lo} - {hi}"
+            raise ValueError(
+                msg.format(arg=self.argument, val=value, lo=self.low, hi=self.high)
+            )
+        return value
+
+    @property
+    def __schema__(self):
+        return {
+            "type": "integer",
+            "minimum": self.low,
+            "maximum": self.high,
+        }
+
+
 query_parser = reqparse.RequestParser()
 query_parser.add_argument(
     "return_pyarrow",
@@ -102,6 +135,14 @@ query_parser.add_argument(
     required=False,
     location="args",
     help=("whether to convert dataframe to pyarrow ipc batch format"),
+)
+query_parser.add_argument(
+    "random_sample",
+    type=inputs.positive,
+    default=None,
+    required=False,
+    location="args",
+    help="How many samples to randomly get using tablesample on annotation tables, useful for visualization of large tables does not work as a random sample of query",
 )
 query_parser.add_argument(
     "split_positions",
@@ -211,7 +252,8 @@ def execute_materialized_query(
     user_data: dict,
     query_map: dict,
     cg_client,
-    split_mode=False,
+    random_sample: int = None,
+    split_mode: bool = False,
 ) -> pd.DataFrame:
     """_summary_
 
@@ -233,6 +275,8 @@ def execute_materialized_query(
         .filter(MaterializedMetadata.table_name == user_data["table"])
         .scalar()
     )
+    if random_sample is not None:
+        random_sample = (100.0*random_sample)/mat_row_count
     if mat_row_count:
         # setup a query manager
         qm = QueryManager(
@@ -240,6 +284,7 @@ def execute_materialized_query(
             segmentation_source=pcg_table_name,
             meta_db_name=aligned_volume,
             split_mode=split_mode,
+            random_sample=random_sample,
         )
         qm.configure_query(user_data)
         qm.apply_filter({user_data["table"]: {"valid": True}}, qm.apply_equal_filter)
@@ -962,7 +1007,6 @@ class LiveTableQuery(Resource):
         db = dynamic_annotation_cache.get_db(aligned_vol)
         check_read_permission(db, user_data["table"])
         allow_invalid_root_ids = args.get("allow_invalid_root_ids", False)
-
         # TODO add table owner warnings
         # if has_joins:
         #    abort(400, "we are not supporting joins yet")
@@ -1038,6 +1082,7 @@ class LiveTableQuery(Resource):
             modified_user_data,
             query_map,
             cg_client,
+            random_sample=args["random_sample"],
             split_mode=not chosen_version.is_merged,
         )
 

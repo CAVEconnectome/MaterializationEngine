@@ -13,6 +13,7 @@ from sqlalchemy import or_, func
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.selectable import Alias
 from sqlalchemy.sql.schema import Table
+from sqlalchemy.sql.expression import tablesample
 from sqlalchemy.ext.declarative.api import DeclarativeMeta
 import datetime
 
@@ -31,7 +32,8 @@ class QueryManager:
         offset: int = 0,
         limit: int = DEFAULT_LIMIT,
         get_count: bool = False,
-        split_mode_outer=False,
+        split_mode_outer: bool = False,
+        random_sample: float = None,
     ):
         self._db = dynamic_annotation_cache.get_db(db_name)
         if meta_db_name is None:
@@ -40,6 +42,8 @@ class QueryManager:
             self._meta_db = dynamic_annotation_cache.get_db(meta_db_name)
         self._segmentation_source = segmentation_source
         self._split_mode = split_mode
+        self._random_sample = random_sample
+
         self._split_mode_outer = split_mode_outer
         self._split_models = {}
         self._flat_models = {}
@@ -88,13 +92,15 @@ class QueryManager:
             if reference_table:
                 table_metadata = {"reference_table": reference_table}
                 ref_md = self._meta_db.database.get_table_metadata(reference_table)
-                _ = self._db.schema.get_split_models(reference_table,
-                                                     ref_md["schema_type"],
-                                                     self._segmentation_source,
-                                                     table_metadata=None)
+                _ = self._db.schema.get_split_models(
+                    reference_table,
+                    ref_md["schema_type"],
+                    self._segmentation_source,
+                    table_metadata=None,
+                )
             else:
                 table_metadata = None
-        
+
             annmodel, segmodel = self._db.schema.get_split_models(
                 table_name,
                 md["schema_type"],
@@ -151,7 +157,7 @@ class QueryManager:
 
         self._voxel_resolutions[view_name] = vox_res
 
-    def add_table(self, table_name):
+    def add_table(self, table_name, random_sample=False):
         if table_name not in self._tables:
             self._tables.add(table_name)
             if self._split_mode:
@@ -163,9 +169,15 @@ class QueryManager:
                     seg_columns = [
                         c for c in segmodel.__table__.columns if c.key != "id"
                     ]
+                    if random_sample and self._random_sample:
+                        annmodel_alias1 = aliased(
+                            annmodel, tablesample(annmodel, self._random_sample)
+                        )
+                    else:
+                        annmodel_alias1 = annmodel
                     subquery = (
-                        self._db.database.session.query(annmodel, *seg_columns)
-                        .join(segmodel, annmodel.id == segmodel.id, isouter=True)
+                        self._db.database.session.query(annmodel_alias1, *seg_columns)
+                        .join(segmodel, annmodel_alias1.id == segmodel.id, isouter=True)
                         .subquery()
                     )
                     annmodel_alias = aliased(subquery, name=table_name, flat=True)
@@ -174,9 +186,17 @@ class QueryManager:
                     # self._models[segmodel.__tablename__] = segmodel_alias
 
                 else:
-                    self._models[table_name] = annmodel
+                    if random_sample and self._random_sample:
+                        annmodel_alias1 = aliased(
+                            annmodel, tablesample(annmodel, self._random_sample)
+                        )
+                    else:
+                        annmodel_alias1 = annmodel
+                    self._models[table_name] = annmodel_alias1
             else:
                 model = self._get_flat_model(table_name)
+                if self._random_sample:
+                    model = aliased(model, tablesample, self._random_sample)
                 self._models[table_name] = model
 
     def _find_relevant_model(self, table_name, column_name):
@@ -189,7 +209,7 @@ class QueryManager:
 
     def join_tables(self, table1, column1, table2, column2, isouter=False):
 
-        self.add_table(table1)
+        self.add_table(table1, random_sample=True)
         self.add_table(table2)
 
         model1 = self._models[table1]
@@ -412,7 +432,6 @@ class QueryManager:
 
         if select_columns is not None:
             query = query.with_entities(*select_columns)
-
         if offset is not None:
             query = query.offset(offset)
         if limit is not None:
