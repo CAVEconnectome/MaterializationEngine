@@ -370,7 +370,9 @@ class QueryManager:
                     "column_name":"regex"
             }
         }"""
-        self.add_table(user_data["table"])
+        self.add_table(
+            user_data["table"], random_sample=True if self._random_sample else False
+        )
         if user_data.get("join_tables", None):
             for join in user_data["join_tables"]:
                 self.join_tables(join[0], join[1], join[2], join[3])
