@@ -8,7 +8,7 @@ from materializationengine.blueprints.client.query import (
 )
 import numpy as np
 from geoalchemy2.types import Geometry
-from sqlalchemy.sql.sqltypes import Integer
+from sqlalchemy.sql.sqltypes import Integer, String
 from sqlalchemy import or_, func
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.selectable import Alias
@@ -265,6 +265,15 @@ class QueryManager:
         f2 = get_column(model, deleted_column).between(str(start_time), str(end_time))
         self._filters.append((or_(f1, f2),))
 
+    def apply_regex_filter(self, table_name, column_name, regex):
+        model = self._find_relevant_model(
+            table_name=table_name, column_name=column_name
+        )
+        column = get_column(model, column_name)
+        if not isinstance(column.type, String):
+            raise ValueError("Regex filter is only supported on string columns")
+        self._filters.append((column.op("~")(regex),))
+
     def select_column(self, table_name, column_name):
         # if the column_name is not in the table_name list
         # then we should add it
@@ -356,6 +365,10 @@ class QueryManager:
                 "table_name": {
                 "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
             }
+            "filter_regex_dict":{
+                "table_name":{
+                    "column_name":"regex"
+            }
         }"""
         self.add_table(user_data["table"])
         if user_data.get("join_tables", None):
@@ -394,6 +407,9 @@ class QueryManager:
         )
         self.apply_filter(
             user_data.get("filter_spatial_dict", None), self.apply_spatial_filter
+        )
+        self.apply_filter(
+            user_data.get("filter_regex_dict", None), self.apply_regex_filter
         )
 
         if user_data.get("suffixes", None):

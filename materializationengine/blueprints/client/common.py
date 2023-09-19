@@ -254,6 +254,7 @@ def handle_simple_query(
     qm.apply_filter(data.get("filter_out_dict", None), qm.apply_notequal_filter)
     qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
     qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
+    qm.apply_filter(data.get("filter_regex_dict", None), qm.apply_regex_filter)
     qm.apply_filter({table_name: {"valid": True}}, qm.apply_equal_filter)
     select_columns = data.get("select_columns", None)
     if select_columns:
@@ -389,6 +390,7 @@ def handle_complex_query(
     qm.apply_filter(data.get("filter_out_dict", None), qm.apply_notequal_filter)
     qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
     qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
+    qm.apply_filter(data.get("filter_regex_dict", None), qm.apply_regex_filter)
     for table_info in data["tables"]:
         table_name = table_info[0]
         qm.apply_filter({table_name: {"valid": True}}, qm.apply_equal_filter)
