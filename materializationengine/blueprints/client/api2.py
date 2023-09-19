@@ -5,6 +5,15 @@ from cachetools import TTLCache, cached
 from flask import abort, request, current_app, g
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
+from middle_auth_client import (
+    auth_requires_permission,
+)
+import pandas as pd
+import datetime
+from typing import List
+import werkzeug
+from sqlalchemy.sql.sqltypes import String, Integer, Float, DateTime, Boolean, Numeric
+from geoalchemy2.types import Geometry
 from materializationengine.blueprints.client.datastack import validate_datastack
 from materializationengine.blueprints.client.new_query import (
     remap_query,
@@ -41,16 +50,10 @@ from materializationengine.database import (
 )
 from materializationengine.info_client import get_aligned_volumes, get_datastack_info
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
-from middle_auth_client import (
-    auth_requires_permission,
-)
 from materializationengine.blueprints.client.utils import update_notice_text_warnings
-import pandas as pd
-import datetime
-from typing import List
-import werkzeug
 
-__version__ = "4.0.20"
+
+__version__ = "4.18.0"
 
 
 authorizations = {
@@ -276,7 +279,7 @@ def execute_materialized_query(
         .scalar()
     )
     if random_sample is not None:
-        random_sample = (100.0*random_sample)/mat_row_count
+        random_sample = (100.0 * random_sample) / mat_row_count
     if mat_row_count:
         # setup a query manager
         qm = QueryManager(
@@ -841,7 +844,11 @@ class FrozenTableQuery(Resource):
                 }
             "filter_spatial_dict": {
                 "tablename": {
-                "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+                    "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+            }
+            "filter_regex_dict": {
+                "tablename": {
+                    "column_name": "regex"
             }
         }
         Returns:
@@ -911,10 +918,15 @@ class FrozenQuery(Resource):
                 "tablename":{
                     "column_name":value
                 }
-            }
+            },
             "filter_spatial_dict": {
                 "tablename":{
                     "column_name":[[min_x,min_y,minz], [max_x_max_y_max_z]]
+                }
+            },
+            "filter_regex_dict": {
+                "tablename":{
+                    "column_name": "regex"
                 }
             }
         }
@@ -988,6 +1000,10 @@ class LiveTableQuery(Resource):
             "filter_spatial_dict": {
                 "table_name": {
                 "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+            }
+            "filter_regex_dict":{
+                "table_name":{
+                    "column_name": "regex"
             }
         }
         Returns:
@@ -1262,6 +1278,11 @@ class ViewQuery(Resource):
                 "tablename": {
                 "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
             }
+            "filter_regex_dict": {
+                "tablename": {
+                    "column_name": "regex"
+                }
+            }
         }
         Returns:
             pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
@@ -1315,7 +1336,7 @@ class ViewQuery(Resource):
         qm.apply_filter(data.get("filter_out_dict", None), qm.apply_notequal_filter)
         qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
         qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
-
+        qm.apply_filter(data.get("filter_regex_dict", None), qm.apply_regex_filter)
         select_columns = data.get("select_columns", None)
         if select_columns:
             for column in select_columns:
@@ -1344,10 +1365,6 @@ class ViewQuery(Resource):
             return_pyarrow=args["return_pyarrow"],
             arrow_format=args["arrow_format"],
         )
-
-
-from sqlalchemy.sql.sqltypes import String, Integer, Float, DateTime, Boolean, Numeric
-from geoalchemy2.types import Geometry
 
 
 def get_table_schema(table):
