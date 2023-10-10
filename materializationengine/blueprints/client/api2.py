@@ -947,6 +947,35 @@ class FrozenQuery(Resource):
         )
 
 
+@client_bp.route(
+    "/datastack/<string:datastack_name>/table/<string:table_name>/unique_string_values"
+)
+class TableUniqueStringValues(Resource):
+    method_decorators = [
+        limit_by_category("query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    @client_bp.doc("get_unique_string_values", security="apikey")
+    def get(self, datastack_name: str, table_name: str):
+        """get unique string values for a table
+
+        Args:
+            datastack_name (str): datastack name
+            table_name (str): table name
+
+        Returns:
+            list: list of unique string values
+        """
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        unique_values = db.database.get_unique_string_values(table_name)
+        return unique_values, 200
+
+
 @client_bp.expect(query_parser)
 @client_bp.route("/datastack/<string:datastack_name>/query")
 class LiveTableQuery(Resource):
