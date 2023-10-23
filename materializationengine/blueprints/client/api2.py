@@ -521,7 +521,7 @@ class DatastackVersions(Resource):
             session.query(AnalysisVersion)
             .filter(AnalysisVersion.datastack == datastack_name)
         )
-        if request.args.get("expired"):
+        if not request.args.get("expired"):
             response = response.filter(AnalysisVersion.valid is True)
 
         response = response.all()
