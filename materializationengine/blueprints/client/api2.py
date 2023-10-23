@@ -496,7 +496,6 @@ def combine_queries(
 @client_bp.route("/datastack/<string:datastack_name>/versions")
 class DatastackVersions(Resource):
     method_decorators = [
-        validate_datastack,
         limit_by_category("fast_query"),
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
@@ -520,8 +519,9 @@ class DatastackVersions(Resource):
         response = session.query(AnalysisVersion).filter(
             AnalysisVersion.datastack == datastack_name
         )
-        if not request.args.get("expired"):
-            response = response.filter(AnalysisVersion.valid is True)
+        args = metadata_parser.parse_args()
+        if not args.get("expired"):
+            response = response.filter(AnalysisVersion.valid == True)
 
         response = response.all()
 
@@ -532,7 +532,6 @@ class DatastackVersions(Resource):
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>")
 class DatastackVersion(Resource):
     method_decorators = [
-        validate_datastack,
         limit_by_category("fast_query"),
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
@@ -652,8 +651,9 @@ class DatastackMetadata(Resource):
         response = session.query(AnalysisVersion).filter(
             AnalysisVersion.datastack == datastack_name
         )
-        if not request.args.get("expired"):
-            response = response.filter(AnalysisVersion.valid is True)
+        args = metadata_parser.parse_args()
+        if not args.get("expired"):
+            response = response.filter(AnalysisVersion.valid == True)
 
         response = response.all()
 
