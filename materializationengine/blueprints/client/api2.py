@@ -517,9 +517,8 @@ class DatastackVersions(Resource):
         )
         session = sqlalchemy_cache.get(aligned_volume_name)
 
-        response = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.datastack == datastack_name)
+        response = session.query(AnalysisVersion).filter(
+            AnalysisVersion.datastack == datastack_name
         )
         if not request.args.get("expired"):
             response = response.filter(AnalysisVersion.valid is True)
@@ -629,6 +628,7 @@ class CustomResource(Resource):
         return wrapper
 
 
+@client_bp.expect(metadata_parser)
 @client_bp.route("/datastack/<string:datastack_name>/metadata", strict_slashes=False)
 class DatastackMetadata(Resource):
     method_decorators = [
@@ -649,12 +649,14 @@ class DatastackMetadata(Resource):
             datastack_name
         )
         session = sqlalchemy_cache.get(aligned_volume_name)
-        response = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.datastack == datastack_name)
-            .filter(AnalysisVersion.valid == True)
-            .all()
+        response = session.query(AnalysisVersion).filter(
+            AnalysisVersion.datastack == datastack_name
         )
+        if not request.args.get("expired"):
+            response = response.filter(AnalysisVersion.valid is True)
+
+        response = response.all()
+
         if response is None:
             return "No valid versions found", 404
         schema = AnalysisVersionSchema()
