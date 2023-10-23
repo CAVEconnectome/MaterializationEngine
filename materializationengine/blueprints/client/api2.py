@@ -185,6 +185,18 @@ not be relevant and the user might not be getting data back that they expect, bu
 )
 
 
+metadata_parser = reqparse.RequestParser()
+# add a boolean argument for whether to return all expired versions
+metadata_parser.add_argument(
+    "expired",
+    type=inputs.boolean,
+    default=False,
+    required=False,
+    location="args",
+    help="whether to return all expired versions",
+)
+
+
 @cached(cache=TTLCache(maxsize=64, ttl=600))
 def get_relevant_datastack_info(datastack_name):
     ds_info = get_datastack_info(datastack_name=datastack_name)
@@ -480,6 +492,7 @@ def combine_queries(
     return comb_df.reset_index()
 
 
+@client_bp.expect(metadata_parser)
 @client_bp.route("/datastack/<string:datastack_name>/versions")
 class DatastackVersions(Resource):
     method_decorators = [
@@ -504,12 +517,15 @@ class DatastackVersions(Resource):
         )
         session = sqlalchemy_cache.get(aligned_volume_name)
 
+
         response = (
             session.query(AnalysisVersion)
             .filter(AnalysisVersion.datastack == datastack_name)
-            .filter(AnalysisVersion.valid == True)
-            .all()
         )
+        if request.args.get("expired"):
+            response=response.filter(AnalysisVersion.valid == True)
+        )
+        response = response.all()
 
         versions = [av.version for av in response]
         return versions, 200
