@@ -458,7 +458,7 @@ def combine_queries(
         else:
             deleted_between = (
                 prod_df[column_names[table]["deleted"]] > user_timestamp
-            ) & ([column_names[table]["deleted"]] < chosen_timestamp)
+            ) & (prod_df[column_names[table]["deleted"]] < chosen_timestamp)
             created_between = (
                 prod_df[column_names[table]["created"]] > user_timestamp
             ) & (prod_df[column_names[table]["created"]] < chosen_timestamp)
