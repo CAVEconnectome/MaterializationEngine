@@ -30,7 +30,7 @@ from middle_auth_client import auth_requires_permission
 from materializationengine.blueprints.client.datastack import validate_datastack
 
 
-__version__ = "4.17.6"
+__version__ = "4.21.2"
 
 
 authorizations = {
@@ -90,6 +90,14 @@ query_parser.add_argument(
     required=False,
     location="args",
     help="whether to only return the count of a query",
+)
+query_parser.add_argument(
+    "random_sample",
+    type=inputs.positive,
+    default=None,
+    required=False,
+    location="args",
+    help="How many samples to randomly get using tablesample on annotation tables, useful for visualization of large tables does not work as a random sample of query",
 )
 
 

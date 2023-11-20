@@ -18,6 +18,7 @@ from materializationengine.info_client import (
 )
 from dynamicannotationdb.models import AnalysisVersion
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
+from materializationengine.blueprints.materialize.schemas import BadRootsSchema
 from middle_auth_client import auth_requires_admin, auth_requires_permission
 from sqlalchemy import MetaData, Table
 from sqlalchemy.engine.url import make_url
@@ -31,7 +32,7 @@ from materializationengine.blueprints.materialize.schemas import (
 )
 
 
-__version__ = "4.17.6"
+__version__ = "4.21.2"
 
 
 bulk_upload_parser = reqparse.RequestParser()
@@ -42,6 +43,7 @@ bulk_upload_parser.add_argument("project", required=True, type=str)
 bulk_upload_parser.add_argument("file_path", required=True, type=str)
 bulk_upload_parser.add_argument("schema", required=True, type=str)
 bulk_upload_parser.add_argument("materialized_ts", type=float)
+
 
 missing_chunk_parser = reqparse.RequestParser()
 missing_chunk_parser.add_argument("chunks", required=True, type=list, location="json")
@@ -278,23 +280,72 @@ class SpatialSVIDLookupTableResource(Resource):
         return 200
 
 
-@mat_bp.route("/materialize/run/lookup_root_ids/datastack/<string:datastack_name>")
-class LookupMissingRootIdsResource(Resource):
+@mat_bp.route("/materialize/run/dense_lookup_root_ids/datastack/<string:datastack_name>")
+class LookupDenseMissingRootIdsResource(Resource):
     @reset_auth
     @auth_requires_admin
-    @mat_bp.doc("process new annotations workflow", security="apikey")
+    @mat_bp.doc("Find all null root ids and lookup new roots", security="apikey")
     def post(self, datastack_name: str):
+        """Run workflow to lookup missing root ids and insert into database across
+        all tables in the database.
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+        """
+        from materializationengine.workflows.ingest_new_annotations import (
+            process_dense_missing_roots_workflow,
+        )
+
+        datastack_info = get_datastack_info(datastack_name)
+        process_dense_missing_roots_workflow.s(datastack_info).apply_async()
+        return 200
+
+
+@mat_bp.route("/materialize/run/sparse_lookup_root_ids/datastack/<string:datastack_name>/table/<string:table_name>")
+class LookupSparseMissingRootIdsResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("Find null root ids in table and lookup new root ids", security="apikey")
+    def post(self, datastack_name: str, table_name: str):
+        """Finds null root ids in a given table and lookups new root ids
+        using last updated time stamp.
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+            table_name (str): name of table
+        """
+        from materializationengine.workflows.ingest_new_annotations import (
+            process_sparse_missing_roots_workflow,
+        )
+
+        datastack_info = get_datastack_info(datastack_name)
+        process_sparse_missing_roots_workflow.s(datastack_info, table_name).apply_async()
+        return 200
+
+
+@mat_bp.route(
+    "/materialize/run/remove_bad_root_ids/datastack/<string:datastack_name>/table/<string:table_name>"
+)
+class SetBadRootsToNullResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @accepts("BadRootsSchema", schema=BadRootsSchema, api=mat_bp)
+    @mat_bp.doc("set bad roots to None", security="apikey")
+    def post(self, datastack_name: str, table_name: str):
         """Run workflow to lookup missing root ids and insert into database
 
         Args:
             datastack_name (str): name of datastack from infoservice
         """
         from materializationengine.workflows.ingest_new_annotations import (
-            process_missing_roots_workflow,
+            fix_root_id_workflow,
         )
 
+        data = request.parsed_obj
+        bad_roots_ids = data["bad_roots"]
+
         datastack_info = get_datastack_info(datastack_name)
-        process_missing_roots_workflow.s(datastack_info).apply_async()
+        fix_root_id_workflow.s(datastack_info, table_name, bad_roots_ids).apply_async()
         return 200
 
 
@@ -363,7 +414,7 @@ class UpdateExpiredRootIdsResource(Resource):
     @reset_auth
     @auth_requires_admin
     @mat_bp.expect(get_roots_parser)
-    @mat_bp.doc("Lookup root ids", security="apikey")
+    @mat_bp.doc("Update expired root ids", security="apikey")
     def post(self, datastack_name: str):
         """Lookup root ids
 

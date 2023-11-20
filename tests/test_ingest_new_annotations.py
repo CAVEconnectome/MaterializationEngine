@@ -13,7 +13,7 @@ from materializationengine.workflows.ingest_new_annotations import (
     get_annotations_with_missing_supervoxel_ids,
     get_cloudvolume_supervoxel_ids,
     get_new_root_ids,
-    get_sql_supervoxel_ids,
+    get_sql_supervoxel_ids_chunks,
     insert_segmentation_data,
 )
 from numpy import nan
@@ -138,7 +138,7 @@ class TestIngestMissingAnnotations:
 
     def test_get_sql_supervoxel_ids(self, test_app, mat_metadata):
         id_chunk_range = [1, 4]
-        supervoxel_ids = get_sql_supervoxel_ids(id_chunk_range, mat_metadata)
+        supervoxel_ids = get_sql_supervoxel_ids_chunks(id_chunk_range, mat_metadata)
         logging.info(supervoxel_ids)
         assert supervoxel_ids == {
             "id": [1, 2, 3, 4],

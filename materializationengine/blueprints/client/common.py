@@ -8,6 +8,7 @@ from materializationengine.blueprints.client.utils import (
     collect_crud_columns,
 )
 from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
+from materializationengine.models import MaterializedMetadata
 from materializationengine.utils import check_read_permission
 from materializationengine.info_client import (
     get_relevant_datastack_info,
@@ -228,6 +229,16 @@ def handle_simple_query(
     else:
         data["desired_resolution"] = None
 
+    random_sample = args.get("random_sample", None)
+    if random_sample is not None:
+        session = sqlalchemy_cache.get(mat_db_name)
+        mat_row_count = (
+            session.query(MaterializedMetadata.row_count)
+            .filter(MaterializedMetadata.table_name == table_name)
+            .scalar()
+        )
+        random_sample = (100.0 * random_sample) / mat_row_count
+
     qm = QueryManager(
         mat_db_name,
         segmentation_source=pcg_table_name,
@@ -236,12 +247,14 @@ def handle_simple_query(
         limit=limit,
         offset=data.get("offset", 0),
         get_count=get_count,
+        random_sample=random_sample,
     )
-    qm.add_table(table_name)
+    qm.add_table(table_name, random_sample=True)
     qm.apply_filter(data.get("filter_in_dict", None), qm.apply_isin_filter)
     qm.apply_filter(data.get("filter_out_dict", None), qm.apply_notequal_filter)
     qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
     qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
+    qm.apply_filter(data.get("filter_regex_dict", None), qm.apply_regex_filter)
     qm.apply_filter({table_name: {"valid": True}}, qm.apply_equal_filter)
     select_columns = data.get("select_columns", None)
     if select_columns:
@@ -267,7 +280,7 @@ def handle_simple_query(
         column_names=column_names,
         desired_resolution=data["desired_resolution"],
         return_pyarrow=args["return_pyarrow"],
-        arrow_format=args['arrow_format']
+        arrow_format=args["arrow_format"],
     )
 
 
@@ -334,6 +347,16 @@ def handle_complex_query(
     else:
         suffixes = data.get("suffix_map")
 
+    random_sample = args.get("random_sample", None)
+    if random_sample is not None:
+        session = sqlalchemy_cache.get(db_name)
+        mat_row_count = (
+            session.query(MaterializedMetadata.row_count)
+            .filter(MaterializedMetadata.table_name == data["tables"][0][0])
+            .scalar()
+        )
+        random_sample = (100.0 * random_sample) / mat_row_count
+
     qm = QueryManager(
         db_name,
         segmentation_source=pcg_table_name,
@@ -343,6 +366,7 @@ def handle_complex_query(
         limit=limit,
         offset=data.get("offset", 0),
         get_count=False,
+        random_sample=random_sample,
     )
     if convert_desired_resolution:
         if not data.get("desired_resolution", None):
@@ -366,6 +390,7 @@ def handle_complex_query(
     qm.apply_filter(data.get("filter_out_dict", None), qm.apply_notequal_filter)
     qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
     qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
+    qm.apply_filter(data.get("filter_regex_dict", None), qm.apply_regex_filter)
     for table_info in data["tables"]:
         table_name = table_info[0]
         qm.apply_filter({table_name: {"valid": True}}, qm.apply_equal_filter)
@@ -421,5 +446,5 @@ def handle_complex_query(
         column_names=column_names,
         desired_resolution=data["desired_resolution"],
         return_pyarrow=args["return_pyarrow"],
-        arrow_format=args['arrow_format']
+        arrow_format=args["arrow_format"],
     )

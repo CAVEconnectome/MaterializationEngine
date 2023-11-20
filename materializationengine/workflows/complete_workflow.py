@@ -21,6 +21,7 @@ from materializationengine.workflows.create_frozen_database import (
 )
 from materializationengine.workflows.ingest_new_annotations import (
     ingest_new_annotations_workflow,
+    find_missing_root_ids_workflow
 )
 from materializationengine.task import LockedTask
 from materializationengine.workflows.update_root_ids import (
@@ -78,6 +79,7 @@ def run_complete_workflow(
         if mat_metadata.get("segmentation_table_name"):
             workflow = chain(
                 ingest_new_annotations_workflow(mat_metadata),
+                # find_missing_root_ids_workflow(mat_metadata), # skip for now
                 update_root_ids_workflow(mat_metadata),
             )
         else:

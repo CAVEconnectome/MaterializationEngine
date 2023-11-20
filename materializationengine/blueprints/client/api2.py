@@ -5,6 +5,15 @@ from cachetools import TTLCache, cached
 from flask import abort, request, current_app, g
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
+from middle_auth_client import (
+    auth_requires_permission,
+)
+import pandas as pd
+import datetime
+from typing import List
+import werkzeug
+from sqlalchemy.sql.sqltypes import String, Integer, Float, DateTime, Boolean, Numeric
+from geoalchemy2.types import Geometry
 from materializationengine.blueprints.client.datastack import validate_datastack
 from materializationengine.blueprints.client.new_query import (
     remap_query,
@@ -41,16 +50,10 @@ from materializationengine.database import (
 )
 from materializationengine.info_client import get_aligned_volumes, get_datastack_info
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
-from middle_auth_client import (
-    auth_requires_permission,
-)
 from materializationengine.blueprints.client.utils import update_notice_text_warnings
-import pandas as pd
-import datetime
-from typing import List
-import werkzeug
 
-__version__ = "4.0.20"
+
+__version__ = "4.21.2"
 
 
 authorizations = {
@@ -83,6 +86,39 @@ annotation_parser.add_argument(
 )
 
 
+def _get_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{value} is not a valid float")
+
+
+class float_range(object):
+    """Restrict input to an float in a range (inclusive)"""
+
+    def __init__(self, low, high, argument="argument"):
+        self.low = low
+        self.high = high
+        self.argument = argument
+
+    def __call__(self, value):
+        value = _get_float(value)
+        if value < self.low or value > self.high:
+            msg = "Invalid {arg}: {val}. {arg} must be within the range {lo} - {hi}"
+            raise ValueError(
+                msg.format(arg=self.argument, val=value, lo=self.low, hi=self.high)
+            )
+        return value
+
+    @property
+    def __schema__(self):
+        return {
+            "type": "integer",
+            "minimum": self.low,
+            "maximum": self.high,
+        }
+
+
 query_parser = reqparse.RequestParser()
 query_parser.add_argument(
     "return_pyarrow",
@@ -102,6 +138,14 @@ query_parser.add_argument(
     required=False,
     location="args",
     help=("whether to convert dataframe to pyarrow ipc batch format"),
+)
+query_parser.add_argument(
+    "random_sample",
+    type=inputs.positive,
+    default=None,
+    required=False,
+    location="args",
+    help="How many samples to randomly get using tablesample on annotation tables, useful for visualization of large tables does not work as a random sample of query",
 )
 query_parser.add_argument(
     "split_positions",
@@ -138,6 +182,18 @@ query_parser.add_argument(
     help="whether to let a query proceed when passed a set of root ids\
  that are not valid at the timestamp that is queried. If True the filter will likely \
 not be relevant and the user might not be getting data back that they expect, but it will not error.",
+)
+
+
+metadata_parser = reqparse.RequestParser()
+# add a boolean argument for whether to return all expired versions
+metadata_parser.add_argument(
+    "expired",
+    type=inputs.boolean,
+    default=False,
+    required=False,
+    location="args",
+    help="whether to return all expired versions",
 )
 
 
@@ -211,7 +267,8 @@ def execute_materialized_query(
     user_data: dict,
     query_map: dict,
     cg_client,
-    split_mode=False,
+    random_sample: int = None,
+    split_mode: bool = False,
 ) -> pd.DataFrame:
     """_summary_
 
@@ -233,6 +290,8 @@ def execute_materialized_query(
         .filter(MaterializedMetadata.table_name == user_data["table"])
         .scalar()
     )
+    if random_sample is not None:
+        random_sample = (100.0 * random_sample) / mat_row_count
     if mat_row_count:
         # setup a query manager
         qm = QueryManager(
@@ -240,6 +299,7 @@ def execute_materialized_query(
             segmentation_source=pcg_table_name,
             meta_db_name=aligned_volume,
             split_mode=split_mode,
+            random_sample=random_sample,
         )
         qm.configure_query(user_data)
         qm.apply_filter({user_data["table"]: {"valid": True}}, qm.apply_equal_filter)
@@ -398,7 +458,7 @@ def combine_queries(
         else:
             deleted_between = (
                 prod_df[column_names[table]["deleted"]] > user_timestamp
-            ) & ([column_names[table]["deleted"]] < chosen_timestamp)
+            ) & (prod_df[column_names[table]["deleted"]] < chosen_timestamp)
             created_between = (
                 prod_df[column_names[table]["created"]] > user_timestamp
             ) & (prod_df[column_names[table]["created"]] < chosen_timestamp)
@@ -432,10 +492,10 @@ def combine_queries(
     return comb_df.reset_index()
 
 
+@client_bp.expect(metadata_parser)
 @client_bp.route("/datastack/<string:datastack_name>/versions")
 class DatastackVersions(Resource):
     method_decorators = [
-        validate_datastack,
         limit_by_category("fast_query"),
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
@@ -456,12 +516,14 @@ class DatastackVersions(Resource):
         )
         session = sqlalchemy_cache.get(aligned_volume_name)
 
-        response = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.datastack == datastack_name)
-            .filter(AnalysisVersion.valid == True)
-            .all()
+        response = session.query(AnalysisVersion).filter(
+            AnalysisVersion.datastack == datastack_name
         )
+        args = metadata_parser.parse_args()
+        if not args.get("expired"):
+            response = response.filter(AnalysisVersion.valid == True)
+
+        response = response.all()
 
         versions = [av.version for av in response]
         return versions, 200
@@ -470,7 +532,6 @@ class DatastackVersions(Resource):
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>")
 class DatastackVersion(Resource):
     method_decorators = [
-        validate_datastack,
         limit_by_category("fast_query"),
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
@@ -566,6 +627,7 @@ class CustomResource(Resource):
         return wrapper
 
 
+@client_bp.expect(metadata_parser)
 @client_bp.route("/datastack/<string:datastack_name>/metadata", strict_slashes=False)
 class DatastackMetadata(Resource):
     method_decorators = [
@@ -586,12 +648,15 @@ class DatastackMetadata(Resource):
             datastack_name
         )
         session = sqlalchemy_cache.get(aligned_volume_name)
-        response = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.datastack == datastack_name)
-            .filter(AnalysisVersion.valid == True)
-            .all()
+        response = session.query(AnalysisVersion).filter(
+            AnalysisVersion.datastack == datastack_name
         )
+        args = metadata_parser.parse_args()
+        if not args.get("expired"):
+            response = response.filter(AnalysisVersion.valid == True)
+
+        response = response.all()
+
         if response is None:
             return "No valid versions found", 404
         schema = AnalysisVersionSchema()
@@ -796,7 +861,11 @@ class FrozenTableQuery(Resource):
                 }
             "filter_spatial_dict": {
                 "tablename": {
-                "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+                    "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+            }
+            "filter_regex_dict": {
+                "tablename": {
+                    "column_name": "regex"
             }
         }
         Returns:
@@ -866,10 +935,15 @@ class FrozenQuery(Resource):
                 "tablename":{
                     "column_name":value
                 }
-            }
+            },
             "filter_spatial_dict": {
                 "tablename":{
                     "column_name":[[min_x,min_y,minz], [max_x_max_y_max_z]]
+                }
+            },
+            "filter_regex_dict": {
+                "tablename":{
+                    "column_name": "regex"
                 }
             }
         }
@@ -888,6 +962,35 @@ class FrozenQuery(Resource):
             data,
             convert_desired_resolution=True,
         )
+
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/table/<string:table_name>/unique_string_values"
+)
+class TableUniqueStringValues(Resource):
+    method_decorators = [
+        limit_by_category("query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    @client_bp.doc("get_unique_string_values", security="apikey")
+    def get(self, datastack_name: str, table_name: str):
+        """get unique string values for a table
+
+        Args:
+            datastack_name (str): datastack name
+            table_name (str): table name
+
+        Returns:
+            list: list of unique string values
+        """
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        unique_values = db.database.get_unique_string_values(table_name)
+        return unique_values, 200
 
 
 @client_bp.expect(query_parser)
@@ -944,6 +1047,10 @@ class LiveTableQuery(Resource):
                 "table_name": {
                 "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
             }
+            "filter_regex_dict":{
+                "table_name":{
+                    "column_name": "regex"
+            }
         }
         Returns:
             pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
@@ -962,7 +1069,6 @@ class LiveTableQuery(Resource):
         db = dynamic_annotation_cache.get_db(aligned_vol)
         check_read_permission(db, user_data["table"])
         allow_invalid_root_ids = args.get("allow_invalid_root_ids", False)
-
         # TODO add table owner warnings
         # if has_joins:
         #    abort(400, "we are not supporting joins yet")
@@ -1038,6 +1144,7 @@ class LiveTableQuery(Resource):
             modified_user_data,
             query_map,
             cg_client,
+            random_sample=args["random_sample"],
             split_mode=not chosen_version.is_merged,
         )
 
@@ -1217,6 +1324,11 @@ class ViewQuery(Resource):
                 "tablename": {
                 "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
             }
+            "filter_regex_dict": {
+                "tablename": {
+                    "column_name": "regex"
+                }
+            }
         }
         Returns:
             pyarrow.buffer: a series of bytes that can be deserialized using pyarrow.deserialize
@@ -1270,7 +1382,7 @@ class ViewQuery(Resource):
         qm.apply_filter(data.get("filter_out_dict", None), qm.apply_notequal_filter)
         qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
         qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
-
+        qm.apply_filter(data.get("filter_regex_dict", None), qm.apply_regex_filter)
         select_columns = data.get("select_columns", None)
         if select_columns:
             for column in select_columns:
@@ -1299,10 +1411,6 @@ class ViewQuery(Resource):
             return_pyarrow=args["return_pyarrow"],
             arrow_format=args["arrow_format"],
         )
-
-
-from sqlalchemy.sql.sqltypes import String, Integer, Float, DateTime, Boolean, Numeric
-from geoalchemy2.types import Geometry
 
 
 def get_table_schema(table):
