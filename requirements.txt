@@ -94,7 +94,7 @@ compresso==3.0.0
     # via cloud-volume
 crc32c==2.2.post0
     # via cloud-files
-cryptography==36.0.1
+cryptography==42.0.4
     # via
     #   pyopenssl
     #   urllib3
