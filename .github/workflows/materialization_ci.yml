@@ -33,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: Set up Python 3.9
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v5
         with:
           python-version: 3.9
       - uses: actions/cache@v2
@@ -42,7 +42,7 @@ jobs:
           key: ${{ runner.os }}-pip-${{ hashFiles('**/test_requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
-      - uses: conda-incubator/setup-miniconda@v2
+      - uses: conda-incubator/setup-miniconda@v3
         with:
           auto-update-conda: true
           auto-activate-base: true
