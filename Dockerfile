@@ -1,4 +1,4 @@
-FROM tiangolo/uwsgi-nginx-flask:python3.7
+FROM tiangolo/uwsgi-nginx-flask:python3.9
 
 ENV UWSGI_INI /app/uwsgi.ini
 RUN mkdir -p /home/nginx/.cloudvolume/secrets \
