@@ -16,9 +16,21 @@ on:
     branches: master
 
 jobs:
+
   test:
+  
     name: Test against different Python versions
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:13-master
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_aligned_volume
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python 3.9
