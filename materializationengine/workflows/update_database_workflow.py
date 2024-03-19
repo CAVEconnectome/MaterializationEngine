@@ -73,6 +73,7 @@ def update_database_workflow(self, datastack_info: dict, **kwargs):
         analysis_version=None,
         materialization_time_stamp=materialization_time_stamp,
     )
+
     celery_logger.info(mat_info)
 
     update_live_database_workflow = []

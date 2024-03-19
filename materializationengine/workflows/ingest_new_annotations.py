@@ -70,9 +70,7 @@ def process_new_annotations_workflow(
     )
 
     for mat_metadata in mat_info:
-        if mat_metadata["row_count"] < 1_000_000 and mat_metadata.get(
-            "segmentation_table_name"
-        ):
+        if mat_metadata.get("segmentation_table_name"):
             annotation_chunks = generate_chunked_model_ids(mat_metadata)
             process_chunks_workflow = chain(
                 ingest_new_annotations_workflow(
@@ -633,7 +631,8 @@ def ingest_new_annotations_workflow(mat_metadata: dict):
     """
     celery_logger.info("Ingesting new annotations...")
     if mat_metadata["row_count"] >= 1_000_000:
-        return fin.si()
+        if not mat_metadata.get("lookup_all_root_ids", False):
+            return fin.si()
     annotation_chunks = generate_chunked_model_ids(mat_metadata)
     table_created = create_missing_segmentation_table(mat_metadata)
     if table_created:

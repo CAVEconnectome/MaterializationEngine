@@ -744,7 +744,8 @@ class FrozenTablesMetadata(Resource):
         analysis_version, analysis_tables = get_analysis_version_and_tables(
             target_datastack, target_version, session
         )
-
+        if analysis_tables is None:
+            abort(404, f"no tables found in target_datastack {target_datastack} for version {target_version}")
         schema = AnalysisTableSchema()
         tables = schema.dump(analysis_tables, many=True)
 
@@ -752,8 +753,9 @@ class FrozenTablesMetadata(Resource):
         for table in tables:
             table_name = table["table_name"]
             ann_md = db.database.get_table_metadata(table_name)
-            ann_md.pop("id")
-            ann_md.pop("deleted")
+            if ann_md is not None:
+                ann_md.pop("id")
+                ann_md.pop("deleted")
             table.update(ann_md)
 
         return tables, 200
