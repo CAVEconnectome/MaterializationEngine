@@ -441,7 +441,6 @@ def combine_queries(
     if prod_df is not None:
         # if we are moving forward in time
         if chosen_timestamp < user_timestamp:
-
             deleted_between = (
                 prod_df[column_names[table]["deleted"]] > chosen_timestamp
             ) & (prod_df[column_names[table]["deleted"]] < user_timestamp)
@@ -752,6 +751,13 @@ class FrozenTablesMetadata(Resource):
         for table in tables:
             table_name = table["table_name"]
             ann_md = db.database.get_table_metadata(table_name)
+            # the get_table_metadata function joins on the segmentationmetadata which
+            # has the segmentation_table in the table_name and the annotation table name in the annotation_table
+            # field.  So when we update here, we overwrite the table_name with the segmentation table name,
+            # which was not the intent of the API.
+            ann_table = ann_md.pop("annotation_table", None)
+            if ann_table:
+                ann_md["table_name"] = ann_table
             ann_md.pop("id")
             ann_md.pop("deleted")
             table.update(ann_md)
@@ -802,6 +808,13 @@ class FrozenTableMetadata(Resource):
 
         db = dynamic_annotation_cache.get_db(aligned_volume_name)
         ann_md = db.database.get_table_metadata(table_name)
+        # the get_table_metadata function joins on the segmentationmetadata which
+        # has the segmentation_table in the table_name and the annotation table name in the annotation_table
+        # field.  So when we update here, we overwrite the table_name with the segmentation table name,
+        # which was not the intent of the API.
+        ann_table = ann_md.pop("annotation_table", None)
+        if ann_table:
+            ann_md["table_name"] = ann_table
         ann_md.pop("id")
         ann_md.pop("deleted")
         tables.update(ann_md)
@@ -1152,7 +1165,6 @@ class LiveTableQuery(Resource):
         if (last_modified > chosen_timestamp) or (
             last_modified > user_data["timestamp"]
         ):
-
             prod_df, column_names, prod_warnings = execute_production_query(
                 aligned_volume_name,
                 pcg_table_name,
