@@ -27,6 +27,10 @@ from materializationengine.workflows.ingest_new_annotations import (
     create_missing_segmentation_table,
     get_new_root_ids,
 )
+from materializationengine.utils import (
+    create_segmentation_model,
+    create_annotation_model,
+)
 
 celery_logger = get_task_logger(__name__)
 
@@ -303,16 +307,21 @@ def get_table_bounding_boxes(
     Args:
         aligned_volume (str): Name of the aligned volume to use as the database
         table_name (str): Name of the annotation table
+        segmentation_source (str): Name of the PCG table
 
     Returns:
         dict: Dictionary of bounding boxes for each column in the annotation table
     """
     db = dynamic_annotation_cache.get_db(aligned_volume)
     schema = db.database.get_table_schema(table_name)
-    AnnotationModel = db.schema.create_annotation_model(table_name, schema)
-    SegmentationModel = db.schema.create_segmentation_model(
-        table_name, schema, segmentation_source
-    )
+    mat_metadata = {
+        "annotation_table_name": table_name,
+        "schema": schema,
+        "pcg_table_name": segmentation_source,
+    }
+    AnnotationModel = create_annotation_model(mat_metadata)
+    SegmentationModel = create_segmentation_model(mat_metadata)
+
     engine = sqlalchemy_cache.get_engine(aligned_volume)
     bbox_data = []
 
@@ -550,11 +559,9 @@ def select_all_points_in_bbox(
     db = dynamic_annotation_cache.get_db(mat_info["aligned_volume"])
     table_name = mat_info["annotation_table_name"]
     schema = db.database.get_table_schema(table_name)
-
-    AnnotationModel = db.schema.create_annotation_model(table_name, schema)
-    SegmentationModel = db.schema.create_segmentation_model(
-        table_name, schema, mat_info["segmentation_source"]
-    )
+    mat_info["schema"] = schema
+    AnnotationModel = create_annotation_model(mat_info)
+    SegmentationModel = create_segmentation_model(mat_info)
 
     spatial_columns = []
     for annotation_column in AnnotationModel.__table__.columns:
@@ -709,14 +716,12 @@ def insert_segmentation_data(
     start_time = time.time()
     aligned_volume = mat_info["aligned_volume"]
     table_name = mat_info["annotation_table_name"]
-    pcg_table_name = mat_info["pcg_table_name"]
+    # pcg_table_name = mat_info["pcg_table_name"]
     db = dynamic_annotation_cache.get_db(aligned_volume)
     schema = db.database.get_table_schema(table_name)
     engine = sqlalchemy_cache.get_engine(aligned_volume)
-
-    SegmentationModel = db.schema.create_segmentation_model(
-        table_name, schema, pcg_table_name, reset_cache=True
-    )
+    mat_info["schema"] = schema
+    SegmentationModel = create_segmentation_model(mat_info)
     seg_columns = SegmentationModel.__table__.columns.keys()
     segmentation_dataframe = pd.DataFrame(columns=seg_columns, dtype=object)
     data_df = pd.DataFrame(data, dtype=object)
