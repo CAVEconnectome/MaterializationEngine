@@ -715,7 +715,7 @@ def insert_segmentation_data(
     engine = sqlalchemy_cache.get_engine(aligned_volume)
 
     SegmentationModel = db.schema.create_segmentation_model(
-        table_name, schema, pcg_table_name
+        table_name, schema, pcg_table_name, reset_cache=True
     )
     seg_columns = SegmentationModel.__table__.columns.keys()
     segmentation_dataframe = pd.DataFrame(columns=seg_columns, dtype=object)
