@@ -228,6 +228,11 @@ def match_point_and_get_value(point, points_map):
     return points_map.get(point_tuple, 0)
 
 
+def normalize_positions(point, scale_factor):
+    scaled_point = np.floor(np.array(point) / scale_factor).astype(int)
+    return tuple(scaled_point)
+
+
 def get_svids_from_df(df, mat_info: dict) -> pd.DataFrame:
     """Get the supervoxel ids from a dataframe of points.
 
@@ -242,19 +247,24 @@ def get_svids_from_df(df, mat_info: dict) -> pd.DataFrame:
     segmentation_source = mat_info["segmentation_source"]
     coord_resolution = mat_info["coord_resolution"]
     cv = cloudvolume_cache.get_cv(segmentation_source)
+    scale_factor = cv.resolution / coord_resolution
+
+    # Scale the points to the resolution of the cloudvolume
+    df["pt_position_scaled"] = df["pt_position"].apply(
+        lambda x: normalize_positions(x, scale_factor)
+    )
+
     sv_id_data = cv.scattered_points(
         df["pt_position"], coord_resolution=coord_resolution
     )
-    df["pt_position"] = df["pt_position"].apply(
-        lambda x: x // cv.resolution
-    )  # scale the points to the resolution of the cloudvolume
-    # match points to svids
-    df["svids"] = df["pt_position"].apply(
+
+    # Match points to svids using the scaled coordinates
+    df["svids"] = df["pt_position_scaled"].apply(
         lambda x: match_point_and_get_value(x, sv_id_data)
     )
 
-    # drop the pt_position column
-    df.drop(columns=["pt_position"], inplace=True)
+    # Drop the temporary scaled coordinates column
+    df.drop(columns=["pt_position_scaled"], inplace=True)
 
     # Add the supervoxel id column to the type column name
     if df["type"].str.contains("pt").all():
@@ -771,24 +781,30 @@ def insert_segmentation_data(
 
 def _safe_pivot_svid_df_to_dict(df: pd.DataFrame) -> dict:
     """Custom pivot function to preserve uint64 dtype values."""
+    # Check if required columns exist in the DataFrame
+    required_columns = ["id", "type", "svids"]
+    if any(col not in df.columns for col in required_columns):
+        raise ValueError(f"DataFrame must contain columns: {required_columns}")
 
-    # Get the columns names from the dataframe
+    # Get the unique column names from the DataFrame
     columns = ["id"] + df["type"].unique().tolist()
 
     # Initialize an output dict with lists for each column
     output_dict = {col: [] for col in columns}
-    seen_ids = set()
 
-    for _, row in df.iterrows():
-        row_id = row["id"]
-        if row_id not in seen_ids:
-            seen_ids.add(row_id)
-            output_dict["id"].append(row_id)
-            # Initialize other columns with 0
-            for col in columns[1:]:
-                output_dict[col].append(0)
+    # Group the DataFrame by "id" and iterate over each group
+    for row_id, group in df.groupby("id"):
+        output_dict["id"].append(row_id)
 
-        idx = output_dict["id"].index(row_id)
-        output_dict[row["type"]][idx] = row["svids"]
+        # Initialize other columns with 0 for the current row_id
+        for col in columns[1:]:
+            output_dict[col].append(0)
+
+        # Update the values for each type
+        for _, row in group.iterrows():
+            col_type = row["type"]
+            if col_type in output_dict:
+                idx = len(output_dict["id"]) - 1
+                output_dict[col_type][idx] = row["svids"]
 
     return output_dict
