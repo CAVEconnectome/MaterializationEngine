@@ -281,6 +281,7 @@ def handle_simple_query(
         desired_resolution=data["desired_resolution"],
         return_pyarrow=args["return_pyarrow"],
         arrow_format=args["arrow_format"],
+        ipc_compress=args["ipc_compress"],
     )
 
 
@@ -293,7 +294,6 @@ def handle_complex_query(
     data,
     convert_desired_resolution=False,
 ):
-
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
 
@@ -447,4 +447,5 @@ def handle_complex_query(
         desired_resolution=data["desired_resolution"],
         return_pyarrow=args["return_pyarrow"],
         arrow_format=args["arrow_format"],
+        ipc_compress=args["ipc_compress"],
     )
