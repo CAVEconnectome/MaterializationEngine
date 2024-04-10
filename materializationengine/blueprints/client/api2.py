@@ -183,7 +183,17 @@ query_parser.add_argument(
  that are not valid at the timestamp that is queried. If True the filter will likely \
 not be relevant and the user might not be getting data back that they expect, but it will not error.",
 )
-
+query_parser.add_argument(
+    "ipc_compress",
+    types=inputs.boolean,
+    default=True,
+    required=False,
+    location="args",
+    help="whether to have arrow compress the result when using return_pyarrow=True and arrow_format=True. \
+    If False, the result will not have it's internal data compressed (note that the entire response \
+    will be gzip compressed if accept-enconding includes gzip). If True, accept=encoding will determine what \
+    internal compression is used")
+)
 
 metadata_parser = reqparse.RequestParser()
 # add a boolean argument for whether to return all expired versions
@@ -1187,6 +1197,7 @@ class LiveTableQuery(Resource):
             desired_resolution=user_data["desired_resolution"],
             return_pyarrow=args["return_pyarrow"],
             arrow_format=args["arrow_format"],
+            ipc_compress=args["ipc_compress"]
         )
 
 
@@ -1422,6 +1433,7 @@ class ViewQuery(Resource):
             desired_resolution=data["desired_resolution"],
             return_pyarrow=args["return_pyarrow"],
             arrow_format=args["arrow_format"],
+            ipc_compress=args["ipc_compress"]
         )
 
 
