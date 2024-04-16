@@ -48,6 +48,7 @@ def run_spatial_lookup_workflow(
     table_name: str,
     chunk_scale_factor: int = 8,
     get_root_ids: bool = True,
+    upload_to_database: bool = True,
     task_group_chunk_size: int = 100,
 ):
     """Run the spatial lookup workflow.
@@ -112,6 +113,7 @@ def run_spatial_lookup_workflow(
                     max_corner=max_corner.tolist(),
                     mat_info=mat_info,
                     get_root_ids=get_root_ids,
+                    upload_to_database=upload_to_database
                 )
                 result = task.apply_async()
 
@@ -160,7 +162,7 @@ def get_min_enclosing_bbox(cv_info: dict, mat_info: dict) -> tuple:
     max_retries=10,
 )
 def process_spatially_chunked_svids(
-    self, min_corner, max_corner, mat_info, get_root_ids: bool = True
+    self, min_corner, max_corner, mat_info, get_root_ids: bool = True, upload_to_database: bool = True
 ):
     """Reads the points from the database and gets the supervoxel ids for each point.
 
@@ -190,15 +192,15 @@ def process_spatially_chunked_svids(
             start_time = time.time()
             data = get_new_root_ids(data, mat_info)
             celery_logger.info(f"Time to get root ids: {time.time() - start_time}")
+        if upload_to_database:
+            # time to insert data
+            start_time = time.time()
+            is_inserted = insert_segmentation_data(data, mat_info)
+            celery_logger.debug(f"Time to insert data: {time.time() - start_time}")
 
-        # time to insert data
-        start_time = time.time()
-        is_inserted = insert_segmentation_data(data, mat_info)
-        celery_logger.debug(f"Time to insert data: {time.time() - start_time}")
-
-        celery_logger.debug(
-            f"Data inserted: {is_inserted}, Number of rows: {len(data)}"
-        )
+            celery_logger.debug(
+                f"Data inserted: {is_inserted}, Number of rows: {len(data)}"
+            )
     except Exception as e:
         celery_logger.error(e)
         self.retry(exc=e, countdown=int(random.uniform(2, 6) ** self.request.retries))
