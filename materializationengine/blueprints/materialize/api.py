@@ -251,7 +251,7 @@ class SpatialSVIDLookupTableResource(Resource):
     @reset_auth
     @auth_requires_permission("edit", table_arg="datastack_name")
     @mat_bp.doc("Lookup spatially chunked svid workflow", security="apikey")
-    def post(self, datastack_name: str, table_name: str):
+    def post(self, datastack_name: str, table_name: str, upload_to_database: bool = True):
         """Process newly added annotations and lookup segmentation data using
         a spatially chunked svid lookup strategy. Optionally also lookups root ids.
 
@@ -277,6 +277,7 @@ class SpatialSVIDLookupTableResource(Resource):
                 table_name=table_name,
                 chunk_scale_factor=chunk_scale_factor,
                 get_root_ids=get_root_ids,
+                upload_to_database=upload_to_database,
             ).apply_async()
         except Exception as e:
             logging.error(e)
