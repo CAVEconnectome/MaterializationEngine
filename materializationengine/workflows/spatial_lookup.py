@@ -179,14 +179,15 @@ def process_spatially_chunked_svids(
     """
 
     try:
+        start_time = time.time()
         pts_df = get_pts_from_bbox(np.array(min_corner), np.array(max_corner), mat_info)
+        celery_logger.info(f"Time to get points from bbox: {time.time() - start_time}")
         if pts_df is None:
             return None
-        start_time = time.time()
         data = get_svids_from_df(pts_df, mat_info)
         # time to get svids
-        celery_logger.debug(f"Time to get svids: {time.time() - start_time}")
-        celery_logger.debug(f"Number of svids: {len(data['id'])}")
+        celery_logger.info(f"Time to get svids: {time.time() - start_time}")
+        celery_logger.info(f"Number of svids: {len(data['id'])}")
         if get_root_ids:
             # get time for root ids
             start_time = time.time()
@@ -196,9 +197,9 @@ def process_spatially_chunked_svids(
             # time to insert data
             start_time = time.time()
             is_inserted = insert_segmentation_data(data, mat_info)
-            celery_logger.debug(f"Time to insert data: {time.time() - start_time}")
+            celery_logger.info(f"Time to insert data: {time.time() - start_time}")
 
-            celery_logger.debug(
+            celery_logger.info(
                 f"Data inserted: {is_inserted}, Number of rows: {len(data)}"
             )
     except Exception as e:
@@ -278,7 +279,7 @@ def get_svids_from_df(df, mat_info: dict) -> pd.DataFrame:
     # add we loose precision when converting back to uint64
     svid_dict = _safe_pivot_svid_df_to_dict(df)
 
-    celery_logger.debug(f"Time to get svids from df: {time.time() - start_time}")
+    celery_logger.info(f"Time to get svids from df: {time.time() - start_time}")
     return svid_dict
 
 
