@@ -65,6 +65,7 @@ materialize_parser.add_argument("merge_tables", required=True, type=inputs.boole
 spatial_svid_parser = reqparse.RequestParser()
 spatial_svid_parser.add_argument("chunk_scale_factor", default=12, type=int)
 spatial_svid_parser.add_argument("get_root_ids", default=True, type=inputs.boolean)
+spatial_svid_parser.add_argument("upload_to_database", default=True, type=inputs.boolean)
 
 
 authorizations = {
@@ -239,7 +240,7 @@ class ProcessNewAnnotationsTableResource(Resource):
         ).apply_async()
         return 200
 
-
+@mat_bp.expect(spatial_svid_parser)
 @mat_bp.route(
     "/materialize/run/spatial_lookup/datastack/<string:datastack_name>/<string:table_name>"
 )
@@ -247,7 +248,7 @@ class SpatialSVIDLookupTableResource(Resource):
     @reset_auth
     @auth_requires_permission("edit", table_arg="datastack_name")
     @mat_bp.doc("Lookup spatially chunked svid workflow", security="apikey")
-    def post(self, datastack_name: str, table_name: str, upload_to_database: bool = True):
+    def post(self, datastack_name: str, table_name: str):
         """Process newly added annotations and lookup segmentation data using
         a spatially chunked svid lookup strategy. Optionally also lookups root ids.
 
@@ -258,15 +259,17 @@ class SpatialSVIDLookupTableResource(Resource):
         from materializationengine.workflows.spatial_lookup import (
             run_spatial_lookup_workflow,
         )
+        args = spatial_svid_parser.parse_args()
+
 
         if datastack_name not in current_app.config["DATASTACKS"]:
             abort(404, f"datastack {datastack_name} not configured for materialization")
 
         datastack_info = get_datastack_info(datastack_name)
 
-        args = spatial_svid_parser.parse_args()
         chunk_scale_factor = args["chunk_scale_factor"]
         get_root_ids = args["get_root_ids"]
+        upload_to_database = args["upload_to_database"]
         try:
             run_spatial_lookup_workflow.si(
                 datastack_info,
