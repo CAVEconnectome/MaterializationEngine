@@ -113,7 +113,7 @@ def run_spatial_lookup_workflow(
                     max_corner=max_corner.tolist(),
                     mat_info=mat_info,
                     get_root_ids=get_root_ids,
-                    upload_to_database=upload_to_database
+                    upload_to_database=upload_to_database,
                 )
                 result = task.apply_async()
 
@@ -162,7 +162,12 @@ def get_min_enclosing_bbox(cv_info: dict, mat_info: dict) -> tuple:
     max_retries=10,
 )
 def process_spatially_chunked_svids(
-    self, min_corner, max_corner, mat_info, get_root_ids: bool = True, upload_to_database: bool = True
+    self,
+    min_corner,
+    max_corner,
+    mat_info,
+    get_root_ids: bool = True,
+    upload_to_database: bool = True,
 ):
     """Reads the points from the database and gets the supervoxel ids for each point.
 
@@ -186,7 +191,7 @@ def process_spatially_chunked_svids(
             return None
         data = get_svids_from_df(pts_df, mat_info)
         # time to get svids
-        celery_logger.info(f"Time to get svids: {time.time() - start_time}")
+        celery_logger.info(f"Total Time to get svids: {time.time() - start_time}")
         celery_logger.info(f"Number of svids: {len(data['id'])}")
         if get_root_ids:
             # get time for root ids
@@ -252,20 +257,26 @@ def get_svids_from_df(df, mat_info: dict) -> pd.DataFrame:
     cv = cloudvolume_cache.get_cv(segmentation_source)
     scale_factor = cv.resolution / coord_resolution
 
+    celery_logger.info(f"Time to initialize cv: {time.time() - start_time}")
+    start_time = time.time()
     # Scale the points to the resolution of the cloudvolume
     df["pt_position_scaled"] = df["pt_position"].apply(
         lambda x: normalize_positions(x, scale_factor)
     )
-
+    celery_logger.info(f"normalize positions: {time.time() - start_time}")
+    start_time = time.time()
     sv_id_data = cv.scattered_points(
         df["pt_position"], coord_resolution=coord_resolution
     )
+    celery_logger.info(f"cv scattered_points: {time.time() - start_time}")
+    start_time = time.time()
 
     # Match points to svids using the scaled coordinates
     df["svids"] = df["pt_position_scaled"].apply(
         lambda x: match_point_and_get_value(x, sv_id_data)
     )
-
+    celery_logger.info(f"cv match_point_and_get_value: {time.time() - start_time}")
+    start_time = time.time()
     # Drop the temporary scaled coordinates column
     df.drop(columns=["pt_position_scaled"], inplace=True)
 
@@ -274,10 +285,15 @@ def get_svids_from_df(df, mat_info: dict) -> pd.DataFrame:
         df["type"] = df["type"].apply(lambda x: f"{x}_supervoxel_id")
     else:
         df["type"] = df["type"].apply(lambda x: f"{x}_pt_supervoxel_id")
-
+    celery_logger.info(
+        f"drop columns and add superoxel column: {time.time() - start_time}"
+    )
+    start_time = time.time()
     # custom pivot to preserve uint64 dtype values since they are normally converted to float64
     # add we loose precision when converting back to uint64
     svid_dict = _safe_pivot_svid_df_to_dict(df)
+    celery_logger.info(f"_safe_pivot_svid_df_to_dict: {time.time() - start_time}")
+    start_time = time.time()
 
     celery_logger.info(f"Time to get svids from df: {time.time() - start_time}")
     return svid_dict
