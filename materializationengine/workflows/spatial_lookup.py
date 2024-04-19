@@ -186,6 +186,7 @@ def process_spatially_chunked_svids(
     try:
         start_time = time.time()
         pts_df = get_pts_from_bbox(np.array(min_corner), np.array(max_corner), mat_info)
+        celery_logger.info(f"min corner: {min_corner}, max corner: {max_corner}")
         celery_logger.info(f"Time to get points from bbox: {time.time() - start_time}")
         if pts_df is None:
             return None
