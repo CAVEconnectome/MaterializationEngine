@@ -289,11 +289,9 @@ def get_svids_from_df(df, mat_info: dict) -> pd.DataFrame:
     df["pt_position_scaled"] = df["pt_position"].apply(
         lambda x: normalize_positions(x, scale_factor)
     )
-    df["chunk_pos"] = df.pt_position_scaled.apply(
-        lambda x: point_to_chunk_position(cv, x, 0)
-    )
+    chunk_pos = df.pt_position_scaled.apply(lambda x: point_to_chunk_position(cv, x, 0))
     # find out how many unique chunks are there
-    unique_chunks = df.chunk_pos.unique()
+    unique_chunks = chunk_pos.unique()
     celery_logger.info(f"# unique_chunks: {len(unique_chunks)}")
 
     celery_logger.info(f"normalize positions: {time.time() - start_time}")
