@@ -43,7 +43,7 @@ class CloudVolumeGateway:
             use_https=True,
             bounded=False,
             fill_missing=True,
-            lru_bytes=int(10e6),
+            lru_bytes=int(10e8),
         )
 
         self._cv_clients[seg_source_key] = cv_client
