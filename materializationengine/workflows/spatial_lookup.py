@@ -306,7 +306,7 @@ def get_svids_from_df(df, mat_info: dict) -> pd.DataFrame:
     sv_id_data = cv.scattered_points(
         df["pt_position"], coord_resolution=coord_resolution
     )
-    celery_logger.info(f"cv download_point loop: {time.time() - start_time}")
+    celery_logger.info(f"cv scattered_points : {time.time() - start_time}")
     start_time = time.time()
 
     # Match points to svids using the scaled coordinates
