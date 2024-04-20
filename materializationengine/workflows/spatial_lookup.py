@@ -290,7 +290,7 @@ def get_svids_from_df(df, mat_info: dict) -> pd.DataFrame:
         lambda x: normalize_positions(x, scale_factor)
     )
     chunk_pos = df.pt_position_scaled.apply(
-        lambda x: point_to_chunk_position(cv.meta, x, mip=0)
+        lambda x: str(point_to_chunk_position(cv.meta, x, mip=0))
     )
     # find out how many unique chunks are there
     unique_chunks = chunk_pos.unique()
