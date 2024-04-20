@@ -31,6 +31,7 @@ from materializationengine.utils import (
     create_segmentation_model,
     create_annotation_model,
 )
+from cloudvolume.lib import Vec
 
 celery_logger = get_task_logger(__name__)
 
@@ -242,6 +243,30 @@ def normalize_positions(point, scale_factor):
     return tuple(scaled_point)
 
 
+def point_to_chunk_position(cv, pt, mip=None):
+    """
+    Convert a point into the chunk position.
+
+    pt: x,y,z triple
+    mip:
+      if None, pt is in physical coordinates
+      else pt is in the coordinates of the indicated mip level
+
+    Returns: Vec(chunk_x,chunk_y,chunk_z)
+    """
+    pt = Vec(*pt, dtype=np.float64)
+
+    if mip is not None:
+        pt *= cv.resolution(mip)
+
+    pt /= cv.resolution(self.watershed_mip)
+
+    if cv.chunks_start_at_voxel_offset:
+        pt -= cv.voxel_offset(cv.watershed_mip)
+
+    return (pt // cv.graph_chunk_size).astype(np.int32)
+
+
 def get_svids_from_df(df, mat_info: dict) -> pd.DataFrame:
     """Get the supervoxel ids from a dataframe of points.
 
@@ -265,7 +290,7 @@ def get_svids_from_df(df, mat_info: dict) -> pd.DataFrame:
         lambda x: normalize_positions(x, scale_factor)
     )
     df["chunk_pos"] = df.pt_position_scaled.apply(
-        lambda x: cv.meta.point_to_chunk_position(x, 0)
+        lambda x: point_to_chunk_position(cv, x, 0)
     )
     # find out how many unique chunks are there
     unique_chunks = df.chunk_pos.unique()
