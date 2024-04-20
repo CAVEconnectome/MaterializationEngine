@@ -259,7 +259,7 @@ def point_to_chunk_position(cv, pt, mip=None):
     if mip is not None:
         pt *= cv.resolution(mip)
 
-    pt /= cv.resolution(self.watershed_mip)
+    pt /= cv.resolution(cv.watershed_mip)
 
     if cv.chunks_start_at_voxel_offset:
         pt -= cv.voxel_offset(cv.watershed_mip)
