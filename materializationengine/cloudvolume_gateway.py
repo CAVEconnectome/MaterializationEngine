@@ -1,11 +1,13 @@
 import cloudvolume
+import os
 
 
 class CloudVolumeGateway:
     """A class to manage cloudvolume clients and cache them for reuse."""
 
-    def __init__(self):
+    def __init__(self, lru_bytes: int = 0):
         self._cv_clients = {}
+        self._lru_bytes = lru_bytes
 
     def get_cv(self, seg_source: str, mip_level: int = 0) -> cloudvolume.CloudVolume:
         """A function to get a cloudvolume client for a given source.
@@ -43,7 +45,7 @@ class CloudVolumeGateway:
             use_https=True,
             bounded=False,
             fill_missing=True,
-            lru_bytes=int(10e9),
+            lru_bytes=self._lru_bytes,
         )
 
         self._cv_clients[seg_source_key] = cv_client
@@ -54,4 +56,6 @@ class CloudVolumeGateway:
         self._cv_clients = {}
 
 
-cloudvolume_cache = CloudVolumeGateway()
+cloudvolume_cache = CloudVolumeGateway(
+    lru_bytes=os.environ.get("CLOUDVOLUME_CACHE_SIZE", 0)
+)
