@@ -355,14 +355,14 @@ def get_cloud_volume_info(segmentation_source: str) -> dict:
         celery_logger.error(e)
         raise e
 
-    bbox = cv.bounds.expand_to_chunk_size(cv.chunk_size)
+    bbox = cv.bounds.expand_to_chunk_size(cv.chunk_size, cv.voxel_offset)
     bbox = bbox.to_list()
     chunk_size = cv.chunk_size.tolist()
 
     return {
         "bbox": bbox,
         "chunk_size": np.array(chunk_size),
-        "resolution": cv.scale["resolution"],
+        "resolution": cv.scale["resolution"]
     }
 
 
