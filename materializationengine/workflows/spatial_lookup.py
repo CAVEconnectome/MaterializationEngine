@@ -803,12 +803,13 @@ def insert_segmentation_data(
     common_cols = segmentation_dataframe.columns.intersection(data_df.columns)
 
     # merge the dataframes and fill the missing values with 0, data might get updated in the next chunk lookup
-    df = pd.merge(
-        segmentation_dataframe[common_cols], data_df[common_cols], how="right"
-    ).fillna(0)
+    df = pd.merge(segmentation_dataframe[common_cols], data_df[common_cols], how="right")
+    
+    # fill the missing values with 0
+    df = df.infer_objects().fillna(0)
 
-    # reorder the columns
-    df = df[segmentation_dataframe.columns]
+    # reindex the dataframe to match the order of the columns in the segmentation model
+    df = df.reindex(columns=segmentation_dataframe.columns, fill_value=0)
 
     # convert the dataframe to a list of dictionaries
     data = df.to_dict(orient="records")
