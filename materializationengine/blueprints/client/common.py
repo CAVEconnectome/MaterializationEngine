@@ -237,7 +237,10 @@ def handle_simple_query(
             .filter(MaterializedMetadata.table_name == table_name)
             .scalar()
         )
-        random_sample = (100.0 * random_sample) / mat_row_count
+        if random_sample >= mat_row_count:
+            random_sample = None
+        else:
+            random_sample = (100.0 * random_sample) / mat_row_count
 
     qm = QueryManager(
         mat_db_name,
@@ -355,7 +358,10 @@ def handle_complex_query(
             .filter(MaterializedMetadata.table_name == data["tables"][0][0])
             .scalar()
         )
-        random_sample = (100.0 * random_sample) / mat_row_count
+        if random_sample >= mat_row_count:
+            random_sample = None
+        else:
+            random_sample = (100.0 * random_sample) / mat_row_count
 
     qm = QueryManager(
         db_name,
