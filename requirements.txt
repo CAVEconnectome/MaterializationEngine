@@ -475,7 +475,7 @@ tenacity==8.0.1
     #   cloud-volume
 tomli==2.0.1
     # via pytest
-tqdm==4.62.3
+tqdm==4.66.3
     # via
     #   cloud-files
     #   cloud-volume
