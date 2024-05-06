@@ -254,10 +254,11 @@ markdown==3.3.6
     # via python-jsonschema-objects
 markdown-it-py==2.2.0
     # via rich
-markupsafe==2.0.1
+markupsafe==2.1.5
     # via
     #   jinja2
     #   mako
+    #   werkzeug
     #   wtforms
 marshmallow==3.5.1
     # via
@@ -503,7 +504,7 @@ wcwidth==0.2.5
     # via prompt-toolkit
 webcolors==1.12
     # via nglui
-werkzeug==2.0.2
+werkzeug==3.0.3
     # via
     #   flask
     #   flask-accepts
