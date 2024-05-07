@@ -527,7 +527,7 @@ zope-interface==6.1
 zstandard==0.22.0
     # via cloud-files
 google-cloud-pubsub==2.21.1
-git+https://github.com/fcollman/python-task-queue.git@google_pubsub#egg=task-queue[pubsub]
+git+https://github.com/fcollman/python-task-queue.git@google_pubsub#egg=task-queue
 
 # The following packages are considered to be unsafe in a requirements file:
 # setuptools
