@@ -13,7 +13,7 @@ from geoalchemy2 import Geometry
 from sqlalchemy import case, func, literal, select, union_all
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.sql import func
-
+from materializationengine.app import create_app
 from materializationengine.celery_init import celery
 from materializationengine.cloudvolume_gateway import cloudvolume_cache
 from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
@@ -202,27 +202,29 @@ def process_spatially_chunked_svids_func(
     get_root_ids: bool = True,
     upload_to_database: bool = True,
 ):
-    start_time = time.time()
-    pts_df = get_pts_from_bbox(np.array(min_corner), np.array(max_corner), mat_info)
-    print(f"min corner: {min_corner}, max corner: {max_corner}")
-    print(f"Time to get points from bbox: {time.time() - start_time}")
-    if pts_df is None:
-        return None
-    data = get_svids_from_df(pts_df, mat_info)
-    # time to get svids
-    print(f"Total Time to get svids: {time.time() - start_time}")
-    print(f"Number of svids: {len(data['id'])}")
-    if get_root_ids:
-        # get time for root ids
+    application = create_app()
+    with application.app_context():
         start_time = time.time()
-        data = get_new_root_ids(data, mat_info)
-        print(f"Time to get root ids: {time.time() - start_time}")
-    if upload_to_database:
-        # time to insert data
-        start_time = time.time()
-        is_inserted = insert_segmentation_data(data, mat_info)
-        print(f"Time to insert data: {time.time() - start_time}")
-        print(f"Data inserted: {is_inserted}, Number of rows: {len(data)}")
+        pts_df = get_pts_from_bbox(np.array(min_corner), np.array(max_corner), mat_info)
+        print(f"min corner: {min_corner}, max corner: {max_corner}")
+        print(f"Time to get points from bbox: {time.time() - start_time}")
+        if pts_df is None:
+            return None
+        data = get_svids_from_df(pts_df, mat_info)
+        # time to get svids
+        print(f"Total Time to get svids: {time.time() - start_time}")
+        print(f"Number of svids: {len(data['id'])}")
+        if get_root_ids:
+            # get time for root ids
+            start_time = time.time()
+            data = get_new_root_ids(data, mat_info)
+            print(f"Time to get root ids: {time.time() - start_time}")
+        if upload_to_database:
+            # time to insert data
+            start_time = time.time()
+            is_inserted = insert_segmentation_data(data, mat_info)
+            print(f"Time to insert data: {time.time() - start_time}")
+            print(f"Data inserted: {is_inserted}, Number of rows: {len(data)}")
 
 
 @celery.task(
