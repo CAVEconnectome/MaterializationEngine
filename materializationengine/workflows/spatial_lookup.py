@@ -118,11 +118,10 @@ def run_spatial_lookup_workflow(
                 min_c.tolist(),
                 max_c.tolist(),
                 mat_info,
-                num_c,
                 get_root_ids,
                 upload_to_database,
             )
-            for min_c, max_c, chunk_i, num_c in cg
+            for min_c, max_c, _, _ in cg
         )
         task_queue = get_config_param("TASKQUEUE_QURL")
 
