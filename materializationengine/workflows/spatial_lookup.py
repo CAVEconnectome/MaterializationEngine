@@ -22,7 +22,6 @@ from materializationengine.shared_tasks import (
     workflow_complete,
 )
 from materializationengine.utils import get_geom_from_wkb
-from materializationengine.throttle import throttle_celery
 from materializationengine.workflows.ingest_new_annotations import (
     create_missing_segmentation_table,
     get_new_root_ids,
