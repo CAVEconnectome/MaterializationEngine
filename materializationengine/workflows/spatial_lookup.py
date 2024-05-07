@@ -30,8 +30,11 @@ from materializationengine.workflows.ingest_new_annotations import (
 from materializationengine.utils import (
     create_segmentation_model,
     create_annotation_model,
+    get_config_param,
 )
 from cloudvolume.lib import Vec
+from taskqueue import queueable, TaskQueue
+from functools import partial
 
 celery_logger = get_task_logger(__name__)
 
@@ -91,35 +94,73 @@ def run_spatial_lookup_workflow(
             celery_logger.error(e)
             raise self.retry(exc=e, countdown=3)
 
-        chunks = chunk_tasks(
-            chunk_generator(
-                min_enclosing_bbox[0],
-                min_enclosing_bbox[1],
-                cv_info,
-                mat_info,
-                chunk_scale_factor,
-            ),
-            task_group_chunk_size,
+        # chunks = chunk_tasks(
+        #     chunk_generator(
+        #         min_enclosing_bbox[0],
+        #         min_enclosing_bbox[1],
+        #         cv_info,
+        #         mat_info,
+        #         chunk_scale_factor,
+        #     ),
+        #     task_group_chunk_size,
+        # )
+
+        cg = chunk_generator(
+            min_enclosing_bbox[0],
+            min_enclosing_bbox[1],
+            cv_info,
+            mat_info,
+            chunk_scale_factor,
         )
-        for i, chunk_data in enumerate(chunks):
-            celery_logger.debug(f"Chunk {i}")
-            for j, chunk_info in enumerate(chunk_data):
-                min_corner, max_corner, chunk_index, num_chunks = chunk_info
-                celery_logger.debug(
-                    f"Sub-Chunk {chunk_index}: {min_corner} to {max_corner}"
-                )
+        tasks = (
+            partial(
+                process_spatially_chunked_svids_func,
+                min_c,
+                max_c,
+                chunk_i,
+                num_c,
+                get_root_ids,
+                upload_to_database,
+            )
+            for min_c, max_c, chunk_i, num_c in cg
+        )
+        task_queue = get_config_param("TASKQUEUE_QURL")
 
-                task = process_spatially_chunked_svids.si(
-                    min_corner=min_corner.tolist(),
-                    max_corner=max_corner.tolist(),
-                    mat_info=mat_info,
-                    get_root_ids=get_root_ids,
-                    upload_to_database=upload_to_database,
-                )
-                result = task.apply_async()
+        tq = TaskQueue(task_queue)
+        tq.insert(tasks)
+        # for i, chunk_data in enumerate(chunks):
+        #     celery_logger.debug(f"Chunk {i}")
+        #     tasks = ( partial(process_spatially_chunked_svids_func,
+        #                        min_c,
+        #                        max_c,
+        #                        chunk_i,
+        #                        num_c,
+        #                        get_root_ids,
+        #                        upload_to_database) for min_c, max_c, chunk_i, num_c in chunk_generator(
+        #         min_enclosing_bbox[0],
+        #         min_enclosing_bbox[1],
+        #         cv_info,
+        #         mat_info,
+        #         chunk_scale_factor,
+        #     ))
 
-                if mat_info.get("throttle_queues"):
-                    throttle_celery.wait_if_queue_full(queue_name="process")
+        # for j, chunk_info in enumerate(chunk_data):
+        #     min_corner, max_corner, chunk_index, num_chunks = chunk_info
+        #     celery_logger.debug(
+        #         f"Sub-Chunk {chunk_index}: {min_corner} to {max_corner}"
+        #     )
+
+        # task = process_spatially_chunked_svids.si(
+        #     min_corner=min_corner.tolist(),
+        #     max_corner=max_corner.tolist(),
+        #     mat_info=mat_info,
+        #     get_root_ids=get_root_ids,
+        #     upload_to_database=upload_to_database,
+        # )
+        # result = task.apply_async()
+
+        # if mat_info.get("throttle_queues"):
+        #     throttle_celery.wait_if_queue_full(queue_name="process")
 
     return workflow_complete.si("Spatial Lookup Workflow")
 
@@ -153,6 +194,37 @@ def get_min_enclosing_bbox(cv_info: dict, mat_info: dict) -> tuple:
         coord_resolution=coord_resolution,
     )
     return min_enclosing_bbox, outside_volume
+
+
+@queueable
+def process_spatially_chunked_svids_func(
+    min_corner,
+    max_corner,
+    mat_info,
+    get_root_ids: bool = True,
+    upload_to_database: bool = True,
+):
+    start_time = time.time()
+    pts_df = get_pts_from_bbox(np.array(min_corner), np.array(max_corner), mat_info)
+    print(f"min corner: {min_corner}, max corner: {max_corner}")
+    print(f"Time to get points from bbox: {time.time() - start_time}")
+    if pts_df is None:
+        return None
+    data = get_svids_from_df(pts_df, mat_info)
+    # time to get svids
+    print(f"Total Time to get svids: {time.time() - start_time}")
+    print(f"Number of svids: {len(data['id'])}")
+    if get_root_ids:
+        # get time for root ids
+        start_time = time.time()
+        data = get_new_root_ids(data, mat_info)
+        print(f"Time to get root ids: {time.time() - start_time}")
+    if upload_to_database:
+        # time to insert data
+        start_time = time.time()
+        is_inserted = insert_segmentation_data(data, mat_info)
+        print(f"Time to insert data: {time.time() - start_time}")
+        print(f"Data inserted: {is_inserted}, Number of rows: {len(data)}")
 
 
 @celery.task(
@@ -362,7 +434,7 @@ def get_cloud_volume_info(segmentation_source: str) -> dict:
     return {
         "bbox": bbox,
         "chunk_size": np.array(chunk_size),
-        "resolution": cv.scale["resolution"]
+        "resolution": cv.scale["resolution"],
     }
 
 
@@ -803,8 +875,10 @@ def insert_segmentation_data(
     common_cols = segmentation_dataframe.columns.intersection(data_df.columns)
 
     # merge the dataframes and fill the missing values with 0, data might get updated in the next chunk lookup
-    df = pd.merge(segmentation_dataframe[common_cols], data_df[common_cols], how="right")
-    
+    df = pd.merge(
+        segmentation_dataframe[common_cols], data_df[common_cols], how="right"
+    )
+
     # fill the missing values with 0
     df = df.infer_objects().fillna(0)
 

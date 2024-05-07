@@ -22,6 +22,7 @@ class BaseConfig:
     CELERY_BROKER_URL = "memory://"
     RATELIMIT_STORAGE_URI = "memory://"
     CELERY_RESULT_BACKEND = REDIS_URL
+    TASKQUEUE_QURL = "pubsub://"
     LOCAL_SERVER_URL = os.environ.get("LOCAL_SERVER_URL")
     GLOBAL_SERVER_URL = "https://global.daf-apis.com"
     ANNO_ENDPOINT = f"{LOCAL_SERVER_URL}/annotation/"
