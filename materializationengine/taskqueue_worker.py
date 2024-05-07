@@ -4,7 +4,6 @@ from materializationengine.workflows.spatial_lookup import (
 )
 
 from materializationengine.app import create_app
-from materializationengine.celery_worker import create_celery
 from materializationengine.utils import get_config_param
 
 application = create_app()
