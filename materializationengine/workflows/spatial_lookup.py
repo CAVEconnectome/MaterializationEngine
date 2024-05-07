@@ -117,7 +117,7 @@ def run_spatial_lookup_workflow(
                 process_spatially_chunked_svids_func,
                 min_c.tolist(),
                 max_c.tolist(),
-                chunk_i.tolist(),
+                mat_info,
                 num_c,
                 get_root_ids,
                 upload_to_database,
