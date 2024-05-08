@@ -904,8 +904,15 @@ def insert_segmentation_data(
 
     # insert the data or update if it already exists
     with engine.begin() as connection:
-        connection.execute(do_update_stmt)
+        result = connection.execute(do_update_stmt)
     celery_logger.info(f"Insertion time: {time.time() - start_time} seconds")
+
+    # check if the number of rows inserted matches the number of rows in the original DataFrame
+    if result.rowcount != len(data_df):
+        raise Exception(
+            f"Number of rows inserted ({result.rowcount}) does not match number of rows in original DataFrame ({len(data_df)})"
+        )
+
     return True
 
 
