@@ -269,7 +269,9 @@ def process_spatially_chunked_svids(
             # get time for root ids
             start_time = time.time()
             data = get_new_root_ids(data, mat_info)
-            celery_logger.info(f"Time to get root ids: {time.time() - start_time}")
+            celery_logger.info(
+                f"Time to get root ids: {time.time() - start_time} len(data): {len(data)}"
+            )
         if upload_to_database:
             # time to insert data
             start_time = time.time()
