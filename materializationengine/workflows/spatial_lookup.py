@@ -216,13 +216,15 @@ def process_spatially_chunked_svids_func(
         # get time for root ids
         start_time = time.time()
         data = get_new_root_ids(data, mat_info)
-        print(f"Time to get root ids: {time.time() - start_time}")
+        print(
+            f"Time to get root ids: {time.time() - start_time} len(data): {len(data)}"
+        )
     if upload_to_database:
         # time to insert data
         start_time = time.time()
-        is_inserted = insert_segmentation_data(data, mat_info)
+        rows_inserted = insert_segmentation_data(data, mat_info)
         print(f"Time to insert data: {time.time() - start_time}")
-        print(f"Data inserted: {is_inserted}, Number of rows: {len(data)}")
+        print(f"# of data inserted: {rows_inserted}, Number of rows: {len(data)}")
 
 
 @celery.task(
@@ -915,7 +917,7 @@ def insert_segmentation_data(
             f"Number of rows inserted ({result.rowcount}) does not match number of rows in original DataFrame ({len(data_df)})"
         )
 
-    return True
+    return result.rowcount
 
 
 def _safe_pivot_svid_df_to_dict(df: pd.DataFrame) -> dict:
