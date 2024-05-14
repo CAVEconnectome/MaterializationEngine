@@ -207,7 +207,7 @@ def process_spatially_chunked_svids(
             celery_logger.info(f"Time to insert data: {time.time() - start_time}")
 
             celery_logger.info(
-                f"Data inserted: {is_inserted}, Number of rows: {len(data)}"
+                f"Data inserted: {is_inserted}, Number of rows: {str(data)}"
             )
     except Exception as e:
         celery_logger.error(e)
