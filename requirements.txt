@@ -138,7 +138,9 @@ flask-accepts==0.18.4
 flask-admin==1.6.0
     # via -r requirements.in
 flask-cors==3.0.10
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   emannotationschemas
 flask-limiter[redis]==3.3.0
     # via -r requirements.in
 flask-marshmallow==0.14.0
@@ -417,7 +419,7 @@ redis==4.1.4
     # via
     #   limits
     #   middle-auth-client
-requests==2.26.0
+requests==2.32.0
     # via
     #   -r requirements.in
     #   caveclient
