@@ -155,7 +155,7 @@ def _fix_decimal_column(df_col):
     if np.all(is_integer_col(df_col)):
         return df_col.apply(int)
     else:
-        return df_col.apply(np.float)
+        return df_col.apply(float)
 
 
 def get_column(model, column):
