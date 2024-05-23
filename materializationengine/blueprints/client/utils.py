@@ -5,7 +5,6 @@ from io import BytesIO
 
 
 def collect_crud_columns(column_names):
-
     crud_columns = []
     created_columns = []
     for table in column_names.keys():
@@ -20,7 +19,6 @@ def collect_crud_columns(column_names):
 
 
 def after_request(response):
-
     accept_encoding = request.headers.get("Accept-Encoding", "")
 
     if "gzip" not in accept_encoding.lower():
@@ -68,6 +66,7 @@ def create_query_response(
     column_names,
     return_pyarrow=True,
     arrow_format=False,
+    ipc_compress=True,
 ):
     accept_encoding = request.headers.get("Accept-Encoding", "")
 
@@ -79,10 +78,13 @@ def create_query_response(
         if arrow_format:
             batch = pa.RecordBatch.from_pandas(df)
             sink = pa.BufferOutputStream()
-            if "lz4" in accept_encoding:
-                compression = "LZ4_FRAME"
-            elif "zstd" in accept_encoding:
-                compression = "ZSTD"
+            if ipc_compress:
+                if "lz4" in accept_encoding:
+                    compression = "LZ4_FRAME"
+                elif "zstd" in accept_encoding:
+                    compression = "ZSTD"
+                else:
+                    compression = None
             else:
                 compression = None
             opt = pa.ipc.IpcWriteOptions(compression=compression)

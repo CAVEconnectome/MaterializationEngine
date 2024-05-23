@@ -53,7 +53,7 @@ from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSc
 from materializationengine.blueprints.client.utils import update_notice_text_warnings
 
 
-__version__ = "4.21.2"
+__version__ = "4.25.3"
 
 
 authorizations = {
@@ -182,6 +182,20 @@ query_parser.add_argument(
     help="whether to let a query proceed when passed a set of root ids\
  that are not valid at the timestamp that is queried. If True the filter will likely \
 not be relevant and the user might not be getting data back that they expect, but it will not error.",
+)
+query_parser.add_argument(
+    "ipc_compress",
+    type=inputs.boolean,
+    default=True,
+    required=False,
+    location="args",
+    help="whether to have arrow compress the result when using \
+          return_pyarrow=True and arrow_format=True. \
+          If False, the result will not have it's internal data\
+          compressed (note that the entire response \
+          will be gzip compressed if accept-enconding includes gzip). \
+          If True, accept-encoding will determine what \
+          internal compression is used",
 )
 
 
@@ -441,7 +455,6 @@ def combine_queries(
     if prod_df is not None:
         # if we are moving forward in time
         if chosen_timestamp < user_timestamp:
-
             deleted_between = (
                 prod_df[column_names[table]["deleted"]] > chosen_timestamp
             ) & (prod_df[column_names[table]["deleted"]] < user_timestamp)
@@ -752,6 +765,13 @@ class FrozenTablesMetadata(Resource):
         for table in tables:
             table_name = table["table_name"]
             ann_md = db.database.get_table_metadata(table_name)
+            # the get_table_metadata function joins on the segmentationmetadata which
+            # has the segmentation_table in the table_name and the annotation table name in the annotation_table
+            # field.  So when we update here, we overwrite the table_name with the segmentation table name,
+            # which was not the intent of the API.
+            ann_table = ann_md.pop("annotation_table", None)
+            if ann_table:
+                ann_md["table_name"] = ann_table
             ann_md.pop("id")
             ann_md.pop("deleted")
             table.update(ann_md)
@@ -802,6 +822,13 @@ class FrozenTableMetadata(Resource):
 
         db = dynamic_annotation_cache.get_db(aligned_volume_name)
         ann_md = db.database.get_table_metadata(table_name)
+        # the get_table_metadata function joins on the segmentationmetadata which
+        # has the segmentation_table in the table_name and the annotation table name in the annotation_table
+        # field.  So when we update here, we overwrite the table_name with the segmentation table name,
+        # which was not the intent of the API.
+        ann_table = ann_md.pop("annotation_table", None)
+        if ann_table:
+            ann_md["table_name"] = ann_table
         ann_md.pop("id")
         ann_md.pop("deleted")
         tables.update(ann_md)
@@ -1152,7 +1179,6 @@ class LiveTableQuery(Resource):
         if (last_modified > chosen_timestamp) or (
             last_modified > user_data["timestamp"]
         ):
-
             prod_df, column_names, prod_warnings = execute_production_query(
                 aligned_volume_name,
                 pcg_table_name,
@@ -1175,6 +1201,7 @@ class LiveTableQuery(Resource):
             desired_resolution=user_data["desired_resolution"],
             return_pyarrow=args["return_pyarrow"],
             arrow_format=args["arrow_format"],
+            ipc_compress=args["ipc_compress"],
         )
 
 
@@ -1410,6 +1437,7 @@ class ViewQuery(Resource):
             desired_resolution=data["desired_resolution"],
             return_pyarrow=args["return_pyarrow"],
             arrow_format=args["arrow_format"],
+            ipc_compress=args["ipc_compress"],
         )
 
 
