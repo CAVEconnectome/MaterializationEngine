@@ -30,7 +30,7 @@ from materializationengine.utils import (
     get_query_columns_by_suffix,
 )
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.sql import or_
+from sqlalchemy.sql import or_, and_
 from sqlalchemy.sql import func, text
 
 celery_logger = get_task_logger(__name__)
@@ -235,7 +235,7 @@ def process_dense_missing_roots_workflow(datastack_info: dict, **kwargs):
 
 @celery.task(name="workflow:process_sparse_missing_roots_workflow")
 def process_sparse_missing_roots_workflow(datastack_info: dict, table_name: str, **kwargs):
-    """Find missing (ie NULL) root ids in the segmentation table. If missing root ids
+    """Find missing (ie NULL or 0 value) root ids in the segmentation table. If missing root ids
     are found, lookup root ids. Uses last updated time stamp to find missing
     root ids.
     
@@ -248,7 +248,9 @@ def process_sparse_missing_roots_workflow(datastack_info: dict, table_name: str,
 
     """
     mat_metadata = get_materialization_info(datastack_info, table_name=table_name)[0]
-    mat_metadata["materialization_time_stamp"] = mat_metadata["last_updated_time_stamp"] # override materialization time stamp
+    # update materialization time stamp to last updated time stamp if not null
+    if mat_metadata["last_updated_time_stamp"]:
+        mat_metadata["materialization_time_stamp"] = mat_metadata["last_updated_time_stamp"] # override materialization time stamp
     find_missing_root_ids_workflow(mat_metadata)
 
 
@@ -291,23 +293,22 @@ def find_missing_root_ids_workflow(mat_metadata: dict):
     celery task
 
     """
-    query = get_ids_with_missing_roots(mat_metadata)
+    query = filter_missing_or_zero_value_root_ids(mat_metadata)
     tasks = batch_missing_root_ids_query(query, mat_metadata)
     tasks_completed = monitor_task_states(tasks)
 
     return fin.si()
 
 
-def get_ids_with_missing_roots(mat_metadata: dict):
-    """Get a chunk generator of the primary key ids for rows that contain
-    at least one missing root id. Finds the min and max primary key id values
-    globally across the table where a missing root id is present in a column.
+def filter_missing_or_zero_value_root_ids(mat_metadata: dict):
+    """Get a statement to find missing or zero value
+    root ids in the segmentation table.
 
     Args:
         mat_metadata (dict): materialization metadata
 
     Returns:
-        query: sqlalchemy query which returns a list of IDs to
+        statement: sqlalchemy statement
     """
     SegmentationModel = create_segmentation_model(mat_metadata)
     aligned_volume = mat_metadata.get("aligned_volume")
@@ -317,13 +318,18 @@ def get_ids_with_missing_roots(mat_metadata: dict):
     root_id_columns = [
         root_column for root_column in columns if "root_id" in root_column
     ]
+
     query_columns = [
-        getattr(SegmentationModel, root_id_column).is_(None)
+        or_(
+            getattr(SegmentationModel, root_id_column) == 0,
+            getattr(SegmentationModel, root_id_column).is_(None)
+        )
         for root_id_column in root_id_columns
     ]
+    # Filter rows where root_id is NULL or 0 and supervoxel_id is not 0
     query = session.query(SegmentationModel.id).filter(or_(*query_columns))
-    stmt = query.statement.compile(compile_kwargs={"literal_binds": True})
 
+    stmt = query.statement.compile(compile_kwargs={"literal_binds": True})
     return stmt
 
 
@@ -980,7 +986,6 @@ def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
         # merge root_id df with supervoxel df
         df = pd.DataFrame(current_root_ids, dtype=object)
         root_ids_df = pd.merge(supervoxel_df, df)
-
     else:
         # create empty dataframe with root_id columns
         root_id_columns = [
@@ -996,7 +1001,7 @@ def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
     cg_client = chunkedgraph_cache.init_pcg(pcg_table_name)
 
     # filter missing root_ids and lookup root_ids if missing or zero
-    mask = np.logical_and.reduce(
+    mask = np.logical_or.reduce(
         [(root_ids_df[col].isna() | (root_ids_df[col] == 0)) for col in cols]
     )
     missing_root_rows = root_ids_df.loc[mask]
