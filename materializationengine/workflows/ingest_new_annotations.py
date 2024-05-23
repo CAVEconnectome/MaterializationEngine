@@ -951,8 +951,7 @@ def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
     drop_col_names = list(
         supervoxel_df.loc[:, supervoxel_df.columns.str.endswith("position")]
     )
-    supervoxel_df = supervoxel_df.drop(drop_col_names, 1)
-
+    supervoxel_df = supervoxel_df.drop(labels=drop_col_names, axis=1)
     AnnotationModel = create_annotation_model(mat_metadata, with_crud_columns=True)
     SegmentationModel = create_segmentation_model(mat_metadata)
 

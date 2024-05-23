@@ -27,6 +27,8 @@ attrs==23.2.0
     #   jsonschema
 billiard==4.2.0
     # via celery
+blinker==1.8.2
+    # via flask
 blosc2==2.6.2
     # via tables
 boto3==1.34.112
@@ -125,7 +127,7 @@ fastremap==1.14.1
     # via
     #   cloud-volume
     #   crackle-codec
-flask==2.0.2
+flask==2.3.3
     # via
     #   -r requirements.in
     #   flask-admin

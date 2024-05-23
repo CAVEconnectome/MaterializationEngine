@@ -535,7 +535,7 @@ def calc_min_enclosing_and_sub_volumes(
                             [outside_max[0], global_bbox[0, 1] - 1, outside_max[2]],
                         ]
                     )
-                )["chunk_size"]
+                )
             if outside_max[1] > global_bbox[1, 1]:
                 sub_volumes.append(
                     np.array(
