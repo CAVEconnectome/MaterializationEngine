@@ -234,7 +234,9 @@ class ProcessNewAnnotationsTableResource(Resource):
         return 200
 
 
-@mat_bp.route("/materialize/run/dense_lookup_root_ids/datastack/<string:datastack_name>")
+@mat_bp.route(
+    "/materialize/run/dense_lookup_root_ids/datastack/<string:datastack_name>"
+)
 class LookupDenseMissingRootIdsResource(Resource):
     @reset_auth
     @auth_requires_admin
@@ -255,11 +257,15 @@ class LookupDenseMissingRootIdsResource(Resource):
         return 200
 
 
-@mat_bp.route("/materialize/run/sparse_lookup_root_ids/datastack/<string:datastack_name>/table/<string:table_name>")
+@mat_bp.route(
+    "/materialize/run/sparse_lookup_root_ids/datastack/<string:datastack_name>/table/<string:table_name>"
+)
 class LookupSparseMissingRootIdsResource(Resource):
     @reset_auth
     @auth_requires_admin
-    @mat_bp.doc("Find null root ids in table and lookup new root ids", security="apikey")
+    @mat_bp.doc(
+        "Find null root ids in table and lookup new root ids", security="apikey"
+    )
     def post(self, datastack_name: str, table_name: str):
         """Finds null root ids in a given table and lookups new root ids
         using last updated time stamp.
@@ -273,7 +279,9 @@ class LookupSparseMissingRootIdsResource(Resource):
         )
 
         datastack_info = get_datastack_info(datastack_name)
-        process_sparse_missing_roots_workflow.s(datastack_info, table_name).apply_async()
+        process_sparse_missing_roots_workflow.s(
+            datastack_info, table_name
+        ).apply_async()
         return 200
 
 
@@ -685,6 +693,7 @@ class CreateVirtualPublicVersionResource(Resource):
             expires_on=expiration_timestamp,
             parent_version=analysis_version.id,
             status="AVAILABLE",
+            is_merged=analysis_version.is_merged,
         )
 
         session.add(virtual_analysis_version)
