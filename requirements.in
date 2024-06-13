@@ -27,6 +27,6 @@ gcsfs>=0.8.0
 pyarrow
 flask_cors
 emannotationschemas>=5.8.0
-dynamicannotationdb>=5.7.2
+dynamicannotationdb==5.9.1
 nglui>=2.10.1
 Flask-Limiter[redis]
