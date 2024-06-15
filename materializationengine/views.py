@@ -481,7 +481,9 @@ def generic_report(datastack_name, id):
         parent_version = session.query(AnalysisVersion).get(parent_version_id)
         target_version = datastack_name
         datastack_name = parent_version.datastack
-        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
 
     mat_db_name = f"{datastack_name}__mat{table.analysisversion.version}"
     anno_metadata = db.database.get_table_metadata(table.table_name)
