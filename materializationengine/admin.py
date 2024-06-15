@@ -2,7 +2,7 @@ from flask_admin import Admin, AdminIndexView, BaseView, expose
 from flask_admin.contrib.sqla import ModelView
 from dynamicannotationdb.models import AnalysisVersion, AnalysisTable
 from flask import request, current_app, g, render_template
-from middle_auth_client import auth_required
+from middle_auth_client import auth_required, auth_requires_admin
 from dynamicannotationdb.migration import DynamicMigration, run_alembic_migration
 from sqlalchemy.engine.url import make_url
 from materializationengine.info_client import (
@@ -55,13 +55,13 @@ class MigrationView(BaseView):
         return render_template("admin/403.html"), 403
 
     @expose("/")
-    @auth_required
+    @auth_requires_admin
     def index(self):
         aligned_volumes = get_allowed_aligned_volumes()
         return self.render("admin/migration.html", aligned_volumes=aligned_volumes)
 
     @expose("/migrate_static_schemas", methods=["POST"])
-    @auth_required
+    @auth_requires_admin
     def migrate_static_schemas(self):
         sql_url = request.form.get("sql_url")
         aligned_volume = request.form.get("aligned_volume")
@@ -75,7 +75,7 @@ class MigrationView(BaseView):
         )
 
     @expose("/migrate_annotation_schemas", methods=["POST"])
-    @auth_required
+    @auth_requires_admin
     def migrate_annotation_schemas(self):
         sql_url = request.form.get("sql_url")
         aligned_volume = request.form.get("aligned_volume")
@@ -89,7 +89,7 @@ class MigrationView(BaseView):
         )
 
     @expose("/migrate_foreign_key_constraints", methods=["POST"])
-    @auth_required
+    @auth_requires_admin
     def migrate_foreign_key_constraints(self):
         sql_url = request.form.get("sql_url")
         aligned_volume = request.form.get("aligned_volume")
