@@ -138,7 +138,9 @@ flask-accepts==0.18.4
 flask-admin==1.6.0
     # via -r requirements.in
 flask-cors==3.0.10
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   emannotationschemas
 flask-limiter[redis]==3.3.0
     # via -r requirements.in
 flask-marshmallow==0.14.0
@@ -514,7 +516,7 @@ wtforms==3.0.1
     # via flask-admin
 yarl==1.7.2
     # via aiohttp
-zipp==3.7.0
+zipp==3.19.1
     # via
     #   importlib-metadata
     #   importlib-resources
