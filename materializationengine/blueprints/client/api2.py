@@ -1,7 +1,7 @@
 import pytz
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
-from cachetools import TTLCache, cached
+from cachetools import TTLCache, cached, LRUCache
 from flask import abort, request, current_app, g
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
@@ -38,6 +38,7 @@ from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.blueprints.client.common import (
     handle_complex_query,
     generate_complex_query_dataframe,
+    generate_simple_query_dataframe,
     handle_simple_query,
     validate_table_args,
     get_analysis_version_and_table,
@@ -919,6 +920,7 @@ class FrozenTableQuery(Resource):
 )
 class MatTableSegmentInfo(Resource):
     method_decorators = [
+        cached(LRUCache(maxsize=256)),
         validate_datastack,
         limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
@@ -970,72 +972,95 @@ class MatTableSegmentInfo(Resource):
             if table_metadata["reference_table"]:
                 ref_table = table_metadata["reference_table"]
                 suffix_map = {table_name: "", ref_table: "_ref"}
-                tables = [table_name, "target_id", ref_table, "id"]
-                data = {"tables": [tables], "suffix_map": suffix_map}
+                tables = [[table_name, "target_id"], [ref_table, "id"]]
+                data = {
+                    "tables": tables,
+                    "suffix_map": suffix_map,
+                    "desired_resolution": [1, 1, 1],
+                }
 
-                df = generate_complex_query_dataframe(
+                df, warnings, column_names = generate_complex_query_dataframe(
                     datastack_name,
                     version,
                     target_datastack,
                     target_version,
                     {},
                     data,
-                    convert_desired_resolution=False,
+                    convert_desired_resolution=True,
                 )
-
-                # find the first column that ends with _root_id using next
-                try:
-                    root_id_col = next(
-                        (col for col in df.columns if col.endswith("_root_id")), None
-                    )
-                except StopIteration:
-                    return "No root_id column found", 400
-
-                # pick only the first row with each root_id
-                # df = df.drop_duplicates(subset=[root_id_col])
-                # drop any row with root_id =0
-                df = df[df[root_id_col] != 0]
-
-                # iterate through the columns and put them into
-                # categories of 'tags' for strings, 'numerical' for numbers
-
-                tags = []
-                numerical = []
-                for col in df.columns:
-                    if col.endswith("_supervoxel_id"):
-                        continue
-                    if col.endswith("_position"):
-                        continue
-
-                    # if it is a timestamp, we don't want to include it
-                    if df[col].dtype == "datetime64[ns]":
-                        continue
-                    if col == "id":
-                        continue
-                    if col == "target_id":
-                        continue
-                    if col == "id_ref":
-                        continue
-
-                    if df[col].dtype == "object":
-                        tags.append(col)
-                    else:
-                        numerical.append(col)
-                seg_prop = nglui.segmentprops.SegmentProperties.from_dataframe(
-                    df, id_col=root_id_col, tag_value_cols=tags, label_col="id"
+            else:
+                df, warnings, column_names = generate_simple_query_dataframe(
+                    datastack_name,
+                    version,
+                    table_name,
+                    target_datastack,
+                    target_version,
+                    {},
+                    {"desired_resolution": [1, 1, 1]},
+                    convert_desired_resolution=True,
                 )
-                return seg_prop.to_dict(), 200
+            # find the first column that ends with _root_id using next
+            try:
+                root_id_col = next(
+                    (col for col in df.columns if col.endswith("_root_id")), None
+                )
+            except StopIteration:
+                return "No root_id column found", 400
 
-        return handle_simple_query(
-            datastack_name,
-            version,
-            table_name,
-            target_datastack,
-            target_version,
-            args,
-            data,
-            convert_desired_resolution=True,
-        )
+            # pick only the first row with each root_id
+            # df = df.drop_duplicates(subset=[root_id_col])
+            # drop any row with root_id =0
+            df = df[df[root_id_col] != 0]
+
+            # iterate through the columns and put them into
+            # categories of 'tags' for strings, 'numerical' for numbers
+
+            tags = []
+            numerical = []
+            for col in df.columns:
+                if col.endswith("_supervoxel_id"):
+                    continue
+                if col.endswith("_root_id"):
+                    continue
+                if col.endswith("_position"):
+                    continue
+
+                # if it is a timestamp, we don't want to include it
+                if df[col].dtype == "datetime64[ns]":
+                    continue
+                if col == "superceded_id":
+                    continue
+                if col == "id":
+                    continue
+                if col == "target_id":
+                    continue
+                if col == "id_ref":
+                    continue
+                if col == "valid":
+                    continue
+                if col == "valid_ref":
+                    continue
+                if col == "created_ref":
+                    continue
+                if col == "created":
+                    continue
+                if df[col].dtype == "object":
+                    tags.append(col)
+                    print(f"tag col: {col}")
+                else:
+                    # if the column is all nan's skip it
+                    if df[col].isnull().all():
+                        continue
+                    numerical.append(col)
+                    print(f"numerical col: {col}")
+            seg_prop = nglui.segmentprops.SegmentProperties.from_dataframe(
+                df,
+                id_col=root_id_col,
+                tag_value_cols=tags,
+                number_cols=numerical,
+                label_col="id",
+            )
+            return seg_prop.to_dict(), 200
 
 
 @client_bp.expect(query_parser)

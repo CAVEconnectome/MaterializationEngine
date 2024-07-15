@@ -184,7 +184,7 @@ def validate_table_args(tables, datastack_name, version):
             )
 
 
-def handle_simple_query(
+def generate_simple_query_dataframe(
     datastack_name,
     version,
     table_name,
@@ -277,6 +277,30 @@ def handle_simple_query(
     if len(df) == limit:
         warnings.append(f'201 - "Limited query to {limit} rows')
     warnings = update_notice_text_warnings(ann_md, warnings, table_name)
+
+    return df, warnings, column_names
+
+
+def handle_simple_query(
+    datastack_name,
+    version,
+    table_name,
+    target_datastack,
+    target_version,
+    args,
+    data,
+    convert_desired_resolution=False,
+):
+    df, warnings, column_names = generate_simple_query_dataframe(
+        datastack_name,
+        version,
+        table_name,
+        target_datastack,
+        target_version,
+        args,
+        data,
+        convert_desired_resolution=convert_desired_resolution,
+    )
     return create_query_response(
         df,
         warnings=warnings,
