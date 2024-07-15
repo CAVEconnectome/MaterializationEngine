@@ -288,7 +288,7 @@ def handle_simple_query(
     )
 
 
-def handle_complex_query(
+def generate_complex_query_dataframe(
     datastack_name,
     version,
     target_datastack,
@@ -446,6 +446,27 @@ def handle_complex_query(
     if len(df) == limit:
         warnings.append(f'201 - "Limited query to {limit} rows')
 
+    return df, warnings, column_names
+
+
+def handle_complex_query(
+    datastack_name,
+    version,
+    target_datastack,
+    target_version,
+    args,
+    data,
+    convert_desired_resolution=False,
+):
+    df, warnings, column_names = generate_complex_query_dataframe(
+        datastack_name,
+        version,
+        target_datastack,
+        target_version,
+        args,
+        data,
+        convert_desired_resolution=convert_desired_resolution,
+    )
     return create_query_response(
         df,
         warnings=warnings,

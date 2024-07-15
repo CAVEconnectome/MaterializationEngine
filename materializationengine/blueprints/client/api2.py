@@ -14,6 +14,7 @@ from typing import List
 import werkzeug
 from sqlalchemy.sql.sqltypes import String, Integer, Float, DateTime, Boolean, Numeric
 from geoalchemy2.types import Geometry
+import nglui
 from materializationengine.blueprints.client.datastack import validate_datastack
 from materializationengine.blueprints.client.new_query import (
     remap_query,
@@ -36,6 +37,7 @@ from materializationengine.models import MaterializedMetadata
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.blueprints.client.common import (
     handle_complex_query,
+    generate_complex_query_dataframe,
     handle_simple_query,
     validate_table_args,
     get_analysis_version_and_table,
@@ -900,6 +902,130 @@ class FrozenTableQuery(Resource):
         """
         args = query_parser.parse_args()
         data = request.parsed_obj
+        return handle_simple_query(
+            datastack_name,
+            version,
+            table_name,
+            target_datastack,
+            target_version,
+            args,
+            data,
+            convert_desired_resolution=True,
+        )
+
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/info"
+)
+class MatTableSegmentInfo(Resource):
+    method_decorators = [
+        validate_datastack,
+        limit_by_category("query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    def get(
+        self,
+        datastack_name: str,
+        version: int,
+        table_name: str,
+        target_datastack: str = None,
+        target_version: int = None,
+    ):
+        """endpoint for getting a segment properties object for a table
+
+        Args:
+            datastack_name (str): datastack name
+            version (int): version number
+            table_name (str): table name
+
+        Returns:
+            json: a precomputed json object with the segment info for this table
+        """
+        # check how many rows are in this table
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+
+        validate_table_args([table_name], target_datastack, target_version)
+        db_name = f"{datastack_name}__mat{version}"
+
+        # if the database is a split database get a split model
+        # and if its not get a flat model
+
+        session = sqlalchemy_cache.get(db_name)
+
+        mat_row_count = (
+            session.query(MaterializedMetadata.row_count)
+            .filter(MaterializedMetadata.table_name == table_name)
+            .scalar()
+        )
+        if mat_row_count > current_app.config["QUERY_LIMIT_SIZE"]:
+            return "Table too large to return info", 400
+        else:
+            db = dynamic_annotation_cache.get_db(aligned_volume_name)
+            # check if this is a reference table
+            table_metadata = db.database.get_table_metadata(table_name)
+            if table_metadata["reference_table"]:
+                ref_table = table_metadata["reference_table"]
+                suffix_map = {table_name: "", ref_table: "_ref"}
+                tables = [table_name, "target_id", ref_table, "id"]
+                data = {"tables": [tables], "suffix_map": suffix_map}
+
+                df = generate_complex_query_dataframe(
+                    datastack_name,
+                    version,
+                    target_datastack,
+                    target_version,
+                    {},
+                    data,
+                    convert_desired_resolution=False,
+                )
+
+                # find the first column that ends with _root_id using next
+                try:
+                    root_id_col = next(
+                        (col for col in df.columns if col.endswith("_root_id")), None
+                    )
+                except StopIteration:
+                    return "No root_id column found", 400
+
+                # pick only the first row with each root_id
+                # df = df.drop_duplicates(subset=[root_id_col])
+                # drop any row with root_id =0
+                df = df[df[root_id_col] != 0]
+
+                # iterate through the columns and put them into
+                # categories of 'tags' for strings, 'numerical' for numbers
+
+                tags = []
+                numerical = []
+                for col in df.columns:
+                    if col.endswith("_supervoxel_id"):
+                        continue
+                    if col.endswith("_position"):
+                        continue
+
+                    # if it is a timestamp, we don't want to include it
+                    if df[col].dtype == "datetime64[ns]":
+                        continue
+                    if col == "id":
+                        continue
+                    if col == "target_id":
+                        continue
+                    if col == "id_ref":
+                        continue
+
+                    if df[col].dtype == "object":
+                        tags.append(col)
+                    else:
+                        numerical.append(col)
+                seg_prop = nglui.segmentprops.SegmentProperties.from_dataframe(
+                    df, id_col=root_id_col, tag_value_cols=tags, label_col="id"
+                )
+                return seg_prop.to_dict(), 200
+
         return handle_simple_query(
             datastack_name,
             version,
