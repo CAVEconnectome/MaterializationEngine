@@ -10,6 +10,8 @@ from middle_auth_client import (
 )
 import pandas as pd
 import numpy as np
+from marshmallow import fields as mm_fields
+from emannotationschemas.schemas.base import SegmentationField, PostGISField
 import datetime
 from typing import List
 import werkzeug
@@ -970,6 +972,9 @@ class MatTableSegmentInfo(Resource):
             db = dynamic_annotation_cache.get_db(aligned_volume_name)
             # check if this is a reference table
             table_metadata = db.database.get_table_metadata(table_name)
+            schema = db.schema.get_flattened_schema(table_metadata["schema_type"])
+            fields = schema._declared_fields
+
             if table_metadata["reference_table"]:
                 ref_table = table_metadata["reference_table"]
                 suffix_map = {table_name: "", ref_table: "_ref"}
@@ -989,6 +994,12 @@ class MatTableSegmentInfo(Resource):
                     data,
                     convert_desired_resolution=True,
                 )
+                ref_table_metadata = db.database.get_table_metadata(ref_table)
+                ref_schema = db.schema.get_flattened_schema(
+                    ref_table_metadata["schema_type"]
+                )
+                ref_fields = ref_schema._declared_fields
+
             else:
                 df, warnings, column_names = generate_simple_query_dataframe(
                     datastack_name,
@@ -1000,6 +1011,7 @@ class MatTableSegmentInfo(Resource):
                     {"desired_resolution": [1, 1, 1]},
                     convert_desired_resolution=True,
                 )
+
             # find the first column that ends with _root_id using next
             try:
                 root_id_col = next(
@@ -1019,45 +1031,52 @@ class MatTableSegmentInfo(Resource):
             tags = []
             numerical = []
             bool_tags = []
-            for col in df.columns:
-                if col.endswith("_supervoxel_id"):
-                    continue
-                if col.endswith("_root_id"):
-                    continue
-                if col.endswith("_position"):
-                    continue
 
-                # if it is a timestamp, we don't want to include it
-                if df[col].dtype == "datetime64[ns]":
-                    continue
-                if col == "superceded_id":
-                    continue
-                if col == "id":
-                    continue
-                if col == "target_id":
-                    continue
-                if col == "id_ref":
-                    continue
-                if col == "valid":
-                    continue
-                if col == "valid_ref":
-                    continue
-                if col == "created_ref":
-                    continue
-                if col == "created":
-                    continue
-                if df[col].dtype == "object":
-                    tags.append(col)
-                    print(f"tag col: {col}")
-                elif df[col].dtype == bool:
-                    bool_tags.append(col)
-                    print(f"bool tag col: {col}")
-                else:
-                    # if the column is all nan's skip it
-                    if df[col].isnull().all():
+            def process_fields(fields, column_names, tags, bool_tags, numerical):
+                for field_name, field in fields.items():
+                    col = column_names[field_name]
+
+                    if (
+                        field_name.endswith("_supervoxel_id")
+                        or field_name.endswith("_root_id")
+                        or field_name == "id"
+                        or field_name == "valid"
+                        or field_name == "target_id"
+                    ):
                         continue
-                    numerical.append(col)
-                    print(f"numerical col: {col}")
+
+                    if isinstance(field, mm_fields.String):
+                        tags.append(col)
+                        print(f"tag col: {col}")
+                    elif isinstance(field, mm_fields.Boolean):
+                        df[col] = df[col].astype(bool)
+                        bool_tags.append(col)
+                        print(f"bool tag col: {col}")
+                    elif isinstance(field, PostGISField):
+                        # if all the values are NaNs skip this column
+                        if df[col + "_x"].isnull().all():
+                            continue
+                        numerical.append(col + "_x")
+                        numerical.append(col + "_y")
+                        numerical.append(col + "_z")
+                        print(f"numerical cols: {col}_(x,y,z)")
+                    elif isinstance(field, mm_fields.Number):
+                        if df[col].isnull().all():
+                            continue
+                        numerical.append(col)
+                        print(f"numerical col: {col}")
+
+            process_fields(fields, column_names[table_name], tags, bool_tags, numerical)
+
+            if table_metadata["reference_table"]:
+                process_fields(
+                    ref_fields,
+                    column_names[ref_table],
+                    tags,
+                    bool_tags,
+                    numerical,
+                )
+
             seg_prop = nglui.segmentprops.SegmentProperties.from_dataframe(
                 df,
                 id_col=root_id_col,
