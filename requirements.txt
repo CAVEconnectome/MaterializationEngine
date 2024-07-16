@@ -314,7 +314,7 @@ networkx==2.5
     #   cloud-volume
 neuroglancer==2.39.2
     # via nglui
-nglui==3.2.1
+nglui==3.3.1
     # via -r requirements.in
 numexpr==2.10.1
     # via tables

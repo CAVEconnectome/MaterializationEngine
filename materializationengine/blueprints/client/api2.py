@@ -9,6 +9,7 @@ from middle_auth_client import (
     auth_requires_permission,
 )
 import pandas as pd
+import numpy as np
 import datetime
 from typing import List
 import werkzeug
@@ -64,7 +65,7 @@ authorizations = {
 }
 
 client_bp = Namespace(
-    "Materialization Client",
+    "Materialization Client2",
     authorizations=authorizations,
     description="Materialization Client",
 )
@@ -1017,6 +1018,7 @@ class MatTableSegmentInfo(Resource):
 
             tags = []
             numerical = []
+            bool_tags = []
             for col in df.columns:
                 if col.endswith("_supervoxel_id"):
                     continue
@@ -1047,6 +1049,9 @@ class MatTableSegmentInfo(Resource):
                 if df[col].dtype == "object":
                     tags.append(col)
                     print(f"tag col: {col}")
+                elif df[col].dtype == bool:
+                    bool_tags.append(col)
+                    print(f"bool tag col: {col}")
                 else:
                     # if the column is all nan's skip it
                     if df[col].isnull().all():
@@ -1057,6 +1062,7 @@ class MatTableSegmentInfo(Resource):
                 df,
                 id_col=root_id_col,
                 tag_value_cols=tags,
+                tag_bool_cols=bool_tags,
                 number_cols=numerical,
                 label_col="id",
             )

@@ -6,6 +6,7 @@ from struct import pack
 
 import pandas as pd
 import numpy as np
+import nglui
 from dynamicannotationdb.models import (
     AnalysisTable,
     AnalysisVersion,
@@ -242,6 +243,39 @@ def version_error(datastack_name: str, id: int):
         )
 
 
+def make_seg_prop_ng_link(datastack_name, table_name, version, client):
+    seg_layer = client.info.segmentation_source(format_for="neuroglancer")
+    seg_layer.replace("graphene://https://", "graphene://middleauth+https://")
+    seginfo_url = url_for(
+        "api.Materialization Client2_mat_table_segment_info",
+        datastack_name=datastack_name,
+        version=version,
+        table_name=table_name,
+        _external=True,
+    )
+
+    seg_info_source = f"precomputed://middleauth+{seginfo_url}".format(
+        seginfo_url=seginfo_url
+    )
+    # strip off the /info
+    seg_info_source = seg_info_source[:-5]
+
+    seg_layer = nglui.statebuilder.SegmentationLayerConfig(
+        source=[seg_layer, seg_info_source], name="seg"
+    )
+    img_layer = nglui.statebuilder.ImageLayerConfig(
+        source=client.info.image_source(), name="img"
+    )
+    sb = nglui.statebuilder.StateBuilder([img_layer, seg_layer], client=client)
+    url_link = sb.render_state(
+        None,
+        return_as="url",
+        url_prefix="https://spelunker.cave-explorer.org",
+        target_site="mainline",
+    )
+    return url_link
+
+
 @views_bp.route("/datastack/<datastack_name>/version/<int:id>")
 @auth_requires_permission("view", table_arg="datastack_name")
 def version_view(datastack_name: str, id: int):
@@ -273,15 +307,21 @@ def version_view(datastack_name: str, id: int):
 
     column_order = schema.declared_fields.keys()
     schema_url = "<a href='{}/schema/views/type/{}/view'>{}</a>"
+    client = caveclient.CAVEclient(
+        datastack_name, server_address=current_app.config["GLOBAL_SERVER_URL"]
+    )
+    df["ng_link"] = df.apply(
+        lambda x: f"<a href='{make_seg_prop_ng_link(datastack_name, x.table_name, version.version, client)}'>seg prop link</a>",
+        axis=1,
+    )
     df["schema"] = df.schema.map(
         lambda x: schema_url.format(current_app.config["GLOBAL_SERVER_URL"], x, x)
     )
     df["table_name"] = df.table_name.map(
         lambda x: f"<a href='/annotation/views/aligned_volume/{aligned_volume_name}/table/{x}'>{x}</a>"
     )
-    df = df.reindex(columns=column_order)
 
-    logging.info(version)
+    df = df.reindex(columns=list(column_order) + ["ng_link"])
 
     classes = ["table table-borderless"]
     with pd.option_context("display.max_colwidth", -1):
