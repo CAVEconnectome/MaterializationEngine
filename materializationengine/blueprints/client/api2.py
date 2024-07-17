@@ -1076,6 +1076,24 @@ class MatTableSegmentInfo(Resource):
                     bool_tags,
                     numerical,
                 )
+            # Look across the tag columns and make sure that there are no
+            # duplicate string values across distinct columns
+            unique_vals = {}
+            for tag in tags:
+                unique_vals[tag] = df[tag].unique()
+            # find all the duplicate values across columns
+            vals, counts = np.unique(
+                np.concatenate([v for v in unique_vals.values()]), return_counts=True
+            )
+            duplicates = vals[counts > 1]
+
+            # iterate through the tags and replace any duplicate
+            # values in the dataframe with a unique value,
+            # based on preprending the column name
+            for tag in tags:
+                for dup in duplicates:
+                    if dup in unique_vals[tag]:
+                        df[tag] = df[tag].replace(dup, f"{tag}:{dup}")
 
             seg_prop = nglui.segmentprops.SegmentProperties.from_dataframe(
                 df,
