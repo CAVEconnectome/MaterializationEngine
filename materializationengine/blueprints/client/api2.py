@@ -918,6 +918,107 @@ class FrozenTableQuery(Resource):
         )
 
 
+def process_fields(df, fields, column_names, tags, bool_tags, numerical):
+    for field_name, field in fields.items():
+        col = column_names[field_name]
+
+        if (
+            field_name.endswith("_supervoxel_id")
+            or field_name.endswith("_root_id")
+            or field_name == "id"
+            or field_name == "valid"
+            or field_name == "target_id"
+        ):
+            continue
+
+        if isinstance(field, mm_fields.String):
+            tags.append(col)
+            print(f"tag col: {col}")
+        elif isinstance(field, mm_fields.Boolean):
+            df[col] = df[col].astype(bool)
+            bool_tags.append(col)
+            print(f"bool tag col: {col}")
+        elif isinstance(field, PostGISField):
+            # if all the values are NaNs skip this column
+            if df[col + "_x"].isnull().all():
+                continue
+            numerical.append(col + "_x")
+            numerical.append(col + "_y")
+            numerical.append(col + "_z")
+            print(f"numerical cols: {col}_(x,y,z)")
+        elif isinstance(field, mm_fields.Number):
+            if df[col].isnull().all():
+                continue
+            numerical.append(col)
+            print(f"numerical col: {col}")
+
+
+def preprocess_dataframe(df, table_name, aligned_volume_name, column_names):
+    db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    # check if this is a reference table
+    table_metadata = db.database.get_table_metadata(table_name)
+    schema = db.schema.get_flattened_schema(table_metadata["schema_type"])
+    fields = schema._declared_fields
+
+    if table_metadata["reference_table"]:
+        ref_table = table_metadata["reference_table"]
+        ref_table_metadata = db.database.get_table_metadata(ref_table)
+        ref_schema = db.schema.get_flattened_schema(ref_table_metadata["schema_type"])
+        ref_fields = ref_schema._declared_fields
+
+    # find the first column that ends with _root_id using next
+    try:
+        root_id_col = next(
+            (col for col in df.columns if col.endswith("_root_id")), None
+        )
+    except StopIteration:
+        raise ValueError("No root_id column found in dataframe")
+
+    # pick only the first row with each root_id
+    # df = df.drop_duplicates(subset=[root_id_col])
+    # drop any row with root_id =0
+    df = df[df[root_id_col] != 0]
+
+    # iterate through the columns and put them into
+    # categories of 'tags' for strings, 'numerical' for numbers
+
+    tags = []
+    numerical = []
+    bool_tags = []
+
+    process_fields(df, fields, column_names[table_name], tags, bool_tags, numerical)
+
+    if table_metadata["reference_table"]:
+        process_fields(
+            df,
+            ref_fields,
+            column_names[ref_table],
+            tags,
+            bool_tags,
+            numerical,
+        )
+    # Look across the tag columns and make sure that there are no
+    # duplicate string values across distinct columns
+    unique_vals = {}
+    for tag in tags:
+        unique_vals[tag] = df[tag].unique()
+    # find all the duplicate values across columns
+    vals, counts = np.unique(
+        np.concatenate([v for v in unique_vals.values()]), return_counts=True
+    )
+    duplicates = vals[counts > 1]
+
+    # iterate through the tags and replace any duplicate
+    # values in the dataframe with a unique value,
+    # based on preprending the column name
+    for tag in tags:
+        for dup in duplicates:
+            if dup in unique_vals[tag]:
+                df[tag] = df[tag].replace(dup, f"{tag}:{dup}")
+
+    return df, tags, bool_tags, numerical, root_id_col
+
+
 @client_bp.route(
     "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/info"
 )
@@ -972,8 +1073,6 @@ class MatTableSegmentInfo(Resource):
             db = dynamic_annotation_cache.get_db(aligned_volume_name)
             # check if this is a reference table
             table_metadata = db.database.get_table_metadata(table_name)
-            schema = db.schema.get_flattened_schema(table_metadata["schema_type"])
-            fields = schema._declared_fields
 
             if table_metadata["reference_table"]:
                 ref_table = table_metadata["reference_table"]
@@ -994,11 +1093,6 @@ class MatTableSegmentInfo(Resource):
                     data,
                     convert_desired_resolution=True,
                 )
-                ref_table_metadata = db.database.get_table_metadata(ref_table)
-                ref_schema = db.schema.get_flattened_schema(
-                    ref_table_metadata["schema_type"]
-                )
-                ref_fields = ref_schema._declared_fields
 
             else:
                 df, warnings, column_names = generate_simple_query_dataframe(
@@ -1011,89 +1105,9 @@ class MatTableSegmentInfo(Resource):
                     {"desired_resolution": [1, 1, 1]},
                     convert_desired_resolution=True,
                 )
-
-            # find the first column that ends with _root_id using next
-            try:
-                root_id_col = next(
-                    (col for col in df.columns if col.endswith("_root_id")), None
-                )
-            except StopIteration:
-                return "No root_id column found", 400
-
-            # pick only the first row with each root_id
-            # df = df.drop_duplicates(subset=[root_id_col])
-            # drop any row with root_id =0
-            df = df[df[root_id_col] != 0]
-
-            # iterate through the columns and put them into
-            # categories of 'tags' for strings, 'numerical' for numbers
-
-            tags = []
-            numerical = []
-            bool_tags = []
-
-            def process_fields(fields, column_names, tags, bool_tags, numerical):
-                for field_name, field in fields.items():
-                    col = column_names[field_name]
-
-                    if (
-                        field_name.endswith("_supervoxel_id")
-                        or field_name.endswith("_root_id")
-                        or field_name == "id"
-                        or field_name == "valid"
-                        or field_name == "target_id"
-                    ):
-                        continue
-
-                    if isinstance(field, mm_fields.String):
-                        tags.append(col)
-                        print(f"tag col: {col}")
-                    elif isinstance(field, mm_fields.Boolean):
-                        df[col] = df[col].astype(bool)
-                        bool_tags.append(col)
-                        print(f"bool tag col: {col}")
-                    elif isinstance(field, PostGISField):
-                        # if all the values are NaNs skip this column
-                        if df[col + "_x"].isnull().all():
-                            continue
-                        numerical.append(col + "_x")
-                        numerical.append(col + "_y")
-                        numerical.append(col + "_z")
-                        print(f"numerical cols: {col}_(x,y,z)")
-                    elif isinstance(field, mm_fields.Number):
-                        if df[col].isnull().all():
-                            continue
-                        numerical.append(col)
-                        print(f"numerical col: {col}")
-
-            process_fields(fields, column_names[table_name], tags, bool_tags, numerical)
-
-            if table_metadata["reference_table"]:
-                process_fields(
-                    ref_fields,
-                    column_names[ref_table],
-                    tags,
-                    bool_tags,
-                    numerical,
-                )
-            # Look across the tag columns and make sure that there are no
-            # duplicate string values across distinct columns
-            unique_vals = {}
-            for tag in tags:
-                unique_vals[tag] = df[tag].unique()
-            # find all the duplicate values across columns
-            vals, counts = np.unique(
-                np.concatenate([v for v in unique_vals.values()]), return_counts=True
+            df, tags, bool_tags, numerical, root_id_col = preprocess_dataframe(
+                df, table_name, aligned_volume_name, column_names
             )
-            duplicates = vals[counts > 1]
-
-            # iterate through the tags and replace any duplicate
-            # values in the dataframe with a unique value,
-            # based on preprending the column name
-            for tag in tags:
-                for dup in duplicates:
-                    if dup in unique_vals[tag]:
-                        df[tag] = df[tag].replace(dup, f"{tag}:{dup}")
 
             seg_prop = nglui.segmentprops.SegmentProperties.from_dataframe(
                 df,
@@ -1104,6 +1118,70 @@ class MatTableSegmentInfo(Resource):
                 label_col="id",
             )
             return seg_prop.to_dict(), 200
+
+
+@client_bp.route("/datastack/<string:datastack_name>/table/<string:table_name>/info")
+class MatTableSegmentInfoLive(Resource):
+    method_decorators = [
+        cached(TTLCache(maxsize=256, ttl=120)),
+        validate_datastack,
+        limit_by_category("query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    def get(
+        self,
+        datastack_name: str,
+        table_name: str,
+        target_datastack: str = None,
+        target_version: int = None,
+    ):
+        """endpoint for getting a segment properties object for a table
+           based on a live query
+        Args:
+            datastack_name (str): datastack name
+            table_name (str): table name
+
+        Returns:
+            json: a precomputed json object with the segment info for this table
+        """
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        # check if this is a reference table
+        table_metadata = db.database.get_table_metadata(table_name)
+
+        user_data = {
+            "table": table_name,
+            "timestamp": datetime.datetime.now(tz=pytz.utc),
+            "suffixes": {table_name: ""},
+            "desired_resolution": [1, 1, 1],
+        }
+
+        if table_metadata["reference_table"]:
+            ref_table = table_metadata["reference_table"]
+            user_data["suffixes"][ref_table] = "_ref"
+            user_data["joins"] = [[table_name, "target_id", ref_table, "id"]]
+
+        return_vals = assemble_live_query_dataframe(
+            user_data, datastack_name=datastack_name, args={}
+        )
+        df, column_names, _, _, _ = return_vals
+
+        vals = preprocess_dataframe(df, table_name, aligned_volume_name, column_names)
+        df, tags, bool_tags, numerical, root_id_col = vals
+
+        seg_prop = nglui.segmentprops.SegmentProperties.from_dataframe(
+            df,
+            id_col=root_id_col,
+            tag_value_cols=tags,
+            tag_bool_cols=bool_tags,
+            number_cols=numerical,
+            label_col="id",
+        )
+        return seg_prop.to_dict(), 200
 
 
 @client_bp.expect(query_parser)
@@ -1214,6 +1292,113 @@ class TableUniqueStringValues(Resource):
         return unique_values, 200
 
 
+def assemble_live_query_dataframe(user_data, datastack_name, args):
+    user_data["limit"] = min(
+        current_app.config["QUERY_LIMIT_SIZE"],
+        user_data.get("limit", current_app.config["QUERY_LIMIT_SIZE"]),
+    )
+    past_ver, future_ver, aligned_vol = get_closest_versions(
+        datastack_name, user_data["timestamp"]
+    )
+    db = dynamic_annotation_cache.get_db(aligned_vol)
+    check_read_permission(db, user_data["table"])
+    allow_invalid_root_ids = args.get("allow_invalid_root_ids", False)
+    # TODO add table owner warnings
+    # if has_joins:
+    #    abort(400, "we are not supporting joins yet")
+    # if future_ver is None and has_joins:
+    #    abort(400, 'we do not support joins when there is no future version')
+    # elif has_joins:
+    #     # run a future to past map version of the query
+    #     check_joins(joins)
+    #     chosen_version = future_ver
+    if (past_ver is None) and (future_ver is None):
+        abort(
+            400,
+            "there is no future or past version for this timestamp, is materialization broken?",
+        )
+    elif past_ver is not None:
+        chosen_version = past_ver
+    else:
+        chosen_version = future_ver
+
+    chosen_timestamp = pytz.utc.localize(chosen_version.time_stamp)
+
+    # map public version datastacks to their private versions
+    if chosen_version.parent_version is not None:
+        target_datastack = chosen_version.datastack
+        session = sqlalchemy_cache.get(aligned_vol)
+        target_version = (
+            session.query(AnalysisVersion)
+            .filter(AnalysisVersion.id == chosen_version.parent_version)
+            .one()
+        )
+        datastack_name = target_version.datastack
+
+        # query the AnalysisVersion with the oldest timestamp
+        newest_version = (
+            session.query(AnalysisVersion)
+            .filter(AnalysisVersion.datastack == target_datastack)
+            .order_by(AnalysisVersion.time_stamp.desc())
+            .first()
+        )
+
+        # if the users timestamp is newer than the newest version
+        # then we set the users timestamp to the newest version
+        if user_data["timestamp"] > pytz.utc.localize(newest_version.time_stamp):
+            user_data["timestamp"] = pytz.utc.localize(newest_version.time_stamp)
+
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+    cg_client = chunkedgraph_cache.get_client(pcg_table_name)
+
+    meta_db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    md = meta_db.database.get_table_metadata(user_data["table"])
+    if not user_data.get("desired_resolution", None):
+        des_res = [
+            md["voxel_resolution_x"],
+            md["voxel_resolution_y"],
+            md["voxel_resolution_z"],
+        ]
+        user_data["desired_resolution"] = des_res
+
+    modified_user_data, query_map, remap_warnings = remap_query(
+        user_data,
+        chosen_timestamp,
+        cg_client,
+        allow_invalid_root_ids,
+    )
+
+    mat_df, column_names, mat_warnings = execute_materialized_query(
+        datastack_name,
+        aligned_volume_name,
+        chosen_version.version,
+        pcg_table_name,
+        modified_user_data,
+        query_map,
+        cg_client,
+        random_sample=args.get("random_sample", None),
+        split_mode=not chosen_version.is_merged,
+    )
+
+    last_modified = pytz.utc.localize(md["last_modified"])
+    if (last_modified > chosen_timestamp) or (last_modified > user_data["timestamp"]):
+        prod_df, column_names, prod_warnings = execute_production_query(
+            aligned_volume_name,
+            pcg_table_name,
+            user_data,
+            chosen_timestamp,
+            cg_client,
+            args["allow_missing_lookups"],
+        )
+    else:
+        prod_df = None
+        prod_warnings = []
+
+    df = combine_queries(mat_df, prod_df, chosen_version, user_data, column_names)
+    df = apply_filters(df, user_data, column_names)
+    return df, column_names, mat_warnings, prod_warnings, remap_warnings
+
+
 @client_bp.expect(query_parser)
 @client_bp.route("/datastack/<string:datastack_name>/query")
 class LiveTableQuery(Resource):
@@ -1278,116 +1463,9 @@ class LiveTableQuery(Resource):
         """
         args = query_parser.parse_args()
         user_data = request.parsed_obj
-        # joins = user_data.get("join_tables", None)
-        # has_joins = joins is not None
-        user_data["limit"] = min(
-            current_app.config["QUERY_LIMIT_SIZE"],
-            user_data.get("limit", current_app.config["QUERY_LIMIT_SIZE"]),
-        )
-        past_ver, future_ver, aligned_vol = get_closest_versions(
-            datastack_name, user_data["timestamp"]
-        )
-        db = dynamic_annotation_cache.get_db(aligned_vol)
-        check_read_permission(db, user_data["table"])
-        allow_invalid_root_ids = args.get("allow_invalid_root_ids", False)
-        # TODO add table owner warnings
-        # if has_joins:
-        #    abort(400, "we are not supporting joins yet")
-        # if future_ver is None and has_joins:
-        #    abort(400, 'we do not support joins when there is no future version')
-        # elif has_joins:
-        #     # run a future to past map version of the query
-        #     check_joins(joins)
-        #     chosen_version = future_ver
-        if (past_ver is None) and (future_ver is None):
-            abort(
-                400,
-                "there is no future or past version for this timestamp, is materialization broken?",
-            )
-        elif past_ver is not None:
-            chosen_version = past_ver
-        else:
-            chosen_version = future_ver
+        return_vals = assemble_live_query_dataframe(user_data, datastack_name, args)
 
-        chosen_timestamp = pytz.utc.localize(chosen_version.time_stamp)
-
-        # map public version datastacks to their private versions
-        if chosen_version.parent_version is not None:
-            target_datastack = chosen_version.datastack
-            session = sqlalchemy_cache.get(aligned_vol)
-            target_version = (
-                session.query(AnalysisVersion)
-                .filter(AnalysisVersion.id == chosen_version.parent_version)
-                .one()
-            )
-            datastack_name = target_version.datastack
-
-            # query the AnalysisVersion with the oldest timestamp
-            newest_version = (
-                session.query(AnalysisVersion)
-                .filter(AnalysisVersion.datastack == target_datastack)
-                .order_by(AnalysisVersion.time_stamp.desc())
-                .first()
-            )
-
-            # if the users timestamp is newer than the newest version
-            # then we set the users timestamp to the newest version
-            if user_data["timestamp"] > pytz.utc.localize(newest_version.time_stamp):
-                user_data["timestamp"] = pytz.utc.localize(newest_version.time_stamp)
-
-        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-            datastack_name
-        )
-        cg_client = chunkedgraph_cache.get_client(pcg_table_name)
-
-        meta_db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        md = meta_db.database.get_table_metadata(user_data["table"])
-        if not user_data.get("desired_resolution", None):
-            des_res = [
-                md["voxel_resolution_x"],
-                md["voxel_resolution_y"],
-                md["voxel_resolution_z"],
-            ]
-            user_data["desired_resolution"] = des_res
-
-        modified_user_data, query_map, remap_warnings = remap_query(
-            user_data,
-            chosen_timestamp,
-            cg_client,
-            allow_invalid_root_ids,
-        )
-
-        mat_df, column_names, mat_warnings = execute_materialized_query(
-            datastack_name,
-            aligned_volume_name,
-            chosen_version.version,
-            pcg_table_name,
-            modified_user_data,
-            query_map,
-            cg_client,
-            random_sample=args["random_sample"],
-            split_mode=not chosen_version.is_merged,
-        )
-
-        last_modified = pytz.utc.localize(md["last_modified"])
-        if (last_modified > chosen_timestamp) or (
-            last_modified > user_data["timestamp"]
-        ):
-            prod_df, column_names, prod_warnings = execute_production_query(
-                aligned_volume_name,
-                pcg_table_name,
-                user_data,
-                chosen_timestamp,
-                cg_client,
-                args["allow_missing_lookups"],
-            )
-        else:
-            prod_df = None
-            prod_warnings = []
-
-        df = combine_queries(mat_df, prod_df, chosen_version, user_data, column_names)
-        df = apply_filters(df, user_data, column_names)
-
+        df, column_names, mat_warnings, prod_warnings, remap_warnings = return_vals
         return create_query_response(
             df,
             warnings=remap_warnings + mat_warnings + prod_warnings,
