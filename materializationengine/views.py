@@ -52,7 +52,7 @@ from nglui.statebuilder.helpers import package_state, make_point_statebuilder
 import caveclient
 
 
-__version__ = "4.28.0"
+__version__ = "4.28.1"
 
 views_bp = Blueprint("views", __name__, url_prefix="/materialize/views")
 
