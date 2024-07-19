@@ -932,12 +932,14 @@ def process_fields(df, fields, column_names, tags, bool_tags, numerical):
             continue
 
         if isinstance(field, mm_fields.String):
-            # check that this column is not all nulls
             if df[col].isnull().all():
                 continue
+            # check that this column is not all nulls
             tags.append(col)
             print(f"tag col: {col}")
         elif isinstance(field, mm_fields.Boolean):
+            if df[col].isnull().all():
+                continue
             df[col] = df[col].astype(bool)
             bool_tags.append(col)
             print(f"bool tag col: {col}")
