@@ -13,6 +13,7 @@ from dynamicannotationdb.models import (
     VersionErrorTable,
     AnnoMetadata,
     MaterializedMetadata,
+    AnalysisView,
 )
 from dynamicannotationdb.schema import DynamicSchemaClient
 from flask import (
@@ -27,6 +28,7 @@ from flask import (
 from middle_auth_client import auth_required, auth_requires_permission
 from sqlalchemy import and_, func, or_
 from sqlalchemy.sql import text
+from materializationengine.blueprints.client.schemas import AnalysisViewSchema
 from materializationengine.celery_init import celery
 from celery.result import AsyncResult
 from materializationengine.blueprints.reset_auth import reset_auth
@@ -43,6 +45,7 @@ from materializationengine.info_client import (
 from materializationengine.schemas import (
     AnalysisTableSchema,
     AnalysisVersionSchema,
+    AnalysisViewSchema,
     VersionErrorTableSchema,
 )
 from materializationengine.utils import check_read_permission
@@ -142,12 +145,13 @@ def make_df_with_links_to_id(
         df = pd.DataFrame(data=schema.dump(objects, many=True))
     if urlkwargs is None:
         urlkwargs = {}
-    df[col] = df.apply(
-        lambda x: "<a href='{}'>{}</a>".format(
-            url_for(url, id=getattr(x, col_value), **urlkwargs), x[col]
-        ),
-        axis=1,
-    )
+    if url is not None:
+        df[col] = df.apply(
+            lambda x: "<a href='{}'>{}</a>".format(
+                url_for(url, id=getattr(x, col_value), **urlkwargs), x[col]
+            ),
+            axis=1,
+        )
     return df
 
 
@@ -243,16 +247,25 @@ def version_error(datastack_name: str, id: int):
         )
 
 
-def make_seg_prop_ng_link(datastack_name, table_name, version, client):
+def make_seg_prop_ng_link(datastack_name, table_name, version, client, is_view=False):
     seg_layer = client.info.segmentation_source(format_for="neuroglancer")
     seg_layer.replace("graphene://https://", "graphene://middleauth+https://")
-    seginfo_url = url_for(
-        "api.Materialization Client2_mat_table_segment_info",
-        datastack_name=datastack_name,
-        version=version,
-        table_name=table_name,
-        _external=True,
-    )
+    if is_view:
+        seginfo_url = url_for(
+            "api.Materialization Client2_mat_view_segment_info",
+            datastack_name=datastack_name,
+            version=version,
+            view_name=table_name,
+            _external=True,
+        )
+    else:
+        seginfo_url = url_for(
+            "api.Materialization Client2_mat_table_segment_info",
+            datastack_name=datastack_name,
+            version=version,
+            table_name=table_name,
+            _external=True,
+        )
 
     seg_info_source = f"precomputed://middleauth+{seginfo_url}".format(
         seginfo_url=seginfo_url
@@ -329,11 +342,34 @@ def version_view(datastack_name: str, id: int):
             escape=False, classes=classes, index=False, justify="left", border=0
         )
 
+    mat_session = sqlalchemy_cache.get(f"{datastack_name}__mat{version.version}")
+
+    views = mat_session.query(AnalysisView).all()
+
+    views_df = make_df_with_links_to_id(
+        objects=views,
+        schema=AnalysisViewSchema(many=True),
+        url=None,
+        col=None,
+        col_value=None,
+        datastack_name=datastack_name,
+    )
+    views_df["ng_link"] = views_df.apply(
+        lambda x: f"<a href='{make_seg_prop_ng_link(datastack_name, x.table_name, version.version, client, is_view=True)}'>seg prop link</a>",
+        axis=1,
+    )
+    classes = ["table table-borderless"]
+    with pd.option_context("display.max_colwidth", -1):
+        output_view_html = views_df.to_html(
+            escape=False, classes=classes, index=False, justify="left", border=0
+        )
+
     return render_template(
         "version.html",
         datastack=datastack_name,
         analysisversion=version,
         table=output_html,
+        view_table=output_view_html,
         version=__version__,
     )
 
