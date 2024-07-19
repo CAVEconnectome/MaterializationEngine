@@ -1,11 +1,13 @@
 {% extends 'base.html' %}
 
 {% block header %}
-  <h1 class="datastack_header">{% block title %}{{datastack}}{% endblock %}</h1>
+<h1 class="datastack_header">{% block title %}{{datastack}}{% endblock %}</h1>
 {% endblock %}
 
 {% block content %}
 <h3>tables</h3>
 {{table|safe}}
 
+<h3>views</h3>
+{{view_table|safe}}
 {% endblock %}
