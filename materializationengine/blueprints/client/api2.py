@@ -1050,11 +1050,12 @@ def preprocess_dataframe(df, table_name, aligned_volume_name, column_names):
         unique_vals[tag] = df[tag].unique()
         unique_vals[tag] = unique_vals[tag][~pd.isnull(unique_vals[tag])]
 
-    # find all the duplicate values across columns
-    vals, counts = np.unique(
-        np.concatenate([v for v in unique_vals.values()]), return_counts=True
-    )
-    duplicates = vals[counts > 1]
+    if len(tags)>0:
+        # find all the duplicate values across columns
+        vals, counts = np.unique(
+            np.concatenate([v for v in unique_vals.values()]), return_counts=True
+        )
+        duplicates = vals[counts > 1]
 
     # iterate through the tags and replace any duplicate
     # values in the dataframe with a unique value,
@@ -1786,6 +1787,7 @@ class MatViewSegmentInfo(Resource):
         )
 
         if version == 0:
+            version = 
             mat_db_name = f"{aligned_volume_name}"
         else:
             mat_db_name = f"{datastack_name}__mat{version}"
