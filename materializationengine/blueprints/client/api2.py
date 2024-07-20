@@ -3,6 +3,8 @@ import pytz
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
 from cachetools import TTLCache, cached, LRUCache
+from cachetools.keys import hashkey
+from functools import wraps
 from flask import Response, abort, request, current_app, g
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
@@ -1752,12 +1754,44 @@ def assemble_view_dataframe(datastack_name, version, view_name, data, args):
     return df, column_names, warnings
 
 
+# Define your cache (LRU Cache with a maximum size of 100 items)
+view_mat_cache = LRUCache(maxsize=100)
+view_live_cache = TTLCache(maxsize=100, ttl=60)
+
+
+def conditional_view_cache(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # Generate a cache key
+        key = hashkey(*args, **kwargs)
+
+        # Check if the 'version' argument is in the kwargs and if it is set to 0
+        if kwargs.get("version") == 0:
+            # Check if the result is in the live cache
+            if key in view_live_cache:
+                return view_live_cache[key]
+            else:
+                result = func(*args, **kwargs)
+                view_live_cache[key] = result
+                return result
+        else:
+            # Check if the result is in the materialized cache
+            if key in view_mat_cache:
+                return view_mat_cache[key]
+            else:
+                result = func(*args, **kwargs)
+                view_mat_cache[key] = result
+                return result
+
+    return wrapper
+
+
 @client_bp.route(
     "/datastack/<string:datastack_name>/version/<int:version>/view/<string:view_name>/info"
 )
 class MatViewSegmentInfo(Resource):
     method_decorators = [
-        cached(TTLCache(maxsize=256, ttl=60 * 60 * 24)),
+        conditional_view_cache,
         validate_datastack,
         limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
