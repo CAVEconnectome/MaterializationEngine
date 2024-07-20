@@ -37,6 +37,8 @@ def validate_datastack(f):
             AnalysisVersion.datastack == target_datastack
         )
         if target_version:
+            if target_version == -1:
+                return f(*args, **kwargs)
             version_query = version_query.filter(
                 AnalysisVersion.version == target_version
             )

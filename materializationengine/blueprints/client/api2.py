@@ -1757,6 +1757,7 @@ def assemble_view_dataframe(datastack_name, version, view_name, data, args):
 # Define your cache (LRU Cache with a maximum size of 100 items)
 view_mat_cache = LRUCache(maxsize=100)
 view_live_cache = TTLCache(maxsize=100, ttl=60)
+latest_mat_cache = TTLCache(maxsize=100, ttl=60 * 60 * 12)
 
 
 def conditional_view_cache(func):
@@ -1764,6 +1765,14 @@ def conditional_view_cache(func):
     def wrapper(*args, **kwargs):
         # Generate a cache key
         key = hashkey(*args, **kwargs)
+        if kwargs.get("version") == -1:
+            # Check if the result is in the live cache
+            if key in view_live_cache:
+                return view_live_cache[key]
+            else:
+                result = func(*args, **kwargs)
+                view_live_cache[key] = result
+                return result
 
         # Check if the 'version' argument is in the kwargs and if it is set to 0
         if kwargs.get("version") == 0:
@@ -1787,7 +1796,7 @@ def conditional_view_cache(func):
 
 
 @client_bp.route(
-    "/datastack/<string:datastack_name>/version/<int:version>/view/<string:view_name>/info"
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>/view/<string:view_name>/info"
 )
 class MatViewSegmentInfo(Resource):
     method_decorators = [
@@ -1822,6 +1831,20 @@ class MatViewSegmentInfo(Resource):
 
         if version == 0:
             mat_db_name = f"{aligned_volume_name}"
+        elif version == -1:
+            mat_db_name = f"{aligned_volume_name}"
+            session = sqlalchemy_cache.get(mat_db_name)
+            # query the database for the latest valid version
+            response = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.datastack == datastack_name)
+                .filter(AnalysisVersion.valid)
+                .order_by(AnalysisVersion.time_stamp.desc())
+                .first()
+            )
+            version = response.version
+            print(f"using version {version}")
+            mat_db_name = f"{datastack_name}__mat{version}"
         else:
             mat_db_name = f"{datastack_name}__mat{version}"
 
