@@ -1495,7 +1495,7 @@ def assemble_live_query_dataframe(user_data, datastack_name, args):
             user_data,
             chosen_timestamp,
             cg_client,
-            args["allow_missing_lookups"],
+            args.get("allow_missing_lookups", True),
         )
     else:
         prod_df = None
