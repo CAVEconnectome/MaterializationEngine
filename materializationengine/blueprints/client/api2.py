@@ -32,6 +32,7 @@ from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.blueprints.client.utils import (
     create_query_response,
     collect_crud_columns,
+    get_table_schema,
 )
 from materializationengine.blueprints.client.schemas import (
     ComplexQuerySchema,
@@ -1998,45 +1999,6 @@ class ViewQuery(Resource):
             arrow_format=args["arrow_format"],
             ipc_compress=args["ipc_compress"],
         )
-
-
-def get_table_schema(table):
-    """
-    Get the schema of a table as a jsonschema
-    Args:
-        table (Table): sqlalchemy table object
-    Returns:
-        dict: jsonschema of the table
-
-    """
-    properties = {}
-
-    for column in table.columns:
-        column_type = None
-        format = None
-        if isinstance(column.type, String):
-            column_type = "string"
-        elif isinstance(column.type, Integer):
-            column_type = "integer"
-        elif isinstance(column.type, Float):
-            column_type = "float"
-        elif isinstance(column.type, DateTime):
-            column_type = "string"
-            format = "date-time"
-        elif isinstance(column.type, Boolean):
-            column_type = "boolean"
-        elif isinstance(column.type, Geometry):
-            column_type = "SpatialPoint"
-        elif isinstance(column.type, Numeric):
-            column_type = "number"
-        else:
-            raise ValueError(f"Unsupported column type: {column.type}")
-
-        properties[column.name] = {"type": column_type}
-        if format:
-            properties[column.name]["format"] = format
-
-    return properties
 
 
 @client_bp.route(

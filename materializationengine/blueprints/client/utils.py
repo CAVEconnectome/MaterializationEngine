@@ -2,6 +2,47 @@ import pyarrow as pa
 from flask import Response, request, send_file
 from cloudfiles import compression
 from io import BytesIO
+from sqlalchemy.sql.sqltypes import String, Integer, Float, DateTime, Boolean, Numeric
+from geoalchemy2.types import Geometry
+
+
+def get_table_schema(table):
+    """
+    Get the schema of a table as a jsonschema
+    Args:
+        table (Table): sqlalchemy table object
+    Returns:
+        dict: jsonschema of the table
+
+    """
+    properties = {}
+
+    for column in table.columns:
+        column_type = None
+        format = None
+        if isinstance(column.type, String):
+            column_type = "string"
+        elif isinstance(column.type, Integer):
+            column_type = "integer"
+        elif isinstance(column.type, Float):
+            column_type = "float"
+        elif isinstance(column.type, DateTime):
+            column_type = "string"
+            format = "date-time"
+        elif isinstance(column.type, Boolean):
+            column_type = "boolean"
+        elif isinstance(column.type, Geometry):
+            column_type = "SpatialPoint"
+        elif isinstance(column.type, Numeric):
+            column_type = "number"
+        else:
+            raise ValueError(f"Unsupported column type: {column.type}")
+
+        properties[column.name] = {"type": column_type}
+        if format:
+            properties[column.name]["format"] = format
+
+    return properties
 
 
 def collect_crud_columns(column_names):
