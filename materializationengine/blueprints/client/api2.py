@@ -209,6 +209,27 @@ query_parser.add_argument(
 )
 
 
+query_seg_prop_parser = reqparse.RequestParser()
+# add an argument for a string controlling the label format
+query_seg_prop_parser.add_argument(
+    "label_format",
+    type=str,
+    default=None,
+    required=False,
+    location="args",
+    help="string controlling the label format, should be formatted like a python format string,\
+          i.e. {cell_type}_{id}, utilizing the columns available in the response",
+)
+# add an argument which is a list of column strings
+query_seg_prop_parser.add_argument(
+    "label_columns",
+    type=str,
+    action="split",
+    default=None,
+    required=False,
+    location="args",
+    help="list of column names include in a label (will be overridden by label_format)",
+)
 metadata_parser = reqparse.RequestParser()
 # add a boolean argument for whether to return all expired versions
 metadata_parser.add_argument(
@@ -1118,10 +1139,10 @@ def preprocess_view_dataframe(df, view_name, db_name, column_names):
         for dup in duplicates:
             if dup in unique_vals[tag]:
                 df[tag] = df[tag].replace(dup, f"{tag}:{dup}")
-
     return df, tags, bool_tags, numerical, root_id_col
 
 
+@client_bp.expect(query_seg_prop_parser)
 @client_bp.route(
     "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/info"
 )
@@ -1159,6 +1180,10 @@ class MatTableSegmentInfo(Resource):
 
         validate_table_args([table_name], target_datastack, target_version)
         db_name = f"{datastack_name}__mat{version}"
+
+        args = query_seg_prop_parser.parse_args()
+        label_format = args.get("label_format", None)
+        label_columns = args.get("label_columns", None)
 
         # if the database is a split database get a split model
         # and if its not get a flat model
@@ -1211,20 +1236,24 @@ class MatTableSegmentInfo(Resource):
             df, tags, bool_tags, numerical, root_id_col = preprocess_dataframe(
                 df, table_name, aligned_volume_name, column_names
             )
-
+            if label_columns is None:
+                if label_format is None:
+                    label_columns = "id"
             seg_prop = nglui.segmentprops.SegmentProperties.from_dataframe(
                 df,
                 id_col=root_id_col,
                 tag_value_cols=tags,
                 tag_bool_cols=bool_tags,
                 number_cols=numerical,
-                label_col="id",
+                label_col=label_columns,
+                label_format_map=label_format,
             )
             dfjson = json.dumps(seg_prop.to_dict(), cls=current_app.json_encoder)
             response = Response(dfjson, status=200, mimetype="application/json")
             return after_request(response)
 
 
+@client_bp.expect(query_seg_prop_parser)
 @client_bp.route("/datastack/<string:datastack_name>/table/<string:table_name>/info")
 class MatTableSegmentInfoLive(Resource):
     method_decorators = [
@@ -1278,13 +1307,22 @@ class MatTableSegmentInfoLive(Resource):
         vals = preprocess_dataframe(df, table_name, aligned_volume_name, column_names)
         df, tags, bool_tags, numerical, root_id_col = vals
 
+        # parse the args
+        args = query_seg_prop_parser.parse_args()
+        label_format = args.get("label_format", None)
+        label_columns = args.get("label_columns", None)
+        if label_format is None:
+            if label_columns is None:
+                label_columns = "id"
+
         seg_prop = nglui.segmentprops.SegmentProperties.from_dataframe(
             df,
             id_col=root_id_col,
             tag_value_cols=tags,
             tag_bool_cols=bool_tags,
             number_cols=numerical,
-            label_col="id",
+            label_col=label_columns,
+            label_format_map=label_format,
         )
         dfjson = json.dumps(seg_prop.to_dict(), cls=current_app.json_encoder)
         response = Response(dfjson, status=200, mimetype="application/json")
@@ -1764,7 +1802,7 @@ def conditional_view_cache(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
         # Generate a cache key
-        key = hashkey(*args, **kwargs)
+        key = request.url
         if kwargs.get("version") == -1:
             # Check if the result is in the live cache
             if key in view_live_cache:
@@ -1795,6 +1833,7 @@ def conditional_view_cache(func):
     return wrapper
 
 
+@client_bp.expect(query_seg_prop_parser)
 @client_bp.route(
     "/datastack/<string:datastack_name>/version/<int(signed=True):version>/view/<string:view_name>/info"
 )
@@ -1856,13 +1895,21 @@ class MatViewSegmentInfo(Resource):
             df, view_name, mat_db_name, column_names
         )
 
+        args = query_seg_prop_parser.parse_args()
+        label_format = args.get("label_format", None)
+        label_columns = args.get("label_columns", None)
+        if label_format is None:
+            if label_columns is None:
+                label_columns = df.columns[0]
+
         seg_prop = nglui.segmentprops.SegmentProperties.from_dataframe(
             df,
             id_col=root_id_col,
             tag_value_cols=tags,
             tag_bool_cols=bool_tags,
             number_cols=numerical,
-            label_col=df.columns[0],
+            label_col=label_columns,
+            label_format_map=label_format,
         )
         # use the current_app encoder to encode the seg_prop.to_dict()
         # to ensure that the json is serialized correctly
