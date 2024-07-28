@@ -436,7 +436,7 @@ def get_dense_ids_with_missing_roots(mat_metadata: dict) -> List:
     )
     if min_id and max_id:
         if min_id < max_id:
-            id_range = range(min_id, max_id + 1)
+            id_range = list(range(min_id, max_id + 1))
             return create_chunks(id_range, 500)
         elif min_id == max_id:
             return [min_id, min_id]
