@@ -119,7 +119,7 @@ def ingest_table_svids(
                 [
                     chain(
                         ingest_new_annotations.si(
-                            annotation_chunk, mat_metadata, lookup_root_ids=False
+                            annotation_chunk, mat_metadata, d=False
                         ),
                     )
                     for annotation_chunk in annotation_chunks
@@ -234,11 +234,13 @@ def process_dense_missing_roots_workflow(datastack_info: dict, **kwargs):
 
 
 @celery.task(name="workflow:process_sparse_missing_roots_workflow")
-def process_sparse_missing_roots_workflow(datastack_info: dict, table_name: str, **kwargs):
+def process_sparse_missing_roots_workflow(
+    datastack_info: dict, table_name: str, **kwargs
+):
     """Find missing (ie NULL) root ids in the segmentation table. If missing root ids
     are found, lookup root ids. Uses last updated time stamp to find missing
     root ids.
-    
+
     Parameters
     ----------
     datastack_info : dict
@@ -248,7 +250,10 @@ def process_sparse_missing_roots_workflow(datastack_info: dict, table_name: str,
 
     """
     mat_metadata = get_materialization_info(datastack_info, table_name=table_name)[0]
-    mat_metadata["materialization_time_stamp"] = mat_metadata["last_updated_time_stamp"] # override materialization time stamp
+    if mat_metadata["last_updated_time_stamp"] is not None:
+        mat_metadata["materialization_time_stamp"] = mat_metadata[
+            "last_updated_time_stamp"
+        ]  # override materialization time stamp
     find_missing_root_ids_workflow(mat_metadata)
 
 
@@ -269,7 +274,9 @@ def batch_missing_root_ids_query(query, mat_metadata):
                     "No rows left for %s", mat_metadata["annotation_table_name"]
                 )
                 break
-            missing_root_data = [row[0] for row in batch] # convert from ResultProxy tuple object to serialize as json
+            missing_root_data = [
+                row[0] for row in batch
+            ]  # convert from ResultProxy tuple object to serialize as json
             task = lookup_root_ids.si(mat_metadata, missing_root_data).apply_async()
             tasks.append(task.id)
 
@@ -809,9 +816,7 @@ def get_cloudvolume_supervoxel_ids(
                 pos_data = getattr(data, col)
                 pos_array = np.asarray(pos_data)
                 try:
-                    svid = get_sv_id(
-                        cv, pos_array, coord_resolution
-                    )  # pylint: disable=maybe-no-member
+                    svid = get_sv_id(cv, pos_array, coord_resolution)  # pylint: disable=maybe-no-member
                 except Exception as e:
                     celery_logger.error(
                         f"Failed to get SVID: {pos_array}, {coord_resolution}. Error {e}"
