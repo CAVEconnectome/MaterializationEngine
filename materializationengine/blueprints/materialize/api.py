@@ -65,7 +65,9 @@ materialize_parser.add_argument("merge_tables", required=True, type=inputs.boole
 spatial_svid_parser = reqparse.RequestParser()
 spatial_svid_parser.add_argument("chunk_scale_factor", default=12, type=int)
 spatial_svid_parser.add_argument("get_root_ids", default=True, type=inputs.boolean)
-spatial_svid_parser.add_argument("upload_to_database", default=True, type=inputs.boolean)
+spatial_svid_parser.add_argument(
+    "upload_to_database", default=True, type=inputs.boolean
+)
 
 
 authorizations = {
@@ -240,6 +242,7 @@ class ProcessNewAnnotationsTableResource(Resource):
         ).apply_async()
         return 200
 
+
 @mat_bp.expect(spatial_svid_parser)
 @mat_bp.route(
     "/materialize/run/spatial_lookup/datastack/<string:datastack_name>/<string:table_name>"
@@ -259,8 +262,8 @@ class SpatialSVIDLookupTableResource(Resource):
         from materializationengine.workflows.spatial_lookup import (
             run_spatial_lookup_workflow,
         )
-        args = spatial_svid_parser.parse_args()
 
+        args = spatial_svid_parser.parse_args()
 
         if datastack_name not in current_app.config["DATASTACKS"]:
             abort(404, f"datastack {datastack_name} not configured for materialization")
@@ -281,6 +284,55 @@ class SpatialSVIDLookupTableResource(Resource):
         except Exception as e:
             logging.error(e)
             return abort(400, f"Error running spatial lookup workflow: {e}")
+        return 200
+
+
+@mat_bp.route("/materialize/run/lookup_root_ids/datastack/<string:datastack_name>")
+class LookupMissingRootIdsResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("Find all null root ids and lookup new roots", security="apikey")
+    def post(self, datastack_name: str):
+        """Run workflow to lookup missing root ids and insert into database across
+        all tables in the database.
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+        """
+        from materializationengine.workflows.ingest_new_annotations import (
+            process_dense_missing_roots_workflow,
+        )
+
+        datastack_info = get_datastack_info(datastack_name)
+        process_dense_missing_roots_workflow.s(datastack_info).apply_async()
+        return 200
+
+
+@mat_bp.route(
+    "/materialize/run/lookup_root_ids/datastack/<string:datastack_name>/table/<string:table_name>"
+)
+class LookupMissingRootIdsTableResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc(
+        "Find all null root ids and lookup new roots in a table", security="apikey"
+    )
+    def post(self, datastack_name: str, table_name: str):
+        """Run workflow to lookup missing root ids and insert into database across
+        all tables in the database.
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+            table_name (str): name of table
+        """
+        from materializationengine.workflows.ingest_new_annotations import (
+            process_dense_missing_roots_table_workflow,
+        )
+
+        datastack_info = get_datastack_info(datastack_name)
+        process_dense_missing_roots_table_workflow.s(
+            datastack_info, table_name
+        ).apply_async()
         return 200
 
 

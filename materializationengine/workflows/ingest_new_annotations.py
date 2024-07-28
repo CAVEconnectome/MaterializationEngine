@@ -200,6 +200,42 @@ def ingest_new_annotations(
     }
 
 
+@celery.task(name="workflow:process_dense_missing_roots_table_workflow")
+def process_dense_missing_roots_table_workflow(
+    datastack_info: dict, table_name: str, **kwargs
+):
+    """Chunk supervoxel ids and lookup root ids in batches
+    for all tables in the database.
+
+
+    -> workflow :
+        find missing root_ids >
+        lookup supervoxel ids from sql >
+        get root_ids >
+        merge root_ids list >
+        insert root_ids
+
+
+    Parameters
+    ----------
+    aligned_volume_name : str
+        [description]
+    segmentation_source : dict
+        [description]
+    """
+    materialization_time_stamp = datetime.datetime.utcnow()
+
+    mat_info = get_materialization_info(
+        datastack_info=datastack_info,
+        materialization_time_stamp=materialization_time_stamp,
+        table_name=table_name,
+    )
+    # filter for missing root ids (min/max ids)
+    for mat_metadata in mat_info:
+        if mat_metadata.get("segmentation_table_name"):
+            find_dense_missing_root_ids_workflow(mat_metadata)
+
+
 @celery.task(name="workflow:process_dense_missing_roots_workflow")
 def process_dense_missing_roots_workflow(datastack_info: dict, **kwargs):
     """Chunk supervoxel ids and lookup root ids in batches
