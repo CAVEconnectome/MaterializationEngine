@@ -8,7 +8,7 @@ default_server_address = os.environ.get(
     "GLOBAL_SERVER_URL", default_global_server_address
 )
 
-PCG_SERVICE = os.environ.get("LOCAL_SERVER_URL", "http://pychunkedgraph-service/")
+PCG_SERVICE = os.environ.get("LOCAL_SERVER_URL", "http://pychunkedgraph-read-service/")
 
 
 class ChunkedGraphGateway:
@@ -31,7 +31,6 @@ class ChunkedGraphGateway:
             return self.init_pcg(table_id)
 
     def init_pcg(self, table_id: str):
-
         cg_client = ChunkedGraphClient(
             self.server_address, table_name=table_id, auth_client=self.auth
         )
