@@ -354,15 +354,18 @@ def version_view(datastack_name: str, id: int):
         col_value=None,
         datastack_name=datastack_name,
     )
-    views_df["ng_link"] = views_df.apply(
-        lambda x: f"<a href='{make_seg_prop_ng_link(datastack_name, x.table_name, version.version, client, is_view=True)}'>seg prop link</a>",
-        axis=1,
-    )
-    classes = ["table table-borderless"]
-    with pd.option_context("display.max_colwidth", -1):
-        output_view_html = views_df.to_html(
-            escape=False, classes=classes, index=False, justify="left", border=0
+    if len(views_df) > 0:
+        views_df["ng_link"] = views_df.apply(
+            lambda x: f"<a href='{make_seg_prop_ng_link(datastack_name, x.table_name, version.version, client, is_view=True)}'>seg prop link</a>",
+            axis=1,
         )
+        classes = ["table table-borderless"]
+        with pd.option_context("display.max_colwidth", -1):
+            output_view_html = views_df.to_html(
+                escape=False, classes=classes, index=False, justify="left", border=0
+            )
+    else:
+        output_view_html = "<h4> No views in datastack </h4>"
 
     return render_template(
         "version.html",
