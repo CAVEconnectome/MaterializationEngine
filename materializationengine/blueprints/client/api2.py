@@ -63,7 +63,7 @@ from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSc
 from materializationengine.blueprints.client.utils import update_notice_text_warnings
 from materializationengine.blueprints.client.utils import after_request
 
-__version__ = "4.31.3"
+__version__ = "4.31.4"
 
 
 authorizations = {
