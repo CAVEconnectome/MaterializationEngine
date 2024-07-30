@@ -109,7 +109,7 @@ def create_versioned_materialization_workflow(
     setup_versioned_database = create_materialized_database_workflow(
         datastack_info, new_version_number, materialization_time_stamp, mat_info
     )
-
+    celery_logger.error("testing celery logger")
     if merge_tables:
         format_workflow = format_materialization_database_workflow(mat_info)
         analysis_database_workflow = chain(
@@ -412,9 +412,7 @@ def create_materialized_metadata(
 
     try:
         mat_table = MaterializedMetadata()
-        mat_table.__table__.create(
-            bind=analysis_engine
-        )  # pylint: disable=maybe-no-member
+        mat_table.__table__.create(bind=analysis_engine)  # pylint: disable=maybe-no-member
     except Exception as e:
         celery_logger.error(f"Materialized Metadata table creation failed {e}")
     try:
