@@ -26,6 +26,7 @@ from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoSuchTableError
 from materializationengine.utils import check_write_permission
 import os
+import subprocess
 import cloudfiles
 
 
@@ -438,14 +439,30 @@ class DumpTableToBucketAsCSV(Resource):
             return 200, "file already exists, nothing to do here"
         else:
             # run a gcloud command to select * from table and write it to disk as a csv
-            export_command = f"gcloud sql export csv {sql_instance_name} \
-                {cloudpath} --database {mat_db_name} --async \
-                    --query='select * from {table_name}'"
+            export_command = [
+                "gcloud",
+                "sql",
+                "export",
+                "csv",
+                sql_instance_name,
+                cloudpath,
+                "--database",
+                mat_db_name,
+                "--async",
+                f"--query=select * from {table_name}",
+            ]
+            process = subprocess.Popen(
+                export_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            stdout, stderr = process.communicate()
             # run this command and capture the stdout and return code
-            return_code = os.system(export_command)
-
+            return_code = process.returncode
             if return_code != 0:
-                return 500, f"file failed to create using: {export_command}"
+                return (
+                    500,
+                    f"file failed to create using: {export_command}. \
+                        Error: {stderr.decode()} stdout: {stdout.decode()}",
+                )
             else:
                 return 200, "file is being created at {cloudpath}"
 
