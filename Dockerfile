@@ -7,8 +7,11 @@ RUN mkdir -p /home/nginx/.cloudvolume/secrets \
 COPY requirements.txt /app/.
 RUN python -m pip install --upgrade pip
 RUN pip install -r requirements.txt
-RUN sudo --user=nginx curl -sSL https://sdk.cloud.google.com | bash
+# Install gcloud SDK as root and set permissions
+RUN curl -sSL https://sdk.cloud.google.com | bash
 ENV PATH $PATH:/root/google-cloud-sdk/bin
+# Change ownership of gcloud installation to nginx user
+RUN chown -R nginx:nginx /root/google-cloud-sdk
 COPY . /app
 COPY override/timeout.conf /etc/nginx/conf.d/timeout.conf
 COPY gracefully_shutdown_celery.sh /home/nginx
