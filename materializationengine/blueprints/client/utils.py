@@ -5,6 +5,7 @@ from io import BytesIO
 
 from materializationengine.info_client import get_datastack_info
 from materializationengine.database import sqlalchemy_cache
+from dynamicannotationdb.models import AnalysisVersion
 
 
 def collect_crud_columns(column_names):
