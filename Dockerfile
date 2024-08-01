@@ -7,6 +7,8 @@ RUN mkdir -p /home/nginx/.cloudvolume/secrets \
 COPY requirements.txt /app/.
 RUN python -m pip install --upgrade pip
 RUN pip install -r requirements.txt
+RUN curl -sSL https://sdk.cloud.google.com | bash
+ENV PATH $PATH:/root/google-cloud-sdk/bin
 COPY . /app
 COPY override/timeout.conf /etc/nginx/conf.d/timeout.conf
 COPY gracefully_shutdown_celery.sh /home/nginx
