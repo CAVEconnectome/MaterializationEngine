@@ -32,6 +32,7 @@ from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.blueprints.client.utils import (
     create_query_response,
     collect_crud_columns,
+    get_latest_version,
 )
 from materializationengine.blueprints.client.schemas import (
     ComplexQuerySchema,
@@ -1868,24 +1869,12 @@ class MatViewSegmentInfo(Resource):
             datastack_name
         )
 
+        if version == -1:
+            version = get_latest_version(datastack_name)
+            print(f"using version {version}")
+        mat_db_name = f"{datastack_name}__mat{version}"
         if version == 0:
             mat_db_name = f"{aligned_volume_name}"
-        elif version == -1:
-            mat_db_name = f"{aligned_volume_name}"
-            session = sqlalchemy_cache.get(mat_db_name)
-            # query the database for the latest valid version
-            response = (
-                session.query(AnalysisVersion)
-                .filter(AnalysisVersion.datastack == datastack_name)
-                .filter(AnalysisVersion.valid)
-                .order_by(AnalysisVersion.time_stamp.desc())
-                .first()
-            )
-            version = response.version
-            print(f"using version {version}")
-            mat_db_name = f"{datastack_name}__mat{version}"
-        else:
-            mat_db_name = f"{datastack_name}__mat{version}"
 
         df, column_names, warnings = assemble_view_dataframe(
             datastack_name, version, view_name, {}, {}

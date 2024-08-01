@@ -5,6 +5,7 @@ from dynamicannotationdb.models import AnalysisTable, Base
 from flask import abort, current_app, request
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
+from materializationengine.blueprints.client.utils import get_latest_version
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import (
     create_session,
@@ -24,6 +25,8 @@ from sqlalchemy import MetaData, Table
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoSuchTableError
 from materializationengine.utils import check_write_permission
+import os
+import cloudfiles
 
 
 from materializationengine.blueprints.materialize.schemas import (
@@ -394,6 +397,57 @@ class UpdateExpiredRootIdsResource(Resource):
 
         expired_root_id_workflow.s(datastack_info).apply_async()
         return 200
+
+
+@mat_bp.route(
+    "/materialize/run/dump_csv_table/datastack/<string:datastack_name>/version/<int(signed=True):version>/table_name/<string:table_name>/"
+)
+class DumpTableToBucketAsCSV(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("Take table or view and dump it to a bucket as csv", security="apikey")
+    def post(self, datastack_name: str, version: int, table_name: str):
+        """Dump table to bucket as csv
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+            version (int): version of datastack
+            table_name (str): name of table or view to dump
+        """
+        mat_db_name = f"{datastack_name}__mat{version}"
+
+        # TODO: add validation of parameters
+        sql_instance_name = current_app.config.get("SQL_INSTANCE_NAME", None)
+        if not sql_instance_name:
+            return 500, "SQL_INSTANCE_NAME not set in app config"
+
+        bucket = current_app.config.get("MATERIALIZATION_DUMP_BUCKET", None)
+        if not bucket:
+            return 500, "MATERIALIZATION_DUMP_BUCKET not set in app config"
+
+        if version == -1:
+            version = get_latest_version(datastack_name)
+
+        cf = cloudfiles.CloudFiles(bucket)
+        filename = f"{datastack_name}/v{version}/{table_name}.csv.gz"
+
+        cloudpath = os.path.join(bucket, filename)
+
+        # check if the file already exists
+        if cf.exists(filename):
+            return 200, "file already exists, nothing to do here"
+        else:
+            # run a gcloud command to select * from table and write it to disk as a csv
+            export_command = f"gcloud sql export csv {sql_instance_name} \
+                {cloudpath} --database {mat_db_name} --async \
+                    --query='select * from {table_name}'"
+            # run this command and capture the stdout and return code
+            return_code = os.system(export_command)
+
+            if return_code != 0:
+                return 500, f"file failed to create using: {export_command}"
+            else:
+                return 200, "file is being created at {cloudpath}"
 
 
 @mat_bp.route("/materialize/run/update_database/datastack/<string:datastack_name>")
