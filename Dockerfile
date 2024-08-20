@@ -9,12 +9,10 @@ RUN python -m pip install --upgrade pip
 RUN pip install -r requirements.txt
 # Install gcloud SDK as root and set permissions
 # Install gcloud SDK as root
-RUN curl -sSL https://sdk.cloud.google.com | bash
 
 # Change ownership of gcloud installation to nginx user
 RUN chown -R nginx:nginx /root/google-cloud-sdk
 # Set the PATH for the nginx user
-ENV PATH /home/nginx/google-cloud-sdk/bin:/root/google-cloud-sdk/bin:$PATH
 
 # Change ownership of gcloud installation to nginx user
 RUN chown -R nginx:nginx /root/google-cloud-sdk
@@ -25,3 +23,7 @@ RUN chmod +x /home/nginx/gracefully_shutdown_celery.sh
 RUN mkdir -p /home/nginx/tmp/shutdown 
 RUN chmod +x /entrypoint.sh
 WORKDIR /app
+USER nginx
+RUN curl -sSL https://sdk.cloud.google.com | bash
+ENV PATH /home/nginx/google-cloud-sdk/bin:/root/google-cloud-sdk/bin:$PATH
+USER root
