@@ -470,8 +470,9 @@ class DumpTableToBucketAsCSV(Resource):
                 "--database",
                 mat_db_name,
                 "--async",
-                f"--query='select * from {table_name}'",
+                f'--query="SELECT * from {table_name}"',
             ]
+            print(export_command)
             process = subprocess.Popen(
                 export_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
