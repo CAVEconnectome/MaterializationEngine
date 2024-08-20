@@ -438,6 +438,27 @@ class DumpTableToBucketAsCSV(Resource):
         if cf.exists(filename):
             return 200, "file already exists, nothing to do here"
         else:
+            # run a gcloud command to activate the service account for gcloud
+            activate_command = [
+                "gcloud",
+                "auth",
+                "activate-service-account",
+                "--key-file",
+                os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
+            ]
+            process = subprocess.Popen(
+                activate_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            stdout, stderr = process.communicate()
+            # run this command and capture the stdout and return code
+            return_code = process.returncode
+            if return_code != 0:
+                return (
+                    500,
+                    f"failed to activate service account using \
+                    {activate_command}. Error: {stderr.decode()} stdout: {stdout.decode()}",
+                )
+
             # run a gcloud command to select * from table and write it to disk as a csv
             export_command = [
                 "gcloud",
