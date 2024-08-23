@@ -1677,7 +1677,7 @@ class AvailableViews(Resource):
 
 @client_bp.expect(query_parser)
 @client_bp.route(
-    "/datastack/<string:datastack_name>/version/<version>/views/<string:view_name>/metadata"
+    "/datastack/<string:datastack_name>/version/<int(signed+True):version>/views/<string:view_name>/metadata"
 )
 class ViewMetadata(Resource):
     method_decorators = [
