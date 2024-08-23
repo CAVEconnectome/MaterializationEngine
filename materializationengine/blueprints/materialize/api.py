@@ -466,6 +466,33 @@ class DumpTableToBucketAsCSV(Resource):
                     "message": f"failed to activate service account using {activate_command}. Error: {stderr.decode()} stdout: {stdout.decode()}"
                 }, 500
 
+            header_file = f"{datastack_name}/v{version}/{table_name}_header.csv"
+            header_cloudpath = os.path.join(bucket, header_file)
+
+            header_command = [
+                "gcloud",
+                "sql",
+                "export",
+                "csv",
+                sql_instance_name,
+                header_cloudpath,
+                "--database",
+                mat_db_name,
+                "--query",
+                f"SELECT column_name, data_type from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = '{table_name}'",
+            ]
+            process = subprocess.Popen(
+                header_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            stdout, stderr = process.communicate()
+            # run this command and capture the stdout and return code
+            return_code = process.returncode
+            if return_code != 0:
+                return {
+                    "message": f"header file failed to create using:\
+                          {header_command}. Error: {stderr.decode()} stdout: {stdout.decode()}"
+                }, 500
+
             # run a gcloud command to select * from table and write it to disk as a csv
             export_command = [
                 "gcloud",
@@ -490,33 +517,6 @@ class DumpTableToBucketAsCSV(Resource):
             if return_code != 0:
                 return {
                     "message": f"file failed to create using: {export_command}. Error: {stderr.decode()} stdout: {stdout.decode()}"
-                }, 500
-            header_file = f"{datastack_name}/v{version}/{table_name}_header.csv"
-            header_cloudpath = os.path.join(bucket, header_file)
-
-            header_command = [
-                "gcloud",
-                "sql",
-                "export",
-                "csv",
-                sql_instance_name,
-                header_cloudpath,
-                "--database",
-                mat_db_name,
-                "--async",
-                "--query",
-                f"SELECT column_name, data_type from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = '{table_name}'",
-            ]
-            process = subprocess.Popen(
-                header_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            stdout, stderr = process.communicate()
-            # run this command and capture the stdout and return code
-            return_code = process.returncode
-            if return_code != 0:
-                return {
-                    "message": f"header file failed to create using:\
-                          {header_command}. Error: {stderr.decode()} stdout: {stdout.decode()}"
                 }, 500
 
             else:
