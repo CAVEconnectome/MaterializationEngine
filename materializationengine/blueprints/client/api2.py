@@ -574,7 +574,9 @@ class DatastackVersions(Resource):
         return versions, 200
 
 
-@client_bp.route("/datastack/<string:datastack_name>/version/<int:version>")
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>"
+)
 class DatastackVersion(Resource):
     method_decorators = [
         limit_by_category("fast_query"),
@@ -611,7 +613,7 @@ class DatastackVersion(Resource):
 
 
 @client_bp.route(
-    "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/count"
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>/table/<string:table_name>/count"
 )
 class FrozenTableCount(Resource):
     method_decorators = [
@@ -708,7 +710,9 @@ class DatastackMetadata(Resource):
         return schema.dump(response, many=True), 200
 
 
-@client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/tables")
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>/tables"
+)
 class FrozenTableVersions(Resource):
     method_decorators = [
         limit_by_category("fast_query"),
@@ -753,7 +757,7 @@ class FrozenTableVersions(Resource):
 
 
 @client_bp.route(
-    "/datastack/<string:datastack_name>/version/<int:version>/tables/metadata"
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>/tables/metadata"
 )
 class FrozenTablesMetadata(Resource):
     method_decorators = [
@@ -812,7 +816,7 @@ class FrozenTablesMetadata(Resource):
 
 
 @client_bp.route(
-    "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/metadata"
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>/table/<string:table_name>/metadata"
 )
 class FrozenTableMetadata(Resource):
     method_decorators = [
@@ -869,7 +873,7 @@ class FrozenTableMetadata(Resource):
 
 @client_bp.expect(query_parser)
 @client_bp.route(
-    "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/query"
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>/table/<string:table_name>/query"
 )
 class FrozenTableQuery(Resource):
     method_decorators = [
@@ -1145,7 +1149,7 @@ def preprocess_view_dataframe(df, view_name, db_name, column_names):
 
 @client_bp.expect(query_seg_prop_parser)
 @client_bp.route(
-    "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/info"
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>/table/<string:table_name>/info"
 )
 class MatTableSegmentInfo(Resource):
     method_decorators = [
@@ -1331,7 +1335,9 @@ class MatTableSegmentInfoLive(Resource):
 
 
 @client_bp.expect(query_parser)
-@client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/query")
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>/query"
+)
 class FrozenQuery(Resource):
     method_decorators = [
         validate_datastack,
@@ -1624,7 +1630,9 @@ class LiveTableQuery(Resource):
 
 
 @client_bp.expect(query_parser)
-@client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/views")
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>/views"
+)
 class AvailableViews(Resource):
     method_decorators = [
         validate_datastack,
@@ -1909,7 +1917,7 @@ class MatViewSegmentInfo(Resource):
 
 @client_bp.expect(query_parser)
 @client_bp.route(
-    "/datastack/<string:datastack_name>/version/<int:version>/views/<string:view_name>/query"
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>/views/<string:view_name>/query"
 )
 class ViewQuery(Resource):
     method_decorators = [
@@ -2029,7 +2037,7 @@ def get_table_schema(table):
 
 
 @client_bp.route(
-    "/datastack/<string:datastack_name>/version/<int:version>/views/<string:view_name>/schema"
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>/views/<string:view_name>/schema"
 )
 class ViewSchema(Resource):
     method_decorators = [
@@ -2075,7 +2083,7 @@ class ViewSchema(Resource):
 
 
 @client_bp.route(
-    "/datastack/<string:datastack_name>/version/<int:version>/views/schemas"
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>/views/schemas"
 )
 class ViewSchemas(Resource):
     method_decorators = [
