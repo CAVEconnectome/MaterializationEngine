@@ -400,7 +400,7 @@ class UpdateExpiredRootIdsResource(Resource):
         return 200
 
 
-response_model = api.model(
+response_model = mat_bp.model(
     "Response", {"message": fields.String(description="Response message")}
 )
 
@@ -412,8 +412,8 @@ class DumpTableToBucketAsCSV(Resource):
     @reset_auth
     @auth_requires_admin
     @mat_bp.doc("Take table or view and dump it to a bucket as csv", security="apikey")
-    @api.response(200, "Success", response_model)
-    @api.response(500, "Internal Server Error", response_model)
+    @mat_bp.response(200, "Success", response_model)
+    @mat_bp.response(500, "Internal Server Error", response_model)
     def post(self, datastack_name: str, version: int, table_name: str):
         """Dump table to bucket as csv
 
