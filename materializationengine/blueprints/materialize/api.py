@@ -4,7 +4,7 @@ import logging
 from dynamicannotationdb.models import AnalysisTable, Base
 from flask import abort, current_app, request
 from flask_accepts import accepts
-from flask_restx import Namespace, Resource, inputs, reqparse
+from flask_restx import Namespace, Resource, inputs, reqparse, fields
 from materializationengine.blueprints.client.utils import get_latest_version
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import (
