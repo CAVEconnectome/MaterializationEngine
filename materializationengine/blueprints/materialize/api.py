@@ -401,7 +401,12 @@ class UpdateExpiredRootIdsResource(Resource):
 
 
 response_model = mat_bp.model(
-    "Response", {"message": fields.String(description="Response message")}
+    "Response",
+    {
+        "message": fields.String(description="Response message"),
+        "csv_path": fields.String(description="Path to csv file", required=False),
+        "header_path": fields.String(description="Path to header file", required=False),
+    },
 )
 
 
@@ -440,11 +445,17 @@ class DumpTableToBucketAsCSV(Resource):
         filename = f"{datastack_name}/v{version}/{table_name}.csv.gz"
 
         cloudpath = os.path.join(bucket, filename)
+        header_file = f"{datastack_name}/v{version}/{table_name}_header.csv"
+        header_cloudpath = os.path.join(bucket, header_file)
 
         # check if the file already exists
         if cf.exists(filename):
             # return a flask respoonse 200 message that says that the file already exitss
-            return {"message": f"file already exists at {cloudpath}"}, 200
+            return {
+                "message": "file already created",
+                "csv_path": cloudpath,
+                "header_path": header_cloudpath,
+            }, 200
 
         else:
             # run a gcloud command to activate the service account for gcloud
@@ -465,9 +476,6 @@ class DumpTableToBucketAsCSV(Resource):
                 return {
                     "message": f"failed to activate service account using {activate_command}. Error: {stderr.decode()} stdout: {stdout.decode()}"
                 }, 500
-
-            header_file = f"{datastack_name}/v{version}/{table_name}_header.csv"
-            header_cloudpath = os.path.join(bucket, header_file)
 
             header_command = [
                 "gcloud",
@@ -521,7 +529,9 @@ class DumpTableToBucketAsCSV(Resource):
 
             else:
                 return {
-                    "message": f"file created at {cloudpath}, header at {header_cloudpath}"
+                    "message": "file created sucessefully",
+                    "csv_path": cloudpath,
+                    "header_path": header_cloudpath,
                 }, 200
 
 
