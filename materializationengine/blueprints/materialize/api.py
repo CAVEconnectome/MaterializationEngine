@@ -4,7 +4,8 @@ import logging
 from dynamicannotationdb.models import AnalysisTable, Base
 from flask import abort, current_app, request
 from flask_accepts import accepts
-from flask_restx import Namespace, Resource, inputs, reqparse
+from flask_restx import Namespace, Resource, inputs, reqparse, fields
+from materializationengine.blueprints.client.utils import get_latest_version
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import (
     create_session,
@@ -24,6 +25,9 @@ from sqlalchemy import MetaData, Table
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoSuchTableError
 from materializationengine.utils import check_write_permission
+import os
+import subprocess
+import cloudfiles
 
 
 from materializationengine.blueprints.materialize.schemas import (
@@ -394,6 +398,141 @@ class UpdateExpiredRootIdsResource(Resource):
 
         expired_root_id_workflow.s(datastack_info).apply_async()
         return 200
+
+
+response_model = mat_bp.model(
+    "Response",
+    {
+        "message": fields.String(description="Response message"),
+        "csv_path": fields.String(description="Path to csv file", required=False),
+        "header_path": fields.String(description="Path to header file", required=False),
+    },
+)
+
+
+@mat_bp.route(
+    "/materialize/run/dump_csv_table/datastack/<string:datastack_name>/version/<int(signed=True):version>/table_name/<string:table_name>/"
+)
+class DumpTableToBucketAsCSV(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("Take table or view and dump it to a bucket as csv", security="apikey")
+    @mat_bp.response(200, "Success", response_model)
+    @mat_bp.response(500, "Internal Server Error", response_model)
+    def post(self, datastack_name: str, version: int, table_name: str):
+        """Dump table to bucket as csv
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+            version (int): version of datastack
+            table_name (str): name of table or view to dump
+        """
+        mat_db_name = f"{datastack_name}__mat{version}"
+
+        # TODO: add validation of parameters
+        sql_instance_name = current_app.config.get("SQL_INSTANCE_NAME", None)
+        if not sql_instance_name:
+            return {"message": "SQL_INSTANCE_NAME not set in app config"}, 500
+
+        bucket = current_app.config.get("MATERIALIZATION_DUMP_BUCKET", None)
+        if not bucket:
+            return {"message": "MATERIALIZATION_DUMP_BUCKET not set in app config"}, 500
+
+        if version == -1:
+            version = get_latest_version(datastack_name)
+
+        cf = cloudfiles.CloudFiles(bucket)
+        filename = f"{datastack_name}/v{version}/{table_name}.csv.gz"
+
+        cloudpath = os.path.join(bucket, filename)
+        header_file = f"{datastack_name}/v{version}/{table_name}_header.csv"
+        header_cloudpath = os.path.join(bucket, header_file)
+
+        # check if the file already exists
+        if cf.exists(filename):
+            # return a flask respoonse 200 message that says that the file already exitss
+            return {
+                "message": "file already created",
+                "csv_path": cloudpath,
+                "header_path": header_cloudpath,
+            }, 200
+
+        else:
+            # run a gcloud command to activate the service account for gcloud
+            activate_command = [
+                "gcloud",
+                "auth",
+                "activate-service-account",
+                "--key-file",
+                os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
+            ]
+            process = subprocess.Popen(
+                activate_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            stdout, stderr = process.communicate()
+            # run this command and capture the stdout and return code
+            return_code = process.returncode
+            if return_code != 0:
+                return {
+                    "message": f"failed to activate service account using {activate_command}. Error: {stderr.decode()} stdout: {stdout.decode()}"
+                }, 500
+
+            header_command = [
+                "gcloud",
+                "sql",
+                "export",
+                "csv",
+                sql_instance_name,
+                header_cloudpath,
+                "--database",
+                mat_db_name,
+                "--query",
+                f"SELECT column_name, data_type from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = '{table_name}'",
+            ]
+            process = subprocess.Popen(
+                header_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            stdout, stderr = process.communicate()
+            # run this command and capture the stdout and return code
+            return_code = process.returncode
+            if return_code != 0:
+                return {
+                    "message": f"header file failed to create using:\
+                          {header_command}. Error: {stderr.decode()} stdout: {stdout.decode()}"
+                }, 500
+
+            # run a gcloud command to select * from table and write it to disk as a csv
+            export_command = [
+                "gcloud",
+                "sql",
+                "export",
+                "csv",
+                sql_instance_name,
+                cloudpath,
+                "--database",
+                mat_db_name,
+                "--async",
+                "--query",
+                f"SELECT * from {table_name}",
+            ]
+
+            process = subprocess.Popen(
+                export_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            stdout, stderr = process.communicate()
+            # run this command and capture the stdout and return code
+            return_code = process.returncode
+            if return_code != 0:
+                return {
+                    "message": f"file failed to create using: {export_command}. Error: {stderr.decode()} stdout: {stdout.decode()}"
+                }, 500
+
+            else:
+                return {
+                    "message": "file created sucessefully",
+                    "csv_path": cloudpath,
+                    "header_path": header_cloudpath,
+                }, 200
 
 
 @mat_bp.route("/materialize/run/update_database/datastack/<string:datastack_name>")

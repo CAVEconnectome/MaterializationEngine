@@ -210,7 +210,7 @@ def datastack_view(datastack_name):
     )
 
 
-@views_bp.route("/datastack/<datastack_name>/version/<int:id>/failed")
+@views_bp.route("/datastack/<datastack_name>/version/<int(signed=True):id>/failed")
 @auth_requires_permission("view", table_arg="datastack_name")
 def version_error(datastack_name: str, id: int):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
@@ -289,7 +289,7 @@ def make_seg_prop_ng_link(datastack_name, table_name, version, client, is_view=F
     return url_link
 
 
-@views_bp.route("/datastack/<datastack_name>/version/<int:id>")
+@views_bp.route("/datastack/<datastack_name>/version/<int(signed=True):id>")
 @auth_requires_permission("view", table_arg="datastack_name")
 def version_view(datastack_name: str, id: int):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)

@@ -3,6 +3,10 @@ from flask import Response, request, send_file
 from cloudfiles import compression
 from io import BytesIO
 
+from materializationengine.info_client import get_datastack_info
+from materializationengine.database import sqlalchemy_cache
+from dynamicannotationdb.models import AnalysisVersion
+
 
 def collect_crud_columns(column_names):
     crud_columns = []
@@ -57,6 +61,23 @@ def update_notice_text_warnings(ann_md, warnings, table_name):
         warnings.append(msg)
 
     return warnings
+
+
+def get_latest_version(datastack_name):
+    aligned_volume_name = get_datastack_info(datastack_name)["aligned_volume"]["name"]
+    session = sqlalchemy_cache.get(aligned_volume_name)
+    # query the database for the latest valid version
+    response = (
+        session.query(AnalysisVersion)
+        .filter(AnalysisVersion.datastack == datastack_name)
+        .filter(AnalysisVersion.valid)
+        .order_by(AnalysisVersion.time_stamp.desc())
+        .first()
+    )
+    if response is None:
+        return None
+    else:
+        return response.version
 
 
 def create_query_response(
