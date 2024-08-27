@@ -1131,19 +1131,20 @@ def preprocess_view_dataframe(df, view_name, db_name, column_names):
         # remove nan values from unique values
         unique_vals[tag] = unique_vals[tag][~pd.isnull(unique_vals[tag])]
 
-    # find all the duplicate values across columns
-    vals, counts = np.unique(
-        np.concatenate([v for v in unique_vals.values()]), return_counts=True
-    )
-    duplicates = vals[counts > 1]
+    if len(unique_vals) > 0:
+        # find all the duplicate values across columns
+        vals, counts = np.unique(
+            np.concatenate([v for v in unique_vals.values()]), return_counts=True
+        )
+        duplicates = vals[counts > 1]
 
-    # iterate through the tags and replace any duplicate
-    # values in the dataframe with a unique value,
-    # based on preprending the column name
-    for tag in tags:
-        for dup in duplicates:
-            if dup in unique_vals[tag]:
-                df[tag] = df[tag].replace(dup, f"{tag}:{dup}")
+        # iterate through the tags and replace any duplicate
+        # values in the dataframe with a unique value,
+        # based on preprending the column name
+        for tag in tags:
+            for dup in duplicates:
+                if dup in unique_vals[tag]:
+                    df[tag] = df[tag].replace(dup, f"{tag}:{dup}")
     return df, tags, bool_tags, numerical, root_id_col
 
 
@@ -1677,7 +1678,7 @@ class AvailableViews(Resource):
 
 @client_bp.expect(query_parser)
 @client_bp.route(
-    "/datastack/<string:datastack_name>/version/<int(signed+True):version>/views/<string:view_name>/metadata"
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>/views/<string:view_name>/metadata"
 )
 class ViewMetadata(Resource):
     method_decorators = [
