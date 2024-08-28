@@ -88,7 +88,7 @@ def days_till_next_month(date):
         date (datetime.datetime): a timepoint
 
     Returns:
-        datetime.datetime: same day next month (in the sense of same # of weeday)
+        datetime.datetime: same day next month (in the sense of same # of weekday)
     """
 
     weekday = relativedelta.weekday(date.isoweekday() - 1)
@@ -113,24 +113,10 @@ def setup_periodic_tasks(sender, **kwargs):
         run_periodic_database_update,
     )
 
-    merge_tables = get_config_param("MERGE_TABLES")
-    periodic_tasks = {
-        "run_daily_periodic_materialization": run_periodic_materialization.s(
-            days_to_expire=2, merge_tables=merge_tables
-        ),
-        "run_weekly_periodic_materialization": run_periodic_materialization.s(
-            days_to_expire=7, merge_tables=merge_tables
-        ),
-        "run_lts_periodic_materialization": run_periodic_materialization.s(
-            days_to_expire=days_till_next_month(
-                datetime.datetime.utcnow(),
-            ),
-            merge_tables=merge_tables,
-        ),
-        "run_periodic_database_update": run_periodic_database_update.s(),
-        "remove_expired_databases": remove_expired_databases.s(
-            delete_threshold=get_config_param("MIN_DATABASES")
-        ),
+    task_map = {
+        "run_periodic_materialization": run_periodic_materialization,
+        "run_periodic_database_update": run_periodic_database_update,
+        "remove_expired_databases": remove_expired_databases,
     }
 
     # remove expired task results in redis broker
@@ -145,10 +131,36 @@ def setup_periodic_tasks(sender, **kwargs):
     schedules = CeleryBeatSchema(many=True).dump(beat_schedules)
     for schedule in schedules:
 
-        if schedule["task"] not in periodic_tasks:
-            raise TaskNotFound(schedule["task"], periodic_tasks)
+        task_name = schedule["task"]
 
-        task = periodic_tasks[schedule["task"]]
+        if task_name not in task_map:
+            raise TaskNotFound(task_name, task_map)
+
+        task_function = task_map[task_name]
+        datastack_params = schedule.get("datastack_params", {})
+
+        if task_name == "remove_expired_databases":
+            task = task_function.s(
+                delete_threshold=datastack_params.get("delete_threshold", 5),
+                datastack=datastack_params.get("datastack"),
+            )
+        elif task_name == "run_periodic_database_update":
+            task = task_function.s(
+                datastack=datastack_params.get("datastack"),
+            )
+
+        elif task_name == "run_periodic_materialization":
+            # If `days_to_expire` is not provided, calculate it dynamically #TODO handle this better
+            if datastack_params["days_"] == 30:
+                datastack_params["days_to_expire"] = days_till_next_month(
+                    datetime.datetime.now(datetime.timezone.utc)
+                )
+            task = task_function.s(
+                days_to_expire=datastack_params.get("days_to_expire"),
+                merge_tables=datastack_params.get("merge_tables", False),
+                datastack=datastack_params.get("datastack"),
+            )
+
         sender.add_periodic_task(
             crontab(
                 minute=schedule["minute"],

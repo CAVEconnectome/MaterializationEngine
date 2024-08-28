@@ -45,6 +45,12 @@ class CronField(fields.Field):
             raise ValidationError("Field should be str, int or list")
 
 
+class CeleryDatastackSchema(Schema):
+    days_to_expire = fields.Int(required=False)
+    merge_tables = fields.Bool(required=False)
+    datastack = fields.Str(required=False)
+    delete_threshold = fields.Int(required=False)
+
 class CeleryBeatSchema(Schema):
     name = fields.Str(required=True)
     minute = CronField(default="*")
@@ -53,3 +59,4 @@ class CeleryBeatSchema(Schema):
     day_of_month = CronField(default="*")
     month_of_year = CronField(default="*")
     task = fields.Str(required=True)
+    datastack_params = CeleryDatastackSchema(required=False)
