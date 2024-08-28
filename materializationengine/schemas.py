@@ -59,4 +59,4 @@ class CeleryBeatSchema(Schema):
     day_of_month = CronField(default="*")
     month_of_year = CronField(default="*")
     task = fields.Str(required=True)
-    datastack_params = CeleryDatastackSchema(required=False)
+    datastack_params = fields.Nested(CeleryDatastackSchema, required=False)
