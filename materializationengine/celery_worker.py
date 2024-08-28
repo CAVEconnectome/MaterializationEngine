@@ -151,7 +151,7 @@ def setup_periodic_tasks(sender, **kwargs):
 
         elif task_name == "run_periodic_materialization":
             # If `days_to_expire` is not provided, calculate it dynamically #TODO handle this better
-            if datastack_params["days_"] == 30:
+            if datastack_params.get("days_to_expire") == 30:
                 datastack_params["days_to_expire"] = days_till_next_month(
                     datetime.datetime.now(datetime.timezone.utc)
                 )
