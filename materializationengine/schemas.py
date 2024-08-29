@@ -70,24 +70,21 @@ class TaskParamsSchema(Schema):
 
 class CeleryBeatSchema(Schema):
     name = fields.Str(required=True, metadata={"description": "Name of the task"})
-    minute = fields.Str(
+    minute = CronField(
         default="*", metadata={"description": "Minute field for cron schedule"}
     )
-    hour = fields.Str(
+    hour = CronField(
         default="*", metadata={"description": "Hour field for cron schedule"}
     )
-    day_of_week = fields.Str(
-        required=False,
+    day_of_week = CronField(
         default="*",
         metadata={"description": "Day of week for cron schedule"},
     )
-    day_of_month = fields.Str(
-        required=False,
+    day_of_month = CronField(
         default="*",
         metadata={"description": "Day of month for cron schedule"},
     )
-    month_of_year = fields.Str(
-        required=False,
+    month_of_year = CronField(
         default="*",
         metadata={"description": "Month of year for cron schedule"},
     )
