@@ -59,6 +59,13 @@ class BaseConfig:
             "minute": 10,
             "hour": 8,
             "day_of_week": [0, 2, 4, 6],
+            "task": "run_daily_periodic_materialization",
+        },        
+        {
+            "name": "Materialize Specific Database Daily",
+            "minute": 10,
+            "hour": 8,
+            "day_of_week": [0, 2, 4, 6],
             "task": "run_periodic_materialization",
             "datastack_params": {
                 "days_to_expire": 2,
@@ -86,7 +93,7 @@ class BaseConfig:
             "day_of_week": [1, 5],
             "task": "run_periodic_materialization",
             "datastack_params": {
-                "days_to_expire": 2,
+                "days_to_expire": 7,
             }
         },
         {
