@@ -53,3 +53,8 @@ class TaskNotFound(KeyError):
 
     def __str__(self):
         return f"{self.message}"
+
+
+class ConfigurationError(Exception):
+    """Custom exception for configuration errors."""
+    pass

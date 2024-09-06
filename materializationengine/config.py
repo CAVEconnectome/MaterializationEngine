@@ -60,6 +60,18 @@ class BaseConfig:
             "hour": 8,
             "day_of_week": [0, 2, 4, 6],
             "task": "run_daily_periodic_materialization",
+        },        
+        {
+            "name": "Materialize Specific Database Daily",
+            "minute": 10,
+            "hour": 8,
+            "day_of_week": [0, 2, 4, 6],
+            "task": "run_periodic_materialization",
+            "datastack_params": {
+                "days_to_expire": 2,
+                "merge_tables": False,
+                "datastack": "minnie65_phase3_v1",
+            },
         },
         {
             "name": "Materialized Database Daily (2 Days) (Wednesdays)",
@@ -67,14 +79,22 @@ class BaseConfig:
             "hour": 8,
             "day_of_week": 3,
             "day_of_month": "8-14,22-31",
-            "task": "run_daily_periodic_materialization",
+            "task": "run_periodic_materialization",
+            "datastack_params": {
+                "days_to_expire": 2,
+                "merge_tables": False,
+                "datastack": "minnie65_phase3_v1",
+            },
         },
         {
             "name": "Materialized Database Weekly (7 Days)",
             "minute": 10,
             "hour": 8,
             "day_of_week": [1, 5],
-            "task": "run_weekly_periodic_materialization",
+            "task": "run_periodic_materialization",
+            "datastack_params": {
+                "days_to_expire": 7,
+            }
         },
         {
             "name": "Long Term Support Materialized Database (30 days)",
@@ -82,13 +102,14 @@ class BaseConfig:
             "hour": 8,
             "day_of_week": 3,
             "day_of_month": "1-7,15-21",
-            "task": "run_lts_periodic_materialization",
+            "task": "run_periodic_materialization",
         },
         {
             "name": "Remove Expired Databases (Midnight)",
             "minute": 0,
             "hour": 8,
             "task": "remove_expired_databases",
+            "datastack_params": {"delete_threshold": 5},
         },
         {
             "name": "Update Live Database",

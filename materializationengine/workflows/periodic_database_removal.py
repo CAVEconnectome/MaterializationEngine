@@ -48,12 +48,13 @@ def get_valid_versions(session):
 
 
 @celery.task(name="workflow:remove_expired_databases")
-def remove_expired_databases(delete_threshold: int = 5) -> str:
+def remove_expired_databases(delete_threshold: int = 5, datastack: str = None) -> str:
     """
     Remove expired database from time this method is called.
     """
     aligned_volume_databases = get_aligned_volumes_databases()
-    datastacks = get_config_param("DATASTACKS")
+
+    datastacks = [datastack] if datastack else get_config_param("DATASTACKS")
     current_time = datetime.utcnow()
     remove_db_cron_info = []
 
@@ -82,7 +83,7 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
                     .order_by(AnalysisVersion.time_stamp)
                     .all()
                 ) # some databases might have failed to materialize completely but are still present on disk
-                
+
                 non_valid_versions = [str(non_valid_version) for non_valid_version in non_valid_results]
                 versions = list(set(expired_versions + non_valid_versions))
             except Exception as sql_error:
@@ -128,7 +129,7 @@ def remove_expired_databases(delete_threshold: int = 5) -> str:
 
                         if len(remaining_databases) == delete_threshold:
                             break
-                        
+
                         if (len(databases) - len(dropped_dbs)) > delete_threshold:
                             try:
                                 sql = (

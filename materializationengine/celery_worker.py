@@ -1,20 +1,23 @@
+import datetime
 import logging
 import os
 import sys
-import redis
+import warnings
+from typing import Any, Callable, Dict
 
+import redis
 from celery.app.builtins import add_backend_cleanup_task
 from celery.schedules import crontab
 from celery.signals import after_setup_logger
 from celery.utils.log import get_task_logger
+from dateutil import relativedelta
+from marshmallow import ValidationError
 
 from materializationengine.celery_init import celery
 from materializationengine.celery_slack import post_to_slack_on_task_failure
-from materializationengine.errors import TaskNotFound
+from materializationengine.errors import ConfigurationError
 from materializationengine.schemas import CeleryBeatSchema
 from materializationengine.utils import get_config_param
-from dateutil import relativedelta
-import datetime
 
 celery_logger = get_task_logger(__name__)
 
@@ -88,7 +91,7 @@ def days_till_next_month(date):
         date (datetime.datetime): a timepoint
 
     Returns:
-        datetime.datetime: same day next month (in the sense of same # of weeday)
+        datetime.datetime: same day next month (in the sense of same # of weekday)
     """
 
     weekday = relativedelta.weekday(date.isoweekday() - 1)
@@ -103,6 +106,85 @@ def days_till_next_month(date):
 
 @celery.on_after_configure.connect
 def setup_periodic_tasks(sender, **kwargs):
+    # remove expired task results in redis broker
+    sender.add_periodic_task(
+        crontab(hour=0, minute=0, day_of_week="*", day_of_month="*", month_of_year="*"),
+        add_backend_cleanup_task(celery),
+        name="Clean up back end results",
+    )
+
+    beat_schedules = celery.conf["beat_schedules"]
+    celery_logger.info(beat_schedules)
+
+    try:
+        schedules = CeleryBeatSchema(many=True).load(beat_schedules)
+    except ValidationError as validation_error:
+        celery_logger.error(f"Configuration validation failed: {validation_error}")
+        raise ConfigurationError("Invalid configuration") from validation_error
+
+    for schedule in schedules:
+        try:
+            task = configure_task(schedule)
+            sender.add_periodic_task(
+                create_crontab(schedule),
+                task,
+                name=schedule["name"],
+            )
+            celery_logger.info(f"Added task: {schedule['name']}")
+        except ConfigurationError as e:
+            celery_logger.error(
+                f"Error configuring task '{schedule.get('name', 'Unknown')}': {str(e)}"
+            )
+
+
+def configure_task(schedule: Dict[str, Any]) -> Callable:
+    task_name = schedule["task"]
+    datastack_params = schedule.get("datastack_params", {})
+
+    if is_old_materialization_configuration(task_name):
+        return schedule_legacy_workflow(task_name)
+    else:
+        return schedule_workflow(task_name, datastack_params)
+
+
+def is_old_materialization_configuration(task_name: str) -> bool:
+    old_task_names = [
+        "run_daily_periodic_materialization",
+        "run_weekly_periodic_materialization",
+        "run_lts_periodic_materialization",
+    ]
+    return task_name in old_task_names
+
+
+def schedule_legacy_workflow(task_name: str) -> Callable:
+    from materializationengine.workflows.periodic_materialization import (
+        run_periodic_materialization,
+    )
+
+    warnings.warn(
+        f"Deprecated task name '{task_name}' detected. Please update your configuration to use 'run_periodic_materialization' instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+    if task_name == "run_daily_periodic_materialization":
+        days_to_expire = 2
+    elif task_name == "run_weekly_periodic_materialization":
+        days_to_expire = 7
+    elif task_name == "run_lts_periodic_materialization":
+        days_to_expire = days_till_next_month(
+            datetime.datetime.now(datetime.timezone.utc)
+        )
+    else:
+        raise ConfigurationError(f"Unknown old task name: {task_name}")
+
+    return run_periodic_materialization.s(
+        days_to_expire=days_to_expire,
+        merge_tables=False,  # Default value for old configuration
+    )
+
+
+def schedule_workflow(task_name: str, datastack_params: Dict[str, Any]) -> Callable:
     from materializationengine.workflows.periodic_database_removal import (
         remove_expired_databases,
     )
@@ -113,53 +195,38 @@ def setup_periodic_tasks(sender, **kwargs):
         run_periodic_database_update,
     )
 
-    merge_tables = get_config_param("MERGE_TABLES")
-    periodic_tasks = {
-        "run_daily_periodic_materialization": run_periodic_materialization.s(
-            days_to_expire=2, merge_tables=merge_tables
-        ),
-        "run_weekly_periodic_materialization": run_periodic_materialization.s(
-            days_to_expire=7, merge_tables=merge_tables
-        ),
-        "run_lts_periodic_materialization": run_periodic_materialization.s(
-            days_to_expire=days_till_next_month(
-                datetime.datetime.utcnow(),
-            ),
-            merge_tables=merge_tables,
-        ),
-        "run_periodic_database_update": run_periodic_database_update.s(),
-        "remove_expired_databases": remove_expired_databases.s(
-            delete_threshold=get_config_param("MIN_DATABASES")
-        ),
-    }
-
-    # remove expired task results in redis broker
-    sender.add_periodic_task(
-        crontab(hour=0, minute=0, day_of_week="*", day_of_month="*", month_of_year="*"),
-        add_backend_cleanup_task(celery),
-        name="Clean up back end results",
-    )
-
-    beat_schedules = celery.conf["beat_schedules"]
-    celery_logger.info(beat_schedules)
-    schedules = CeleryBeatSchema(many=True).dump(beat_schedules)
-    for schedule in schedules:
-
-        if schedule["task"] not in periodic_tasks:
-            raise TaskNotFound(schedule["task"], periodic_tasks)
-
-        task = periodic_tasks[schedule["task"]]
-        sender.add_periodic_task(
-            crontab(
-                minute=schedule["minute"],
-                hour=schedule["hour"],
-                day_of_week=schedule["day_of_week"],
-                day_of_month=schedule["day_of_month"],
-                month_of_year=schedule["month_of_year"],
-            ),
-            task,
-            name=schedule["name"],
+    if task_name == "remove_expired_databases":
+        return remove_expired_databases.s(
+            delete_threshold=datastack_params.get("delete_threshold", 5),
+            datastack=datastack_params.get("datastack"),
         )
+
+    elif task_name == "run_periodic_database_update":
+        return run_periodic_database_update.s(
+            datastack=datastack_params.get("datastack")
+        )
+
+    elif task_name == "run_periodic_materialization":
+
+        return run_periodic_materialization.s(
+            days_to_expire=datastack_params.get("days_to_expire", 2),
+            merge_tables=datastack_params.get("merge_tables", False),
+            datastack=datastack_params.get("datastack"),
+        )
+
+    else:
+        raise ConfigurationError(f"Unknown task: {task_name}")
+
+
+def create_crontab(schedule: Dict[str, Any]) -> crontab:
+    """Create a crontab object from the schedule dictionary."""
+    return crontab(
+        minute=schedule.get("minute", "*"),
+        hour=schedule.get("hour", "*"),
+        day_of_week=schedule.get("day_of_week", "*"),
+        day_of_month=schedule.get("day_of_month", "*"),
+        month_of_year=schedule.get("month_of_year", "*"),
+    )
 
 
 def get_celery_worker_status():

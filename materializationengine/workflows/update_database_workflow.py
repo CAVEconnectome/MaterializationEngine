@@ -26,17 +26,20 @@ celery_logger = get_task_logger(__name__)
 
 
 @celery.task(name="workflow:run_periodic_database_update")
-def run_periodic_database_update() -> None:
+def run_periodic_database_update(datastack: str = None) -> None:
     """
     Run update database workflow. Steps are as follows:
     1. Find missing segmentation data in a given datastack and lookup.
     2. Update expired root ids
 
     """
-    try:
-        datastacks = json.loads(os.environ["DATASTACKS"])
-    except:
-        datastacks = get_config_param("DATASTACKS")
+    if datastack:
+        datastacks = [datastack]
+    else:
+        try:
+            datastacks = json.loads(os.environ["DATASTACKS"])
+        except Exception:
+            datastacks = get_config_param("DATASTACKS")
 
     for datastack in datastacks:
         try:
