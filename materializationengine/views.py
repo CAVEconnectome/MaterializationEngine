@@ -36,6 +36,7 @@ from materializationengine.celery_init import celery
 from materializationengine.blueprints.client.query import specific_query
 from materializationengine.database import sqlalchemy_cache, dynamic_annotation_cache
 from materializationengine.blueprints.client.query_manager import QueryManager
+from materializationengine.blueprints.client.datastack import validate_datastack
 
 from materializationengine.info_client import (
     get_datastack_info,
@@ -138,6 +139,23 @@ def get_job_info(job_name: str):
     return render_template("job.html", job=job_info, version=__version__)
 
 
+def make_df_with_links_to_version(
+    objects, schema, url, col, col_value, df=None, **urlkwargs
+):
+    if df is None:
+        df = pd.DataFrame(data=schema.dump(objects, many=True))
+    if urlkwargs is None:
+        urlkwargs = {}
+    if url is not None:
+        df[col] = df.apply(
+            lambda x: "<a href='{}'>{}</a>".format(
+                url_for(url, version=getattr(x, col_value), **urlkwargs), x[col]
+            ),
+            axis=1,
+        )
+    return df
+
+
 def make_df_with_links_to_id(
     objects, schema, url, col, col_value, df=None, **urlkwargs
 ):
@@ -183,7 +201,7 @@ def datastack_view(datastack_name):
             df=df,
             datastack_name=datastack_name,
         )
-        df = make_df_with_links_to_id(
+        df = make_df_with_links_to_version(
             objects=versions,
             schema=schema,
             url="views.version_view",
@@ -289,22 +307,25 @@ def make_seg_prop_ng_link(datastack_name, table_name, version, client, is_view=F
     return url_link
 
 
-@views_bp.route("/datastack/<datastack_name>/version/<int(signed=True):id>")
+@views_bp.route("/datastack/<datastack_name>/version/<int(signed=True):version>")
+@validate_datastack
 @auth_requires_permission("view", table_arg="datastack_name")
-def version_view(datastack_name: str, id: int):
+def version_view(
+    datastack_name: str, version: int, target_datastack=None, target_version=None
+):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
 
     session = sqlalchemy_cache.get(aligned_volume_name)
 
-    version = (
+    anal_version = (
         session.query(AnalysisVersion)
-        .filter(AnalysisVersion.version == id)
-        .filter(AnalysisVersion.datastack == datastack_name)
+        .filter(AnalysisVersion.version == target_version)
+        .filter(AnalysisVersion.datastack == target_datastack)
         .first()
     )
 
     table_query = session.query(AnalysisTable).filter(
-        AnalysisTable.analysisversion == version
+        AnalysisTable.analysisversion == anal_version
     )
     tables = table_query.all()
     schema = AnalysisTableSchema(many=True)
@@ -315,7 +336,7 @@ def version_view(datastack_name: str, id: int):
         url="views.table_view",
         col="id",
         col_value="id",
-        datastack_name=datastack_name,
+        datastack_name=target_datastack,
     )
 
     column_order = schema.declared_fields.keys()
@@ -324,7 +345,7 @@ def version_view(datastack_name: str, id: int):
         datastack_name, server_address=current_app.config["GLOBAL_SERVER_URL"]
     )
     df["ng_link"] = df.apply(
-        lambda x: f"<a href='{make_seg_prop_ng_link(datastack_name, x.table_name, version.version, client)}'>seg prop link</a>",
+        lambda x: f"<a href='{make_seg_prop_ng_link(target_datastack, x.table_name, target_version, client)}'>seg prop link</a>",
         axis=1,
     )
     df["schema"] = df.schema.map(
@@ -342,7 +363,7 @@ def version_view(datastack_name: str, id: int):
             escape=False, classes=classes, index=False, justify="left", border=0
         )
 
-    mat_session = sqlalchemy_cache.get(f"{datastack_name}__mat{version.version}")
+    mat_session = sqlalchemy_cache.get(f"{datastack_name}__mat{version}")
 
     views = mat_session.query(AnalysisView).all()
 
@@ -352,11 +373,11 @@ def version_view(datastack_name: str, id: int):
         url=None,
         col=None,
         col_value=None,
-        datastack_name=datastack_name,
+        datastack_name=target_datastack,
     )
     if len(views_df) > 0:
         views_df["ng_link"] = views_df.apply(
-            lambda x: f"<a href='{make_seg_prop_ng_link(datastack_name, x.table_name, version.version, client, is_view=True)}'>seg prop link</a>",
+            lambda x: f"<a href='{make_seg_prop_ng_link(target_datastack, x.table_name, target_version, client, is_view=True)}'>seg prop link</a>",
             axis=1,
         )
         classes = ["table table-borderless"]
@@ -369,8 +390,8 @@ def version_view(datastack_name: str, id: int):
 
     return render_template(
         "version.html",
-        datastack=datastack_name,
-        analysisversion=version,
+        datastack=target_datastack,
+        analysisversion=target_version,
         table=output_html,
         view_table=output_view_html,
         version=__version__,
