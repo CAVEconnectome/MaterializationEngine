@@ -425,6 +425,10 @@ def apply_filters(df, user_data, column_names):
     filter_in_dict = user_data.get("filter_in_dict", None)
     filter_out_dict = user_data.get("filter_out_dict", None)
     filter_equal_dict = user_data.get("filter_equal_dict", None)
+    filter_greater_dict = user_data.get("filter_greater_dict", None)
+    filter_less_dict = user_data.get("filter_less_dict", None)
+    filter_greater_equal_dict = user_data.get("filter_greater_equal_dict", None)
+    filter_less_equal_dict = user_data.get("filter_less_equal_dict", None)
 
     if filter_in_dict:
         for table, filter in filter_in_dict.items():
@@ -441,6 +445,26 @@ def apply_filters(df, user_data, column_names):
             for col, val in filter.items():
                 colname = column_names[table][col]
                 df = df[df[colname] == val]
+    if filter_greater_dict:
+        for table, filter in filter_greater_dict.items():
+            for col, val in filter.items():
+                colname = column_names[table][col]
+                df = df[df[colname] > val]
+    if filter_less_dict:
+        for table, filter in filter_less_dict.items():
+            for col, val in filter.items():
+                colname = column_names[table][col]
+                df = df[df[colname] < val]
+    if filter_greater_equal_dict:
+        for table, filter in filter_greater_equal_dict.items():
+            for col, val in filter.items():
+                colname = column_names[table][col]
+                df = df[df[colname] >= val]
+    if filter_less_equal_dict:
+        for table, filter in filter_less_equal_dict.items():
+            for col, val in filter.items():
+                colname = column_names[table][col]
+                df = df[df[colname] <= val]
     return df
 
 
@@ -922,10 +946,31 @@ class FrozenTableQuery(Resource):
                 "tablename":{
                     "column_name":value
                 }
+            },
+            "filter_greater_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_less_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_greater_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_less_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
             "filter_spatial_dict": {
                 "tablename": {
                     "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
-            }
+            },
             "filter_regex_dict": {
                 "tablename": {
                     "column_name": "regex"
@@ -1388,6 +1433,26 @@ class FrozenQuery(Resource):
                     "column_name":value
                 }
             },
+            "filter_greater_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_less_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_greater_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_less_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
             "filter_spatial_dict": {
                 "tablename":{
                     "column_name":[[min_x,min_y,minz], [max_x_max_y_max_z]]
@@ -1602,10 +1667,31 @@ class LiveTableQuery(Resource):
                 "table_name":{
                     "column_name":value
                 }
+            },
+            "filter_greater_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_less_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_greater_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_less_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
             "filter_spatial_dict": {
                 "table_name": {
                 "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
-            }
+            },
             "filter_regex_dict":{
                 "table_name":{
                     "column_name": "regex"
@@ -1778,6 +1864,10 @@ def assemble_view_dataframe(datastack_name, version, view_name, data, args):
     qm.apply_filter(data.get("filter_in_dict", None), qm.apply_isin_filter)
     qm.apply_filter(data.get("filter_out_dict", None), qm.apply_notequal_filter)
     qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
+    qm.apply_filter(data.get("filter_greater_dict", None), qm.apply_greater_filter)
+    qm.apply_filter(data.get("filter_less_dict", None), qm.apply_less_filter)
+    qm.apply_filter(data.get("filter_greater_equal_dict", None), qm.apply_greater_equal_filter)
+    qm.apply_filter(data.get("filter_less_equal_dict", None), qm.apply_less_equal_filter)
     qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
     qm.apply_filter(data.get("filter_regex_dict", None), qm.apply_regex_filter)
     select_columns = data.get("select_columns", None)
@@ -1969,10 +2059,31 @@ class ViewQuery(Resource):
                 "tablename":{
                     "column_name":value
                 }
+            },
+            "filter_greater_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_less_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_greater_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_less_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
             "filter_spatial_dict": {
                 "tablename": {
                 "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
-            }
+            },
             "filter_regex_dict": {
                 "tablename": {
                     "column_name": "regex"

@@ -231,6 +231,30 @@ class QueryManager:
         )
         self._filters.append((get_column(model, column_name) == value,))
 
+    def apply_greater_filter(self, table_name, column_name, value):
+        model = self._find_relevant_model(
+            table_name=table_name, column_name=column_name
+        )
+        self._filters.append((get_column(model, column_name) == value,))
+
+    def apply_less_filter(self, table_name, column_name, value):
+        model = self._find_relevant_model(
+            table_name=table_name, column_name=column_name
+        )
+        self._filters.append((get_column(model, column_name) == value,))
+
+    def apply_greater_equal_filter(self, table_name, column_name, value):
+        model = self._find_relevant_model(
+            table_name=table_name, column_name=column_name
+        )
+        self._filters.append((get_column(model, column_name) == value,))
+
+    def apply_less_equal_filter(self, table_name, column_name, value):
+        model = self._find_relevant_model(
+            table_name=table_name, column_name=column_name
+        )
+        self._filters.append((get_column(model, column_name) == value,))
+
     def apply_isin_filter(self, table_name, column_name, value):
         model = self._find_relevant_model(
             table_name=table_name, column_name=column_name
@@ -361,10 +385,31 @@ class QueryManager:
                 "table_name":{
                     "column_name":value
                 }
+            },
+            "filter_greater_dict": {
+                "table_name":{
+                    "column_name":value
+                }
+            },
+            "filter_less_dict": {
+                "table_name":{
+                    "column_name":value
+                }
+            },
+            "filter_greater_equal_dict": {
+                "table_name":{
+                    "column_name":value
+                }
+            },
+            "filter_less_equal_dict": {
+                "table_name":{
+                    "column_name":value
+                }
+            },
             "filter_spatial_dict": {
                 "table_name": {
                 "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
-            }
+            },
             "filter_regex_dict":{
                 "table_name":{
                     "column_name":"regex"
@@ -406,6 +451,18 @@ class QueryManager:
         )
         self.apply_filter(
             user_data.get("filter_equal_dict", None), self.apply_equal_filter
+        )
+        self.apply_filter(
+            user_data.get("filter_greater_dict", None), self.apply_greater_filter
+        )
+        self.apply_filter(
+            user_data.get("filter_less_dict", None), self.apply_less_filter
+        )
+        self.apply_filter(
+            user_data.get("filter_greater_equal_dict", None), self.apply_greater_equal_filter
+        )
+        self.apply_filter(
+            user_data.get("filter_less_equal_dict", None), self.apply_less_equal_filter
         )
         self.apply_filter(
             user_data.get("filter_spatial_dict", None), self.apply_spatial_filter
