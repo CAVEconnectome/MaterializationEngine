@@ -110,6 +110,10 @@ def strip_root_id_filters(user_data):
     strip_filter("filter_in_dict")
     strip_filter("filter_out_dict")
     strip_filter("filter_equal_dict")
+    strip_filter("filter_greater_dict")
+    strip_filter("filter_less_dict")
+    strip_filter("filter_greater_equal_dict")
+    strip_filter("filter_less_equal_dict")
     return modified_user_data
 
 
@@ -123,6 +127,10 @@ def remap_query(user_data, mat_timestamp, cg_client, allow_invalid_root_ids=Fals
             user_data.get("filter_in_dict", None),
             user_data.get("filter_out_dict", None),
             user_data.get("filter_equal_dict", None),
+            user_data.get("filter_greater_dict", None),
+            user_data.get("filter_less_dict", None),
+            user_data.get("filter_greater_equal_dict", None),
+            user_data.get("filter_less_equal_dict", None),
         ],
         query_timestamp,
         mat_timestamp,
@@ -130,7 +138,7 @@ def remap_query(user_data, mat_timestamp, cg_client, allow_invalid_root_ids=Fals
         allow_invalid_root_ids,
     )
 
-    new_filter_in_dict, new_filter_out_dict, new_equal_dict = new_filters
+    new_filter_in_dict, new_filter_out_dict, new_equal_dict, new_greater_dict, new_less_dict, new_greater_equal_dict, new_less_equal_dict = new_filters
     if new_equal_dict is not None:
         if new_filter_in_dict is None:
             new_filter_in_dict = defaultdict(lambda: None)
@@ -152,6 +160,10 @@ def remap_query(user_data, mat_timestamp, cg_client, allow_invalid_root_ids=Fals
 
     modified_user_data = deepcopy(user_data)
     modified_user_data["filter_equal_dict"] = new_equal_dict
+    modified_user_data["filter_greater_dict"] = new_greater_dict
+    modified_user_data["filter_less_dict"] = new_less_dict
+    modified_user_data["filter_greater_equal_dict"] = new_greater_equal_dict
+    modified_user_data["filter_less_equal_dict"] = new_less_equal_dict
     modified_user_data["filter_in_dict"] = new_filter_in_dict
     modified_user_data["filter_out_dict"] = new_filter_out_dict
 
@@ -339,6 +351,10 @@ def map_filters(
 #         filter_in_dict = data.get("filter_in_dict", None)
 #         filter_out_dict = data.get("filter_notin_dict", None)
 #         filter_equal_dict = data.get("filter_equal_dict", None)
+#         filter_greater_dict = data.get("filter_greater_dict", None)
+#         filter_less_dict = data.get("filter_less_dict", None)
+#         filter_greater_equal_dict = data.get("filter_greater_equal_dict", None)
+#         filter_less_equal_dict = data.get("filter_less_equal_dict", None)
 
 #         db = dynamic_annotation_cache.get_db(aligned_volume_name)
 #         table_metadata = db.database.get_table_metadata(table_name)
@@ -361,7 +377,7 @@ def map_filters(
 #             )
 
 #             past_filters, future_map = map_filters(
-#                 [filter_in_dict, filter_out_dict, filter_equal_dict],
+#                 [filter_in_dict, filter_out_dict, filter_equal_dict, filter_greater_dict, filter_less_dict, filter_greater_equal_dict, filter_less_equal_dict],
 #                 timestamp,
 #                 timestamp_start,
 #                 cg_client,
@@ -412,6 +428,10 @@ def map_filters(
 #                 filter_in_dict=past_filter_in_dict,
 #                 filter_notin_dict=past_filter_out_dict,
 #                 filter_equal_dict=None,
+#                 filter_greater_dict=None,
+#                 filter_less_dict=None,
+#                 filter_greater_equal_dict=None,
+#                 filter_less_equal_dict=None,
 #                 filter_spatial=data.get("filter_spatial_dict", None),
 #                 select_columns=data.get("select_columns", None),
 #                 consolidate_positions=False,
@@ -485,6 +505,10 @@ def map_filters(
 #                 data.get("filter_notin_dict", None), table_name
 #             ),
 #             filter_equal_dict=_format_filter(filter_equal_dict, table_name),
+#             filter_greater_dict=_format_filter(filter_greater_dict, table_name),
+#             filter_less_dict=_format_filter(filter_less_dict, table_name),
+#             filter_greater_equal_dict=_format_filter(filter_greater_equal_dict, table_name),
+#             filter_less_equal_dict=_format_filter(filter_less_equal_dict, table_name),
 #             filter_spatial=data.get("filter_spatial_dict", None),
 #             select_columns=data.get("select_columns", None),
 #             consolidate_positions=not args["split_positions"],
@@ -543,6 +567,22 @@ def map_filters(
 #             for col, val in filter_equal_dict.items():
 #                 if col.endswith("root_id"):
 #                     df = df[df[col] == val]
+#         if filter_greater_dict is not None:
+#             for col, val in filter_greater_dict.items():
+#                 if col.endswith("root_id"):
+#                     df = df[df[col] > val]
+#         if filter_less_dict is not None:
+#             for col, val in filter_less_dict.items():
+#                 if col.endswith("root_id"):
+#                     df = df[df[col] < val]
+#         if filter_greater_equal_dict is not None:
+#             for col, val in filter_greater_equal_dict.items():
+#                 if col.endswith("root_id"):
+#                     df = df[df[col] >= val]
+#         if filter_less_equal_dict is not None:
+#             for col, val in filter_less_equal_dict.items():
+#                 if col.endswith("root_id"):
+#                     df = df[df[col] <= val]
 
 #         now = time.time()
 #         headers = None
@@ -571,7 +611,7 @@ def map_filters(
 #             return after_request(response)
 
 # def map_filters(
-#                 [filter_in_dict, filter_out_dict, filter_equal_dict],
+#                 [filter_in_dict, filter_out_dict, filter_equal_dict, filter_greater_dict, filter_less_dict, filter_greater_equal_dict, filter_less_equal_dict],
 #                 timestamp,
 #                 timestamp_start,
 #                 cg_client,
@@ -586,6 +626,10 @@ def map_filters(
 #     select_columns=None,
 #     filter_in_dict=None,
 #     filter_equal_dict=None,
+#     filter_greater_dict=None,
+#     filter_less_dict=None,
+#     filter_greater_equal_dict=None,
+#     filter_less_equal_dict=None,
 #     filter_out_dict=None,
 #     filter_spatial_dict=None,
 #     offset=0,
