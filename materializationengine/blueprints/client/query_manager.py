@@ -235,25 +235,25 @@ class QueryManager:
         model = self._find_relevant_model(
             table_name=table_name, column_name=column_name
         )
-        self._filters.append((get_column(model, column_name) == value,))
+        self._filters.append((get_column(model, column_name) > value,))
 
     def apply_less_filter(self, table_name, column_name, value):
         model = self._find_relevant_model(
             table_name=table_name, column_name=column_name
         )
-        self._filters.append((get_column(model, column_name) == value,))
+        self._filters.append((get_column(model, column_name) < value,))
 
     def apply_greater_equal_filter(self, table_name, column_name, value):
         model = self._find_relevant_model(
             table_name=table_name, column_name=column_name
         )
-        self._filters.append((get_column(model, column_name) == value,))
+        self._filters.append((get_column(model, column_name) >= value,))
 
     def apply_less_equal_filter(self, table_name, column_name, value):
         model = self._find_relevant_model(
             table_name=table_name, column_name=column_name
         )
-        self._filters.append((get_column(model, column_name) == value,))
+        self._filters.append((get_column(model, column_name) <= value,))
 
     def apply_isin_filter(self, table_name, column_name, value):
         model = self._find_relevant_model(
