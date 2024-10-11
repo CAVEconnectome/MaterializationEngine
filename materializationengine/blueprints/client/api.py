@@ -369,6 +369,27 @@ class FrozenTableQuery(Resource):
                 "tablename":{
                     "column_name":value
                 }
+            },
+            "filter_greater_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_less_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_greater_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_less_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
             "filter_spatial_dict": {
                 "tablename": {
                 "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
@@ -437,7 +458,27 @@ class FrozenQuery(Resource):
                 "tablename":{
                     "column_name":value
                 }
-            }
+            },
+            "filter_greater_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_less_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_greater_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
+            "filter_less_equal_dict": {
+                "tablename":{
+                    "column_name":value
+                }
+            },
             "filter_spatial_dict": {
                 "tablename":{
                     "column_name":[[min_x,min_y,minz], [max_x_max_y_max_z]]

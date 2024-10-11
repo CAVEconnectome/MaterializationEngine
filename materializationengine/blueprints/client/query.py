@@ -250,6 +250,10 @@ def specific_query(
     filter_in_dict=None,
     filter_notin_dict=None,
     filter_equal_dict=None,
+    filter_greater_dict=None,
+    filter_less_dict=None,
+    filter_greater_equal_dict=None,
+    filter_less_equal_dict=None,
     filter_spatial=None,
     select_columns=None,
     consolidate_positions=True,
@@ -277,6 +281,18 @@ def specific_query(
     filter_equal_dict: dict of dicts
         outer layer: keys are table names
         inner layer: keys are column names, values are entries to be equal
+    filter_greater_dict: dict of dicts
+        outer layer: keys are table names
+        inner layer: keys are column names, values are entries to be exclusive upper-bound
+    filter_less_dict: dict of dicts
+        outer layer: keys are table names
+        inner layer: keys are column names, values are entries to be exclusive lower-bound
+    filter_greater_equal_dict: dict of dicts
+        outer layer: keys are table names
+        inner layer: keys are column names, values are entries to be inclusive upper-bound
+    filter_less_equal_dict: dict of dicts
+        outer layer: keys are table names
+        inner layer: keys are column names, values are entries to be inclusive lower-bound
     filter_spatial: dict of dicts
         outer layer: keys are table_namess
         inner layer: keys are column names, values are [min,max] as list of lists
@@ -383,6 +399,34 @@ def specific_query(
                 filter_value = filter_table_dict[column_name]
                 filter_args.append(
                     (model_dict[filter_table].__dict__[column_name] == filter_value,)
+                )
+    if filter_greater_dict is not None:
+        for filter_table, filter_table_dict in filter_greater_dict.items():
+            for column_name in filter_table_dict.keys():
+                filter_value = filter_table_dict[column_name]
+                filter_args.append(
+                    (model_dict[filter_table].__dict__[column_name] > filter_value,)
+                )
+    if filter_less_dict is not None:
+        for filter_table, filter_table_dict in filter_less_dict.items():
+            for column_name in filter_table_dict.keys():
+                filter_value = filter_table_dict[column_name]
+                filter_args.append(
+                    (model_dict[filter_table].__dict__[column_name] < filter_value,)
+                )
+    if filter_greater_equal_dict is not None:
+        for filter_table, filter_table_dict in filter_greater_equal_dict.items():
+            for column_name in filter_table_dict.keys():
+                filter_value = filter_table_dict[column_name]
+                filter_args.append(
+                    (model_dict[filter_table].__dict__[column_name] >= filter_value,)
+                )
+    if filter_less_equal_dict is not None:
+        for filter_table, filter_table_dict in filter_less_equal_dict.items():
+            for column_name in filter_table_dict.keys():
+                filter_value = filter_table_dict[column_name]
+                filter_args.append(
+                    (model_dict[filter_table].__dict__[column_name] <= filter_value,)
                 )
 
     if filter_spatial is not None:
