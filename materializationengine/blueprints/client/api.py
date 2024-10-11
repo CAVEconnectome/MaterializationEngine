@@ -30,7 +30,7 @@ from middle_auth_client import auth_requires_permission
 from materializationengine.blueprints.client.datastack import validate_datastack
 
 
-__version__ = "4.33.3"
+__version__ = "4.34.0"
 
 
 authorizations = {
