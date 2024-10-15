@@ -58,13 +58,13 @@ def create_app(config_name: str = None):
         app = configure_app(app)
     # register blueprints
 
-    apibp = Blueprint("api", __name__, url_prefix="/materialize/api")
+    apibp = Blueprint("api", __name__, url_prefix="/materialize")
 
-    @apibp.route("/versions")
+    @apibp.route("/api/versions")
     def versions():
         return jsonify([2, 3]), 200
 
-    @apibp.route("/materialize/version")
+    @apibp.route("/version")
     def version():
         return __version__, 200
 
@@ -75,9 +75,9 @@ def create_app(config_name: str = None):
         api = Api(
             apibp, title="Materialization Engine API", version=__version__, doc="/doc"
         )
-        api.add_namespace(mat_bp, path="/v2")
-        api.add_namespace(client_bp, path="/v2")
-        api.add_namespace(client_bp2, path="/v3")
+        api.add_namespace(mat_bp, path="/api/v2")
+        api.add_namespace(client_bp, path="/api/v2")
+        api.add_namespace(client_bp2, path="/api/v3")
 
         app.register_blueprint(apibp)
         app.register_blueprint(views_bp)
