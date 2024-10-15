@@ -25,16 +25,18 @@ def get_allowed_aligned_volumes():
 
 def migrate_static_schemas(sql_url: str, aligned_volume: str):
     sql_base_uri = sql_url.rpartition("/")[0]
+    logging.info(sql_base_uri)
     sql_uri = make_url(f"{sql_base_uri}/{aligned_volume}")
     return run_alembic_migration(str(sql_uri))
 
 
 def migrate_static_schemas_in_aligned_volume_dbs():
-    sql_base_uri = application.config["SQLALCHEMY_DATABASE_URI"].rpartition("/")[0]
+    sql_uri = application.config["SQLALCHEMY_DATABASE_URI"]
+    print(f"SQL Base URI: {sql_uri}")
     aligned_volumes = get_allowed_aligned_volumes()
     for aligned_volume in aligned_volumes:
         logger.info(f"Migrating {aligned_volume}")
-        migration_status = migrate_static_schemas(sql_base_uri, aligned_volume)
+        migration_status = migrate_static_schemas(sql_uri, aligned_volume)
         logger.info(f"Migrated {aligned_volume} with {migration_status}")
 
 
