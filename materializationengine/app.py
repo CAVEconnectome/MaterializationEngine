@@ -66,7 +66,7 @@ def create_app(config_name: str = None):
 
     @apibp.route("/materialize/version")
     def version():
-        return __version__, 200
+        return jsonify(__version__), 200
 
     db.init_app(app)
     ma.init_app(app)
