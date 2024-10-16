@@ -21,7 +21,7 @@ from materializationengine.schemas import ma
 from materializationengine.utils import get_instance_folder_path
 from materializationengine.views import views_bp
 from materializationengine.limiter import limiter
-
+from materializationengine.migrate import auto_migrate
 db = SQLAlchemy(model_class=Base)
 
 
@@ -66,6 +66,8 @@ def create_app(config_name: str = None):
 
     db.init_app(app)
     ma.init_app(app)
+
+    app.cli.add_command(auto_migrate)
 
     with app.app_context():
         api = Api(

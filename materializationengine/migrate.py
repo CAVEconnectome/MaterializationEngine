@@ -9,6 +9,8 @@ from materializationengine.info_client import (
     get_relevant_datastack_info,
 )
 from flask import current_app
+from flask.cli import with_appcontext
+
 logger = logging.getLogger(__name__)
 
 @click.group(help="Migration tools")
@@ -32,8 +34,9 @@ def migrate_static_schemas(sql_url: str, aligned_volume: str):
     sql_uri = make_url(f"{sql_base_uri}/{aligned_volume}")
     return run_alembic_migration(str(sql_uri))
 
-
-def migrate_static_schemas_in_aligned_volume_dbs():
+@click.command()
+@with_appcontext
+def auto_migrate():
     sql_uri = current_app.config["SQLALCHEMY_DATABASE_URI"]
     aligned_volumes = get_allowed_aligned_volumes()
     for aligned_volume in aligned_volumes:
