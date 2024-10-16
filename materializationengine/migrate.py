@@ -2,20 +2,18 @@ import logging
 
 import click
 from dynamicannotationdb.migration import DynamicMigration, run_alembic_migration
+from flask import current_app
+from flask.cli import AppGroup
 from sqlalchemy.engine.url import make_url
 
 from materializationengine.info_client import (
     get_datastacks,
     get_relevant_datastack_info,
 )
-from flask import current_app
-from flask.cli import with_appcontext
 
 logger = logging.getLogger(__name__)
 
-@click.group(help="Migration tools")
-def migrator():
-    pass
+migrator = AppGroup("migrator")
 
 
 def get_allowed_aligned_volumes():
@@ -25,7 +23,7 @@ def get_allowed_aligned_volumes():
         for datastack in datastacks:
             aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack)
             aligned_volumes.append(aligned_volume_name)
-    return aligned_volumes
+        return aligned_volumes
 
 
 def migrate_static_schemas(sql_url: str, aligned_volume: str):
@@ -34,8 +32,8 @@ def migrate_static_schemas(sql_url: str, aligned_volume: str):
     sql_uri = make_url(f"{sql_base_uri}/{aligned_volume}")
     return run_alembic_migration(str(sql_uri))
 
-@click.command()
-@with_appcontext
+
+@migrator.command()
 def auto_migrate():
     sql_uri = current_app.config["SQLALCHEMY_DATABASE_URI"]
     aligned_volumes = get_allowed_aligned_volumes()
@@ -43,6 +41,16 @@ def auto_migrate():
         logger.info(f"Migrating {aligned_volume}")
         migration_status = migrate_static_schemas(sql_uri, aligned_volume)
         logger.info(f"Migrated {aligned_volume} with {migration_status}")
+
+
+def validate_aligned_volume(ctx, param, value):
+    if value is None:
+        return None
+    allowed_volumes = get_allowed_aligned_volumes()
+    if value not in allowed_volumes:
+        raise click.BadParameter(f"Must be one of: {', '.join(allowed_volumes)}")
+    return value
+
 
 @migrator.command(help="Migrate metadata schemas")
 @click.option(
@@ -56,7 +64,7 @@ def auto_migrate():
     "--aligned_volume",
     prompt="Target Aligned Volume",
     help="Aligned Volume database to migrate",
-    type=click.Choice(get_allowed_aligned_volumes()),
+    callback=validate_aligned_volume,
 )
 def migrate(sql_url: str, aligned_volume: str):
     migration_status = migrate_static_schemas(sql_url, aligned_volume)
@@ -75,7 +83,7 @@ def migrate(sql_url: str, aligned_volume: str):
     "--aligned_volume",
     prompt="Target Aligned Volume",
     help="Aligned Volume database to migrate",
-    type=click.Choice(get_allowed_aligned_volumes()),
+    callback=validate_aligned_volume,
 )
 @click.option(
     "--dry_run", prompt="Dry Run", help="Test migration before running", default=True
@@ -98,7 +106,7 @@ def migrate_annotation_schemas(sql_url: str, aligned_volume: str, dry_run: bool 
     "--aligned_volume",
     prompt="Target Aligned Volume",
     help="Aligned Volume database to migrate",
-    type=click.Choice(get_allowed_aligned_volumes()),
+    callback=validate_aligned_volume,
 )
 @click.option(
     "--dry_run", prompt="Dry Run", help="Test migration before running", default=True
@@ -109,7 +117,3 @@ def migrate_foreign_key_constraints(
     migrator = DynamicMigration(sql_url, aligned_volume)
     fkey_constraint_mapping = migrator.apply_cascade_option_to_tables(dry_run=dry_run)
     click.echo(fkey_constraint_mapping)
-
-
-if __name__ == "__main__":
-    migrator()
