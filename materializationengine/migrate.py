@@ -8,13 +8,16 @@ from materializationengine.info_client import (
     get_datastacks,
     get_relevant_datastack_info,
 )
-from run import application
-
+from flask import current_app
 logger = logging.getLogger(__name__)
+
+@click.group(help="Migration tools")
+def migrator():
+    pass
 
 
 def get_allowed_aligned_volumes():
-    with application.app_context():
+    with current_app.app_context():
         datastacks = get_datastacks()
         aligned_volumes = []
         for datastack in datastacks:
@@ -31,25 +34,18 @@ def migrate_static_schemas(sql_url: str, aligned_volume: str):
 
 
 def migrate_static_schemas_in_aligned_volume_dbs():
-    sql_uri = application.config["SQLALCHEMY_DATABASE_URI"]
-    print(f"SQL Base URI: {sql_uri}")
+    sql_uri = current_app.config["SQLALCHEMY_DATABASE_URI"]
     aligned_volumes = get_allowed_aligned_volumes()
     for aligned_volume in aligned_volumes:
         logger.info(f"Migrating {aligned_volume}")
         migration_status = migrate_static_schemas(sql_uri, aligned_volume)
         logger.info(f"Migrated {aligned_volume} with {migration_status}")
 
-
-@click.group(help="Migration tools")
-def migrator():
-    pass
-
-
 @migrator.command(help="Migrate metadata schemas")
 @click.option(
     "--sql_url",
     prompt=True,
-    default=lambda: application.config["SQLALCHEMY_DATABASE_URI"],
+    default=lambda: current_app.config["SQLALCHEMY_DATABASE_URI"],
     show_default="SQL URL from config",
 )
 @click.option(
@@ -68,7 +64,7 @@ def migrate(sql_url: str, aligned_volume: str):
 @click.option(
     "--sql_url",
     prompt=True,
-    default=lambda: application.config["SQLALCHEMY_DATABASE_URI"],
+    default=lambda: current_app.config["SQLALCHEMY_DATABASE_URI"],
     show_default="SQL URL from config",
 )
 @click.option(
@@ -91,7 +87,7 @@ def migrate_annotation_schemas(sql_url: str, aligned_volume: str, dry_run: bool 
 @click.option(
     "--sql_url",
     prompt=True,
-    default=lambda: application.config["SQLALCHEMY_DATABASE_URI"],
+    default=lambda: current_app.config["SQLALCHEMY_DATABASE_URI"],
     show_default="SQL URL from config",
 )
 @click.option(
