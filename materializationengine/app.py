@@ -4,7 +4,7 @@ from datetime import date, datetime
 
 import numpy as np
 from dynamicannotationdb.models import Base, AnalysisVersion
-from flask import Blueprint, Flask, current_app, jsonify, redirect
+from flask import Blueprint, Flask, current_app, jsonify, redirect, url_for
 from flask_cors import CORS
 from flask_restx import Api
 from flask_sqlalchemy import SQLAlchemy
@@ -22,6 +22,7 @@ from materializationengine.utils import get_instance_folder_path
 from materializationengine.views import views_bp
 from materializationengine.limiter import limiter
 from materializationengine.migrate import migrator
+
 db = SQLAlchemy(model_class=Base)
 
 
@@ -68,6 +69,10 @@ def create_app(config_name: str = None):
     def version():
         return jsonify(__version__), 200
 
+    @apibp.route("/")
+    def index():
+        return redirect("/materialize/views/")
+
     db.init_app(app)
     ma.init_app(app)
 
@@ -76,7 +81,10 @@ def create_app(config_name: str = None):
 
     with app.app_context():
         api = Api(
-            apibp, title="Materialization Engine API", version=__version__, doc="/doc"
+            apibp,
+            title="Materialization Engine API",
+            version=__version__,
+            doc="/api/doc",
         )
         api.add_namespace(mat_bp, path="/api/v2")
         api.add_namespace(client_bp, path="/api/v2")
@@ -97,10 +105,6 @@ def create_app(config_name: str = None):
         n_versions = session.query(AnalysisVersion).count()
         session.close()
         return jsonify({aligned_volume: n_versions}), 200
-
-    @app.route("/materialize/")
-    def index():
-        return redirect("/materialize/views")
 
     @app.teardown_appcontext
     def shutdown_session(exception=None):
