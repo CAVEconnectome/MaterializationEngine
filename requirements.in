@@ -19,11 +19,11 @@ flask-restx
 flask-accepts
 geoalchemy2>=0.9.2
 alembic
-celery>=5.2.3
+celery>=5.4.0
 cachetools
 gevent
 gcsfs>=0.8.0
-pyarrow==3.0.0
+pyarrow
 flask_cors
 numpy>=1.20
 emannotationschemas>=5.11.0
