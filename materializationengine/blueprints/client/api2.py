@@ -336,8 +336,11 @@ def execute_materialized_query(
         .filter(MaterializedMetadata.table_name == user_data["table"])
         .scalar()
     )
-    if random_sample is not None:
+    if random_sample >= mat_row_count:
+        random_sample = None
+    else:
         random_sample = (100.0 * random_sample) / mat_row_count
+
     if mat_row_count:
         # setup a query manager
         qm = QueryManager(
@@ -1866,8 +1869,12 @@ def assemble_view_dataframe(datastack_name, version, view_name, data, args):
     qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
     qm.apply_filter(data.get("filter_greater_dict", None), qm.apply_greater_filter)
     qm.apply_filter(data.get("filter_less_dict", None), qm.apply_less_filter)
-    qm.apply_filter(data.get("filter_greater_equal_dict", None), qm.apply_greater_equal_filter)
-    qm.apply_filter(data.get("filter_less_equal_dict", None), qm.apply_less_equal_filter)
+    qm.apply_filter(
+        data.get("filter_greater_equal_dict", None), qm.apply_greater_equal_filter
+    )
+    qm.apply_filter(
+        data.get("filter_less_equal_dict", None), qm.apply_less_equal_filter
+    )
     qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
     qm.apply_filter(data.get("filter_regex_dict", None), qm.apply_regex_filter)
     select_columns = data.get("select_columns", None)
