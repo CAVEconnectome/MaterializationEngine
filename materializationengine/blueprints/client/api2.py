@@ -336,10 +336,11 @@ def execute_materialized_query(
         .filter(MaterializedMetadata.table_name == user_data["table"])
         .scalar()
     )
-    if random_sample >= mat_row_count:
-        random_sample = None
-    else:
-        random_sample = (100.0 * random_sample) / mat_row_count
+    if random_sample:
+        if random_sample >= mat_row_count:
+            random_sample = None
+        else:
+            random_sample = (100.0 * random_sample) / mat_row_count
 
     if mat_row_count:
         # setup a query manager
