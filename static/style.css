@@ -126,7 +126,30 @@ form {
 }
 
 
+.wizard-step {
+  display: none;
+}
 
+.wizard-step.active {
+  display: block;
+}
+
+.step-indicator {
+  margin-bottom: 2rem;
+}
+
+.step-indicator .step {
+  display: inline-block;
+  margin-right: 1rem;
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  background: #f0f0f0;
+}
+
+.step-indicator .step.active {
+  background: #3b82f6;
+  color: white;
+}
 
 
 form section div label {
@@ -136,4 +159,15 @@ form section div label {
 input,
 label {
   display: block;
+}
+
+
+#schema_type {
+  background-color: #ffffff;
+  color: #000000;
+  border: 1px solid #d1d5db;
+}
+
+#schema_type option {
+  color: #000000;
 }
