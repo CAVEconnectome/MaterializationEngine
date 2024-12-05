@@ -1,0 +1,166 @@
+<div class="space-y-8">
+    <!-- Header Section -->
+    <div class="border-b border-gray-200 pb-5">
+        <h3 class="text-lg font-medium leading-6 text-gray-900">Database Selection</h3>
+        <p class="mt-2 text-sm text-gray-500">
+            Select the target databases for your annotation data. The default database is required and will be automatically selected.
+        </p>
+    </div>
+
+    <!-- Loading Indicator -->
+    <div id="databaseLoadingIndicator" class="flex justify-center py-6 hidden">
+        <div class="inline-flex items-center px-4 py-2 font-semibold leading-6 text-blue-600 transition ease-in-out duration-150 cursor-not-allowed">
+            <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Loading databases...
+        </div>
+    </div>
+
+    <!-- Database Selection Container -->
+    <div id="databaseSelectionContainer" class="space-y-4">
+        <!-- Database options will be dynamically inserted here -->
+    </div>
+
+    <!-- Error Messages -->
+    <div id="databaseErrors" class="rounded-md bg-red-50 p-4 hidden">
+        <div class="flex">
+            <div class="flex-shrink-0">
+                <svg class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+                </svg>
+            </div>
+            <div class="ml-3">
+                <h3 class="text-sm font-medium text-red-800">
+                    There were errors with your selection
+                </h3>
+                <div class="mt-2 text-sm text-red-700">
+                    <!-- Error messages will be dynamically inserted here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Configuration Summary -->
+    <div class="bg-gray-50 rounded-lg p-6">
+        <h4 class="text-sm font-medium text-gray-900 mb-4">Configuration Summary</h4>
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <!-- File Information -->
+            <div class="flex flex-col space-y-2">
+                <div class="text-sm text-gray-500">Selected File</div>
+                <div id="summaryFileName" class="text-sm font-medium text-gray-900">
+                    <!-- File name will be inserted here -->
+                </div>
+            </div>
+            <!-- Schema Information -->
+            <div class="flex flex-col space-y-2">
+                <div class="text-sm text-gray-500">Schema Type</div>
+                <div id="summarySchemaType" class="text-sm font-medium text-gray-900">
+                    <!-- Schema type will be inserted here -->
+                </div>
+            </div>
+            <!-- Table Information -->
+            <div class="flex flex-col space-y-2">
+                <div class="text-sm text-gray-500">Table Name</div>
+                <div id="summaryTableName" class="text-sm font-medium text-gray-900">
+                    <!-- Table name will be inserted here -->
+                </div>
+            </div>
+            <!-- Selected Databases -->
+            <div class="flex flex-col space-y-2">
+                <div class="text-sm text-gray-500">Selected Databases</div>
+                <div id="summaryDatabases" class="text-sm font-medium text-gray-900">
+                    <!-- Selected databases will be inserted here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="flex justify-end space-x-3">
+        <button type="button" id="resetSelection"
+                class="inline-flex items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+            Reset Selection
+        </button>
+        <button type="button" id="submitDatabases"
+                class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                disabled>
+            Submit Configuration
+        </button>
+    </div>
+</div>
+
+<!-- Confirmation Modal -->
+<div id="confirmationModal" class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity hidden" aria-labelledby="modal-title" role="dialog" aria-modal="true">
+    <div class="fixed inset-0 z-10 overflow-y-auto">
+        <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-0">
+            <div class="relative transform overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-lg sm:p-6">
+                <div class="sm:flex sm:items-start">
+                    <div class="mx-auto flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-full bg-blue-100 sm:mx-0 sm:h-10 sm:w-10">
+                        <svg class="h-6 w-6 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                        </svg>
+                    </div>
+                    <div class="mt-3 text-center sm:mt-0 sm:ml-4 sm:text-left">
+                        <h3 class="text-lg font-medium leading-6 text-gray-900" id="modal-title">
+                            Confirm Configuration
+                        </h3>
+                        <div class="mt-2">
+                            <p class="text-sm text-gray-500">
+                                Are you sure you want to proceed with this configuration? This will start the materialization process.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-5 sm:mt-4 sm:flex sm:flex-row-reverse">
+                    <button type="button" id="confirmSubmit"
+                            class="inline-flex w-full justify-center rounded-md border border-transparent bg-blue-600 px-4 py-2 text-base font-medium text-white shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 sm:ml-3 sm:w-auto sm:text-sm">
+                        Confirm
+                    </button>
+                    <button type="button" id="cancelSubmit"
+                            class="mt-3 inline-flex w-full justify-center rounded-md border border-gray-300 bg-white px-4 py-2 text-base font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 sm:mt-0 sm:w-auto sm:text-sm">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Success Modal -->
+<div id="successModal" class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity hidden" aria-labelledby="modal-title" role="dialog" aria-modal="true">
+    <div class="fixed inset-0 z-10 overflow-y-auto">
+        <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-0">
+            <div class="relative transform overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-lg sm:p-6">
+                <div>
+                    <div class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-green-100">
+                        <svg class="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                        </svg>
+                    </div>
+                    <div class="mt-3 text-center sm:mt-5">
+                        <h3 class="text-lg font-medium leading-6 text-gray-900">
+                            Configuration Submitted Successfully
+                        </h3>
+                        <div class="mt-2">
+                            <p class="text-sm text-gray-500">
+                                Your materialization process has been initiated. You can monitor the progress in the tasks section.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-5 sm:mt-6">
+                    <button type="button" id="viewTasks"
+                            class="inline-flex w-full justify-center rounded-md border border-transparent bg-blue-600 px-4 py-2 text-base font-medium text-white shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 sm:text-sm">
+                        View Tasks
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script type="module">
+    import { databaseHandler } from "{{ url_for('static', filename='js/modules/database-handler.js') }}";
+</script>

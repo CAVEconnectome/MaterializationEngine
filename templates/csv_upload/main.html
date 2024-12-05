@@ -1,0 +1,104 @@
+{% extends "base_wizard.html" %}
+
+{% block wizard_content %}
+<div x-data="{ currentStep: 0 }" x-init="currentStep = {{ current_step }}">
+    <!-- Step 1: CSV Upload -->
+    <div x-show="currentStep === 0" class="wizard-step">
+        {% include 'csv_upload/steps/step1/file_upload.html' %}
+    </div>
+
+    <!-- Step 2: Schema Selection -->
+    <div x-show="currentStep === 1" class="wizard-step">
+        {% include 'csv_upload/steps/step2/schema_select.html' %}
+    </div>
+
+    <!-- Step 3: Metadata Form -->
+    <div x-show="currentStep === 2" class="wizard-step">
+        {% include 'csv_upload/steps/step3/metadata_form.html' %}
+    </div>
+
+    <!-- Step 4: Upload Process -->
+    <div x-show="currentStep === 3" class="wizard-step">
+        {% include 'csv_upload/steps/step4/upload.html' %}
+    </div>
+
+    <!-- Step 5: Database Selection -->
+    <div x-show="currentStep === 4" class="wizard-step">
+        {% include 'csv_upload/steps/step5/database_select.html' %}
+    </div>
+</div>
+
+<script type="module">
+    import { sessionManager } from '{{ url_for("static", filename="js/modules/session-manager.js") }}';
+    import { wizardManager } from '{{ url_for("static", filename="js/modules/wizard-manager.js") }}';
+    
+    // Initialize the wizard state
+    document.addEventListener('DOMContentLoaded', function() {
+        const currentStep = {{ current_step }};
+        const totalSteps = {{ total_steps }};
+        
+        // Make steps visible/hidden based on current step
+        document.querySelectorAll('.wizard-step').forEach((step, index) => {
+            if (index === currentStep) {
+                step.style.display = 'block';
+            } else {
+                step.style.display = 'none';
+            }
+        });
+
+        // Initialize navigation buttons
+        const prevBtn = document.getElementById('prevBtn');
+        const nextBtn = document.getElementById('nextBtn');
+
+        if (prevBtn) {
+            prevBtn.disabled = currentStep === 0;
+            prevBtn.addEventListener('click', async () => {
+                if (currentStep > 0) {
+                    try {
+                        const response = await fetch('/materialize/views/update-step', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ current_step: currentStep - 1 }),
+                        });
+        
+                        if (!response.ok) {
+                            throw new Error(`Server error: ${response.status}`);
+                        }
+        
+                        // Navigate to the updated step
+                        window.location.href = `/materialize/views/step/${currentStep - 1}`;
+                    } catch (error) {
+                        console.error('Failed to update step:', error);
+                    }
+                }
+            });
+        }
+        
+        if (nextBtn) {
+            nextBtn.disabled = currentStep === totalSteps - 1;
+            nextBtn.addEventListener('click', async () => {
+                if (currentStep < totalSteps - 1) {
+                    try {
+                        const response = await fetch('/materialize/views/update-step', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ current_step: currentStep + 1 }),
+                        });
+        
+                        if (!response.ok) {
+                            throw new Error(`Server error: ${response.status}`);
+                        }
+                        const data = await response.json();
+                        console.log('Step updated:', data);
+                        // Navigate to the updated step
+                        window.location.href = `/materialize/views/step/${currentStep + 1}`;
+                    } catch (error) {
+                        console.error('Failed to update step:', error);
+                    }
+                }
+            });
+        }
+    });
+</script>
+    
+{% endblock %}

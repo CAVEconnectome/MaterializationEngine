@@ -1,0 +1,128 @@
+{% extends 'base.html' %}
+
+{% block html_head %}
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="CSV Upload Wizard for Annotation Data">
+<script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+
+<script>
+    document.addEventListener('alpine:init', () => {
+        Alpine.store('session', {
+            currentStep: 0,
+            totalSteps: 5,
+            steps: {
+                fileSelection: { complete: false, data: null },
+                schemaSelection: { complete: false, data: null },
+                metadataForm: { complete: false, data: null },
+                upload: { complete: false, data: null },
+                databaseSelection: { complete: false, data: null }
+            }
+        });
+    
+        Alpine.data('wizard', () => ({
+            currentStep: 0,
+            showHelp: false,
+            showFileHelp: false,
+            
+            init() {
+                this.currentStep = Alpine.store('session').currentStep;
+            }
+        }));
+    });
+</script>
+
+<style>
+    [x-cloak] { display: none !important; }
+    
+    .wizard-step {
+        display: none;
+    }
+    
+    .wizard-step.active {
+        display: block;
+    }
+</style>
+{% endblock %}
+
+{% block header %}
+<h1>{% block title %}CSV Upload Wizard{% endblock %}</h1>
+{% endblock %}
+
+{% block content %}
+<!-- Main Content -->
+<main id="main-content" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <!-- Wizard Progress -->
+    <div class="mb-8">
+        <nav aria-label="Progress" class="w-full">
+            <ol role="list" class="flex items-center justify-between">
+                {% for step in ['Upload CSV', 'Schema Selection', 'Metadata', 'Processing', 'Database Selection'] %}
+                <li class="flex-1 relative">
+                    <div class="group flex items-center">
+                        <span class="px-6 py-4 flex items-center text-sm font-medium
+                            {% if loop.index0 == current_step %}
+                                text-blue-600 font-semibold
+                            {% elif loop.index0 < current_step %}
+                                text-gray-500
+                            {% else %}
+                                text-gray-400
+                            {% endif %}">
+                            <span class="flex-shrink-0 w-10 h-10 flex items-center justify-center border-2 rounded-full
+                                {% if loop.index0 == current_step %}
+                                    border-blue-600 bg-white
+                                {% elif loop.index0 < current_step %}
+                                    border-gray-300 bg-gray-100
+                                {% else %}
+                                    border-gray-200
+                                {% endif %}">
+                                {{ loop.index }}
+                            </span>
+                            <span class="ml-4 text-sm font-medium">{{ step }}</span>
+                        </span>
+                    </div>
+                </li>
+                {% endfor %}
+            </ol>
+        </nav>
+    </div>
+
+    <!-- Wizard Content -->
+    <div class="bg-white shadow rounded-lg p-6">
+        {% block wizard_content %}{% endblock %}
+    </div>
+
+    <!-- Navigation Controls -->
+    <div class="mt-8 flex justify-between">
+        <button id="prevBtn" 
+                class="inline-flex items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                {% if current_step == 0 %}disabled{% endif %}>
+            Previous
+        </button>
+        <button id="nextBtn"
+                class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                {% if current_step == total_steps - 1 %}disabled{% endif %}>
+            Next
+        </button>
+    </div>
+</main>
+
+<!-- Help Modal -->
+<div id="helpModal" 
+     class="fixed inset-0 bg-gray-500 bg-opacity-75 hidden"
+     x-cloak
+     x-show="showHelp"
+     x-transition>
+    <div class="fixed inset-0 z-10 overflow-y-auto">
+        <div class="flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-0">
+            <div class="relative transform overflow-hidden rounded-lg bg-white px-4 pt-5 pb-4 text-left shadow-xl transition-all sm:my-8 sm:w-full sm:max-w-lg sm:p-6">
+                <!-- Modal content -->
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Scripts -->
+<script type="module">
+    import { wizardManager } from "{{ url_for('static', filename='js/modules/wizard-manager.js') }}";
+</script>
+{% endblock %}
