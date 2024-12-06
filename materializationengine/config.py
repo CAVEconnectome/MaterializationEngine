@@ -1,11 +1,12 @@
-# Define the application directory
-import os
-import logging
-from dynamicannotationdb.models import Base
-from flask_sqlalchemy import SQLAlchemy
 import json
+import logging
+import os
 import sys
+from datetime import timedelta
+
+from dynamicannotationdb.models import Base
 from flask.logging import default_handler
+from flask_sqlalchemy import SQLAlchemy
 
 
 class BaseConfig:
@@ -44,6 +45,15 @@ class BaseConfig:
     MAX_DATABASES = 2
     MERGE_TABLES = True
     AUTH_SERVICE_NAMESPACE = "datastack"
+
+    SESSION_TYPE = "redis"
+    PERMANENT_SESSION_LIFETIME = timedelta(hours=24)
+    SESSION_PREFIX = "annotation_upload_"
+    SESSION_USE_SIGNER = True
+    REDIS_SESSION_DB = (
+        1  # Redis DB for session storage, separate from the celery redis DB
+    )
+
     if os.environ.get("DAF_CREDENTIALS", None) is not None:
         with open(os.environ.get("DAF_CREDENTIALS"), "r") as f:
             AUTH_TOKEN = json.load(f)["token"]
@@ -60,7 +70,7 @@ class BaseConfig:
             "hour": 8,
             "day_of_week": [0, 2, 4, 6],
             "task": "run_daily_periodic_materialization",
-        },        
+        },
         {
             "name": "Materialize Specific Database Daily",
             "minute": 10,
@@ -94,7 +104,7 @@ class BaseConfig:
             "task": "run_periodic_materialization",
             "datastack_params": {
                 "days_to_expire": 7,
-            }
+            },
         },
         {
             "name": "Long Term Support Materialized Database (30 days)",

@@ -5,6 +5,7 @@ from typing import Any, Dict
 from dynamicannotationdb.schema import DynamicSchemaClient
 from flask import Blueprint, current_app, jsonify, render_template, request, session
 from flask_restx import Namespace, Resource, inputs, reqparse, fields
+
 from google.cloud import storage
 from redis import StrictRedis
 
@@ -22,6 +23,7 @@ upload_bp = Namespace(
     "Upload API",
     authorizations=authorizations,
     description="Upload API",
+    path="/upload",
 )
 
 REDIS_CLIENT = StrictRedis(
@@ -221,10 +223,16 @@ def upload_complete():
 @upload_bp.route("/update-step", methods=["POST"])
 def update_step():
     """Update wizard step in the session"""
-    data = request.json
-    session["current_step"] = data.get("current_step", session.get("current_step", 0))
-    return jsonify({"status": "success", "current_step": session["current_step"]})
+    try:
+        data = request.get_json()
+        current_step = data.get("current_step", session.get("current_step", 0))
 
+        session["current_step"] = current_step
+        session.modified = True
+        return jsonify({"status": "success", "current_step": session["current_step"]})
+    except Exception as e:
+        current_app.logger.error(f"Error updating step: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @upload_bp.route("/step/<int:step_number>", methods=["GET"])
 def get_step(step_number: int):
@@ -240,21 +248,6 @@ def get_step(step_number: int):
     return render_template(
         "/csv_upload/main.html", current_step=step_number, total_steps=5
     )
-
-
-@upload_bp.route("/save-session", methods=["POST"])
-def save_session():
-    try:
-        session_data = request.get_json()
-        if not session_data:
-            return jsonify({"status": "error", "message": "No data provided"}), 400
-
-        session["wizard_data"] = session_data
-
-        return jsonify({"status": "success"}), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
 
 @upload_bp.route("/databases", methods=["GET"])
 def get_databases():
@@ -274,19 +267,42 @@ def get_databases():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@upload_bp.route("/save-session", methods=["POST"])
+def save_session():
+    try:
+        session_data = request.get_json()
+        if not session_data:
+            return jsonify({"status": "error", "message": "No data provided"}), 400
+
+        session["wizard_data"] = session_data
+        session.modified = True
+
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        current_app.logger.error(f"Error saving session: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @upload_bp.route("/restore-session", methods=["GET"])
 def restore_session():
     """Restore wizard session data from the server"""
     try:
-        session_key = request.cookies.get("wizard_session")
-        saved_data = REDIS_CLIENT.get(f"wizard_{session_key}")
-        if saved_data:
-            return jsonify(json.loads(saved_data)), 200
+        wizard_data = session.get('wizard_data')
+        if wizard_data:
+            return jsonify(json.loads(wizard_data)), 200
         return jsonify({"status": "error", "message": "No session found"}), 404
     except Exception as e:
         current_app.logger.error(f"Error restoring session: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+@upload_bp.route("/clear-session", methods=["POST"])
+def clear_session():
+    try:
+        session.clear()
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        current_app.logger.error(f"Error clearing session: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # @views_bp.route("/upload_tasks")
 # def upload_tasks():

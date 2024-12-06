@@ -31,5 +31,4 @@ emannotationschemas>=5.11.0
 dynamicannotationdb>=5.7.2
 nglui>=3.2.1
 Flask-Limiter[redis]
-
-
+Flask-Session[redis]
