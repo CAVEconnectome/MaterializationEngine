@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, JSON, Text, Enum
+from sqlalchemy import Column, Integer, String, DateTime, JSON, Text, Enum, ARRAY
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 import enum
@@ -27,14 +27,18 @@ class UploadMetadata(Base):
     schema_type = Column(String(100), nullable=False)
     column_mapping = Column(JSON, nullable=False)  # Store column mappings
     
+    # Database targeting info
+    aligned_volume = Column(String(100), nullable=False)
+    datastack = Column(String(100), nullable=False)
+    materialized_versions = Column(ARRAY(Integer)) 
+
+
     status = Column(
         Enum(UploadStatus, name='upload_status_enum', native_enum=True),
         nullable=False,
         default=UploadStatus.UPLOADING
     )
     error_details = Column(Text)
-    
-    target_database = Column(String(100))  #TODO refactor to JSON to map mat versions
     row_count = Column(Integer)
       
     created_at = Column(DateTime, nullable=False, default=datetime.now(datetime.timezone.utc))
