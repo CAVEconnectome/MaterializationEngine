@@ -3,7 +3,7 @@ from flask import Blueprint, render_template, session, jsonify, current_app
 __version__ = "4.35.0"
 
 
-wizard_bp = Blueprint('wizard', __name__, url_prefix='/materialize/wizard')
+wizard_bp = Blueprint('wizard', __name__, url_prefix="/materialize/wizard")
 
 @wizard_bp.route("/")
 def wizard():
