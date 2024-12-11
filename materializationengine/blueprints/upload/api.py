@@ -4,13 +4,16 @@ from typing import Any, Dict
 
 from dynamicannotationdb.schema import DynamicSchemaClient
 from flask import Blueprint, current_app, jsonify, render_template, request, session
-from flask_restx import Namespace, Resource, inputs, reqparse, fields
 
 from google.cloud import storage
 from redis import StrictRedis
 
 from materializationengine.blueprints.upload.schema_helper import get_schema_types
 from materializationengine.utils import get_config_param
+from materializationengine.database import dynamic_annotation_cache
+from materializationengine.info_client import get_datastack_info
+from dynamicannotationdb.models import AnalysisVersion
+from materializationengine.database import sqlalchemy_cache
 
 __version__ = "4.35.0"
 
@@ -19,12 +22,7 @@ authorizations = {
     "apikey": {"type": "apiKey", "in": "query", "name": "middle_auth_token"}
 }
 
-upload_bp = Namespace(
-    "Upload API",
-    authorizations=authorizations,
-    description="Upload API",
-    path="/upload",
-)
+upload_bp = Blueprint("upload", __name__, url_prefix="/materialize/upload")
 
 REDIS_CLIENT = StrictRedis(
     host=get_config_param("REDIS_HOST"),
@@ -212,7 +210,69 @@ def get_schema_types_endpoint():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@upload_bp.route("/upload-complete", methods=["POST"])
+@upload_bp.route("/aligned_volumes", methods=["GET"])
+def get_aligned_volumes():
+    """Get list of available aligned volumes (databases)"""
+    try:
+        datastacks = current_app.config["DATASTACKS"]
+        
+        aligned_volumes = []
+        for datastack in datastacks:
+            datastack_info = get_datastack_info(datastack)
+            aligned_volumes.append({
+                "datastack": datastack,
+                "aligned_volume": datastack_info["aligned_volume"]["name"],
+                "description": datastack_info["aligned_volume"]["description"]
+            })
+        
+        return jsonify({
+            "status": "success",
+            "aligned_volumes": aligned_volumes
+        })
+    except Exception as e:
+        current_app.logger.error(f"Error getting aligned volumes: {str(e)}")
+        return jsonify({
+            "status": "error", 
+            "message": "Failed to get aligned volumes"
+        }), 500
+    
+@upload_bp.route("/aligned_volumes/<aligned_volume>/versions", methods=["GET"])
+def get_materialized_versions(aligned_volume):
+    """Get available materialized versions for an aligned volume"""
+    try:
+        session = sqlalchemy_cache.get(aligned_volume)
+        
+        # Query versions from the AnalysisVersion table
+        versions = (
+            session.query(AnalysisVersion)
+            .filter(AnalysisVersion.valid == True)  # Only get valid versions
+            .filter(AnalysisVersion.datastack == aligned_volume)
+            .order_by(AnalysisVersion.version.desc())  # Latest first
+            .all()
+        )
+
+        versions_list = []
+        for version in versions:
+            versions_list.append({
+                "version": version.version,
+                "created": version.time_stamp.isoformat(),
+                "expires": version.expires_on.isoformat() if version.expires_on else None,
+                "status": version.status,
+                "is_merged": version.is_merged
+            })
+
+        return jsonify({
+            "status": "success",
+            "versions": versions_list
+        })
+    except Exception as e:
+        current_app.logger.error(f"Error getting versions for {aligned_volume}: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"Failed to get versions for {aligned_volume}"
+        }), 500    
+    
+@upload_bp.route("/api/upload-complete", methods=["POST"])
 def upload_complete():
     filename = request.json["filename"]
     # TODO maybe add some callback logic here
@@ -220,7 +280,7 @@ def upload_complete():
         {"status": "success", "message": f"{filename} uploaded successfully"}
     )
 
-@upload_bp.route("/update-step", methods=["POST"])
+@upload_bp.route("/api/update-step", methods=["POST"])
 def update_step():
     """Update wizard step in the session"""
     try:
@@ -234,7 +294,7 @@ def update_step():
         current_app.logger.error(f"Error updating step: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@upload_bp.route("/step/<int:step_number>", methods=["GET"])
+@upload_bp.route("/api/step/<int:step_number>", methods=["GET"])
 def get_step(step_number: int):
     """Update wizard step in the session"""
     current_step = request.args.get("current_step", type=int)
@@ -249,7 +309,7 @@ def get_step(step_number: int):
         "/csv_upload/main.html", current_step=step_number, total_steps=5
     )
 
-@upload_bp.route("/databases", methods=["GET"])
+@upload_bp.route("/api/databases", methods=["GET"])
 def get_databases():
     try:
         databases = [
@@ -267,7 +327,7 @@ def get_databases():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@upload_bp.route("/save-session", methods=["POST"])
+@upload_bp.route("/api/session/save-session", methods=["POST"])
 def save_session():
     try:
         session_data = request.get_json()
@@ -283,7 +343,7 @@ def save_session():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@upload_bp.route("/restore-session", methods=["GET"])
+@upload_bp.route("/api/session/restore-session", methods=["GET"])
 def restore_session():
     """Restore wizard session data from the server"""
     try:
@@ -295,7 +355,7 @@ def restore_session():
         current_app.logger.error(f"Error restoring session: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@upload_bp.route("/clear-session", methods=["POST"])
+@upload_bp.route("/api/session/clear-session", methods=["POST"])
 def clear_session():
     try:
         session.clear()
