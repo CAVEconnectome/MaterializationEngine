@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import numpy as np
 import redis
@@ -8,7 +8,7 @@ from dynamicannotationdb.models import AnalysisVersion, Base
 from flask import Blueprint, Flask, current_app, jsonify, redirect
 from flask_cors import CORS
 from flask_restx import Api
-from flask_session.redis import RedisSessionInterface
+from flask_session import Session
 from flask_sqlalchemy import SQLAlchemy
 
 from materializationengine import __version__
@@ -60,15 +60,27 @@ def create_app(config_name: str = None):
         app.config.from_object(config[config_name])
     else:
         app = configure_app(app)
+    Session(app)
+    
+    app.secret_key = 'super secret key' #TODO pass a secret key to the app
 
-    app.config["SESSION_REDIS"] = redis.Redis(
-        host=app.config["REDIS_HOST"],
-        port=app.config["REDIS_PORT"],
-        db=app.config["REDIS_SESSION_DB"],
-        password=app.config["REDIS_PASSWORD"],
+    app.config.update(
+        SESSION_TYPE='redis',
+        SESSION_REDIS=redis.Redis(
+            host=app.config["REDIS_HOST"],
+            port=app.config["REDIS_PORT"],
+            db=app.config["REDIS_SESSION_DB"],
+            password=app.config["REDIS_PASSWORD"]
+        ),
+        PERMANENT_SESSION_LIFETIME=timedelta(hours=24),
+        SESSION_KEY_PREFIX='upload_wizard_'
+    )
+    app.config.update(
+        SESSION_COOKIE_SECURE=True,
+        SESSION_COOKIE_SAMESITE='Lax',
+        SESSION_COOKIE_HTTPONLY=True
     )
 
-    app.session_interface = RedisSessionInterface(client=app.config["SESSION_REDIS"])
 
     # register blueprints
     apibp = Blueprint("api", __name__, url_prefix="/materialize")
@@ -89,15 +101,15 @@ def create_app(config_name: str = None):
 
     with app.app_context():
         api = Api(
-            apibp, title="Materialization Engine API", version=__version__, doc="/doc"
+            apibp, title="Materialization Engine API", version=__version__, doc="/api/doc"
         )
         api.add_namespace(mat_bp, path="/api/v2")
-        api.add_namespace(upload_bp, path="/api/v2")
         api.add_namespace(client_bp, path="/api/v2")
         api.add_namespace(client_bp2, path="/api/v3")
 
         app.register_blueprint(apibp)
         app.register_blueprint(views_bp)
+        app.register_blueprint(upload_bp)
         app.register_blueprint(wizard_bp)
         limiter.init_app(app)
 
