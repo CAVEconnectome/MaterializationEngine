@@ -886,6 +886,11 @@ class FrozenTableMetadata(Resource):
 
         db = dynamic_annotation_cache.get_db(aligned_volume_name)
         ann_md = db.database.get_table_metadata(table_name)
+        if ann_md is None:
+            return (
+                f"No metadata found for table named {table_name} in version {version}",
+                404,
+            )
         # the get_table_metadata function joins on the segmentationmetadata which
         # has the segmentation_table in the table_name and the annotation table name in the annotation_table
         # field.  So when we update here, we overwrite the table_name with the segmentation table name,
