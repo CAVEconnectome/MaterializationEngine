@@ -243,7 +243,7 @@ itsdangerous==2.0.1
     # via flask
 jedi==0.18.1
     # via ipython
-jinja2==3.0.3
+jinja2==3.1.5
     # via flask
 jmespath==0.10.0
     # via
