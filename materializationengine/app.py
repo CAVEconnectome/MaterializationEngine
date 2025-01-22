@@ -18,6 +18,7 @@ from materializationengine.blueprints.client.api2 import client_bp as client_bp2
 from materializationengine.blueprints.materialize.api import mat_bp
 from materializationengine.blueprints.upload.api import upload_bp
 from materializationengine.blueprints.upload.wizard import wizard_bp
+from materializationengine.blueprints.upload.models import init_staging_database
 from materializationengine.config import config, configure_app
 from materializationengine.database import sqlalchemy_cache
 from materializationengine.limiter import limiter
@@ -116,6 +117,7 @@ def create_app(config_name: str = None):
         db.init_app(app)
         db.create_all()
         admin = setup_admin(app, db)
+        init_staging_database(app)
 
     @app.route("/health")
     def health():
