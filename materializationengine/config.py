@@ -57,7 +57,7 @@ class BaseConfig:
     )
 
     STAGING_DATABASE_NAME = "staging"
-    MATERIALIZATION_DUMP_BUCKET = "test_annotation_csv_upload"
+    MATERIALIZATION_UPLOAD_BUCKET_PATH = "test_annotation_csv_upload"
 
     if os.environ.get("DAF_CREDENTIALS", None) is not None:
         with open(os.environ.get("DAF_CREDENTIALS"), "r") as f:
