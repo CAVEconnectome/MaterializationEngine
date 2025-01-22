@@ -4,9 +4,8 @@ import os
 import sys
 from datetime import timedelta
 
-from dynamicannotationdb.models import Base
+from flask import Flask
 from flask.logging import default_handler
-from flask_sqlalchemy import SQLAlchemy
 
 
 class BaseConfig:
@@ -46,6 +45,9 @@ class BaseConfig:
     MERGE_TABLES = True
     AUTH_SERVICE_NAMESPACE = "datastack"
 
+    REDIS_HOST="localhost"
+    REDIS_PORT=6379
+    REDIS_PASSWORD=""
     SESSION_TYPE = "redis"
     PERMANENT_SESSION_LIFETIME = timedelta(hours=24)
     SESSION_PREFIX = "annotation_upload_"
@@ -53,6 +55,9 @@ class BaseConfig:
     REDIS_SESSION_DB = (
         1  # Redis DB for session storage, separate from the celery redis DB
     )
+
+    STAGING_DATABASE_NAME = "staging"
+    MATERIALIZATION_DUMP_BUCKET = "test_annotation_csv_upload"
 
     if os.environ.get("DAF_CREDENTIALS", None) is not None:
         with open(os.environ.get("DAF_CREDENTIALS"), "r") as f:
@@ -172,7 +177,7 @@ config = {
 }
 
 
-def configure_app(app):
+def configure_app(app: Flask) -> Flask:
     config_name = os.getenv("FLASK_CONFIGURATION", "default")
     # object-based default configuration
     app.config.from_object(config[config_name])
@@ -187,9 +192,6 @@ def configure_app(app):
     app.logger.addHandler(handler)
     app.logger.setLevel(app.config["LOGGING_LEVEL"])
     app.logger.propagate = False
-
     app.logger.debug(app.config)
-    db = SQLAlchemy(model_class=Base)
-    db.init_app(app)
     app.app_context().push()
     return app
