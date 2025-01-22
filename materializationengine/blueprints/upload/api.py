@@ -14,6 +14,11 @@ from materializationengine.database import dynamic_annotation_cache
 from materializationengine.info_client import get_datastack_info
 from dynamicannotationdb.models import AnalysisVersion
 from materializationengine.database import sqlalchemy_cache
+from materializationengine.blueprints.upload.tasks import (
+    process_and_upload,
+    get_job_status,
+    cancel_processing,
+)
 
 __version__ = "4.35.0"
 
@@ -37,9 +42,9 @@ def generate_presigned_url():
     data = request.json
     filename = data["filename"]
     content_type = data["contentType"]
-
+    bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
     storage_client = storage.Client()
-    bucket = storage_client.bucket("test_annotation_csv_upload")
+    bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(filename)
     origin = request.headers.get("Origin") or current_app.config.get(
         "ALLOWED_ORIGIN", "http://localhost:5000"
@@ -99,9 +104,10 @@ def store_metadata(filename: str, metadata: Dict[str, Any]) -> tuple[bool, str]:
             return False, error_msg
 
         metadata_filename = f"{filename}.metadata.json"
+        bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
 
         storage_client = storage.Client()
-        bucket = storage_client.bucket("test_annotation_csv_upload")
+        bucket = storage_client.bucket(bucket_name)
 
         blob = bucket.blob(metadata_filename)
         blob.upload_from_string(
@@ -150,7 +156,7 @@ def handle_metadata():
         return jsonify({"status": "error", "message": f"Server error: {str(e)}"}), 500
 
 
-@upload_bp.route("/get-schema-model", methods=["GET"])
+@upload_bp.route("/api/get-schema-model", methods=["GET"])
 def get_schema_model():
     """Endpoint to get schema model for a specific schema type"""
     try:
@@ -183,7 +189,7 @@ def get_schema_model():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@upload_bp.route("/get-schema-types", methods=["GET"])
+@upload_bp.route("/api/get-schema-types", methods=["GET"])
 def get_schema_types_endpoint():
     """Endpoint to get available schema types or specific schema details"""
     try:
@@ -215,33 +221,33 @@ def get_aligned_volumes():
     """Get list of available aligned volumes (databases)"""
     try:
         datastacks = current_app.config["DATASTACKS"]
-        
+
         aligned_volumes = []
         for datastack in datastacks:
             datastack_info = get_datastack_info(datastack)
-            aligned_volumes.append({
-                "datastack": datastack,
-                "aligned_volume": datastack_info["aligned_volume"]["name"],
-                "description": datastack_info["aligned_volume"]["description"]
-            })
-        
-        return jsonify({
-            "status": "success",
-            "aligned_volumes": aligned_volumes
-        })
+            aligned_volumes.append(
+                {
+                    "datastack": datastack,
+                    "aligned_volume": datastack_info["aligned_volume"]["name"],
+                    "description": datastack_info["aligned_volume"]["description"],
+                }
+            )
+
+        return jsonify({"status": "success", "aligned_volumes": aligned_volumes})
     except Exception as e:
         current_app.logger.error(f"Error getting aligned volumes: {str(e)}")
-        return jsonify({
-            "status": "error", 
-            "message": "Failed to get aligned volumes"
-        }), 500
-    
+        return (
+            jsonify({"status": "error", "message": "Failed to get aligned volumes"}),
+            500,
+        )
+
+
 @upload_bp.route("/aligned_volumes/<aligned_volume>/versions", methods=["GET"])
 def get_materialized_versions(aligned_volume):
     """Get available materialized versions for an aligned volume"""
     try:
         session = sqlalchemy_cache.get(aligned_volume)
-        
+
         # Query versions from the AnalysisVersion table
         versions = (
             session.query(AnalysisVersion)
@@ -253,25 +259,34 @@ def get_materialized_versions(aligned_volume):
 
         versions_list = []
         for version in versions:
-            versions_list.append({
-                "version": version.version,
-                "created": version.time_stamp.isoformat(),
-                "expires": version.expires_on.isoformat() if version.expires_on else None,
-                "status": version.status,
-                "is_merged": version.is_merged
-            })
+            versions_list.append(
+                {
+                    "version": version.version,
+                    "created": version.time_stamp.isoformat(),
+                    "expires": (
+                        version.expires_on.isoformat() if version.expires_on else None
+                    ),
+                    "status": version.status,
+                    "is_merged": version.is_merged,
+                }
+            )
 
-        return jsonify({
-            "status": "success",
-            "versions": versions_list
-        })
+        return jsonify({"status": "success", "versions": versions_list})
     except Exception as e:
-        current_app.logger.error(f"Error getting versions for {aligned_volume}: {str(e)}")
-        return jsonify({
-            "status": "error",
-            "message": f"Failed to get versions for {aligned_volume}"
-        }), 500    
-    
+        current_app.logger.error(
+            f"Error getting versions for {aligned_volume}: {str(e)}"
+        )
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": f"Failed to get versions for {aligned_volume}",
+                }
+            ),
+            500,
+        )
+
+
 @upload_bp.route("/api/upload-complete", methods=["POST"])
 def upload_complete():
     filename = request.json["filename"]
@@ -279,6 +294,7 @@ def upload_complete():
     return jsonify(
         {"status": "success", "message": f"{filename} uploaded successfully"}
     )
+
 
 @upload_bp.route("/api/update-step", methods=["POST"])
 def update_step():
@@ -293,6 +309,7 @@ def update_step():
     except Exception as e:
         current_app.logger.error(f"Error updating step: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 @upload_bp.route("/api/step/<int:step_number>", methods=["GET"])
 def get_step(step_number: int):
@@ -309,9 +326,11 @@ def get_step(step_number: int):
         "/csv_upload/main.html", current_step=step_number, total_steps=5
     )
 
+
 @upload_bp.route("/api/databases", methods=["GET"])
 def get_databases():
     try:
+        # TODO replace mock data with callbacks
         databases = [
             {
                 "id": "default",
@@ -320,7 +339,7 @@ def get_databases():
                 "isDefault": True,
                 "isRequired": True,
             }
-            # Add other databases as needed
+
         ]
         return jsonify({"status": "success", "databases": databases}), 200
     except Exception as e:
@@ -347,13 +366,14 @@ def save_session():
 def restore_session():
     """Restore wizard session data from the server"""
     try:
-        wizard_data = session.get('wizard_data')
+        wizard_data = session.get("wizard_data")
         if wizard_data:
-            return jsonify(json.loads(wizard_data)), 200
+            return wizard_data, 200
         return jsonify({"status": "error", "message": "No session found"}), 404
     except Exception as e:
         current_app.logger.error(f"Error restoring session: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 @upload_bp.route("/api/session/clear-session", methods=["POST"])
 def clear_session():
@@ -363,15 +383,6 @@ def clear_session():
     except Exception as e:
         current_app.logger.error(f"Error clearing session: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
-
-# @views_bp.route("/upload_tasks")
-# def upload_tasks():
-#     return render_template("upload_tasks.html")
-
-
-# @views_bp.route("/csv_upload")
-# def csv_upload():
-#     return render_template("csv_upload.html", version=1)
 
 
 @upload_bp.route("/get_persisted_uploads", methods=["GET"])
@@ -383,3 +394,73 @@ def get_persisted_uploads():
         persisted_uploads[upload_id] = upload_info
 
     return jsonify(persisted_uploads)
+
+
+@upload_bp.route("/api/process/start", methods=["POST"])
+def start_csv_processing():
+    """Start CSV processing job"""
+    try:
+        data = request.get_json()
+        #TODO should prob use marshmallow for this
+        file_info = {
+            "file_path": data.get("step0", {}).get("filename"),
+            "row_size": data.get("step0", {}).get("rowSize"),
+            "schema_name": data.get("step1", {}).get("selectedSchema"),
+            "column_mapping": data.get("step1", {}).get("columnMapping"),
+            "table_metadata": data.get("step2", {}).get("metadata"),
+        }
+
+        sql_instance_name = current_app.config.get("SQLALCHEMY_DATABASE_URI")
+        bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
+        database_name = current_app.config.get("STAGING_DATABASE_NAME")
+
+        if not all([sql_instance_name, bucket_name, database_name]):
+            return (
+                jsonify(
+                    {"status": "error", "message": "Missing required configuration"}
+                ),
+                500,
+            )
+
+        result = process_and_upload.si(
+            file_info=file_info,
+            chunk_size=data.get("chunk_size", 10000),
+            sql_instance_name=sql_instance_name,
+            bucket_name=bucket_name,
+            database_name=database_name,
+        ).apply_async()
+
+
+        return jsonify({"status": "success", "jobId": result.id})
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@upload_bp.route("/api/process/status/<job_id>", methods=["GET"])
+def check_processing_status(job_id):
+    """Get processing job status"""
+    try:
+        status = get_job_status(job_id)
+        if not status:
+            return jsonify({"status": "error", "message": "Job not found"}), 404
+
+        return jsonify(status)
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@upload_bp.route("/api/process/cancel/<job_id>", methods=["POST"])
+def cancel_processing_job(job_id):
+    """Cancel processing job"""
+    try:
+        result = cancel_processing.delay(job_id)
+        status = result.get(timeout=10)
+
+        return jsonify(
+            {"status": "success", "message": "Processing cancelled", "details": status}
+        )
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
