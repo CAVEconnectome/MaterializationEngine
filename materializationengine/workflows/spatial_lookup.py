@@ -30,6 +30,7 @@ from materializationengine.workflows.ingest_new_annotations import (
 from materializationengine.utils import (
     create_segmentation_model,
     create_annotation_model,
+    get_config_param,
 )
 from cloudvolume.lib import Vec
 
@@ -51,6 +52,7 @@ def run_spatial_lookup_workflow(
     get_root_ids: bool = True,
     upload_to_database: bool = True,
     task_group_chunk_size: int = 100,
+    use_staging_database: bool = True,
 ):
     """Run the spatial lookup workflow.
 
@@ -59,6 +61,10 @@ def run_spatial_lookup_workflow(
         datastack_info (dict): Datastack info
         table_name (str): Annotation table name
         chunk_scale_factor (int, optional): Scale factor for chunk size. Defaults to 10.
+        get_root_ids (bool, optional): Get the root ids for the supervoxel ids. Defaults to True.
+        upload_to_database (bool, optional): Upload the data to the database. Defaults to True.
+        task_group_chunk_size (int, optional): Chunk size for the task group. Defaults to 100.
+        staging_database (bool, optional): Staging database name. Defaults to True.
 
     Raises:
         e: Exception
@@ -67,12 +73,14 @@ def run_spatial_lookup_workflow(
         celery.task: Celery task
     """
     materialization_time_stamp = datetime.datetime.utcnow()
-
+    staging_database = get_config_param("STAGING_DATABASE_NAME")
+    
     table_info = get_materialization_info(
         datastack_info=datastack_info,
         materialization_time_stamp=materialization_time_stamp,
         table_name=table_name,
         skip_row_count=True,
+        database=staging_database if use_staging_database and staging_database else None,
     )
     celery_logger.info(f"Table info: {table_info}")
     for mat_info in table_info:
@@ -135,13 +143,13 @@ def get_min_enclosing_bbox(cv_info: dict, mat_info: dict) -> tuple:
     Returns:
         tuple: The minimum enclosing bounding box and sub-volumes
     """
-    aligned_volume = mat_info["aligned_volume"]
+    database = mat_info["database"]
     table_name = mat_info["annotation_table_name"]
     coord_resolution = mat_info["coord_resolution"]
     segmentation_source = mat_info["pcg_table_name"]
 
     annotation_table_bounding_boxes = get_table_bounding_boxes(
-        aligned_volume=aligned_volume,
+        database=database,
         table_name=table_name,
         segmentation_source=segmentation_source,
     )
@@ -367,19 +375,19 @@ def get_cloud_volume_info(segmentation_source: str) -> dict:
 
 
 def get_table_bounding_boxes(
-    aligned_volume: str, table_name: str, segmentation_source: str
+    database: str, table_name: str, segmentation_source: str
 ) -> dict:
     """Get the bounding boxes of the annotation table.
 
     Args:
-        aligned_volume (str): Name of the aligned volume to use as the database
+        database (str): Name of the database
         table_name (str): Name of the annotation table
         segmentation_source (str): Name of the PCG table
 
     Returns:
         dict: Dictionary of bounding boxes for each column in the annotation table
     """
-    db = dynamic_annotation_cache.get_db(aligned_volume)
+    db = dynamic_annotation_cache.get_db(database)
     schema = db.database.get_table_schema(table_name)
     mat_metadata = {
         "annotation_table_name": table_name,
@@ -389,7 +397,7 @@ def get_table_bounding_boxes(
     AnnotationModel = create_annotation_model(mat_metadata)
     SegmentationModel = create_segmentation_model(mat_metadata)
 
-    engine = sqlalchemy_cache.get_engine(aligned_volume)
+    engine = sqlalchemy_cache.get_engine(database)
     bbox_data = []
 
     for annotation_column in AnnotationModel.__table__.columns:
@@ -781,12 +789,12 @@ def insert_segmentation_data(
     """
 
     start_time = time.time()
-    aligned_volume = mat_info["aligned_volume"]
+    database = mat_info["database"]
     table_name = mat_info["annotation_table_name"]
     # pcg_table_name = mat_info["pcg_table_name"]
-    db = dynamic_annotation_cache.get_db(aligned_volume)
+    db = dynamic_annotation_cache.get_db(database)
     schema = db.database.get_table_schema(table_name)
-    engine = sqlalchemy_cache.get_engine(aligned_volume)
+    engine = sqlalchemy_cache.get_engine(database)
     mat_info["schema"] = schema
     SegmentationModel = create_segmentation_model(mat_info)
     seg_columns = SegmentationModel.__table__.columns.keys()

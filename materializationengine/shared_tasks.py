@@ -128,6 +128,7 @@ def get_materialization_info(
     row_size: int = 1_000_000,
     table_name: str = None,
     skip_row_count: bool = False,
+    database: str = None,
 ) -> List[dict]:
 
     """Initialize materialization by an aligned volume name. Iterates through all
@@ -151,7 +152,10 @@ def get_materialization_info(
     if not materialization_time_stamp:
         materialization_time_stamp = datetime.datetime.utcnow()
 
-    db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    if not database:
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    else:
+        db = dynamic_annotation_cache.get_db(database)
 
     annotation_tables = db.database.get_valid_table_names()
     if table_name is not None:
@@ -207,6 +211,7 @@ def get_materialization_info(
                     "annotation_table_name": annotation_table,
                     "datastack": datastack_info["datastack"],
                     "aligned_volume": str(aligned_volume_name),
+                    "database": database if database else aligned_volume_name,
                     "schema": schema,
                     "add_indices": True,
                     "coord_resolution": voxel_resolution,

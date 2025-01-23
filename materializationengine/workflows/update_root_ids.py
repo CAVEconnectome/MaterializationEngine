@@ -176,10 +176,10 @@ def get_supervoxel_id_queries(root_id_chunk: list, mat_metadata: dict):
         dict: supervoxels of a group of expired root ids
         None: no supervoxel ids exist for the expired root id
     """
-    aligned_volume = mat_metadata.get("aligned_volume")
+    database = mat_metadata.get("database")
     SegmentationModel = create_segmentation_model(mat_metadata)
 
-    session = sqlalchemy_cache.get(aligned_volume)
+    session = sqlalchemy_cache.get(database)
     columns = [column.name for column in SegmentationModel.__table__.columns]
     root_id_columns = [column for column in columns if "root_id" in column]
 
@@ -234,12 +234,12 @@ def update_root_ids(self, root_id_chunk: list, mat_metadata: dict):
     if not supervoxel_queries:
         return fin.si()
 
-    aligned_volume = mat_metadata.get("aligned_volume")
+    database = mat_metadata.get("database")
     query_chunk_size = mat_metadata.get("chunk_size", 100)
 
     tasks = []
 
-    engine = sqlalchemy_cache.get_engine(aligned_volume)
+    engine = sqlalchemy_cache.get_engine(database)
 
     # https://docs.sqlalchemy.org/en/14/core/connections.html#using-server-side-cursors-a-k-a-stream-results
     for query_dict in supervoxel_queries:
@@ -313,8 +313,8 @@ def get_new_root_ids(self, supervoxel_data, mat_metadata):
     root_ids_df.drop(columns=[supervoxel_col_name[0]])
 
     SegmentationModel = create_segmentation_model(mat_metadata)
-    aligned_volume = mat_metadata.get("aligned_volume")
-    session = sqlalchemy_cache.get(aligned_volume)
+    database = mat_metadata.get("database")
+    session = sqlalchemy_cache.get(database)
     data = root_ids_df.to_dict(orient="records")
     try:
         session.bulk_update_mappings(SegmentationModel, data)

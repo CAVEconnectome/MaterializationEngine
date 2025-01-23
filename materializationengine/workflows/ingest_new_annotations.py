@@ -669,11 +669,11 @@ def create_missing_segmentation_table(mat_metadata: dict) -> bool:
         bool: if segmentation table was created or already exists
     """
     segmentation_table_name = mat_metadata.get("segmentation_table_name")
-    aligned_volume = mat_metadata.get("aligned_volume")
+    database = mat_metadata.get("database")
 
     SegmentationModel = create_segmentation_model(mat_metadata)
-    session = sqlalchemy_cache.get(aligned_volume)
-    engine = sqlalchemy_cache.get_engine(aligned_volume)
+    session = sqlalchemy_cache.get(database)
+    engine = sqlalchemy_cache.get_engine(database)
 
     if (
         not session.query(SegmentationMetadata)
@@ -724,11 +724,11 @@ def get_annotations_with_missing_supervoxel_ids(
         dict of annotation and segmentation data
     """
 
-    aligned_volume = mat_metadata.get("aligned_volume")
+    database = mat_metadata.get("database")
     AnnotationModel = create_annotation_model(mat_metadata, with_crud_columns=True)
     SegmentationModel = create_segmentation_model(mat_metadata)
 
-    session = sqlalchemy_cache.get(aligned_volume)
+    session = sqlalchemy_cache.get(database)
 
     anno_model_cols, __, supervoxel_columns = get_query_columns_by_suffix(
         AnnotationModel, SegmentationModel, "supervoxel_id"
@@ -932,7 +932,7 @@ def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
         dict: root_ids to be inserted into db
     """
     pcg_table_name = mat_metadata.get("pcg_table_name")
-    aligned_volume = mat_metadata.get("aligned_volume")
+    database = mat_metadata.get("database")
     try:
         materialization_time_stamp = datetime.datetime.strptime(
             mat_metadata.get("materialization_time_stamp"), "%Y-%m-%d %H:%M:%S.%f"
@@ -956,7 +956,7 @@ def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
     anno_ids = supervoxel_df["id"].to_list()
 
     # get current root ids from database
-    session = sqlalchemy_cache.get(aligned_volume)
+    session = sqlalchemy_cache.get(database)
 
     try:
         current_root_ids = [
