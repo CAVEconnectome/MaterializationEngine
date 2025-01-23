@@ -52,7 +52,7 @@ def run_spatial_lookup_workflow(
     get_root_ids: bool = True,
     upload_to_database: bool = True,
     task_group_chunk_size: int = 100,
-    use_staging_database: bool = True,
+    use_staging_database: bool = False,
 ):
     """Run the spatial lookup workflow.
 
@@ -64,7 +64,7 @@ def run_spatial_lookup_workflow(
         get_root_ids (bool, optional): Get the root ids for the supervoxel ids. Defaults to True.
         upload_to_database (bool, optional): Upload the data to the database. Defaults to True.
         task_group_chunk_size (int, optional): Chunk size for the task group. Defaults to 100.
-        staging_database (bool, optional): Staging database name. Defaults to True.
+        staging_database (bool, optional): Staging database name. Defaults to False.
 
     Raises:
         e: Exception

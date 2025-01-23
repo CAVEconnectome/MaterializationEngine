@@ -70,6 +70,7 @@ spatial_svid_parser = reqparse.RequestParser()
 spatial_svid_parser.add_argument("chunk_scale_factor", default=12, type=int)
 spatial_svid_parser.add_argument("get_root_ids", default=True, type=inputs.boolean)
 spatial_svid_parser.add_argument("upload_to_database", default=True, type=inputs.boolean)
+spatial_svid_parser.add_argument("use_staging_database", default=False, type=inputs.boolean)
 
 
 authorizations = {
@@ -274,6 +275,7 @@ class SpatialSVIDLookupTableResource(Resource):
         chunk_scale_factor = args["chunk_scale_factor"]
         get_root_ids = args["get_root_ids"]
         upload_to_database = args["upload_to_database"]
+        use_staging_database = args["use_staging_database"]
         try:
             run_spatial_lookup_workflow.si(
                 datastack_info,
@@ -281,6 +283,7 @@ class SpatialSVIDLookupTableResource(Resource):
                 chunk_scale_factor=chunk_scale_factor,
                 get_root_ids=get_root_ids,
                 upload_to_database=upload_to_database,
+                use_staging_database=use_staging_database,
             ).apply_async()
         except Exception as e:
             logging.error(e)
