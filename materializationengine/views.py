@@ -309,7 +309,7 @@ def make_seg_prop_ng_link(datastack_name, table_name, version, client, is_view=F
 
 @views_bp.route("/datastack/<datastack_name>/version/<int(signed=True):version>")
 @validate_datastack
-@auth_requires_permission("view", table_arg="datastack_name")
+@auth_requires_permission("view", table_arg="target_datastack")
 def version_view(
     datastack_name: str, version: int, target_datastack=None, target_version=None
 ):
