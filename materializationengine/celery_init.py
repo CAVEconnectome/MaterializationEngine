@@ -15,5 +15,6 @@ celery = Celery(
         "materializationengine.shared_tasks",
         "materializationengine.views",
         "materializationengine.monitor",
+        "materializationengine.blueprints.upload.tasks",
     ]
 )
