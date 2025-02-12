@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}Upload Wizard - Step {{ current_step }}{% endblock %}
+
+{% block html_head %}
+    <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="{{ url_for('static', filename='js/wizardStore.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/step1.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/step2.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/step3.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/step4.js') }}"></script>
+{% endblock %}
+
+{% block content %}
+<div class="wizard-container" x-data>
+    <!-- Step Indicator -->
+    <div class="step-indicator mb-4">
+        <template x-for="step in $store.wizard.state.totalSteps" :key="step">
+            <div class="step-pill"
+                 :class="{
+                     'active': $store.wizard.state.currentStep === step,
+                     'completed': $store.wizard.state.stepStatus[step].completed
+                 }">
+                <span x-text="`Step ${step}`"></span>
+            </div>
+        </template>
+    </div>
+
+    <!-- Step Content -->
+    {% include step_template %}
+</div>
+{% endblock %}

@@ -1,0 +1,124 @@
+<div class="card">
+    <div class="card-header">
+        <h2>Step 1: Upload CSV File</h2>
+    </div>
+
+
+        <!-- Debug Panel -->
+        <div class="card mb-4" x-cloak>
+            <div class="card-header">Debug Info</div>
+                <pre x-text="JSON.stringify({
+                    filename: $store.upload.filename,
+                    status: $store.upload.status,
+                    progress: $store.upload.progress,
+                    error: $store.upload.error,
+                    canUpload: $store.upload.canStartUpload()
+                }, null, 2)"></pre>
+        </div>
+
+        <!-- File Selection -->
+        <div class="mb-4">
+            <label class="form-label">Select CSV File:</label>
+            <input type="file"
+                   accept=".csv"
+                   @change="$store.upload.handleFileSelect($event)"
+                   :disabled="['uploading', 'paused'].includes($store.upload.status)"
+                   class="form-control">
+        </div>
+
+        <!-- CSV Preview -->
+        <div class="table-responsive" style="max-height: 300px">
+            <table class="table table-sm table-bordered mb-0">
+                <tbody>
+                    <template x-for="(row, index) in $store.upload.previewRows.slice(0, 5)" :key="index">
+                        <tr>
+                            <template x-for="(cell, i) in row" :key="i">
+                                <td class="text-nowrap"
+                                    style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
+                                    :title="cell"
+                                    x-text="cell"></td>
+                            </template>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Upload Status -->
+        <div x-cloak x-show="$store.upload.file" class="mt-4">
+            <!-- File Info -->
+            <h5 x-text="$store.upload.filename"></h5>
+            <p class="text-muted">
+                Size: <span x-text="($store.upload.file?.size / (1024 * 1024)).toFixed(2)"></span> MB
+            </p>
+
+            <!-- Progress Bar -->
+            <div x-cloak x-show="['uploading', 'paused'].includes($store.upload.status)" class="progress mb-3">
+                <div class="progress-bar"
+                     :class="{'progress-bar-striped progress-bar-animated': $store.upload.status === 'uploading'}"
+                     :style="`width: ${$store.upload.progress.percentage}%`">
+                    <span x-text="$store.upload.progress.percentage + '%'"></span>
+                </div>
+            </div>
+
+            <!-- Status Messages -->
+            <div x-cloak x-show="$store.upload.status === 'completed'" class="alert alert-success">
+                Upload completed successfully!
+                <button class="btn btn-primary btn-sm ms-2" @click="$store.upload.reset()">
+                    Upload Another File
+                </button>
+            </div>
+
+            <div x-cloak x-show="$store.upload.status === 'paused'" class="alert alert-warning">
+                Upload paused. Click resume to continue.
+            </div>
+
+            <div x-cloak x-show="$store.upload.error" class="alert alert-danger" x-text="$store.upload.error"></div>
+
+            <!-- Controls -->
+            <div class="btn-group">
+                <button x-cloak
+                        class="btn btn-primary"
+                        x-show="$store.upload.status === 'ready'"
+                        @click="$store.upload.startUpload()"
+                        :disabled="!$store.upload.canStartUpload()">
+                    Start Upload
+                </button>
+
+                <button x-cloak
+                        class="btn btn-warning"
+                        x-show="$store.upload.status === 'uploading'"
+                        @click="$store.upload.pause()">
+                    Pause
+                </button>
+
+                <button x-cloak
+                        class="btn btn-success"
+                        x-show="$store.upload.status === 'paused'"
+                        @click="$store.upload.resume()">
+                    Resume
+                </button>
+
+                <button x-cloak
+                        class="btn btn-danger"
+                        x-show="['uploading', 'paused'].includes($store.upload.status)"
+                        @click="$store.upload.cancel()">
+                    Cancel
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="card-footer">
+        <div class="d-flex justify-content-between">
+            <button class="btn btn-secondary" @click="$store.wizard.resetStep(1)">
+                Reset
+            </button>
+            <button class="btn btn-primary"
+                    @click="$store.wizard.next()"
+                    :disabled="$store.upload.status !== 'completed'">
+                Next →
+            </button>
+        </div>
+    </div>
+</div>
