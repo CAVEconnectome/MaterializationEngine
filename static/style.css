@@ -18,7 +18,6 @@ li a {
   text-decoration: none;
 }
 
-/* Change the link color to #111 (black) on hover */
 li a:hover {
   background-color: #111;
   color: white;
@@ -26,31 +25,33 @@ li a:hover {
 
 .datastack_header {
   text-align: center;
+  color: #333333;
 }
 
 .schema_type {
   text-align: center;
-  color: rgb(138, 130, 130)
+  color: #666666;
 }
 
 .version_num {
   text-align: center;
 }
 
+
 .failure {
-  color: red;
+  color: #dc3545;
 }
 
 .completed {
-  color: green;
+  color: #198754;
 }
 
 .running {
-  color: blue;
+  color: #0d6efd;
 }
 
 .expired {
-  color: gray;
+  color: #6c757d;
 }
 
 .card-container {
@@ -60,14 +61,42 @@ li a:hover {
   align-items: center;
 }
 
+.card {
+  position: static;
+  display: grid;
+  overflow: hidden;
+  padding: 1rem;
+  width: 100%;
+  text-align: center;
+  color: #333333;
+  margin-bottom: 10px;
+  background-color: #ffffff;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+@media (min-width: 768px) {
+  .card {
+    height: 350px;
+  }
+}
+
 .card-title {
   align-self: center;
+  color: #333333;
 }
 
 .card-body {
   flex: 2 0;
   align-self: center;
   border: 2px solid rgb(0, 9, 128);
+  padding: 1rem;
+}
+
+.card-header {
+  background-color: #f8f9fa;
+  border-bottom: 1px solid #dee2e6;
+  color: #333333;
+  padding: 1rem;
 }
 
 .content {
@@ -80,49 +109,64 @@ li a:hover {
 }
 
 .notice {
-  background: #ffa0a075;
+  background: #fff3cd;
+  color: #664d03; 
+  padding: 1rem;
+  border-radius: 0.25rem;
+  margin: 1rem 0;
 }
 
 table {
   font-family: arial, sans-serif;
   border-collapse: collapse;
   width: 100%;
+  margin: 1rem 0;
 }
 
-td,
-th {
-  border: 1px solid #dddddd;
+td, th {
+  border: 1px solid #dee2e6;
   text-align: left;
   padding: 8px;
+  color: #333333;
 }
 
 tr:nth-child(even) {
-  background-color: #dddddd;
-}
-
-.card {
-  position: static;
-  display: grid;
-  overflow: hidden;
-  padding: 1rem;
-  width: 100%;
-  text-align: center;
-  color: whitesmoke;
-  margin-bottom: 10px;
-  background-color: whitesmoke;
-  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.1), 0 2px 2px rgba(0, 0, 0, 0.1),
-    0 4px 4px rgba(0, 0, 0, 0.1), 0 8px 8px rgba(0, 0, 0, 0.1),
-    0 16px 16px rgba(0, 0, 0, 0.1);
-
-  @media (min-width: $bp-md) {
-    height: 350px;
-  }
+  background-color: #f8f9fa;
 }
 
 form {
   width: 800px;
+  max-width: 100%;
 }
 
+form section div label {
+  display: block;
+  margin-bottom: 0.5rem;
+}
+
+input, label {
+  display: block;
+  color: #333333;
+}
+
+#schema_type {
+  background-color: #ffffff;
+  color: #333333;
+  border: 1px solid #d1d5db;
+  padding: 0.5rem;
+  border-radius: 0.25rem;
+  width: 100%;
+}
+
+#schema_type option {
+  color: #333333;
+}
+
+.wizard-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 1rem;
+}
 
 .wizard-step {
   display: none;
@@ -133,39 +177,44 @@ form {
 }
 
 .step-indicator {
+  display: flex;
+  gap: 1rem;
   margin-bottom: 2rem;
 }
 
-.step-indicator .step {
-  display: inline-block;
-  margin-right: 1rem;
-  padding: 0.5rem 1rem;
-  border-radius: 4px;
+.step-pill {
+  flex: 1;
+  padding: 0.75rem;
   background: #f0f0f0;
+  border-radius: 0.5rem;
+  text-align: center;
+  transition: all 0.3s ease;
+  color: #666666;
 }
 
-.step-indicator .step.active {
-  background: #3b82f6;
+.step-pill.active {
+  background: #0d6efd;
   color: white;
 }
 
-
-form section div label {
-  display: block;
+.step-pill.completed {
+  background: #198754;
+  color: white;
 }
 
-input,
-label {
-  display: block;
+.error-message {
+  color: #dc3545;
+  font-size: 0.875rem;
+  margin-top: 0.25rem;
+  font-weight: 500;
 }
 
-
-#schema_type {
-  background-color: #ffffff;
-  color: #000000;
-  border: 1px solid #d1d5db;
+.form-footer {
+  margin-top: 2rem;
+  display: flex;
+  justify-content: space-between;
 }
 
-#schema_type option {
-  color: #000000;
+[x-cloak] {
+  display: none !important;
 }
