@@ -17,7 +17,7 @@ from materializationengine.blueprints.client.api import client_bp
 from materializationengine.blueprints.client.api2 import client_bp as client_bp2
 from materializationengine.blueprints.materialize.api import mat_bp
 from materializationengine.blueprints.upload.api import upload_bp
-from materializationengine.blueprints.upload.wizard import wizard_bp
+from materializationengine.blueprints.upload.storage import StorageService
 from materializationengine.blueprints.upload.models import init_staging_database
 from materializationengine.config import config, configure_app
 from materializationengine.database import sqlalchemy_cache
@@ -63,7 +63,6 @@ def create_app(config_name: str = None):
         app = configure_app(app)
     Session(app)
     
-    app.secret_key = 'super secret key' #TODO pass a secret key to the app
 
     app.config.update(
         SESSION_TYPE='redis',
@@ -111,13 +110,19 @@ def create_app(config_name: str = None):
         app.register_blueprint(apibp)
         app.register_blueprint(views_bp)
         app.register_blueprint(upload_bp)
-        app.register_blueprint(wizard_bp)
         limiter.init_app(app)
 
         db.init_app(app)
         db.create_all()
         admin = setup_admin(app, db)
         init_staging_database(app)
+        # setup cors on upload bucket
+        try:
+            bucket_name = app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
+            storage_service = StorageService(bucket_name)
+            storage_service.configure_cors()
+        except Exception as e:
+            app.logger.error(f"Error setting up CORS configuration: {e}")
 
     @app.route("/health")
     def health():
