@@ -51,7 +51,7 @@ class StorageService:
         """Create resumable upload session"""
         upload_url = (
             f"https://storage.googleapis.com/upload/storage/v1/b/"
-            f"{self.config.bucket_name}/o?uploadType=resumable"
+            f"{self._bucket}/o?uploadType=resumable"
         )
         return ResumableUpload(upload_url=upload_url, chunk_size=self.config.chunk_size)
 
@@ -87,7 +87,7 @@ class StorageService:
             transport=self._session,
             stream=stream,
             stream_final=False,
-            metadata={"name": filename, "bucket": self.config.bucket_name},
+            metadata={"name": filename, "bucket": self._bucket},
             content_type=content_type,
             timeout=self.config.timeout,
         )

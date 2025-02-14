@@ -19,6 +19,7 @@ from materializationengine.blueprints.upload.storage import (
     StorageConfig,
     StorageService,
 )
+from materializationengine.blueprints.upload.schemas import UploadRequestSchema
 from materializationengine.blueprints.upload.tasks import (
     cancel_processing,
     get_job_status,
@@ -92,6 +93,8 @@ def generate_presigned_url():
             origin=origin,  # Allow cross-origin requests for uploads
             timeout=3600,  # Set the session timeout to 1 hour
         )
+        
+
         return jsonify({"resumableUrl": resumable_url, "origin": origin})
     except Exception as e:
         current_app.logger.error(f"Error generating presigned URL: {str(e)}")
@@ -266,17 +269,19 @@ def save_metadata():
         current_app.logger.info(f"Received metadata: {data}")
         required_fields = [
             "schema_type",
+            "datastack_name",
             "table_name",
             "description",
-            "voxel_resolution_x",
-            "voxel_resolution_y",
-            "voxel_resolution_z",
+            "voxel_resolution_nm_x",
+            "voxel_resolution_nm_y",
+            "voxel_resolution_nm_z",
             "write_permission",
             "read_permission",
         ]
 
         for field in required_fields:
             if not data.get(field):
+                current_app.logger.error(f"Missing required field: {field}")
                 return (
                     jsonify(
                         {
@@ -395,41 +400,39 @@ def get_materialized_versions(aligned_volume):
 @upload_bp.route("/api/process/start", methods=["POST"])
 def start_csv_processing():
     """Start CSV processing job"""
-    try:
-        data = request.get_json()
-        # TODO should prob use marshmallow for this
-        file_info = {
-            "file_path": data.get("step0", {}).get("filename"),
-            "row_size": data.get("step0", {}).get("rowSize"),
-            "schema_name": data.get("step1", {}).get("selectedSchema"),
-            "column_mapping": data.get("step1", {}).get("columnMapping"),
-            "table_metadata": data.get("step2", {}).get("metadata"),
-        }
+    r = request.get_json()
+    schema = UploadRequestSchema()
+    data = schema.load(r)
 
-        sql_instance_name = current_app.config.get("SQLALCHEMY_DATABASE_URI")
-        bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
-        database_name = current_app.config.get("STAGING_DATABASE_NAME")
+    bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
 
-        if not all([sql_instance_name, bucket_name, database_name]):
-            return (
-                jsonify(
-                    {"status": "error", "message": "Missing required configuration"}
-                ),
-                500,
-            )
+    file_path = f"gs://{bucket_name}/{data.get('filename')}"
+    table_name = data
 
-        result = process_and_upload.si(
-            file_info=file_info,
-            chunk_size=data.get("chunk_size", 10000),
-            sql_instance_name=sql_instance_name,
-            bucket_name=bucket_name,
-            database_name=database_name,
-        ).apply_async()
 
-        return jsonify({"status": "success", "jobId": result.id})
 
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+
+    sql_instance_name = current_app.config.get("SQLALCHEMY_DATABASE_URI")
+    bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
+    database_name = current_app.config.get("STAGING_DATABASE_NAME")
+
+    if not all([sql_instance_name, bucket_name, database_name]):
+        return (
+            jsonify(
+                {"status": "error", "message": "Missing required configuration"}
+            ),
+            500,
+        )
+
+    result = process_and_upload.si(
+        file_info=file_path,
+        chunk_size=data.get("chunk_size", 10000),
+        sql_instance_name=sql_instance_name,
+        bucket_name=bucket_name,
+        database_name=database_name,
+    ).apply_async()
+
+    return jsonify({"status": "start", "jobId": result.id})
 
 
 @upload_bp.route("/api/process/status/<job_id>", methods=["GET"])

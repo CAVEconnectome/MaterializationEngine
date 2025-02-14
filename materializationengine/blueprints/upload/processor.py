@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import marshmallow as mm
 import pandas as pd
+import numpy as np
 from emannotationschemas import get_schema
 from emannotationschemas.models import make_model_from_schema
 from emannotationschemas.schemas.base import ReferenceAnnotation, SpatialPoint
@@ -89,19 +90,39 @@ class SchemaProcessor:
                 ):
                     required.add(field_name)
         return required
-
+    
     def _get_spatial_point_fields(self) -> List[Tuple[str, List[str]]]:
-        """Get all BoundSpatialPoint fields and their required coordinates"""
+        """Get all BoundSpatialPoint fields and their required coordinates.
+        
+        Supports two formats:
+        1. Separate columns: field_position_x, field_position_y, field_position_z
+        2. Combined column: field_position containing [x,y,z] values
+        
+        Returns:
+            List of tuples containing (field_name, coordinate_columns)
+            where coordinate_columns is either:
+            - [x_col, y_col, z_col] for separate columns
+            - [xyz_col] for combined column
+        """
         spatial_points = []
+        
         for field_name, field in self.schema._declared_fields.items():
-            if isinstance(field, mm.fields.Nested):
-                if isinstance(field.schema, SpatialPoint):
-                    coordinate_cols = [
-                        self._get_mapped_column(f"{field_name}_position_x"),
-                        self._get_mapped_column(f"{field_name}_position_y"),
-                        self._get_mapped_column(f"{field_name}_position_z"),
-                    ]
-                    spatial_points.append((field_name, coordinate_cols))
+            if not (isinstance(field, mm.fields.Nested) and isinstance(field.schema, SpatialPoint)):
+                continue
+                
+            # Try combined column first
+            combined_col = self._get_mapped_column(f"{field_name}_position")
+            if combined_col in self.column_mapping.values():
+                spatial_points.append((field_name, [combined_col]))
+                continue
+                
+            # Fall back to separate coordinates
+            coordinate_cols = [
+                self._get_mapped_column(f"{field_name}_position_{suffix}")
+                for suffix in ['x', 'y', 'z']
+            ]
+            spatial_points.append((field_name, coordinate_cols))
+        
         return spatial_points
 
     def validate_columns(self, df: pd.DataFrame) -> None:
@@ -123,14 +144,50 @@ class SchemaProcessor:
             raise ValueError(f"Missing required columns: {missing_columns}")
 
     def process_spatial_point(
-        self, row: pd.Series, coordinate_cols: List[str]
+        self, 
+        row: pd.Series, 
+        coordinate_cols: List[str]
     ) -> Optional[str]:
-        """Convert coordinate columns to PostGIS POINTZ format if coordinates exist and convert to WKBElement"""
+        """Convert coordinate data to PostGIS POINTZ format.
+        
+        Handles both separate coordinates and combined [x,y,z] format.
+        
+        Args:
+            row: DataFrame row
+            coordinate_cols: Either [x_col, y_col, z_col] or [xyz_col]
+        
+        Returns:
+            WKBElement representing the point or None if invalid
+        """
         try:
-            coords = [float(row[col]) for col in coordinate_cols]
+            if len(coordinate_cols) == 1:
+                # Handle combined [x,y,z] format
+                xyz_col = coordinate_cols[0]
+                if pd.isna(row[xyz_col]):
+                    return None
+                    
+                # Parse string "[x,y,z]" or handle list/array
+                coords = row[xyz_col]
+                if isinstance(coords, str):
+                    # Remove brackets and split
+                    coords = [float(x.strip()) for x in coords.strip('[]()').split(',')]
+                elif isinstance(coords, (list, np.ndarray)):
+                    coords = [float(x) for x in coords]
+                else:
+                    raise ValueError(f"Invalid coordinate format: {coords}")
+                    
+            else:
+                # Handle separate x,y,z columns
+                coords = [float(row[col]) for col in coordinate_cols]
+                
+            if len(coords) != 3:
+                raise ValueError(f"Expected 3 coordinates, got {len(coords)}")
+                
             point = Point(coords)
             return create_wkt_element(point)
-        except (KeyError, ValueError):
+            
+        except (KeyError, ValueError, TypeError) as e:
+            logger.debug(f"Error processing spatial point: {str(e)}")
             return None
 
     def process_chunk(self, chunk: pd.DataFrame, timestamp: datetime) -> str:
@@ -201,47 +258,3 @@ class SchemaProcessor:
         data = df[self.column_order]
 
         return data.to_csv(index=False, lineterminator="\n").encode("utf-8")
-
-
-def process_file(
-    file_path: str,
-    schema_name: str,
-    reference_table: str = None,
-    column_mapping: Dict[str, str] = None,
-    ignored_columns: List[str] = None,
-    chunk_size: int = 10000,
-) -> str:
-    """
-    Process a CSV file and save the processed data with optimized chunk handling
-    """
-    processor = SchemaProcessor(
-        schema_name,
-        reference_table,
-        column_mapping=column_mapping,
-        ignored_columns=ignored_columns,
-    )
-    timestamp = datetime.now(timezone.utc)
-    output_path = f"processed_{schema_name}_{timestamp}.csv"
-
-    try:
-        first_chunk = True
-        with pd.read_csv(file_path, chunksize=chunk_size) as chunks:
-            for chunk_num, chunk in enumerate(chunks):
-                logging.debug(f"Processing chunk {chunk_num + 1} with {len(chunk)} rows")
-                processed_chunk = processor.process_chunk(chunk, timestamp)
-
-                processed_chunk.to_csv(
-                    output_path,
-                    mode="w" if first_chunk else "a",
-                    header=False,
-                    index=False,
-                )
-                first_chunk = False
-
-        logger.info(f"Processed file saved to: {output_path}")
-        logger.info(f"Columns in processed file: {processor.column_order}")
-        return output_path
-
-    except Exception as e:
-        logger.error(f"Error processing file: {str(e)}", exc_info=True)
-        raise
