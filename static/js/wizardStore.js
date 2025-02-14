@@ -28,7 +28,7 @@ document.addEventListener("alpine:init", () => {
       const urlStep = parseInt(currentPath.match(/step(\d+)/)?.[1]);
 
       if (urlStep && urlStep !== this.state.currentStep) {
-        window.location.href = `/step${this.state.currentStep}`;
+        window.location.href = `/materialize/upload/step${this.state.currentStep}`;
       }
     },
 
@@ -39,6 +39,10 @@ document.addEventListener("alpine:init", () => {
       this.state.registeredSteps[stepNumber] = storeName;
     },
 
+    getCurrentStepStore() {
+      return this.getStepStore(this.state.currentStep);
+    },
+
     getStepStore(stepNumber) {
       if (!this.state.registeredSteps) {
         this.state.registeredSteps = {};
@@ -47,8 +51,63 @@ document.addEventListener("alpine:init", () => {
       return storeName ? Alpine.store(storeName) : null;
     },
 
+    getNavigationState() {
+      const currentStore = this.getCurrentStepStore();
+      const isStep4 = this.state.currentStep === 4;
+      const processorStatus = isStep4 ? currentStore.state.status : null;
+
+      return {
+        back: {
+          visible: this.state.currentStep > 1,
+          disabled: isStep4 && processorStatus === "processing",
+        },
+        next: {
+          text: this.getNextButtonText(),
+          disabled:
+            !currentStore.isValid() ||
+            (isStep4 && processorStatus === "processing"),
+        },
+        reset: {
+          disabled:
+            isStep4 && ["preparing", "processing"].includes(processorStatus),
+        },
+      };
+    },
+
+    getNextButtonText() {
+      switch (this.state.currentStep) {
+        default:
+          return "Next →";
+      }
+    },
+
+    async handleNextAction() {
+      const currentStore = this.getCurrentStepStore();
+
+      try {
+        const valid = await currentStore.handleNext();
+        if (valid) {
+          this.next();
+        }
+      } catch (error) {
+        console.error("Error handling next action:", error);
+      }
+    },
+
+    async handleResetAction() {
+      const currentStore = this.getCurrentStepStore();
+      if (currentStore && typeof currentStore.reset === "function") {
+        await currentStore.reset();
+        this.state.stepStatus[this.state.currentStep] = {
+          completed: false,
+          valid: false,
+        };
+        this.saveState();
+      }
+    },
+
     next() {
-      const currentStore = this.getStepStore(this.state.currentStep);
+      const currentStore = this.getCurrentStepStore();
 
       if (currentStore && currentStore.isValid && currentStore.isValid()) {
         this.markStepComplete(this.state.currentStep);
@@ -69,41 +128,11 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
-    goToStep(step) {
-      if (
-        step >= 1 &&
-        step <= this.state.totalSteps &&
-        this.canGoToStep(step)
-      ) {
-        this.state.currentStep = step;
-        this.saveState();
-        window.location.href = `/materialize/upload/step${step}`;
-      }
-    },
-
     markStepComplete(step) {
       if (this.state.stepStatus[step]) {
         this.state.stepStatus[step].completed = true;
         this.saveState();
       }
-    },
-
-    markStepValid(step, isValid) {
-      if (this.state.stepStatus[step]) {
-        this.state.stepStatus[step].valid = isValid;
-        this.saveState();
-      }
-    },
-
-    canProgress() {
-      const stepStore = this.getStepStore(this.state.currentStep);
-      return stepStore && stepStore.isValid ? stepStore.isValid() : false;
-    },
-
-    canGoToStep(targetStep) {
-      if (targetStep < this.state.currentStep) return true;
-      if (targetStep > this.state.currentStep + 1) return false;
-      return this.canProgress();
     },
 
     saveState() {
@@ -120,38 +149,6 @@ document.addEventListener("alpine:init", () => {
         }
         this.state = parsedState;
       }
-    },
-
-    resetStep(step) {
-      const stepStore = this.getStepStore(step);
-      if (stepStore && typeof stepStore.reset === "function") {
-        stepStore.reset();
-        this.state.stepStatus[step] = { completed: false, valid: false };
-        this.saveState();
-      }
-    },
-
-    resetWizard() {
-      const registeredSteps = { ...this.state.registeredSteps };
-
-      for (let i = 1; i <= this.state.totalSteps; i++) {
-        this.resetStep(i);
-      }
-
-      this.state = {
-        currentStep: 1,
-        totalSteps: 3,
-        stepStatus: {
-          1: { completed: false, valid: false },
-          2: { completed: false, valid: false },
-          3: { completed: false, valid: false },
-          4: { completed: false, valid: false },
-        },
-        registeredSteps: registeredSteps,
-      };
-
-      this.saveState();
-      window.location.href = "/materialize/upload/step1";
     },
   });
 });

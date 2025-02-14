@@ -1,23 +1,17 @@
-{% extends "base.html" %}
-
-{% block title %}Upload Wizard - Step {{ current_step }}{% endblock %}
-
-{% block html_head %}
-    <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    <script src="{{ url_for('static', filename='js/wizardStore.js') }}"></script>
-    <script src="{{ url_for('static', filename='js/step1.js') }}"></script>
-    <script src="{{ url_for('static', filename='js/step2.js') }}"></script>
-    <script src="{{ url_for('static', filename='js/step3.js') }}"></script>
-    <script src="{{ url_for('static', filename='js/step4.js') }}"></script>
-{% endblock %}
-
-{% block content %}
+{% extends "base.html" %} {% block title %}Upload Wizard - Step {{ current_step
+}}{% endblock %} {% block html_head %}
+<script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script src="{{ url_for('static', filename='js/wizardStore.js') }}"></script>
+<script src="{{ url_for('static', filename='js/step1.js') }}"></script>
+<script src="{{ url_for('static', filename='js/step2.js') }}"></script>
+<script src="{{ url_for('static', filename='js/step3.js') }}"></script>
+<script src="{{ url_for('static', filename='js/step4.js') }}"></script>
+{% endblock %} {% block content %}
 <div class="wizard-container" x-data>
     <!-- Step Indicator -->
     <div class="step-indicator mb-4">
         <template x-for="step in $store.wizard.state.totalSteps" :key="step">
-            <div class="step-pill"
-                 :class="{
+            <div class="step-pill" :class="{
                      'active': $store.wizard.state.currentStep === step,
                      'completed': $store.wizard.state.stepStatus[step].completed
                  }">
@@ -27,6 +21,24 @@
     </div>
 
     <!-- Step Content -->
-    {% include step_template %}
+    <div class="card">{% include step_template %}</div>
+
+    <!-- Centralized Navigation Footer -->
+    <div class="card-footer" x-data="{ navState: $store.wizard.getNavigationState() }">
+        <div class="d-flex justify-content-between">
+            <button class="btn btn-secondary" x-show="navState.back.visible" :disabled="navState.back.disabled"
+                @click="$store.wizard.prev()">
+                ← Back
+            </button>
+            <div>
+                <button class="btn btn-warning me-2" :disabled="navState.reset.disabled"
+                    @click="$store.wizard.handleResetAction()">
+                    Reset
+                </button>
+                <button class="btn btn-primary" :disabled="!$store.wizard.getCurrentStepStore().isValid()"
+                    @click="$store.wizard.handleNextAction()" x-text="navState.next.text"></button>
+            </div>
+        </div>
+    </div>
 </div>
 {% endblock %}
