@@ -8,7 +8,6 @@ from dynamicannotationdb.models import AnalysisVersion, Base
 from flask import Blueprint, Flask, current_app, jsonify, redirect
 from flask_cors import CORS
 from flask_restx import Api
-from flask_session import Session
 from flask_sqlalchemy import SQLAlchemy
 
 from materializationengine import __version__
@@ -61,27 +60,7 @@ def create_app(config_name: str = None):
         app.config.from_object(config[config_name])
     else:
         app = configure_app(app)
-    Session(app)
     
-
-    app.config.update(
-        SESSION_TYPE='redis',
-        SESSION_REDIS=redis.Redis(
-            host=app.config["REDIS_HOST"],
-            port=app.config["REDIS_PORT"],
-            db=app.config["REDIS_SESSION_DB"],
-            password=app.config["REDIS_PASSWORD"]
-        ),
-        PERMANENT_SESSION_LIFETIME=timedelta(hours=24),
-        SESSION_KEY_PREFIX='upload_wizard_'
-    )
-    app.config.update(
-        SESSION_COOKIE_SECURE=True,
-        SESSION_COOKIE_SAMESITE='Lax',
-        SESSION_COOKIE_HTTPONLY=True
-    )
-
-
     # register blueprints
     apibp = Blueprint("api", __name__, url_prefix="/materialize")
 
