@@ -5,14 +5,20 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import pandas as pd
+from celery import chain
+from celery.result import AsyncResult
 from celery.utils.log import get_task_logger
 from flask import current_app
 from redis import Redis
-
+from materializationengine.info_client import (
+    get_datastack_info,
+)
 from materializationengine.blueprints.upload.processor import SchemaProcessor
+from materializationengine.blueprints.upload.storage import StorageService
 from materializationengine.celery_init import celery
 from materializationengine.database import dynamic_annotation_cache
 from materializationengine.utils import get_config_param
+from materializationengine.workflows.spatial_lookup import run_spatial_lookup_workflow
 
 logger = get_task_logger(__name__)
 
@@ -43,126 +49,145 @@ def get_job_status(job_id: str) -> Dict[str, Any]:
 def process_and_upload(
     self,
     file_path: str,
+    datastack_name: str,
+    table_name: str,
     schema_type: str,
     column_mapping: Dict[str, str],
-    ignored_columns: List[str] = None,
     reference_table: str = None,
-    chunk_size: int = 10000,
-    sql_instance_name: str = None,
-    bucket_name: str = None,
-    database_name: str = None,
+    ignored_columns: List[str] = None,
+    **kwargs,
 ) -> Dict[str, Any]:
-    """Process CSV file in chunks and upload to GCS
+    """Chain CSV processing tasks"""
+    job_id = f"csv_processing_{datetime.now(timezone.utc)}"
+    datastack_info = get_datastack_info(datastack_name)
 
-    Args:
-        file_path: Path to CSV file in GCS
-        schema_type: Schema to validate against
-        column_mapping: Maps CSV columns to schema fields
-        chunk_size: Number of rows per chunk
-        sql_instance_name: CloudSQL instance name
-        bucket_name: GCS bucket name
-        database_name: Target database name
-    """
-    timestamp = datetime.now(timezone.utc)
+    chunk_scale_factor = current_app.config.get("CHUNK_SCALE_FACTOR")
+    use_staging_database = current_app.config.get("USE_STAGING_DATABASE")
+    sql_instance_name = current_app.config.get("SQLALCHEMY_DATABASE_URI")
 
-    job_id = f"csv_processing_{timestamp}"
-
-
-    status = {
-        "status": "processing",
-        "phase": "Starting",
-        "progress": 0,
-        "processed_rows": 0,
-        "total_rows": 0,
-        "error": None,
-    }
-    update_job_status(job_id, status)
-
-    status.update({"phase": "Validating Schema", "progress": 5})
-    update_job_status(job_id, status)
-    
-    processor = SchemaProcessor(
-        schema_type=schema_type,
-        reference_table=reference_table,
-        column_mapping=column_mapping,
-        ignored_columns=ignored_columns
-
+    workflow = chain(
+        process_csv.s(
+            file_path,
+            datastack_name,
+            table_name,
+            schema_type,
+            column_mapping,
+            reference_table=reference_table,
+            ignored_columns=ignored_columns,
+        ),
+        upload_to_database.s(
+            sql_instance_name=sql_instance_name,
+            database_name=kwargs.get("database_name"),
+            table_name=table_name,
+        ),
+        run_spatial_lookup_workflow.s(
+            datastack_info,
+            table_name=table_name,
+            chunk_scale_factor=chunk_scale_factor,
+            get_root_ids=True,
+            upload_to_database=True,
+            use_staging_database=use_staging_database,
+        ),
     )
-    
-    output_filename = f"processed_{os.path.basename(file_path)}"
-    output_path = f"gs://{bucket_name}/processed/{output_filename}"
 
-    processed_rows = 0
-    first_chunk = True
+    # Execute chain
+    result = workflow.apply_async(task_id=job_id)
+    return {"job_id": job_id}
 
-    output_path = f"processed_{schema_type}_{timestamp}.csv"
 
+@celery.task(name="process:get_status")
+def get_chain_status(job_id: str) -> Dict[str, Any]:
+    """Get status of processing chain"""
+    result = AsyncResult(job_id)
+    if result.ready():
+        return {
+            "status": "completed" if result.successful() else "failed",
+            "result": result.get() if result.successful() else str(result.result),
+        }
+    return {"status": "processing", "state": result.state}
+
+
+@celery.task(name="process:process_csv")
+def process_csv(
+    file_path: str,
+    datastack_name: str,
+    table_name: str,
+    schema_type: str,
+    column_mapping: Dict[str, str],
+    reference_table: str = None,
+    ignored_columns: List[str] = None,
+    chunk_size: int = 10000,
+) -> Dict[str, Any]:
+    """Process CSV file in chunks and upload to bucket"""
     try:
-        first_chunk = True
-        with pd.read_csv(file_path, chunksize=chunk_size) as chunks:
-            for chunk_num, chunk in enumerate(chunks):
-                logger.info(f"Processing chunk {chunk_num + 1} with {len(chunk)} rows")
-                processed_chunk = processor.process_chunk(chunk, timestamp)
-                
-                processed_chunk.to_csv(
-                    output_path,
-                    mode='w' if first_chunk else 'a',
-                    header=False,
-                    index=False
-                )
-                first_chunk = False
-                
-                update_job_status(job_id, status)
+        processor = SchemaProcessor(
+            schema_type,
+            reference_table,
+            column_mapping=column_mapping,
+            ignored_columns=ignored_columns,
+        )
+        bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
         
-        logger.info(f"Processed file saved to: {output_path}")
-        logger.info(f"Columns in processed file: {processor.column_order}")
-        
-    except Exception as e:
-        logger.error(f"Error processing file: {str(e)}", exc_info=True)
-        raise
+        storage_service = StorageService(bucket_name)
+        url = storage_service.create_upload_session()
 
+        file_name = file_path.split("/")[-1]
+        storage_service.initiate_upload(url, file_name)
 
+        timestamp = datetime.now(timezone.utc)
+        output_path = f"processed_{schema_type}_{timestamp}.csv"
 
-    stagging_db = current_app.config.get("STAGING_DATABASE_NAME")
+        for chunk in pd.read_csv(file_path, chunksize=chunk_size):
+            processed_data = processor.process_chunk(chunk)
+            storage_service.upload_chunk(url, processed_data)
 
-    db = dynamic_annotation_cache.get_db(stagging_db)
-
-  
-    load_command = [
-        "gcloud",
-        "sql",
-        "import",
-        "csv",
-        sql_instance_name,
-        output_path,
-        "--database",
-        database_name,
-        "--table",
-        schema_type,
-    ]
-
-    result = subprocess.run(load_command, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        raise Exception(f"Database upload failed: {result.stderr}")
-
-    status.update(
-        {
+        return {
             "status": "completed",
-            "phase": "Complete",
-            "progress": 100,
-            "processed_rows": processed_rows,
+            "processed_rows": processor.processed_rows,
             "output_path": output_path,
         }
-    )
-    update_job_status(job_id, status)
+    except Exception as e:
+        logger.error(f"Error processing CSV: {str(e)}")
+        raise
+      
 
-    return {
-        "job_id": job_id,
-        "status": "completed",
-        "total_rows": processed_rows,
-        "output_path": output_path,
-    }
+
+@celery.task(name="process:upload_to_db")
+def upload_to_database(
+    process_result: Dict[str, Any],
+    sql_instance_name: str,
+    database_name: str,
+    table_name: str,
+) -> Dict[str, Any]:
+    """Upload processed CSV to database"""
+    try:
+        load_command = [
+            "gcloud",
+            "sql",
+            "import",
+            "csv",
+            sql_instance_name,
+            process_result["output_path"],
+            "--database",
+            database_name,
+            "--table",
+            table_name,
+            "--user",
+            "postgres",
+        ]
+
+        result = subprocess.run(load_command, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise Exception(f"Database upload failed: {result.stderr}")
+
+        return {
+            "status": "completed",
+            "rows_uploaded": process_result["processed_rows"],
+            "output_path": process_result["output_path"],
+        }
+    except Exception as e:
+        logger.error(f"Database upload failed: {str(e)}")
+        raise
 
 
 @celery.task(name="process:cancel_processing")
