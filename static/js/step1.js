@@ -47,6 +47,8 @@ document.addEventListener("alpine:init", () => {
       this.savedState = null;
       this.previewRows = [];
       this.clearAllStates();
+    
+      return this.isValid();
     },
 
     saveState() {
@@ -284,11 +286,17 @@ document.addEventListener("alpine:init", () => {
     },
 
     isValid() {
-      const valid = this.status === "completed";
+      const valid = this.file !== null && 
+                    this.status === "completed" && 
+                    !this.error;
       if (valid) {
         this.saveState();
       }
       return valid;
+    },
+
+    async handleNext() {
+      return this.isValid();
     },
 
     canStartUpload() {

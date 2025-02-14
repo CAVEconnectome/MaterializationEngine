@@ -2,14 +2,15 @@ document.addEventListener("alpine:init", () => {
   Alpine.store("metadata", {
     state: {
       schema_type: "",
+      datastack_name: "",
       table_name: "",
       description: "",
       notice_text: "",
       reference_table: "",
       flat_segmentation_source: "",
-      voxel_resolution_x: 0,
-      voxel_resolution_y: 0,
-      voxel_resolution_z: 0,
+      voxel_resolution_nm_x: 1,
+      voxel_resolution_nm_y: 1,
+      voxel_resolution_nm_z: 1,
       write_permission: "PRIVATE",
       read_permission: "PRIVATE",
       validationErrors: {},
@@ -62,6 +63,10 @@ document.addEventListener("alpine:init", () => {
     validateForm() {
       const errors = {};
 
+      if (!this.state.datastack_name) {
+        errors.datastack_name = "Datastack name is required";
+      }
+
       if (!this.state.table_name) {
         errors.table_name = "Table name is required";
       }
@@ -76,9 +81,9 @@ document.addEventListener("alpine:init", () => {
       }
 
       ["x", "y", "z"].forEach((dim) => {
-        const value = this.state[`voxel_resolution_${dim}`];
+        const value = this.state[`voxel_resolution_nm_${dim}`];
         if (!value || value <= 0) {
-          errors[`voxel_resolution_${dim}`] = "Must be a positive number";
+          errors[`voxel_resolution_nm_${dim}`] = "Must be a positive number";
         }
       });
 
@@ -99,14 +104,15 @@ document.addEventListener("alpine:init", () => {
           },
           body: JSON.stringify({
             schema_type: this.state.schema_type,
+            datastack_name: this.state.datastack_name,
             table_name: this.state.table_name,
             description: this.state.description,
             notice_text: this.state.notice_text,
             reference_table: this.state.reference_table,
             flat_segmentation_source: this.state.flat_segmentation_source,
-            voxel_resolution_x: parseFloat(this.state.voxel_resolution_x),
-            voxel_resolution_y: parseFloat(this.state.voxel_resolution_y),
-            voxel_resolution_z: parseFloat(this.state.voxel_resolution_z),
+            voxel_resolution_nm_x: parseFloat(this.state.voxel_resolution_nm_x),
+            voxel_resolution_nm_y: parseFloat(this.state.voxel_resolution_nm_y),
+            voxel_resolution_nm_z: parseFloat(this.state.voxel_resolution_nm_z),
             write_permission: this.state.write_permission,
             read_permission: this.state.read_permission,
           }),
@@ -138,14 +144,15 @@ document.addEventListener("alpine:init", () => {
     reset() {
       this.state = {
         schema_type: "",
+        datastack_name: "",
         table_name: "",
         description: "",
         notice_text: "",
         reference_table: "",
         flat_segmentation_source: "",
-        voxel_resolution_x: 0,
-        voxel_resolution_y: 0,
-        voxel_resolution_z: 0,
+        voxel_resolution_nm_x: 1,
+        voxel_resolution_nm_y: 1,
+        voxel_resolution_nm_z: 1,
         write_permission: "PRIVATE",
         read_permission: "PRIVATE",
         validationErrors: {},

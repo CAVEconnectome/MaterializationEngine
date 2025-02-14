@@ -2,6 +2,7 @@ document.addEventListener("alpine:init", () => {
     Alpine.store("processor", {
       state: {
         status: "idle",
+        taskId: null,
         progress: 0,
         processedRows: 0,
         totalRows: 0,
@@ -59,7 +60,7 @@ document.addEventListener("alpine:init", () => {
           console.log("columnMapping", columnMapping);
           console.log("ignoredColumns", ignoredColumns);
           console.log("metadata", metadata);
-          const response = await fetch("/materialize/upload/api/start-processing", {
+          const response = await fetch("/materialize/upload/api/process/start", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -72,12 +73,9 @@ document.addEventListener("alpine:init", () => {
             }),
           });
   
-          if (!response.ok) {
-            throw new Error("Failed to start processing");
-          }
-  
           const data = await response.json();
-          this.state.processingStatus = data.status_id;
+          this.state.processingStatus = data.status;
+          this.state.taskId = data.task_id;
           this.state.status = "processing";
           this.startPolling();
           this.saveState();
@@ -94,7 +92,7 @@ document.addEventListener("alpine:init", () => {
         if (!this.state.processingStatus) return;
   
         try {
-          const response = await fetch(`/materialize/upload/api/processing-status/${this.state.processingStatus}`);
+          const response = await fetch(`/materialize/upload/api/process/status/${this.state.taskId}`);
           if (!response.ok) throw new Error("Failed to get processing status");
   
           const data = await response.json();
@@ -160,6 +158,7 @@ document.addEventListener("alpine:init", () => {
         this.stopPolling();
         this.state = {
           status: "idle",
+          taskId: null,
           progress: 0,
           processedRows: 0,
           totalRows: 0,
