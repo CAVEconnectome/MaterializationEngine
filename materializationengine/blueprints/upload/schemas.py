@@ -29,29 +29,10 @@ class MetadataSchema(Schema):
     voxel_resolution_nm_y = fields.Float(required=True)
     voxel_resolution_nm_z = fields.Float(required=True)
 
-class DynamicColumnMappingSchema(Schema):
-    """Schema that allows any string-to-string mapping"""
-
-    class Meta:
-        unknown = EXCLUDE
-
-    @validates_schema
-    def validate_mapping(self, data: Dict[str, Any], **kwargs):
-        """Validate all values are strings"""
-        if not isinstance(data, dict):
-            raise ValidationError("Column mapping must be a dictionary")
-
-        for key, value in data.items():
-            if not isinstance(key, str) or not isinstance(value, str):
-                raise ValidationError("Column mapping must contain only string values")
-
-
 
 class UploadRequestSchema(Schema):
     filename = fields.Str(required=True)
-    column_mapping = fields.Nested(
-        DynamicColumnMappingSchema, data_key="columnMapping", required=True
-    )
+    column_mapping = fields.Dict(required=True, data_key="columnMapping")
     ignored_columns = fields.List(fields.Str(), data_key="ignoredColumns", missing=[])
     metadata = fields.Nested(MetadataSchema, required=True)
 
