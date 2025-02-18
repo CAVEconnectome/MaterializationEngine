@@ -88,7 +88,6 @@ li a:hover {
 .card-body {
   flex: 2 0;
   align-self: center;
-  border: 2px solid rgb(0, 9, 128);
   padding: 1rem;
 }
 
@@ -217,4 +216,36 @@ input, label {
 
 [x-cloak] {
   display: none !important;
+}
+
+.card-footer {
+  background-color: #f8f9fa;
+  border-top: 1px solid rgba(0,0,0,.125);
+}
+
+.nav-button-left,
+.nav-button-right {
+  min-width: 200px;
+}
+
+.btn {
+  transition: all 0.2s ease-in-out;
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+}
+
+.btn-outline-secondary:hover:not(:disabled) {
+  background-color: #6c757d;
+  color: white;
+}
+
+.btn-outline-warning:hover:not(:disabled) {
+  background-color: #ffc107;
+  color: #000;
+}
+
+.gap-2 {
+  gap: 0.75rem !important;
 }
