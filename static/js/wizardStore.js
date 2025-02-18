@@ -62,7 +62,6 @@ document.addEventListener("alpine:init", () => {
           disabled: isStep4 && processorStatus === "processing",
         },
         next: {
-          text: this.getNextButtonText(),
           disabled:
             !currentStore.isValid() ||
             (isStep4 && processorStatus === "processing"),
@@ -72,13 +71,6 @@ document.addEventListener("alpine:init", () => {
             isStep4 && ["preparing", "processing"].includes(processorStatus),
         },
       };
-    },
-
-    getNextButtonText() {
-      switch (this.state.currentStep) {
-        default:
-          return "Next →";
-      }
     },
 
     async handleNextAction() {
@@ -149,6 +141,18 @@ document.addEventListener("alpine:init", () => {
         }
         this.state = parsedState;
       }
+    },
+
+    resetState() {
+      this.state.currentStep = 1;
+      this.state.stepStatus = {
+        1: { completed: false, valid: false },
+        2: { completed: false, valid: false },
+        3: { completed: false, valid: false },
+        4: { completed: false, valid: false },
+      };
+      this.saveState();
+      window.location.href = '/materialize/upload/step1';
     },
   });
 });
