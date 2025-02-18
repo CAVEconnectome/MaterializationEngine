@@ -1,169 +1,184 @@
-<div class="card-header">
-    <h2>Step 4: Process Data</h2>
-</div>
-<div class="row justify-content-center">
-    <!-- Review schema mapping and metadata form -->
-    <div class="mb-4">
-        <h4>Review Schema Mapping</h4>
-        <div class="table-responsive">
-            <table class="table table-bordered">
-                <thead>
-                    <tr>
-                        <th>Schema Field</th>
-                        <th>CSV Column</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <template x-for="field in $store.schema.state.displayFields" :key="field.name">
-                        <tr>
-                            <td x-text="field.name"></td>
-                            <td x-text="$store.schema.state.columnMapping[field.name]"></td>
-                        </tr>
-                    </template>
-                </tbody>
-            </table>
-        </div>
 
-        <h4>Review Metadata</h4>
-        <div class="table-responsive">
-            <table class="table table-bordered">
-                <tbody>
-                    <tr>
-                        <th>Datastack Name</th>
-                        <td x-text="$store.metadata.state.datastack_name"></td>
-                    </tr>
-                    <tr>
-                        <th>Table Name</th>
-                        <td x-text="$store.metadata.state.table_name"></td>
-                    </tr>
-                    <tr>
-                        <th>Description</th>
-                        <td x-text="$store.metadata.state.description"></td>
-                    </tr>
-                    <tr>
-                        <th>Notice Text</th>
-                        <td x-text="$store.metadata.state.notice_text"></td>
-                    </tr>
-                    <tr x-show="$store.metadata.state.isReferenceSchema" x-cloak>
-                        <th>Reference Table</th>
-                        <td x-text="$store.metadata.state.reference_table"></td>
-                    </tr>
-                    <tr>
-                        <th>Flat Segmentation Source</th>
-                        <td x-text="$store.metadata.state.flat_segmentation_source"></td>
-                    </tr>
-
-                    <tr>
-                        <th>Voxel Resolution X (nm)</th>
-                        <td x-text="$store.metadata.state.voxel_resolution_nm_x"></td>
-
-                    </tr>
-                    <tr>
-                        <th>Voxel Resolution Y (nm)</th>
-                        <td x-text="$store.metadata.state.voxel_resolution_nm_y"></td>
-
-                    </tr>
-                    <tr>
-                        <th>Voxel Resolution Z (nm)</th>
-                        <td x-text="$store.metadata.state.voxel_resolution_nm_z"></td>
-
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-
-
-        <!-- Start Processing Job-->
+    <div class="card-header">
+        <h2>Step 4: Process Data</h2>
+    </div>
+    <div class="row justify-content-center">
+        <!-- Review schema mapping and metadata form -->
         <div class="mb-4">
-            <button class="btn btn-primary" @click="$store.processor.startProcessing()">
-                Start Processing
-            </button>
-
-
-
-            <!-- Processing Status -->
+            <h4>Review Schema Mapping</h4>
+            
+            <!-- Schema type -->
             <div class="mb-4">
-                <h4>Processing Status</h4>
-                <div class="alert" :class="{
+                <div class="alert alert-info">
+                    <h5 class="alert-heading">Selected Schema Type:</h5>
+                </div>
+                    <p x-text="$store.schema.state.selectedSchema"></p>
+                
+
+            <div class="table-responsive">
+                <div class="alert alert-info">
+                    <h5 class="alert-heading">Schema Fields</h5>
+                    <p>These are the fields that will be extracted from the CSV file.</p>
+                </div>
+                <table class="table table-bordered">
+                    <thead>
+                        <tr>
+                            <th>Schema Field</th>
+                            <th>CSV Column</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="field in $store.schema.state.displayFields" :key="field.name">
+                            <tr>
+                                <td x-text="field.name"></td>
+                                <td x-text="$store.schema.state.columnMapping[field.name]"></td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+
+            <h4>Review Metadata</h4>
+            <div class="table-responsive">
+                <table class="table table-bordered">
+                    <tbody>
+                        <tr>
+                            <th>Datastack Name</th>
+                            <td x-text="$store.metadata.state.datastack_name"></td>
+                        </tr>
+                        <tr>
+                            <th>Table Name</th>
+                            <td x-text="$store.metadata.state.table_name"></td>
+                        </tr>
+                        <tr>
+                            <th>Description</th>
+                            <td x-text="$store.metadata.state.description"></td>
+                        </tr>
+                        <tr>
+                            <th>Notice Text</th>
+                            <td x-text="$store.metadata.state.notice_text"></td>
+                        </tr>
+                        <tr x-show="$store.metadata.state.isReferenceSchema" x-cloak>
+                            <th>Reference Table</th>
+                            <td x-text="$store.metadata.state.reference_table"></td>
+                        </tr>
+                        <tr>
+                            <th>Flat Segmentation Source</th>
+                            <td x-text="$store.metadata.state.flat_segmentation_source"></td>
+                        </tr>
+
+                        <tr>
+                            <th>Voxel Resolution X (nm)</th>
+                            <td x-text="$store.metadata.state.voxel_resolution_nm_x"></td>
+
+                        </tr>
+                        <tr>
+                            <th>Voxel Resolution Y (nm)</th>
+                            <td x-text="$store.metadata.state.voxel_resolution_nm_y"></td>
+
+                        </tr>
+                        <tr>
+                            <th>Voxel Resolution Z (nm)</th>
+                            <td x-text="$store.metadata.state.voxel_resolution_nm_z"></td>
+
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+
+            <!-- Start Processing Job-->
+            <div class="mb-4">
+                <button class="btn btn-primary" @click="$store.processor.startProcessing()">
+                    Start Processing
+                </button>
+
+
+
+                <!-- Processing Status -->
+                <div class="mb-4">
+                    <h4>Processing Status</h4>
+                    <div class="alert" :class="{
                    'alert-info': $store.processor.state.status === 'preparing',
                    'alert-primary': $store.processor.state.status === 'processing',
                    'alert-success': $store.processor.state.status === 'completed',
                    'alert-danger': $store.processor.state.status === 'error'
                }">
-                    <div class="d-flex align-items-center">
-                        <!-- Processing Spinner -->
-                        <div x-show="['preparing', 'processing'].includes($store.processor.state.status)"
-                            class="spinner-border spinner-border-sm me-2" role="status" x-cloak>
-                            <span class="visually-hidden">Processing...</span>
+                        <div class="d-flex align-items-center">
+                            <!-- Processing Spinner -->
+                            <div x-show="['preparing', 'processing'].includes($store.processor.state.status)"
+                                class="spinner-border spinner-border-sm me-2" role="status" x-cloak>
+                                <span class="visually-hidden">Processing...</span>
+                            </div>
+
+                            <!-- Status Messages -->
+                            <span x-show="$store.processor.state.status === 'preparing'" x-cloak>
+                                Preparing to process data...
+                            </span>
+                            <span x-show="$store.processor.state.status === 'processing'" x-cloak>
+                                Processing data...
+                            </span>
+                            <span x-show="$store.processor.state.status === 'completed'" x-cloak>
+                                Processing completed successfully!
+                            </span>
+                            <span x-show="$store.processor.state.status === 'error'" x-cloak>
+                                Error processing data
+                            </span>
                         </div>
+                    </div>
+                </div>
 
-                        <!-- Status Messages -->
-                        <span x-show="$store.processor.state.status === 'preparing'" x-cloak>
-                            Preparing to process data...
-                        </span>
-                        <span x-show="$store.processor.state.status === 'processing'" x-cloak>
-                            Processing data...
-                        </span>
-                        <span x-show="$store.processor.state.status === 'completed'" x-cloak>
-                            Processing completed successfully!
-                        </span>
-                        <span x-show="$store.processor.state.status === 'error'" x-cloak>
-                            Error processing data
-                        </span>
+                <!-- Progress Information -->
+                <div x-show="['processing', 'completed'].includes($store.processor.state.status)" class="mb-4" x-cloak>
+                    <div class="progress mb-2">
+                        <div class="progress-bar" role="progressbar"
+                            :style="`width: ${$store.processor.state.progress}%`"
+                            :aria-valuenow="$store.processor.state.progress" aria-valuemin="0" aria-valuemax="100">
+                            <span x-text="$store.processor.state.progress + '%'"></span>
+                        </div>
+                    </div>
+                    <div class="text-muted small">
+                        <div>Processed Rows: <span x-text="$store.processor.state.processedRows"></span></div>
+                        <div>Total Rows: <span x-text="$store.processor.state.totalRows"></span></div>
+                        <div>Current Chunk: <span x-text="$store.processor.state.currentChunk"></span></div>
+                    </div>
+                </div>
+
+                <!-- Error Display -->
+                <div x-show="$store.processor.state.error" class="mb-4" x-cloak>
+                    <div class="alert alert-danger">
+                        <h5 class="alert-heading">Processing Error</h5>
+                        <p x-text="$store.processor.state.error" class="mb-0"></p>
+                    </div>
+                </div>
+
+                <!-- Processing Results -->
+                <div x-show="$store.processor.state.status === 'completed'" class="mb-4" x-cloak>
+                    <h4>Processing Results</h4>
+                    <div class="table-responsive">
+                        <table class="table table-bordered">
+                            <tbody>
+                                <tr>
+                                    <th>Input File</th>
+                                    <td x-text="$store.processor.state.inputFile"></td>
+                                </tr>
+                                <tr>
+                                    <th>Output File</th>
+                                    <td x-text="$store.processor.state.outputFile"></td>
+                                </tr>
+                                <tr>
+                                    <th>Total Rows Processed</th>
+                                    <td x-text="$store.processor.state.processedRows"></td>
+                                </tr>
+                                <tr>
+                                    <th>Processing Time</th>
+                                    <td x-text="$store.processor.state.processingTime"></td>
+                                </tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </div>
 
-            <!-- Progress Information -->
-            <div x-show="['processing', 'completed'].includes($store.processor.state.status)" class="mb-4" x-cloak>
-                <div class="progress mb-2">
-                    <div class="progress-bar" role="progressbar" :style="`width: ${$store.processor.state.progress}%`"
-                        :aria-valuenow="$store.processor.state.progress" aria-valuemin="0" aria-valuemax="100">
-                        <span x-text="$store.processor.state.progress + '%'"></span>
-                    </div>
-                </div>
-                <div class="text-muted small">
-                    <div>Processed Rows: <span x-text="$store.processor.state.processedRows"></span></div>
-                    <div>Total Rows: <span x-text="$store.processor.state.totalRows"></span></div>
-                    <div>Current Chunk: <span x-text="$store.processor.state.currentChunk"></span></div>
-                </div>
-            </div>
-
-            <!-- Error Display -->
-            <div x-show="$store.processor.state.error" class="mb-4" x-cloak>
-                <div class="alert alert-danger">
-                    <h5 class="alert-heading">Processing Error</h5>
-                    <p x-text="$store.processor.state.error" class="mb-0"></p>
-                </div>
-            </div>
-
-            <!-- Processing Results -->
-            <div x-show="$store.processor.state.status === 'completed'" class="mb-4" x-cloak>
-                <h4>Processing Results</h4>
-                <div class="table-responsive">
-                    <table class="table table-bordered">
-                        <tbody>
-                            <tr>
-                                <th>Input File</th>
-                                <td x-text="$store.processor.state.inputFile"></td>
-                            </tr>
-                            <tr>
-                                <th>Output File</th>
-                                <td x-text="$store.processor.state.outputFile"></td>
-                            </tr>
-                            <tr>
-                                <th>Total Rows Processed</th>
-                                <td x-text="$store.processor.state.processedRows"></td>
-                            </tr>
-                            <tr>
-                                <th>Processing Time</th>
-                                <td x-text="$store.processor.state.processingTime"></td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
         </div>
-
     </div>
-</div>
