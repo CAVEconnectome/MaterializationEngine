@@ -1,117 +1,157 @@
-<div class="card">
-  <div class="card-header">
-    <h2>Step 2: Map CSV Columns to Schema</h2>
+<div class="card-header">
+  <h2>Step 2: Map CSV Columns to Schema</h2>
+</div>
+
+<div class="card-body">
+  <!-- Error Display -->
+  <div x-show="$store.schema.state.error" class="alert alert-danger" x-text="$store.schema.state.error" x-cloak></div>
+
+  <!-- Validation Errors -->
+  <div x-show="$store.schema.state.validationErrors.length > 0" class="alert alert-warning" x-cloak>
+    <h5 class="alert-heading">Validation Errors</h5>
+    <template x-for="error in $store.schema.state.validationErrors" :key="error">
+      <p class="mb-0" x-text="error"></p>
+    </template>
   </div>
 
-  <div class="card-body">
-    <!-- Error Display -->
-    <div x-show="$store.schema.state.error" class="alert alert-danger" x-text="$store.schema.state.error" x-cloak></div>
-
-    <!-- Validation Errors -->
-    <div x-show="$store.schema.state.validationErrors.length > 0" class="alert alert-warning" x-cloak>
-      <h5 class="alert-heading">Validation Errors</h5>
-      <template x-for="error in $store.schema.state.validationErrors" :key="error">
-        <p class="mb-0" x-text="error"></p>
+  <!-- Schema Selection -->
+  <div class="form-group mb-4">
+    <label class="form-label">Select Schema Type:</label>
+    <select class="form-select" x-model="$store.schema.state.selectedSchema"
+      @change="$store.schema.selectSchema($event.target.value)">
+      <option value="">Choose a schema...</option>
+      <template x-for="schema in $store.schema.state.schemas">
+        <option :value="schema" x-text="schema" :selected="schema === $store.schema.state.selectedSchema"></option>
       </template>
-    </div>
+    </select>
+  </div>
 
-    <!-- Schema Selection -->
-    <div class="form-group mb-4">
-      <label class="form-label">Select Schema Type:</label>
-      <select class="form-select" x-model="$store.schema.state.selectedSchema"
-        @change="$store.schema.selectSchema($event.target.value)">
-        <option value="">Choose a schema...</option>
-        <template x-for="schema in $store.schema.state.schemas">
-          <option :value="schema" x-text="schema" :selected="schema === $store.schema.state.selectedSchema"></option>
-        </template>
-      </select>
-    </div>
-
-    <!-- Position Format Toggle -->
-    <div x-show="$store.schema.state.hasPositionFields" class="form-group mb-4" x-cloak>
-      <div class="form-check">
-        <input type="checkbox" class="form-check-input" id="mergedPositions"
-          :checked="$store.schema.state.useMergedPositions" @change="$store.schema.togglePositionFormat()">
-        <label class="form-check-label" for="mergedPositions">
-          Use merged position columns (single column containing [x,y,z])
-        </label>
+  <!-- Position Format Toggle -->
+  <div x-show="$store.schema.state.hasPositionFields" class="form-group mb-4 position-format-toggle" x-cloak>
+    <div class="card border-info">
+      <div class="card-header bg-info bg-opacity-10">
+        <h5 class="mb-0">
+          <i class="fas fa-map-marker-alt me-2"></i>
+          Position Format
+        </h5>
+      </div>
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-3">
+          <div class="form-check form-switch">
+            <input type="checkbox" 
+                   class="form-check-input" 
+                   role="switch"
+                   id="mergedPositions"
+                   style="width: 3em; height: 1.5em;"
+                   :checked="$store.schema.state.useMergedPositions" 
+                   @change="$store.schema.togglePositionFormat()">
+            <label class="form-check-label" for="mergedPositions">
+              <span x-text="$store.schema.state.useMergedPositions ? 'Using merged [x,y,z] column' : 'Using separate x, y, z columns'"></span>
+            </label>
+          </div>
+          <div class="position-format-example text-muted small">
+            <template x-if="$store.schema.state.useMergedPositions">
+              <span><i class="fas fa-info-circle me-1"></i>Example: [10, 20, 30]</span>
+            </template>
+            <template x-if="!$store.schema.state.useMergedPositions">
+              <span><i class="fas fa-info-circle me-1"></i>Example: x: 10, y: 20, z: 30</span>
+            </template>
+          </div>
+        </div>
       </div>
     </div>
-
-    <!-- CSV Row preview -->
-    <div class="table-responsive" style="max-height: 300px">
-      <table class="table table-sm table-bordered mb-0">
-          <h4>CSV Preview</h4>
-          <tbody>
-              <template x-for="(row, index) in $store.upload.previewRows.slice(0, 5)" :key="index">
-                  <tr>
-                      <template x-for="(cell, i) in row" :key="i">
-                          <td class="text-nowrap"
-                              style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
-                              :title="cell"
-                              x-text="cell"></td>
-                      </template>
-                  </tr>
-              </template>
-          </tbody>
-      </table>
   </div>
 
-    <!-- Column Mapping -->
-    <div x-show="$store.schema.state.selectedSchema" class="mb-4" x-cloak>
-      <h4>Map CSV Columns to Schema Fields</h4>
-      <div class="table-responsive">
-        <table class="table">
-          <thead>
-            <tr>
-              <th>Schema Field</th>
-              <th>Type</th>
-              <th>Required</th>
-              <th>CSV Column</th>
-            </tr>
-          </thead>
-          <tbody>
-            <template x-for="field in $store.schema.state.displayFields" :key="field.name">
-              <tr :class="{
-                'table-warning': field.required && !$store.schema.state.columnMapping[field.name],
+  <!-- CSV Row preview -->
+  <div class="table-responsive" style="max-height: 300px">
+    <table class="table table-sm table-bordered mb-0">
+      <h4>CSV Preview</h4>
+      <tbody>
+        <template x-for="(row, index) in $store.upload.previewRows.slice(0, 5)" :key="index">
+          <tr>
+            <template x-for="(cell, i) in row" :key="i">
+              <td class="text-nowrap"
+                style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" :title="cell"
+                x-text="cell"></td>
+            </template>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Column Mapping -->
+  <div x-show="$store.schema.state.selectedSchema" class="mb-4" x-cloak>
+    <h4>Map CSV Columns to Schema Fields</h4>
+    <div class="table-responsive">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Schema Field</th>
+            <th>Type</th>
+            <th>Required</th>
+            <th>CSV Column</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="field in $store.schema.state.displayFields" :key="field.name">
+            <tr :class="{
+                'table-warning': (field.name !== 'id' && !$store.schema.state.columnMapping[field.name]),
                 'table-info': field.isGeometry,
                 'table-success': $store.schema.state.columnMapping[field.name]
               }">
-                <td>
-                  <span x-text="field.name"></span>
-                  <span x-show="field.isGeometry" class="badge bg-info ms-1">Position</span>
-                </td>
-                <td x-text="field.type"></td>
-                <td>
-                  <span x-show="field.required" class="badge bg-danger">Required</span>
-                  <span x-show="!field.required" class="badge bg-secondary">Optional</span>
-                </td>
-                <td>
-                  <select class="form-select" :value="$store.schema.state.columnMapping[field.name]"
-                    @change="$store.schema.updateColumnMapping(field.name, $event.target.value)">
+              <td>
+                <span x-text="field.name"></span>
+                <span x-show="field.isGeometry" class="badge bg-info ms-1">Position</span>
+              </td>
+              <td x-text="field.type"></td>
+              <td>
+                <template x-if="field.name === 'id'">
+                  <span class="badge bg-secondary">Optional</span>
+                </template>
+                <template x-if="field.name !== 'id'">
+                  <span class="badge bg-danger">Required</span>
+                </template>
+              </td>
+              <td>
+                <select class="form-select" 
+                        :value="$store.schema.state.columnMapping[field.name]"
+                        @change="$store.schema.updateColumnMapping(field.name, $event.target.value)"
+                        :class="{ 'is-invalid': field.name !== 'id' && !$store.schema.state.columnMapping[field.name] }">
+                  <template x-if="field.name === 'id'">
+                    <option value="">Auto-generate (recommended unless pre-computed)</option>
+                  </template>
+                  <template x-if="field.name !== 'id'">
                     <option value="">Select column...</option>
-                    <template x-for="column in $store.schema.state.csvColumns" :key="column">
-                      <option :value="column" x-text="column"
-                        :selected="$store.schema.state.columnMapping[field.name] === column"></option>
-                    </template>
-                  </select>
-                </td>
-              </tr>
-            </template>
-          </tbody>
-        </table>
-      </div>
+                  </template>
+                  <template x-for="column in $store.schema.state.csvColumns" :key="column">
+                    <option :value="column" 
+                            x-text="column"
+                            :selected="$store.schema.state.columnMapping[field.name] === column"></option>
+                  </template>
+                </select>
+                <template x-if="field.name === 'id'">
+                  <small class="form-text text-muted mt-1 d-block">
+                    <i class="fas fa-info-circle"></i>
+                    If no column is selected, unique IDs will be automatically generated
+                  </small>
+                </template>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
     </div>
+  </div>
 
-    <!-- Ignored Columns Display -->
-    <div x-show="$store.schema.state.ignoredColumns.length > 0" class="mt-4" x-cloak>
-      <h5>Ignored Columns</h5>
-      <p class="text-muted">The following columns from your CSV will not be used:</p>
-      <div class="d-flex flex-wrap gap-2">
-        <template x-for="column in $store.schema.state.ignoredColumns" :key="column">
-          <span class="badge bg-secondary" x-text="column"></span>
-        </template>
-      </div>
+  <!-- Ignored Columns Display -->
+  <div x-show="$store.schema.state.ignoredColumns.length > 0" class="mt-4" x-cloak>
+    <h5>Ignored Columns</h5>
+    <p class="text-muted">The following columns from your CSV will not be used:</p>
+    <div class="d-flex flex-wrap gap-2">
+      <template x-for="column in $store.schema.state.ignoredColumns" :key="column">
+        <span class="badge bg-secondary" x-text="column"></span>
+      </template>
     </div>
   </div>
 </div>

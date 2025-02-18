@@ -83,16 +83,6 @@ document.addEventListener("alpine:init", () => {
             field => field.type.toLowerCase().includes('geometry')
           );
           this.updateDisplayFields();
-
-          const newMapping = {};
-          this.state.displayFields.forEach(field => {
-            const matchingColumn = this.state.csvColumns.find(
-              col => col.toLowerCase() === field.name.toLowerCase()
-            );
-            newMapping[field.name] = matchingColumn || "";
-          });
-
-          this.state.columnMapping = newMapping;
           this.updateIgnoredColumns();
           this.state.validationErrors = [];
           this.saveState();
@@ -131,7 +121,6 @@ document.addEventListener("alpine:init", () => {
             });
           }
         } else {
-          // Non-geometry fields
           fields.push({
             name: fieldName,
             type: field.type,
@@ -176,17 +165,20 @@ document.addEventListener("alpine:init", () => {
       const errors = [];
       
       if (!this.state.selectedSchema) {
-        errors.push("No schema selected");
+        errors.push("Please select a schema type");
+        this.state.validationErrors = errors;
         return false;
       }
 
-      this.state.displayFields.forEach(field => {
-        if (field.required && !this.state.columnMapping[field.name]) {
-          errors.push(`Required field not mapped: ${field.name}`);
-        }
+      const unmappedRequiredFields = this.state.displayFields.filter(field => {
+        return field.name !== 'id' && !this.state.columnMapping[field.name];
       });
 
-      this.updateIgnoredColumns();
+      if (unmappedRequiredFields.length > 0) {
+        unmappedRequiredFields.forEach(field => {
+          errors.push(`Required field not mapped: ${field.name}`);
+        });
+      }
 
       this.state.validationErrors = errors;
       return errors.length === 0;
@@ -240,7 +232,10 @@ document.addEventListener("alpine:init", () => {
     },
 
     async handleNext() {
-      return this.validateMapping() && await this.prepareMappingForProcessor();
+      if (!this.validateMapping()) {
+        return false;
+      }
+      return await this.prepareMappingForProcessor();
     },
 
     reset() {
