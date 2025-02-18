@@ -49,38 +49,39 @@ def get_job_status(job_id: str) -> Dict[str, Any]:
 def process_and_upload(
     self,
     file_path: str,
-    datastack_name: str,
-    table_name: str,
-    schema_type: str,
+    file_metadata: dict,
     column_mapping: Dict[str, str],
-    reference_table: str = None,
     ignored_columns: List[str] = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """Chain CSV processing tasks"""
     job_id = f"csv_processing_{datetime.now(timezone.utc)}"
-    datastack_info = get_datastack_info(datastack_name)
 
     chunk_scale_factor = current_app.config.get("CHUNK_SCALE_FACTOR")
     use_staging_database = current_app.config.get("USE_STAGING_DATABASE")
     sql_instance_name = current_app.config.get("SQLALCHEMY_DATABASE_URI")
 
+    datastack_name = file_metadata["datastack_name"]
+    table_name = file_metadata["table_name"]
+    schema_type = file_metadata["schema_type"]
+    reference_table = file_metadata.get("reference_table")
+
+    datastack_info = get_datastack_info(datastack_name)
+
     workflow = chain(
-        process_csv.s(
+        process_csv.si(
             file_path,
-            datastack_name,
-            table_name,
             schema_type,
             column_mapping,
             reference_table=reference_table,
             ignored_columns=ignored_columns,
         ),
-        upload_to_database.s(
+        upload_to_database.si(
             sql_instance_name=sql_instance_name,
             database_name=kwargs.get("database_name"),
             table_name=table_name,
         ),
-        run_spatial_lookup_workflow.s(
+        run_spatial_lookup_workflow.si(
             datastack_info,
             table_name=table_name,
             chunk_scale_factor=chunk_scale_factor,
@@ -90,9 +91,8 @@ def process_and_upload(
         ),
     )
 
-    # Execute chain
-    result = workflow.apply_async(task_id=job_id)
-    return {"job_id": job_id}
+    result = workflow.apply_async()
+    return {"job_id": result.id}
 
 
 @celery.task(name="process:get_status")
@@ -110,8 +110,6 @@ def get_chain_status(job_id: str) -> Dict[str, Any]:
 @celery.task(name="process:process_csv")
 def process_csv(
     file_path: str,
-    datastack_name: str,
-    table_name: str,
     schema_type: str,
     column_mapping: Dict[str, str],
     reference_table: str = None,
