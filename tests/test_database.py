@@ -17,8 +17,8 @@ class TestDatabaseUtils:
         url_mapping = get_sql_url_params(database_uri)
 
         assert url_mapping["user"] == "postgres"
-        assert url_mapping["password"] == "materialize"
-        assert url_mapping["dbname"] == "materialize"
+        assert url_mapping["password"] == "postgres"
+        assert url_mapping["dbname"] == "test_aligned_volume"
         assert url_mapping["host"] == "localhost"
         assert url_mapping["port"] == 5432
 

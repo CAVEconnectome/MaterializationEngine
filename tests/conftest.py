@@ -98,8 +98,8 @@ def setup_docker_image(docker_mode, mat_metadata):
 
         db_environment = [
             "POSTGRES_USER=postgres",
-            "POSTGRES_PASSWORD=materialize",
-            "POSTGRES_DB=materialize",
+            "POSTGRES_PASSWORD=postgres",
+            f"POSTGRES_DB={aligned_volume}",
         ]
 
         try:
@@ -187,6 +187,7 @@ def check_database(sql_uri: str) -> bool:  # Changed return type hint
     except Exception as e:
         test_logger.info(e)
         return False  # Explicitly return False on failure
+        
 
 
 def setup_database(aligned_volume_name, database_uri):
