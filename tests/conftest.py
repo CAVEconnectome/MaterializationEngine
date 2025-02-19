@@ -37,9 +37,6 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "docker: use postgres in docker")
 
 
-# Get testing metadata
-
-
 @pytest.fixture(scope="session")
 def mat_metadata():
     p = pathlib.Path("tests/test_data", "mat_metadata.json")
@@ -101,7 +98,7 @@ def setup_docker_image(docker_mode, mat_metadata):
 
         db_environment = [
             "POSTGRES_USER=postgres",
-            "POSTGRES_PASSWORD=postgres",
+            "POSTGRES_PASSWORD=materialize",
             f"POSTGRES_DB={aligned_volume}",
         ]
 
@@ -135,15 +132,17 @@ def setup_docker_image(docker_mode, mat_metadata):
 # Setup PostGis Database with test data
 @pytest.fixture(scope="session", autouse=True)
 def setup_postgis_database(setup_docker_image, mat_metadata, annotation_data) -> None:
-
     aligned_volume = mat_metadata["aligned_volume"]
     sql_uri = mat_metadata["sql_uri"]
 
     try:
         is_connected = check_database(sql_uri)
+        if not is_connected:
+            test_logger.error(f"Could not connect to database {sql_uri}")
+            yield False
+            return
 
         is_setup = setup_database(aligned_volume, sql_uri)
-
         test_logger.info(
             f"DATABASE CAN BE REACHED: {is_connected}, DATABASE IS SETUP: {is_setup}"
         )
@@ -157,6 +156,7 @@ def setup_postgis_database(setup_docker_image, mat_metadata, annotation_data) ->
         yield True
     except Exception as e:
         test_logger.error(f"Cannot connect to database {sql_uri}: {e}")
+        yield False
 
 
 @pytest.fixture(scope="session")
@@ -173,7 +173,7 @@ def mat_client(aligned_volume_name, database_uri):
     return mat_client
 
 
-def check_database(sql_uri: str) -> None:  # pragma: no cover
+def check_database(sql_uri: str) -> bool:  # Changed return type hint
     try:
         test_logger.info("ATTEMPT TO CONNECT DB")
         conn = psycopg2.connect(sql_uri)
@@ -186,6 +186,7 @@ def check_database(sql_uri: str) -> None:  # pragma: no cover
         return True
     except Exception as e:
         test_logger.info(e)
+        return False  # Explicitly return False on failure
 
 
 def setup_database(aligned_volume_name, database_uri):

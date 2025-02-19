@@ -1,12 +1,11 @@
 from materializationengine.database import (
-    create_session,
     dynamic_annotation_cache,
     get_sql_url_params,
     ping_connection,
     reflect_tables,
     db_manager,
 )
-from sqlalchemy.orm import scoped_session
+from sqlalchemy.orm import Session
 from sqlalchemy.engine.base import Engine
 from dynamicannotationdb import DynamicAnnotationInterface
 import logging
@@ -18,15 +17,14 @@ class TestDatabaseUtils:
         url_mapping = get_sql_url_params(database_uri)
 
         assert url_mapping["user"] == "postgres"
-        assert url_mapping["password"] == "postgres"
-        assert url_mapping["dbname"] == "test_aligned_volume"
+        assert url_mapping["password"] == "materialize"
+        assert url_mapping["dbname"] == "materialize"
         assert url_mapping["host"] == "localhost"
         assert url_mapping["port"] == 5432
 
-    def test_reflect_tables(self, database_uri):
+    def test_reflect_tables(self, database_uri, aligned_volume_name):
         sql_base = database_uri.rpartition("/")[0]
-        database_name = database_uri.rpartition("/")[-1]
-        tables = reflect_tables(sql_base, database_name)
+        tables = reflect_tables(sql_base, aligned_volume_name)
         logging.info(tables)
         assert set(tables) == set(
             [
@@ -46,25 +44,17 @@ class TestDatabaseUtils:
         )
 
 
-class TestCreateSession:
-    @pytest.fixture(autouse=True)
-    def setup_method(self, database_uri, test_app):
-        self.session, self.engine = create_session(database_uri)
-
-    def test_ping_connection(self):
-        is_connected = ping_connection(self.session)
-        assert is_connected == True
-
-    def teardown_method(self):
-        self.session.close()
-        self.engine.dispose()
-
+class TestDatabaseConnection:
+    def test_ping_connection(self, database_uri, test_app):
+        with db_manager.session_scope(database_uri.rpartition('/')[-1]) as session:
+            is_connected = ping_connection(session)
+            assert is_connected == True
 
 class TestSqlAlchemyCache:
     def test_get_session(self, test_app, aligned_volume_name):
         with db_manager.session_scope(aligned_volume_name) as session:
             self.cached_session = session
-            assert isinstance(self.cached_session, scoped_session)
+            assert isinstance(self.cached_session, Session)
 
     def test_get_engine(self, test_app, aligned_volume_name):
         self.cached_engine = db_manager.get_engine(aligned_volume_name)

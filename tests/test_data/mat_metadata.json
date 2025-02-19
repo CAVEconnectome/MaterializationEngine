@@ -10,7 +10,7 @@
     "version": 1,
     "timestamp": "2021-03-25 18:46:55.690121",
     "expires_timestamp": "2021-04-01 18:48:09.540908",
-    "sql_uri": "postgresql://postgres:postgres@localhost:5432/test_aligned_volume",
+    "sql_uri": "postgresql://postgres:materialize@localhost:5432/materialize",
     "schema": "synapse",
     "chunk_size": 2,
     "analysis_version": 1,
