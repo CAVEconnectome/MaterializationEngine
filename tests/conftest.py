@@ -99,7 +99,7 @@ def setup_docker_image(docker_mode, mat_metadata):
         db_environment = [
             "POSTGRES_USER=postgres",
             "POSTGRES_PASSWORD=materialize",
-            f"POSTGRES_DB={aligned_volume}",
+            "POSTGRES_DB=materialize",
         ]
 
         try:
