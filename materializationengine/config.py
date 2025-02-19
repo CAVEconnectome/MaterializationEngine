@@ -139,7 +139,7 @@ class TestConfig(BaseConfig):
     ENV = "testing"
     TESTING = True
     SQLALCHEMY_DATABASE_URI = (
-        "postgresql://postgres:materialize@localhost:5432/test_aligned_volume"
+        "postgresql://postgres:postgres@localhost:5432/test_aligned_volume"
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     CELERY_BROKER_URL = "memory://"
