@@ -11,6 +11,7 @@ from materializationengine.workflows.create_frozen_database import (
     merge_tables,
     update_table_metadata,
 )
+from materializationengine.shared_tasks import get_materialization_info
 
 datastack_info = {
     "datastack": "test_aligned_volume",
@@ -26,8 +27,8 @@ class TestCreateFrozenVersion:
 
         new_version_number = create_new_version(
             datastack_info=datastack_info,
-            materialization_time_stamp=materialization_time_stamp, 
-            days_to_expire=7
+            materialization_time_stamp=materialization_time_stamp,
+            days_to_expire=7,
         )
         assert new_version_number == 1
 
@@ -36,9 +37,12 @@ class TestCreateFrozenVersion:
         assert is_created.get() == True
 
     def test_create_materialized_metadata(self, mat_metadata):
+        mat_info = get_materialization_info(
+            datastack_info, 1, materialization_time_stamp
+        )
         is_table_created = create_materialized_metadata.s(
             datastack_info=datastack_info,
-            mat_info=mat_metadata,
+            mat_info=mat_info,
             analysis_version=1,
             materialization_time_stamp=materialization_time_stamp,
         ).apply()

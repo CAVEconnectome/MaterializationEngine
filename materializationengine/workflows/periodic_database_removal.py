@@ -8,7 +8,7 @@ from typing import List
 from celery.utils.log import get_task_logger
 from dynamicannotationdb.models import AnalysisVersion
 from materializationengine.celery_init import celery
-from materializationengine.database import create_session
+from materializationengine.database import db_manager
 from materializationengine.info_client import get_aligned_volumes, get_datastack_info
 from materializationengine.utils import get_config_param
 from sqlalchemy import create_engine
@@ -49,26 +49,30 @@ def get_valid_versions(session):
 
 @celery.task(name="workflow:remove_expired_databases")
 def remove_expired_databases(delete_threshold: int = 5, datastack: str = None) -> str:
-    """
-    Remove expired database from time this method is called.
+    """Remove expired databases and clean up their metadata.
+    
+    Args:
+        delete_threshold (int): Minimum number of databases to maintain
+        datastack (str, optional): Specific datastack to clean, or all if None
+        
+    Returns:
+        list: Information about dropped databases per datastack
     """
     aligned_volume_databases = get_aligned_volumes_databases()
-
     datastacks = [datastack] if datastack else get_config_param("DATASTACKS")
     current_time = datetime.utcnow()
     remove_db_cron_info = []
 
     for datastack in datastacks:
-        datastack_info = get_datastack_info(datastack)
-        aligned_volume = datastack_info["aligned_volume"]["name"]
-        if aligned_volume in aligned_volume_databases:
-            SQL_URI_CONFIG = get_config_param("SQLALCHEMY_DATABASE_URI")
-            sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
-            sql_uri = make_url(f"{sql_base_uri}/{aligned_volume}")
-            session, engine = create_session(sql_uri)
-            session.expire_on_commit = False
-            # get number of expired dbs that are ready for deletion
-            try:
+        try:
+            datastack_info = get_datastack_info(datastack)
+            aligned_volume = datastack_info["aligned_volume"]["name"]
+            
+            if aligned_volume not in aligned_volume_databases:
+                continue
+
+            with db_manager.session_scope(aligned_volume) as session:
+                # Get expired and non-valid databases
                 expired_results = (
                     session.query(AnalysisVersion)
                     .filter(AnalysisVersion.expires_on <= current_time)
@@ -83,104 +87,93 @@ def remove_expired_databases(delete_threshold: int = 5, datastack: str = None) -
                     .order_by(AnalysisVersion.time_stamp)
                     .all()
                 ) # some databases might have failed to materialize completely but are still present on disk
+                
+                non_valid_versions = [str(non_valid_db) for non_valid_db in non_valid_results]
+                versions_to_remove = list(set(expired_versions + non_valid_versions))
 
-                non_valid_versions = [str(non_valid_version) for non_valid_version in non_valid_results]
-                versions = list(set(expired_versions + non_valid_versions))
-            except Exception as sql_error:
-                celery_logger.error(f"Error: {sql_error}")
-                continue
-            # get databases that exist currently, filter by materialized dbs
-            database_list = get_existing_databases(engine)
+                # Get existing databases
+                engine = db_manager.get_engine(aligned_volume)
+                database_list = get_existing_databases(engine)
+                databases = [db for db in database_list if db.startswith(datastack)]
+                
+                # get databases to delete that are currently present (ordered by timestamp)
+                databases_to_delete = [
+                    db for db in versions_to_remove if db in databases
+                ]
 
-            databases = [
-                database for database in database_list if database.startswith(datastack)
-            ]
+                dropped_dbs = []
 
-            # get databases to delete that are currently present (ordered by timestamp)
-            databases_to_delete = [
-                database for database in versions if database in databases
-            ]
+                if len(databases) > delete_threshold:
+                    with engine.connect() as conn:
+                        conn.execution_options(isolation_level="AUTOCOMMIT")
+                        
+                        for database in databases_to_delete:
+                            # see if any materialized databases exist
+                            existing_databases = get_existing_databases(engine)
+                            mat_versions = get_all_versions(session)
+                            remaining_databases = set(mat_versions).intersection(existing_databases)
+                            # double check to see if there is only one valid db remaining
+                            valid_versions = get_valid_versions(session)
+                            remaining_valid_databases = set(valid_versions).intersection(existing_databases)
 
-            dropped_dbs = []
-
-            if len(databases) > delete_threshold:
-                with engine.connect() as conn:
-                    conn.execution_options(isolation_level="AUTOCOMMIT")
-                    for database in databases_to_delete:
-                        # see if any materialized databases exist
-                        existing_databases = get_existing_databases(engine)
-                        mat_versions = get_all_versions(session)
-                        remaining_databases = set(mat_versions).intersection(
-                            existing_databases
-                        )
-                        # double check to see if there is only one valid db remaining
-                        valid_versions = get_valid_versions(session)
-                        remaining_valid_databases = set(valid_versions).intersection(
-                            existing_databases
-                        )
-                        if (
-                            len(remaining_databases) == 1
-                            or len(remaining_valid_databases) == 1
-                        ):
-                            celery_logger.info(
-                                f"Only one materialized database remaining: {database}, removal stopped."
-                            )
-                            break
-
-                        if len(remaining_databases) == delete_threshold:
-                            break
-
-                        if (len(databases) - len(dropped_dbs)) > delete_threshold:
-                            try:
-                                sql = (
-                                    "SELECT 1 FROM pg_database WHERE datname='%s'"
-                                    % database
-                                )
-                                result_proxy = conn.execute(sql)
-                                result = result_proxy.scalar()
+                            # Stop if we're at minimum database threshold
+                            if (len(remaining_databases) == 1 or 
+                                len(remaining_valid_databases) == 1):
                                 celery_logger.info(
-                                    f"Database to be dropped: {database} exists: {result}"
+                                    f"Only one materialized database remaining: {database}, "
+                                    "removal stopped."
                                 )
-                                if result:
+                                break
+
+                            if len(remaining_databases) == delete_threshold:
+                                break
+
+                            if (len(databases) - len(dropped_dbs)) > delete_threshold:
+                                try:
+                                    exists_query = f"SELECT 1 FROM pg_database WHERE datname='{database}'"
+                                    result = conn.execute(exists_query).scalar()
+                                    
+                                    if not result:
+                                        continue
+
+                                    celery_logger.info(f"Preparing to drop database: {database}")
+
                                     drop_connections = f"""
-                                    SELECT 
-                                        pg_terminate_backend(pid) 
-                                    FROM 
-                                        pg_stat_activity
-                                    WHERE 
-                                        datname = '{database}'
-                                    AND pid <> pg_backend_pid()
+                                        SELECT pg_terminate_backend(pid) 
+                                        FROM pg_stat_activity
+                                        WHERE datname = '{database}'
+                                        AND pid <> pg_backend_pid()
                                     """
-
                                     conn.execute(drop_connections)
-                                    celery_logger.info(
-                                        f"Dropped connections to: {database}"
-                                    )
-                                    sql = f"DROP DATABASE {database}"
-                                    result_proxy = conn.execute(sql)
-                                    celery_logger.info(f"Database: {database} removed")
+                                    celery_logger.info(f"Dropped connections to: {database}")
 
-                                    # strip version from database string
+                                    # Drop the database
+                                    conn.execute(f"DROP DATABASE {database}")
+                                    celery_logger.info(f"Database dropped: {database}")
+
+                                    # Update version metadata
                                     database_version = database.rsplit("__mat")[-1]
-
-                                    expired_database = (
+                                    expired_db = (
                                         session.query(AnalysisVersion)
-                                        .filter(
-                                            AnalysisVersion.version == database_version
-                                        )
+                                        .filter(AnalysisVersion.version == database_version)
                                         .one()
                                     )
-                                    expired_database.valid = False
-                                    expired_database.status = "EXPIRED"
-                                    session.commit()
-                                    celery_logger.info(
-                                        f"Database '{expired_database}' dropped"
-                                    )
+                                    expired_db.valid = False
+                                    expired_db.status = "EXPIRED"
+                                    
                                     dropped_dbs.append(database)
-                            except Exception as e:
-                                celery_logger.error(
-                                    f"ERROR: {e}: {database} does not exist"
-                                )
-            remove_db_cron_info.append(dropped_dbs)
-            session.close()
+                                    celery_logger.info(f"Successfully removed database: {database}")
+
+                                except Exception as e:
+                                    celery_logger.error(
+                                        f"Failed to remove database {database}: {e}"
+                                    )
+                                    continue
+
+                remove_db_cron_info.append(dropped_dbs)
+
+        except Exception as e:
+            celery_logger.error(f"Error processing datastack {datastack}: {e}")
+            continue
+
     return remove_db_cron_info
