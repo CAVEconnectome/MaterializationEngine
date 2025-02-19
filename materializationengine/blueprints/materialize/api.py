@@ -8,7 +8,6 @@ from flask_restx import Namespace, Resource, inputs, reqparse, fields
 from materializationengine.blueprints.client.utils import get_latest_version
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import (
-    create_session,
     dynamic_annotation_cache,
     db_manager,
 )
@@ -744,23 +743,28 @@ class AnnotationResource(Resource):
     @mat_bp.doc("get_top_materialized_annotations", security="apikey")
     def get(self, aligned_volume_name: str, version: int, tablename: str):
         check_aligned_volume(aligned_volume_name)
-        SQL_URI_CONFIG = current_app.config["SQLALCHEMY_DATABASE_URI"]
-        sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
-        sql_uri = make_url(f"{sql_base_uri}/{aligned_volume_name}")
-        session, engine = create_session(sql_uri)
-        metadata = MetaData()
+        
         try:
-            annotation_table = Table(
-                tablename, metadata, autoload=True, autoload_with=engine
-            )
-
-        except NoSuchTableError as e:
-            logging.error(f"No table exists {e}")
-            return abort(404)
-        response = session.query(annotation_table).limit(10).all()
-        annotations = [r._asdict() for r in response]
-        return (annotations, 200) if annotations else abort(404)
-
+            with db_manager.session_scope(aligned_volume_name) as session:
+                engine = db_manager.get_engine(aligned_volume_name)
+                
+                metadata = MetaData()
+                try:
+                    annotation_table = Table(
+                        tablename, metadata, autoload=True, autoload_with=engine
+                    )
+                except NoSuchTableError as e:
+                    logging.error(f"No table exists {e}")
+                    return abort(404)
+                
+                response = session.query(annotation_table).limit(10).all()
+                annotations = [r._asdict() for r in response]
+                
+                return (annotations, 200) if annotations else abort(404)
+                
+        except Exception as e:
+            logging.error(f"Error querying annotations: {e}")
+            return abort(500)
 
 @mat_bp.route("/materialize/run/create_virtual/datastack")
 class CreateVirtualPublicVersionResource(Resource):

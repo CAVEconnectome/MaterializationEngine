@@ -1,34 +1,14 @@
-import logging
 from contextlib import contextmanager
 from urllib.parse import urlparse
 
-from celery.utils.log import get_task_logger
 from dynamicannotationdb import DynamicAnnotationInterface
 from flask import current_app
 from sqlalchemy import MetaData, create_engine
-from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.pool import QueuePool
 
 from materializationengine.celery_worker import celery_logger
 from materializationengine.utils import get_config_param
-
-
-def create_session(sql_uri: str = None):
-    pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 5)
-    max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 5)
-    engine = create_engine(
-        sql_uri,
-        pool_recycle=3600,
-        pool_size=pool_size,
-        max_overflow=max_overflow,
-        pool_pre_ping=True,
-    )
-    Session = scoped_session(
-        sessionmaker(bind=engine, autocommit=False, autoflush=False)
-    )
-    session = Session()
-    return session, engine
 
 
 def get_sql_url_params(sql_url):
@@ -93,7 +73,6 @@ class DatabaseConnectionManager:
                 pool_pre_ping=True,  # Ensure connections are still valid
             )
             
-            # Log pool creation
             celery_logger.info(f"Created new connection pool for {database_name} "
                        f"(size={pool_size}, max_overflow={max_overflow})")
             
