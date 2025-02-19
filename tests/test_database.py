@@ -4,7 +4,7 @@ from materializationengine.database import (
     get_sql_url_params,
     ping_connection,
     reflect_tables,
-    sqlalchemy_cache,
+    db_manager,
 )
 from sqlalchemy.orm import scoped_session
 from sqlalchemy.engine.base import Engine
@@ -62,11 +62,12 @@ class TestCreateSession:
 
 class TestSqlAlchemyCache:
     def test_get_session(self, test_app, aligned_volume_name):
-        self.cached_session = sqlalchemy_cache.get(aligned_volume_name)
-        assert isinstance(self.cached_session, scoped_session)
+        with db_manager.session_scope(aligned_volume_name) as session:
+            self.cached_session = session
+            assert isinstance(self.cached_session, scoped_session)
 
     def test_get_engine(self, test_app, aligned_volume_name):
-        self.cached_engine = sqlalchemy_cache.get_engine(aligned_volume_name)
+        self.cached_engine = db_manager.get_engine(aligned_volume_name)
         assert isinstance(self.cached_engine, Engine)
 
 

@@ -7,7 +7,7 @@ from celery import chain, chord, group
 from celery.utils.log import get_task_logger
 from materializationengine.celery_init import celery
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
-from materializationengine.database import sqlalchemy_cache
+from materializationengine.database import db_manager
 from materializationengine.shared_tasks import (
     fin,
     get_materialization_info,
@@ -179,36 +179,37 @@ def get_supervoxel_id_queries(root_id_chunk: list, mat_metadata: dict):
     aligned_volume = mat_metadata.get("aligned_volume")
     SegmentationModel = create_segmentation_model(mat_metadata)
 
-    session = sqlalchemy_cache.get(aligned_volume)
-    columns = [column.name for column in SegmentationModel.__table__.columns]
-    root_id_columns = [column for column in columns if "root_id" in column]
+    with db_manager.session_scope(aligned_volume) as session:
 
-    supervoxel_queries = []
-    for root_id_column in root_id_columns:
-        prefix = root_id_column.rsplit("_", 2)[0]
-        supervoxel_name = f"{prefix}_supervoxel_id"
-        root_id_att = getattr(SegmentationModel, root_id_column)
-        sv_id_att = getattr(SegmentationModel, supervoxel_name)
-        sv_ids_query = session.query(
-            SegmentationModel.id,
-            root_id_att,
-            sv_id_att,
-        )
-        if mat_metadata.get("lookup_all_root_ids", False):
-            if root_id_chunk[1] is None:
-                root_id_chunk[1] = mat_metadata.get("max_id")
-            stmt = sv_ids_query.filter(
-                or_(SegmentationModel.id).between(
-                    int(root_id_chunk[0]), int(root_id_chunk[1])
+        columns = [column.name for column in SegmentationModel.__table__.columns]
+        root_id_columns = [column for column in columns if "root_id" in column]
+
+        supervoxel_queries = []
+        for root_id_column in root_id_columns:
+            prefix = root_id_column.rsplit("_", 2)[0]
+            supervoxel_name = f"{prefix}_supervoxel_id"
+            root_id_att = getattr(SegmentationModel, root_id_column)
+            sv_id_att = getattr(SegmentationModel, supervoxel_name)
+            sv_ids_query = session.query(
+                SegmentationModel.id,
+                root_id_att,
+                sv_id_att,
+            )
+            if mat_metadata.get("lookup_all_root_ids", False):
+                if root_id_chunk[1] is None:
+                    root_id_chunk[1] = mat_metadata.get("max_id")
+                stmt = sv_ids_query.filter(
+                    or_(SegmentationModel.id).between(
+                        int(root_id_chunk[0]), int(root_id_chunk[1])
+                    )
                 )
-            )
-        else:
-            stmt = sv_ids_query.filter(
-                or_(or_(root_id_att).in_(root_id_chunk), root_id_att == None)
-            )
+            else:
+                stmt = sv_ids_query.filter(
+                    or_(or_(root_id_att).in_(root_id_chunk), root_id_att == None)
+                )
 
-        sv_ids_query = stmt.statement.compile(compile_kwargs={"literal_binds": True})
-        supervoxel_queries.append({f"{root_id_column}": str(sv_ids_query)})
+            sv_ids_query = stmt.statement.compile(compile_kwargs={"literal_binds": True})
+            supervoxel_queries.append({f"{root_id_column}": str(sv_ids_query)})
 
     return supervoxel_queries or None
 
@@ -239,7 +240,7 @@ def update_root_ids(self, root_id_chunk: list, mat_metadata: dict):
 
     tasks = []
 
-    engine = sqlalchemy_cache.get_engine(aligned_volume)
+    engine = db_manager.get_engine(aligned_volume)
 
     # https://docs.sqlalchemy.org/en/14/core/connections.html#using-server-side-cursors-a-k-a-stream-results
     for query_dict in supervoxel_queries:
@@ -314,17 +315,14 @@ def get_new_root_ids(self, supervoxel_data, mat_metadata):
 
     SegmentationModel = create_segmentation_model(mat_metadata)
     aligned_volume = mat_metadata.get("aligned_volume")
-    session = sqlalchemy_cache.get(aligned_volume)
-    data = root_ids_df.to_dict(orient="records")
-    try:
-        session.bulk_update_mappings(SegmentationModel, data)
-        session.commit()
-    except Exception as e:
-        session.rollback()
-        celery_logger.error(f"ERROR: {e}")
-        raise self.retry(exc=e, countdown=3)
-    finally:
-        session.close()
+    
+    with db_manager.session_scope(aligned_volume) as session:
+        try:
+            data = root_ids_df.to_dict(orient="records")
+            session.bulk_update_mappings(SegmentationModel, data)
+        except Exception as e:
+            raise self.retry(exc=e, countdown=3)
+
     return f"Number of rows updated: {len(data)}"
 
 

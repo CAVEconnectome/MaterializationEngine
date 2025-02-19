@@ -11,7 +11,7 @@ from materializationengine.blueprints.client.utils import (
     update_notice_text_warnings,
 )
 from materializationengine.blueprints.reset_auth import reset_auth
-from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
+from materializationengine.database import dynamic_annotation_cache, db_manager
 from materializationengine.info_client import (
     get_aligned_volumes,
     get_relevant_datastack_info,
@@ -124,17 +124,18 @@ class DatastackVersions(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        session = sqlalchemy_cache.get(aligned_volume_name)
+        with db_manager.session_scope(aligned_volume_name) as session:
+            response = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.datastack == datastack_name)
+                .filter(AnalysisVersion.valid == True)
+                .all()
+            )
 
-        response = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.datastack == datastack_name)
-            .filter(AnalysisVersion.valid == True)
-            .all()
-        )
-
-        versions = [av.version for av in response]
-        return versions, 200
+            if response is None:
+                return "No valid versions found", 404
+            versions = [av.version for av in response]
+            return versions, 200
 
 
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>")
@@ -155,18 +156,18 @@ class DatastackVersion(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        session = sqlalchemy_cache.get(aligned_volume_name)
+        with db_manager.session_scope(aligned_volume_name) as session:
 
-        response = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.datastack == datastack_name)
-            .filter(AnalysisVersion.version == version)
-            .first()
-        )
-        if response is None:
-            return "No version found", 404
-        schema = AnalysisVersionSchema()
-        return schema.dump(response), 200
+            response = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.datastack == datastack_name)
+                .filter(AnalysisVersion.version == version)
+                .first()
+            )
+            if response is None:
+                return "No version found", 404
+            schema = AnalysisVersionSchema()
+            return schema.dump(response), 200
 
 
 @client_bp.route("/datastack/<string:datastack_name>/metadata")
@@ -183,14 +184,14 @@ class DatastackMetadata(Resource):
         """
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
-        )
-        session = sqlalchemy_cache.get(aligned_volume_name)
-        response = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.datastack == datastack_name)
-            .filter(AnalysisVersion.valid == True)
-            .all()
-        )
+        )        
+        with db_manager.session_scope(aligned_volume_name) as session:           
+            response = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.datastack == datastack_name)
+                .filter(AnalysisVersion.valid == True)
+                .all()
+            )
         if response is None:
             return "No valid versions found", 404
         schema = AnalysisVersionSchema()
@@ -215,26 +216,26 @@ class FrozenTableVersions(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        session = sqlalchemy_cache.get(aligned_volume_name)
+        with db_manager.session_scope(aligned_volume_name) as session:
 
-        av = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.version == version)
-            .filter(AnalysisVersion.datastack == datastack_name)
-            .first()
-        )
-        if av is None:
-            abort(404, f"version {version} does not exist for {datastack_name} ")
-        response = (
-            session.query(AnalysisTable)
-            .filter(AnalysisTable.analysisversion_id == av.id)
-            .filter(AnalysisTable.valid == True)
-            .all()
-        )
+            av = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.version == version)
+                .filter(AnalysisVersion.datastack == datastack_name)
+                .first()
+            )
+            if av is None:
+                abort(404, f"version {version} does not exist for {datastack_name} ")
+            response = (
+                session.query(AnalysisTable)
+                .filter(AnalysisTable.analysisversion_id == av.id)
+                .filter(AnalysisTable.valid == True)
+                .all()
+            )
 
-        if response is None:
-            return None, 404
-        return [r.table_name for r in response], 200
+            if response is None:
+                return None, 404
+            return [r.table_name for r in response], 200
 
 
 @client_bp.route(
@@ -259,13 +260,13 @@ class FrozenTableMetadata(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        session = sqlalchemy_cache.get(aligned_volume_name)
-        analysis_version, analysis_table = get_analysis_version_and_table(
-            datastack_name, table_name, version, session
-        )
+        with db_manager.session_scope(aligned_volume_name) as session:
+            analysis_version, analysis_table = get_analysis_version_and_table(
+                datastack_name, table_name, version, session
+            )
 
-        schema = AnalysisTableSchema()
-        tables = schema.dump(analysis_table)
+            schema = AnalysisTableSchema()
+            tables = schema.dump(analysis_table)
 
         db = dynamic_annotation_cache.get_db(aligned_volume_name)
         ann_md = db.database.get_table_metadata(table_name)
@@ -311,12 +312,12 @@ class FrozenTableCount(Resource):
         validate_table_args([table_name], target_datastack, target_version)
         mat_db_name = f"{datastack_name}__mat{version}"
 
-        session = sqlalchemy_cache.get(mat_db_name)
-        mat_row_count = (
-            session.query(MaterializedMetadata.row_count)
-            .filter(MaterializedMetadata.table_name == table_name)
-            .scalar()
-        )
+        with db_manager.session_scope(mat_db_name) as session:
+            mat_row_count = (
+                session.query(MaterializedMetadata.row_count)
+                .filter(MaterializedMetadata.table_name == table_name)
+                .scalar()
+            )
 
         return mat_row_count, 200
 

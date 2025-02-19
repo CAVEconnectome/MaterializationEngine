@@ -7,7 +7,7 @@ from materializationengine.blueprints.client.utils import (
     create_query_response,
     collect_crud_columns,
 )
-from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
+from materializationengine.database import dynamic_annotation_cache, db_manager
 from materializationengine.models import MaterializedMetadata
 from materializationengine.utils import check_read_permission
 from materializationengine.info_client import (
@@ -172,16 +172,16 @@ def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
 
 def validate_table_args(tables, datastack_name, version):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
-    session = sqlalchemy_cache.get(aligned_volume_name)
-    for table in tables:
-        analysis_version, analysis_table = get_analysis_version_and_table(
-            datastack_name, table, version, session
-        )
-        if not (analysis_table and analysis_version):
-            abort(
-                404,
-                f"analysis table {table} not found for version {version} in datastack {datastack_name}",
+    with db_manager.session_scope(aligned_volume_name) as session:
+        for table in tables:
+            analysis_version, analysis_table = get_analysis_version_and_table(
+                datastack_name, table, version, session
             )
+            if not (analysis_table and analysis_version):
+                abort(
+                    404,
+                    f"analysis table {table} not found for version {version} in datastack {datastack_name}",
+                )
 
 
 def generate_simple_query_dataframe(
@@ -201,10 +201,11 @@ def generate_simple_query_dataframe(
 
     ann_md = db.database.get_table_metadata(table_name)
 
-    Session = sqlalchemy_cache.get(aligned_volume_name)
-    analysis_version, analysis_table = get_analysis_version_and_table(
-        datastack_name, table_name, version, Session
-    )
+    
+    with db_manager.session_scope(aligned_volume_name) as session:
+        analysis_version, analysis_table = get_analysis_version_and_table(
+            datastack_name, table_name, version, session
+        )
 
     max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
 
@@ -231,16 +232,16 @@ def generate_simple_query_dataframe(
 
     random_sample = args.get("random_sample", None)
     if random_sample is not None:
-        session = sqlalchemy_cache.get(mat_db_name)
-        mat_row_count = (
-            session.query(MaterializedMetadata.row_count)
-            .filter(MaterializedMetadata.table_name == table_name)
-            .scalar()
-        )
-        if random_sample >= mat_row_count:
-            random_sample = None
-        else:
-            random_sample = (100.0 * random_sample) / mat_row_count
+        with db_manager.session_scope(mat_db_name) as session:
+            mat_row_count = (
+                session.query(MaterializedMetadata.row_count)
+                .filter(MaterializedMetadata.table_name == table_name)
+                .scalar()
+            )
+            if random_sample >= mat_row_count:
+                random_sample = None
+            else:
+                random_sample = (100.0 * random_sample) / mat_row_count
 
     qm = QueryManager(
         mat_db_name,
@@ -328,7 +329,6 @@ def generate_complex_query_dataframe(
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
 
-    Session = sqlalchemy_cache.get(aligned_volume_name)
 
     validate_table_args(
         [t[0] for t in data["tables"]], target_datastack, target_version
@@ -342,12 +342,8 @@ def generate_complex_query_dataframe(
 
     db_name = f"{datastack_name}__mat{version}"
 
-    analysis_version = (
-        Session.query(AnalysisVersion)
-        .filter(AnalysisVersion.datastack == datastack_name)
-        .filter(AnalysisVersion.version == version)
-        .first()
-    )
+    with db_manager.session_scope(aligned_volume_name) as session:
+        analysis_version = get_analysis_version(datastack_name, version, session)
     if analysis_version is None:
         abort(404, f"Analysis version {version} not found")
 
@@ -380,16 +376,16 @@ def generate_complex_query_dataframe(
 
     random_sample = args.get("random_sample", None)
     if random_sample is not None:
-        session = sqlalchemy_cache.get(db_name)
-        mat_row_count = (
-            session.query(MaterializedMetadata.row_count)
-            .filter(MaterializedMetadata.table_name == data["tables"][0][0])
-            .scalar()
-        )
-        if random_sample >= mat_row_count:
-            random_sample = None
-        else:
-            random_sample = (100.0 * random_sample) / mat_row_count
+        with db_manager.session_scope(db_name) as session:
+            mat_row_count = (
+                session.query(MaterializedMetadata.row_count)
+                .filter(MaterializedMetadata.table_name == data["tables"][0][0])
+                .scalar()
+            )
+            if random_sample >= mat_row_count:
+                random_sample = None
+            else:
+                random_sample = (100.0 * random_sample) / mat_row_count
 
     qm = QueryManager(
         db_name,

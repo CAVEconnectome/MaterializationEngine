@@ -16,7 +16,7 @@ from materializationengine.blueprints.client.api import client_bp
 from materializationengine.blueprints.client.api2 import client_bp as client_bp2
 from materializationengine.blueprints.materialize.api import mat_bp
 from materializationengine.config import config, configure_app
-from materializationengine.database import sqlalchemy_cache
+from materializationengine.database import db_manager
 from materializationengine.schemas import ma
 from materializationengine.utils import get_instance_folder_path
 from materializationengine.views import views_bp
@@ -101,15 +101,12 @@ def create_app(config_name: str = None):
     @app.route("/health")
     def health():
         aligned_volume = current_app.config.get("TEST_DB_NAME", "annotation")
-        session = sqlalchemy_cache.get(aligned_volume)
-        n_versions = session.query(AnalysisVersion).count()
-        session.close()
+        with db_manager.session_scope(aligned_volume) as session:
+            n_versions = session.query(AnalysisVersion).count()
+        
         return jsonify({aligned_volume: n_versions}), 200
 
     @app.teardown_appcontext
     def shutdown_session(exception=None):
-        for key in sqlalchemy_cache._sessions:
-            session = sqlalchemy_cache.get(key)
-            session.remove()
-
+        db_manager.cleanup()
     return app

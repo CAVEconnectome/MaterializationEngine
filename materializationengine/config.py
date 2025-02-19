@@ -36,7 +36,7 @@ class BaseConfig:
     QUEUES_TO_THROTTLE = ["process"]
     THROTTLE_QUEUES = True
     CELERY_WORKER_IP = os.environ.get("CELERY_WORKER_IP", "127.0.0.1")
-    DATASTACKS = ["minnie65_phase3_v1"]
+    DATASTACKS = ["minnie65_phase3_v1", "fanc_production_mar2021"]
     DAYS_TO_EXPIRE = 7
     LTS_DAYS_TO_EXPIRE = 30
     INFO_API_VERSION = 2
@@ -121,10 +121,11 @@ class BaseConfig:
     ]
 
 
+
 class DevConfig(BaseConfig):
     ENV = "development"
-    # DEBUG = True
-    SQLALCHEMY_DATABASE_URI = "postgres://postgres:materialize@db:5432/materialize"
+    DEBUG = True
+    SQLALCHEMY_DATABASE_URI = "postgresql://postgres:materialize@localhost:5432/materialize"
     REDIS_HOST = os.environ.get("REDIS_HOST")
     REDIS_PORT = os.environ.get("REDIS_PORT")
     REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD")
@@ -138,7 +139,7 @@ class TestConfig(BaseConfig):
     ENV = "testing"
     TESTING = True
     SQLALCHEMY_DATABASE_URI = (
-        "postgresql://postgres:postgres@localhost:5432/test_aligned_volume"
+        "postgresql://postgres:materialize@localhost:5432/test_aligned_volume"
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     CELERY_BROKER_URL = "memory://"

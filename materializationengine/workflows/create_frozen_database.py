@@ -26,7 +26,7 @@ from materializationengine.celery_init import celery
 from materializationengine.database import (
     create_session,
     dynamic_annotation_cache,
-    sqlalchemy_cache,
+    db_manager,
 )
 from materializationengine.errors import IndexMatchError
 from materializationengine.index_manager import index_cache
@@ -369,7 +369,7 @@ def create_analysis_database(self, datastack_info: dict, analysis_version: int) 
         finally:
             # invalidate caches since we killed connections to the live db
             dynamic_annotation_cache.invalidate_cache()
-            sqlalchemy_cache.invalidate_cache()
+            db_manager.cleanup()
 
     connection.close()
     engine.dispose()
@@ -467,32 +467,24 @@ def update_table_metadata(self, mat_info: List[dict]):
     aligned_volume = mat_info[0]["aligned_volume"]
     version = mat_info[0]["analysis_version"]
 
-    session = sqlalchemy_cache.get(aligned_volume)
-
-    tables = []
-    for mat_metadata in mat_info:
-        version_id = (
-            session.query(AnalysisVersion.id)
-            .filter(AnalysisVersion.version == version)
-            .first()
-        )
-        analysis_table = AnalysisTable(
-            aligned_volume=aligned_volume,
-            schema=mat_metadata["schema"],
-            table_name=mat_metadata["annotation_table_name"],
-            valid=False,
-            created=mat_metadata["materialization_time_stamp"],
-            analysisversion_id=version_id,
-        )
-        tables.append(analysis_table.table_name)
-        session.add(analysis_table)
-    try:
-        session.commit()
-    except Exception as e:
-        session.rollback()
-        celery_logger.error(e)
-    finally:
-        session.close()
+    with db_manager.session_scope(aligned_volume) as session:
+        tables = []
+        for mat_metadata in mat_info:
+            version_id = (
+                session.query(AnalysisVersion.id)
+                .filter(AnalysisVersion.version == version)
+                .first()
+            )
+            analysis_table = AnalysisTable(
+                aligned_volume=aligned_volume,
+                schema=mat_metadata["schema"],
+                table_name=mat_metadata["annotation_table_name"],
+                valid=False,
+                created=mat_metadata["materialization_time_stamp"],
+                analysisversion_id=version_id,
+            )
+            tables.append(analysis_table.table_name)
+            session.add(analysis_table)
     return tables
 
 
@@ -563,65 +555,53 @@ def drop_tables(self, mat_info: List[dict], analysis_version: int):
     autoretry_for=(Exception,),
     max_retries=3,
 )
-def insert_annotation_data(self, chunk: List[int], mat_metadata: dict):
-    """Insert annotation data into database
-
+def insert_annotation_data(self, chunk: List[int], mat_metadata: dict) -> bool:
+    """Insert annotation data into database using connection manager.
+    
     Args:
         chunk (List[int]): chunk of annotation ids
         mat_metadata (dict): materialized metadata
-    Returns:
-        bool: True if data was inserted
     """
     aligned_volume = mat_metadata["aligned_volume"]
     analysis_version = mat_metadata["analysis_version"]
     annotation_table_name = mat_metadata["annotation_table_name"]
     datastack = mat_metadata["datastack"]
-    session = sqlalchemy_cache.get(aligned_volume)
-    engine = sqlalchemy_cache.get_engine(aligned_volume)
+    analysis_db = f"{datastack}__mat{analysis_version}"
+
+    # Get models 
     AnnotationModel = create_annotation_model(mat_metadata, with_crud_columns=False)
-
     SegmentationModel = create_segmentation_model(mat_metadata)
-    analysis_table = get_analysis_table(
-        aligned_volume, datastack, annotation_table_name, analysis_version
-    )
-
+    
+    # Setup query columns
     query_columns = list(AnnotationModel.__table__.columns)
-    for col in SegmentationModel.__table__.columns:
-        if col.name != "id":
-            query_columns.append(col)
-    chunked_id_query = query_id_range(AnnotationModel.id, chunk[0], chunk[1])
-    anno_ids = (
-        session.query(AnnotationModel.id)
-        .filter(chunked_id_query)
-        .filter(AnnotationModel.valid == True)
+    query_columns.extend(
+        col for col in SegmentationModel.__table__.columns if col.name != "id"
     )
 
-    query = (
-        session.query(*query_columns)
-        .join(SegmentationModel)
-        .filter(SegmentationModel.id == AnnotationModel.id)
-        .filter(SegmentationModel.id.in_(anno_ids))
-    )
+    # Use source database session for query
+    with db_manager.session_scope(aligned_volume) as source_session:
+        # Query the data
+        chunked_id_query = query_id_range(AnnotationModel.id, chunk[0], chunk[1])
+        query = (
+            source_session.query(*query_columns)
+            .join(SegmentationModel)
+            .filter(chunked_id_query)
+            .filter(AnnotationModel.valid == True)
+        )
+        
+        data = query.all()
+        records = pd.DataFrame(data).to_dict(orient="records")
 
-    data = query.all()
-    mat_df = pd.DataFrame(data)
-    mat_df = mat_df.to_dict(orient="records")
-    SQL_URI_CONFIG = get_config_param("SQLALCHEMY_DATABASE_URI")
-    analysis_sql_uri = create_analysis_sql_uri(
-        SQL_URI_CONFIG, datastack, analysis_version
-    )
-
-    analysis_session, analysis_engine = create_session(analysis_sql_uri)
-    try:
-        analysis_engine.execute(analysis_table.insert(), list(mat_df))
-    except Exception as e:
-        celery_logger.error(e)
-        analysis_session.rollback()
-    finally:
-        analysis_session.close()
-        analysis_engine.dispose()
-        session.close()
-        engine.dispose()
+        # Insert into analysis database
+        with db_manager.session_scope(analysis_db) as analysis_session:
+            analysis_table = get_analysis_table(
+                aligned_volume, datastack, annotation_table_name, analysis_version
+            )
+            analysis_session.execute(
+                analysis_table.insert(),
+                records
+            )
+            
     return True
 
 
@@ -821,28 +801,23 @@ def insert_chunked_data(
 )
 def set_version_status(self, mat_info: list, analysis_version: int, status: str):
     aligned_volume = mat_info[0]["aligned_volume"]  #
-    session = sqlalchemy_cache.get(aligned_volume)
+    with db_manager.session_scope(aligned_volume) as session:
 
-    versioned_database = (
-        session.query(AnalysisVersion)
-        .filter(AnalysisVersion.version == analysis_version)
-        .one()
-    )
-    if status == "AVAILABLE":
-        versioned_database.valid = True
-    else:
-        versioned_database.valid = False
+        versioned_database = (
+            session.query(AnalysisVersion)
+            .filter(AnalysisVersion.version == analysis_version)
+            .one()
+        )
+        if status == "AVAILABLE":
+            versioned_database.valid = True
+        else:
+            versioned_database.valid = False
 
-    versioned_database.status = status
+        versioned_database.status = status
 
-    try:
-        session.commit()
-        return f"Mat db version {analysis_version} to {status}"
-    except Exception as e:
-        session.rollback()
-        celery_logger.error(e)
-    finally:
-        session.close()
+
+    return f"Mat db version {analysis_version} to {status}"
+
 
 
 @celery.task(
@@ -850,117 +825,122 @@ def set_version_status(self, mat_info: list, analysis_version: int, status: str)
     bind=True,
     acks_late=True,
 )
-def check_tables(self, mat_info: list, analysis_version: int):
-    """Check if each materialized table has the same number of rows as
-    the aligned volumes tables in the live database that are set as valid.
-    If row numbers match, set the validity of both the analysis tables as well
-    as the analysis version (materialized database) as True.
-
+def check_tables(self, mat_info: list, analysis_version: int) -> str:
+    """Check materialized table validity by comparing row counts and indexes.
+    
     Args:
-        mat_info (list): list of dicts containing metadata for each materialized table
-        analysis_version (int): the materialized version number
-
+        mat_info: List of dicts containing metadata for each materialized table
+        analysis_version: The materialized version number
+        
     Returns:
-        str: returns statement if all tables are valid
+        str: Success message if all tables are valid
+        
+    Raises:
+        ValueError: If row counts don't match or table counts are invalid
     """
-    aligned_volume = mat_info[0][
-        "aligned_volume"
-    ]  # get aligned_volume name from datastack
+    aligned_volume = mat_info[0]["aligned_volume"]
     table_count = len(mat_info)
     analysis_database = mat_info[0]["analysis_database"]
+    valid_table_count = 0
 
-    session = sqlalchemy_cache.get(aligned_volume)
-    engine = sqlalchemy_cache.get_engine(aligned_volume)
-    mat_session = sqlalchemy_cache.get(analysis_database)
-    mat_engine = sqlalchemy_cache.get_engine(analysis_database)
     live_client = dynamic_annotation_cache.get_db(aligned_volume)
     mat_client = dynamic_annotation_cache.get_db(analysis_database)
-    versioned_database = (
-        session.query(AnalysisVersion)
-        .filter(AnalysisVersion.version == analysis_version)
-        .one()
-    )
-    valid_table_count = 0
-    for mat_metadata in mat_info:
-        merge_table = mat_metadata.get("merge_table")
-        annotation_table_name = mat_metadata["annotation_table_name"]
-        mat_timestamp = mat_metadata["materialization_time_stamp"]
-        if merge_table:
-            live_table_row_count = live_client.database.get_table_row_count(
-                annotation_table_name, filter_valid=True, filter_timestamp=mat_timestamp
-            )
-            mat_row_count = mat_client.database.get_table_row_count(
-                annotation_table_name, filter_valid=True
-            )
-            celery_logger.info(f"ROW COUNTS: {live_table_row_count} {mat_row_count}")
-
-            if mat_row_count == 0:
-                celery_logger.warning(
-                    f"{annotation_table_name} has {mat_row_count} rows, skipping."
-                )
-                continue
-
-            if live_table_row_count != mat_row_count:
-                raise ValueError(
-                    f"""Row count doesn't match for table '{annotation_table_name}': 
-                        Row count in '{aligned_volume}': {live_table_row_count} - Row count in {analysis_database}: {mat_row_count}"""
-                )
-            celery_logger.info(f"{annotation_table_name} row counts match")
-            schema = mat_metadata["schema"]
-            table_metadata = None
-            if mat_metadata.get("reference_table"):
-                table_metadata = {
-                    "reference_table": mat_metadata.get("reference_table")
-                }
-
-            anno_model = make_flat_model(
-                table_name=annotation_table_name,
-                schema_type=schema,
-                table_metadata=table_metadata,
-            )
-            live_mapped_indexes = index_cache.get_index_from_model(
-                annotation_table_name, anno_model, mat_engine
-            )
-            mat_mapped_indexes = index_cache.get_table_indices(
-                annotation_table_name, mat_engine
-            )
-
-            if live_mapped_indexes.keys() != mat_mapped_indexes.keys():
-                celery_logger.warning(
-                    f"Indexes did not match: annotation indexes {live_mapped_indexes}; materialized indexes {mat_mapped_indexes}"
-                )
-
-            celery_logger.info(
-                f"Indexes matches: {live_mapped_indexes} {mat_mapped_indexes}"
-            )
-
-        valid_table_count += 1
-        table_validity = (
-            session.query(AnalysisTable)
-            .filter(AnalysisTable.analysisversion_id == versioned_database.id)
-            .filter(AnalysisTable.table_name == annotation_table_name)
-            .one()
-        )
-        table_validity.valid = True
-    celery_logger.info(f"Valid tables {valid_table_count}, Mat tables {table_count}")
-
-    if valid_table_count != table_count:
-        raise ValueError(
-            f"Valid table amounts don't match {valid_table_count} {table_count}"
-        )
 
     try:
-        session.commit()
-        return "All materialized tables match valid row number from live tables"
+        with db_manager.session_scope(aligned_volume) as session:
+            versioned_database = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.version == analysis_version)
+                .one()
+            )
+
+            for mat_metadata in mat_info:
+                merge_table = mat_metadata.get("merge_table")
+                annotation_table_name = mat_metadata["annotation_table_name"]
+                mat_timestamp = mat_metadata["materialization_time_stamp"]
+
+                if merge_table:
+                    live_count = live_client.database.get_table_row_count(
+                        annotation_table_name, 
+                        filter_valid=True, 
+                        filter_timestamp=mat_timestamp
+                    )
+                    mat_count = mat_client.database.get_table_row_count(
+                        annotation_table_name, 
+                        filter_valid=True
+                    )
+
+                    celery_logger.info(
+                        f"Table {annotation_table_name} counts - "
+                        f"Live: {live_count}, Materialized: {mat_count}"
+                    )
+
+                    if mat_count == 0:
+                        celery_logger.warning(
+                            f"Table {annotation_table_name} has no rows, skipping"
+                        )
+                        continue
+
+                    if live_count != mat_count:
+                        raise ValueError(
+                            f"Row count mismatch for '{annotation_table_name}': "
+                            f"Live ({aligned_volume}): {live_count}, "
+                            f"Materialized ({analysis_database}): {mat_count}"
+                        )
+
+                    schema = mat_metadata["schema"]
+                    table_metadata = (
+                        {"reference_table": mat_metadata["reference_table"]}
+                        if mat_metadata.get("reference_table")
+                        else None
+                    )
+
+                    anno_model = make_flat_model(
+                        table_name=annotation_table_name,
+                        schema_type=schema,
+                        table_metadata=table_metadata,
+                    )
+
+                    with db_manager.session_scope(analysis_database) as mat_session:
+                        mat_engine = mat_session.get_bind()
+                        
+                        live_indexes = index_cache.get_index_from_model(
+                            annotation_table_name, anno_model, mat_engine
+                        )
+                        mat_indexes = index_cache.get_table_indices(
+                            annotation_table_name, mat_engine
+                        )
+
+                        if live_indexes.keys() != mat_indexes.keys():
+                            celery_logger.warning(
+                                f"Index mismatch for {annotation_table_name}: "
+                                f"Live: {live_indexes}, "
+                                f"Materialized: {mat_indexes}"
+                            )
+
+                valid_table_count += 1
+                table_validity = (
+                    session.query(AnalysisTable)
+                    .filter(AnalysisTable.analysisversion_id == versioned_database.id)
+                    .filter(AnalysisTable.table_name == annotation_table_name)
+                    .one()
+                )
+                table_validity.valid = True
+
+            if valid_table_count != table_count:
+                raise ValueError(
+                    f"Table count mismatch: "
+                    f"Valid: {valid_table_count}, Total: {table_count}"
+                )
+
+            return "All materialized tables validated successfully"
+
     except Exception as e:
-        session.rollback()
-        celery_logger.error(e)
+        celery_logger.error(f"Table validation failed: {str(e)}")
+        raise
+
     finally:
-        session.close()
         mat_client.database.cached_session.close()
-        mat_session.close()
-        engine.dispose()
-        mat_engine.dispose()
 
 
 def create_analysis_sql_uri(sql_uri: str, datastack: str, mat_version: int):

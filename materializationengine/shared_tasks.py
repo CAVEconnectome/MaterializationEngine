@@ -13,7 +13,7 @@ from sqlalchemy.orm.exc import NoResultFound
 from materializationengine.info_client import get_relevant_datastack_info
 from materializationengine.celery_init import celery
 from dynamicannotationdb.models import AnalysisVersion, VersionErrorTable
-from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
+from materializationengine.database import dynamic_annotation_cache, db_manager
 from materializationengine.utils import (
     create_annotation_model,
     create_segmentation_model,
@@ -82,30 +82,24 @@ def workflow_failed(request, exc, traceback, mat_info, *args, **kwargs):
         Exception: {exc}
         Traceback: {traceback}
     """
-    session = sqlalchemy_cache.get(aligned_volume)
+    with db_manager.session_scope(aligned_volume) as session:
 
-    version = (
-        session.query(AnalysisVersion)
-        .filter(AnalysisVersion.version == analysis_version)
-        .one()
-    )
+        version = (
+            session.query(AnalysisVersion)
+            .filter(AnalysisVersion.version == analysis_version)
+            .one()
+        )
 
-    error_entry = VersionErrorTable(
-        exception=str(exc), error=traceback, analysisversion_id=version.id
-    )
-    celery_logger.info(error_entry)
-    session.add(error_entry)
+        error_entry = VersionErrorTable(
+            exception=str(exc), error=traceback, analysisversion_id=version.id
+        )
+        celery_logger.info(error_entry)
+        session.add(error_entry)
 
-    version.valid = False
-    version.status = "FAILED"
-    session.flush()
-    try:
-        session.commit()
-    except Exception as e:
-        session.rollback()
-        celery_logger.error(f"Failed to insert error msg: {e}")
-    finally:
-        session.close()
+        version.valid = False
+        version.status = "FAILED"
+        session.flush()
+  
     celery_logger.error(f"{message}: {failure_info}")
     return failure_info
 
@@ -286,23 +280,37 @@ def query_id_range(column, start_id: int, end_id: int):
 
 
 def chunk_ids(mat_metadata, model, chunk_size: int):
+    """Generates chunks of ID ranges for batch processing.
+    
+    Args:
+        mat_metadata (dict): Materialization metadata containing database info
+        model: SQLAlchemy model to chunk
+        chunk_size (int): Size of each chunk
+        
+    Yields:
+        list: [start_id, end_id] for each chunk. end_id is None for last chunk.
+    """
     aligned_volume = mat_metadata.get("aligned_volume")
-    session = sqlalchemy_cache.get(aligned_volume)
 
-    q = session.query(
-        model, func.row_number().over(order_by=model).label("row_count")
-    ).from_self(model)
+    with db_manager.session_scope(aligned_volume) as session:
+        q = (
+            session.query(
+                model, 
+                func.row_number().over(order_by=model).label("row_count")
+            )
+            .from_self(model)
+        )
 
-    if chunk_size > 1:
-        q = q.filter(text("row_count %% %d=1" % chunk_size))
+        if chunk_size > 1:
+            q = q.filter(text("row_count %% %d=1" % chunk_size))
 
-    chunks = [id for id, in q]
+        # Get all chunk boundary IDs
+        chunks = [id for id, in q]
 
-    while chunks:
-        chunk_start = chunks.pop(0)
-        chunk_end = chunks[0] if chunks else None
-        yield [chunk_start, chunk_end]
-
+        while chunks:
+            chunk_start = chunks.pop(0)
+            chunk_end = chunks[0] if chunks else None
+            yield [chunk_start, chunk_end]
 
 @celery.task(
     name="workflow:update_metadata",
@@ -325,31 +333,26 @@ def update_metadata(self, mat_metadata: dict):
     aligned_volume = mat_metadata["aligned_volume"]
     segmentation_table_name = mat_metadata["segmentation_table_name"]
 
-    session = sqlalchemy_cache.get(aligned_volume)
+    with db_manager.session_scope(aligned_volume) as session:
 
-    materialization_time_stamp = mat_metadata["materialization_time_stamp"]
-    try:
-        last_updated_time_stamp = datetime.datetime.strptime(
-            materialization_time_stamp, "%Y-%m-%d %H:%M:%S.%f"
-        )
-    except ValueError:
-        last_updated_time_stamp = datetime.datetime.strptime(
-            materialization_time_stamp, "%Y-%m-%dT%H:%M:%S.%f"
-        )
+        materialization_time_stamp = mat_metadata["materialization_time_stamp"]
+        try:
+            last_updated_time_stamp = datetime.datetime.strptime(
+                materialization_time_stamp, "%Y-%m-%d %H:%M:%S.%f"
+            )
+        except ValueError:
+            last_updated_time_stamp = datetime.datetime.strptime(
+                materialization_time_stamp, "%Y-%m-%dT%H:%M:%S.%f"
+            )
 
-    try:
-        seg_metadata = (
-            session.query(SegmentationMetadata)
-            .filter(SegmentationMetadata.table_name == segmentation_table_name)
-            .one()
-        )
-        seg_metadata.last_updated = last_updated_time_stamp
-        session.commit()
-    except Exception as e:
-        celery_logger.error(f"SQL ERROR: {e}")
-        session.rollback()
-    finally:
-        session.close()
+
+            seg_metadata = (
+                session.query(SegmentationMetadata)
+                .filter(SegmentationMetadata.table_name == segmentation_table_name)
+                .one()
+            )
+            seg_metadata.last_updated = last_updated_time_stamp
+
     return {
         f"Table: {segmentation_table_name}": f"Time stamp {materialization_time_stamp}"
     }
@@ -376,7 +379,7 @@ def add_index(self, database: dict, command: str):
     Returns:
         str: String of SQL command
     """
-    engine = sqlalchemy_cache.get_engine(database)
+    engine = db_manager.get_engine(database)
 
     # increase maintenance memory to improve index creation speeds,
     # reset to default after index is created
