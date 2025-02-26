@@ -28,6 +28,7 @@ from materializationengine.blueprints.upload.tasks import (
 from materializationengine.database import sqlalchemy_cache
 from materializationengine.info_client import get_datastack_info
 from materializationengine.utils import get_config_param
+from middle_auth_client import auth_requires_admin, auth_requires_permission
 
 __version__ = "4.35.0"
 
@@ -61,19 +62,22 @@ def create_storage_service():
 @upload_bp.route("/")
 def index():
     """Redirect to step 1 of the wizard"""
-    return redirect(url_for('upload.wizard_step', step_number=1))
+    return redirect(url_for("upload.wizard_step", step_number=1))
+
 
 @upload_bp.route("/step<int:step_number>")
 def wizard_step(step_number):
     if step_number < 1 or step_number > 4:
-        return redirect(url_for('upload.wizard_step', step_number=1))
-    
+        return redirect(url_for("upload.wizard_step", step_number=1))
+
     return render_template(
         "upload_wizard.html",
         current_step=step_number,
         step_template=f"upload/step{step_number}.html",
-        version=__version__
+        version=__version__,
     )
+
+
 @upload_bp.route("/generate-presigned-url", methods=["POST"])
 def generate_presigned_url():
     data = request.json
@@ -93,7 +97,6 @@ def generate_presigned_url():
             origin=origin,  # Allow cross-origin requests for uploads
             timeout=3600,  # Set the session timeout to 1 hour
         )
-        
 
         return jsonify({"resumableUrl": resumable_url, "origin": origin})
     except Exception as e:
@@ -363,7 +366,7 @@ def get_materialized_versions(aligned_volume):
             session.query(AnalysisVersion)
             .filter(AnalysisVersion.valid == True)
             .filter(AnalysisVersion.datastack == aligned_volume)
-            .order_by(AnalysisVersion.version.desc()) 
+            .order_by(AnalysisVersion.version.desc())
             .all()
         )
 
@@ -398,38 +401,31 @@ def get_materialized_versions(aligned_volume):
 
 
 @upload_bp.route("/api/process/start", methods=["POST"])
+@auth_requires_permission("edit", table_arg="datastack_name")
 def start_csv_processing():
     """Start CSV processing job"""
     r = request.get_json()
     schema = UploadRequestSchema()
-    data = schema.load(r)
+    file_metadata = schema.load(r)
 
     bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
 
-    file_path = f"gs://{bucket_name}/{data.get('filename')}"
-    table_name = data
-
-
-
+    file_path = f"gs://{bucket_name}/{file_metadata.get('filename')}"
 
     sql_instance_name = current_app.config.get("SQLALCHEMY_DATABASE_URI")
     bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
     database_name = current_app.config.get("STAGING_DATABASE_NAME")
+    datastack_name = file_metadata["metadata"]["datastack_name"]
+    datastack_info = get_datastack_info(datastack_name)
 
     if not all([sql_instance_name, bucket_name, database_name]):
         return (
-            jsonify(
-                {"status": "error", "message": "Missing required configuration"}
-            ),
+            jsonify({"status": "error", "message": "Missing required configuration"}),
             500,
         )
 
     result = process_and_upload.si(
-        file_info=file_path,
-        chunk_size=data.get("chunk_size", 10000),
-        sql_instance_name=sql_instance_name,
-        bucket_name=bucket_name,
-        database_name=database_name,
+        file_path, file_metadata, datastack_info
     ).apply_async()
 
     return jsonify({"status": "start", "jobId": result.id})
