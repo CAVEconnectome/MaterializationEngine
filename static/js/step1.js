@@ -15,6 +15,12 @@ document.addEventListener("alpine:init", () => {
     paused: false,
     savedState: null,
     previewRows: [],
+    speedStats: {
+      startTime: null,
+      lastUpdateTime: null,
+      lastUploadedBytes: 0,
+      uploadSpeed: 0,
+    },
 
     init() {
       const savedState = localStorage.getItem("uploadStore");
@@ -46,8 +52,14 @@ document.addEventListener("alpine:init", () => {
       this.paused = false;
       this.savedState = null;
       this.previewRows = [];
+      this.speedStats = {
+        startTime: null,
+        lastUpdateTime: null,
+        lastUploadedBytes: 0,
+        uploadSpeed: 0,
+      };
       this.clearAllStates();
-    
+
       return this.isValid();
     },
 
@@ -99,7 +111,6 @@ document.addEventListener("alpine:init", () => {
     },
 
     handleFileSelect(event) {
-      
       const file = event.target.files[0];
       if (!file) return;
 
@@ -158,15 +169,18 @@ document.addEventListener("alpine:init", () => {
 
     async prepareUpload() {
       try {
-        const response = await fetch("/materialize/upload/generate-presigned-url", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            filename: this.filename,
-            contentType: this.file.type,
-            fileSize: this.file.size,
-          }),
-        });
+        const response = await fetch(
+          "/materialize/upload/generate-presigned-url",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              filename: this.filename,
+              contentType: this.file.type,
+              fileSize: this.file.size,
+            }),
+          }
+        );
 
         if (!response.ok) throw new Error("Failed to get upload URL");
 
@@ -227,6 +241,9 @@ document.addEventListener("alpine:init", () => {
           percentage: 0,
           total: this.file.size,
         };
+        this.speedStats.startTime = Date.now();
+        this.speedStats.lastUpdateTime = Date.now();
+        this.speedStats.lastUploadedBytes = 0;
       }
 
       console.log("Upload starting from:", {
@@ -265,6 +282,8 @@ document.addEventListener("alpine:init", () => {
           this.progress.percentage = Math.round(
             (this.progress.uploaded / this.file.size) * 100
           );
+
+          this.updateUploadSpeed();
         }
 
         if (!this.aborted && !this.paused) {
@@ -275,6 +294,51 @@ document.addEventListener("alpine:init", () => {
         console.error("Upload error:", error);
         this.error = error.message;
         this.status = "error";
+      }
+    },
+
+    updateUploadSpeed() {
+      const now = Date.now();
+      const timeElapsed = (now - this.speedStats.lastUpdateTime) / 1000;
+
+      if (timeElapsed > 0.5) {
+        const bytesUploaded =
+          this.progress.uploaded - this.speedStats.lastUploadedBytes;
+        this.speedStats.uploadSpeed = bytesUploaded / timeElapsed;
+
+        this.speedStats.lastUpdateTime = now;
+        this.speedStats.lastUploadedBytes = this.progress.uploaded;
+      }
+    },
+
+    formatSpeed() {
+      const speed = this.speedStats.uploadSpeed;
+
+      if (speed < 1024) {
+        return `${speed.toFixed(1)} B/s`;
+      } else if (speed < 1024 * 1024) {
+        return `${(speed / 1024).toFixed(1)} KB/s`;
+      } else {
+        return `${(speed / (1024 * 1024)).toFixed(1)} MB/s`;
+      }
+    },
+
+    getEstimatedTimeRemaining() {
+      if (this.speedStats.uploadSpeed <= 0) return "Calculating...";
+
+      const bytesRemaining = this.progress.total - this.progress.uploaded;
+      const secondsRemaining = bytesRemaining / this.speedStats.uploadSpeed;
+
+      if (secondsRemaining < 60) {
+        return `${Math.round(secondsRemaining)} seconds`;
+      } else if (secondsRemaining < 3600) {
+        return `${Math.floor(secondsRemaining / 60)}m ${Math.round(
+          secondsRemaining % 60
+        )}s`;
+      } else {
+        const hours = Math.floor(secondsRemaining / 3600);
+        const minutes = Math.floor((secondsRemaining % 3600) / 60);
+        return `${hours}h ${minutes}m`;
       }
     },
 
@@ -306,9 +370,8 @@ document.addEventListener("alpine:init", () => {
     },
 
     isValid() {
-      const valid = this.file !== null && 
-                    this.status === "completed" && 
-                    !this.error;
+      const valid =
+        this.file !== null && this.status === "completed" && !this.error;
       if (valid) {
         this.saveState();
       }
