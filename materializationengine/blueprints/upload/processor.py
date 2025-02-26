@@ -44,9 +44,7 @@ class SchemaProcessor:
         self.column_mapping = column_mapping or {}
         self.reverse_mapping = {v: k for k, v in self.column_mapping.items()}
         self.ignored_columns = set(ignored_columns or [])
-        self.generate_ids = "id" in self.column_mapping or any(
-            v == "id" for v in self.column_mapping.values()
-        )
+        self.generate_ids = "id" not in self.column_mapping
         self._id_counter = 0
 
         if self.is_reference and reference_table is None:
@@ -255,6 +253,4 @@ class SchemaProcessor:
             if col not in df.columns:
                 df[col] = [""] * chunk_size
 
-        data = df[self.column_order]
-
-        return data.to_csv(index=False, lineterminator="\n").encode("utf-8")
+        return df[self.column_order]
