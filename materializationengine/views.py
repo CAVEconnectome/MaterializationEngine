@@ -342,7 +342,7 @@ def version_view(
     column_order = schema.declared_fields.keys()
     schema_url = "<a href='{}/schema/views/type/{}/view'>{}</a>"
     client = caveclient.CAVEclient(
-        datastack_name, server_address=current_app.config["GLOBAL_SERVER_URL"]
+        target_datastack, server_address=current_app.config["GLOBAL_SERVER_URL"]
     )
     df["ng_link"] = df.apply(
         lambda x: f"<a href='{make_seg_prop_ng_link(target_datastack, x.table_name, target_version, client)}'>seg prop link</a>",
