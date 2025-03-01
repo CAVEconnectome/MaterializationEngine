@@ -1,5 +1,4 @@
 import json
-import os
 import subprocess
 from datetime import datetime, timezone
 from typing import Any, Dict, List
@@ -10,17 +9,17 @@ from celery.result import AsyncResult
 from celery.utils.log import get_task_logger
 from flask import current_app
 from redis import Redis
-from materializationengine.info_client import (
-    get_datastack_info,
-)
+
+from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
 from materializationengine.blueprints.upload.processor import SchemaProcessor
-from materializationengine.blueprints.upload.storage import StorageService
 from materializationengine.celery_init import celery
 from materializationengine.database import dynamic_annotation_cache
+from materializationengine.index_manager import index_cache
+from materializationengine.shared_tasks import add_index
 from materializationengine.utils import get_config_param
 from materializationengine.workflows.spatial_lookup import run_spatial_lookup_workflow
 
-logger = get_task_logger(__name__)
+celery_logger = get_task_logger(__name__)
 
 # Redis client for storing job status
 REDIS_CLIENT = Redis(
@@ -50,8 +49,7 @@ def process_and_upload(
     self,
     file_path: str,
     file_metadata: dict,
-    column_mapping: Dict[str, str],
-    ignored_columns: List[str] = None,
+    datastack_info: dict,
     **kwargs,
 ) -> Dict[str, Any]:
     """Chain CSV processing tasks"""
@@ -59,14 +57,13 @@ def process_and_upload(
 
     chunk_scale_factor = current_app.config.get("CHUNK_SCALE_FACTOR")
     use_staging_database = current_app.config.get("USE_STAGING_DATABASE")
-    sql_instance_name = current_app.config.get("SQLALCHEMY_DATABASE_URI")
+    sql_instance_name = current_app.config.get("SQL_INSTANCE_NAME")
 
-    datastack_name = file_metadata["datastack_name"]
-    table_name = file_metadata["table_name"]
-    schema_type = file_metadata["schema_type"]
-    reference_table = file_metadata.get("reference_table")
-
-    datastack_info = get_datastack_info(datastack_name)
+    table_name = file_metadata["metadata"]["table_name"]
+    schema_type = file_metadata["metadata"]["schema_type"]
+    reference_table = file_metadata["metadata"].get("reference_table")
+    column_mapping = file_metadata["column_mapping"]
+    ignored_columns = file_metadata.get("ignored_columns")
 
     workflow = chain(
         process_csv.si(
@@ -76,10 +73,10 @@ def process_and_upload(
             reference_table=reference_table,
             ignored_columns=ignored_columns,
         ),
-        upload_to_database.si(
+        upload_to_database.s(
             sql_instance_name=sql_instance_name,
-            database_name=kwargs.get("database_name"),
-            table_name=table_name,
+            file_metadata=file_metadata,
+            datastack_info=datastack_info,
         ),
         run_spatial_lookup_workflow.si(
             datastack_info,
@@ -107,8 +104,9 @@ def get_chain_status(job_id: str) -> Dict[str, Any]:
     return {"status": "processing", "state": result.state}
 
 
-@celery.task(name="process:process_csv")
+@celery.task(name="process:process_csv", bind=True)
 def process_csv(
+    self,
     file_path: str,
     schema_type: str,
     column_mapping: Dict[str, str],
@@ -116,75 +114,164 @@ def process_csv(
     ignored_columns: List[str] = None,
     chunk_size: int = 10000,
 ) -> Dict[str, Any]:
-    """Process CSV file in chunks and upload to bucket"""
+    """Process CSV file in chunks using GCSCsvProcessor"""
     try:
-        processor = SchemaProcessor(
+        schema_processor = SchemaProcessor(
             schema_type,
             reference_table,
             column_mapping=column_mapping,
             ignored_columns=ignored_columns,
         )
-        bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
-        
-        storage_service = StorageService(bucket_name)
-        url = storage_service.create_upload_session()
 
-        file_name = file_path.split("/")[-1]
-        storage_service.initiate_upload(url, file_name)
+        bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
+
+        gcs_processor = GCSCsvProcessor(
+            bucket_name, chunk_size=chunk_size
+        )
 
         timestamp = datetime.now(timezone.utc)
-        output_path = f"processed_{schema_type}_{timestamp}.csv"
+        timestamp_str = timestamp.strftime("%Y%m%d_%H%M%S")
 
-        for chunk in pd.read_csv(file_path, chunksize=chunk_size):
-            processed_data = processor.process_chunk(chunk)
-            storage_service.upload_chunk(url, processed_data)
+        source_blob_name = file_path.split("/")[-1]
+        destination_blob_name = f"processed_{schema_type}_{timestamp_str}.csv"
+
+        def transform_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
+            return schema_processor.process_chunk(chunk, timestamp)
+
+        def print_progress(progress):
+            celery_logger.info(f"Upload formatted progress: {progress:.2f}%")
+
+        gcs_processor.process_csv_in_chunks(
+            source_blob_name,
+            destination_blob_name,
+            transform_chunk,
+            chunk_upload_callback=print_progress,
+        )
 
         return {
             "status": "completed",
-            "processed_rows": processor.processed_rows,
-            "output_path": output_path,
+            "output_path": f"{bucket_name}/{destination_blob_name}",
         }
     except Exception as e:
-        logger.error(f"Error processing CSV: {str(e)}")
+        celery_logger.error(f"Error processing CSV: {str(e)}")
         raise
-      
 
 
 @celery.task(name="process:upload_to_db")
 def upload_to_database(
     process_result: Dict[str, Any],
     sql_instance_name: str,
-    database_name: str,
-    table_name: str,
+    file_metadata: Dict[str, Any],
+    datastack_info: str,
 ) -> Dict[str, Any]:
     """Upload processed CSV to database"""
     try:
+        table_name = file_metadata["metadata"]["table_name"]
+        schema = file_metadata["metadata"]["schema_type"]
+        description = file_metadata["metadata"]["description"]
+        user_id = file_metadata["metadata"]["user_id"]
+        voxel_resolution_nm_x = file_metadata["metadata"]["voxel_resolution_nm_x"]
+        voxel_resolution_nm_y = file_metadata["metadata"]["voxel_resolution_nm_y"]
+        voxel_resolution_nm_z = file_metadata["metadata"]["voxel_resolution_nm_z"]
+        write_permission = file_metadata["metadata"]["write_permission"]
+        read_permission = file_metadata["metadata"]["read_permission"]
+        flat_segmentation_source = file_metadata["metadata"].get("flat_segmentation_source")
+        table_metadata = file_metadata["metadata"].get("table_metadata")    
+        notice_text = file_metadata["metadata"].get("notice_text")
+
+        staging_database = current_app.config.get("STAGING_DATABASE_NAME")
+        bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
+
+        db_client = dynamic_annotation_cache.get_db(staging_database)
+        try:
+            db_client.annotation.create_table(
+                table_name=table_name,
+                schema_type=schema,
+                description=description,
+                user_id=user_id,
+                voxel_resolution_x=voxel_resolution_nm_x,
+                voxel_resolution_y=voxel_resolution_nm_y,
+                voxel_resolution_z=voxel_resolution_nm_z,
+                table_metadata=table_metadata,
+                flat_segmentation_source=flat_segmentation_source,
+                write_permission=write_permission,
+                read_permission=read_permission,
+                notice_text=notice_text
+            )
+        except Exception as e:
+            celery_logger.error(f"Error creating table: {str(e)}")
+            
+
+        # create table in staging database and drop indices
+        index_cache.drop_table_indices(table_name, db_client.database.engine)
+
+        # TODO move to deployment scripts
+        # get sql service account email
+        # get_service_account_command = [
+        #     "gcloud",
+        #     "sql",
+        #     "instances",
+        #     "describe",
+        #     sql_instance_name,
+        #     "--format=json",
+        # ]
+        # try:
+        #     sql_instance_info = subprocess.run(get_service_account_command, check=True, capture_output=True, text=True)
+        #     sql_instance_info = json.loads(sql_instance_info.stdout)
+        #     service_account_email = sql_instance_info["serviceAccountEmailAddress"]
+        # except subprocess.CalledProcessError as e:
+        #     celery_logger.error(f"Database upload failed: {e}")
+        #     raise e
+
+
+        # auth_command = [
+        #     "gcloud",
+        #     "storage",
+        #     "buckets",
+        #     "add-iam-policy-binding",
+        #     f"gs://{bucket_name}",
+        #     "--member",
+        #     f"serviceAccount:{service_account_email}",
+        #     "--role",
+        #     "roles/storage.objectAdmin",
+        # ]
+
         load_command = [
             "gcloud",
             "sql",
             "import",
             "csv",
             sql_instance_name,
-            process_result["output_path"],
+            f"gs://{process_result['output_path']}",
             "--database",
-            database_name,
+            staging_database,
             "--table",
             table_name,
             "--user",
             "postgres",
         ]
+        try:
 
-        result = subprocess.run(load_command, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise Exception(f"Database upload failed: {result.stderr}")
+            # auth_process = subprocess.run(auth_command, check=True, capture_output=True, text=True)
+            db_process = subprocess.run(load_command, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            celery_logger.error(f"Database upload failed: {e}, db_process: {e.stderr}")
+            raise e
+        
+        schema_model = db_client.schema.create_annotation_model(table_name, schema)
+
+
+        anno_indices = index_cache.add_indices_sql_commands(table_name, schema_model, db_client.database.engine)
+        for index in anno_indices:
+            celery_logger.info(f"Adding index: {index}")
+            result = add_index(staging_database, index)
+            celery_logger.info(f"Index added: {result}")
 
         return {
             "status": "completed",
-            "rows_uploaded": process_result["processed_rows"],
-            "output_path": process_result["output_path"],
         }
     except Exception as e:
-        logger.error(f"Database upload failed: {str(e)}")
+        celery_logger.error(f"Database upload failed: {str(e)}")
         raise
 
 
@@ -198,5 +285,5 @@ def cancel_processing(job_id: str) -> Dict[str, Any]:
         update_job_status(job_id, status)
         return status
     except Exception as e:
-        logger.error(f"Error cancelling job: {str(e)}")
+        celery_logger.error(f"Error cancelling job: {str(e)}")
         raise
