@@ -10,6 +10,7 @@ from flask import (
     render_template,
     request,
     url_for,
+    g
 )
 from google.cloud import storage
 from redis import StrictRedis
@@ -417,6 +418,9 @@ def start_csv_processing():
     database_name = current_app.config.get("STAGING_DATABASE_NAME")
     datastack_name = file_metadata["metadata"]["datastack_name"]
     datastack_info = get_datastack_info(datastack_name)
+    user_id = str(g.auth_user["id"])
+
+    file_metadata["metadata"]["user_id"] = user_id
 
     if not all([sql_instance_name, bucket_name, database_name]):
         return (
