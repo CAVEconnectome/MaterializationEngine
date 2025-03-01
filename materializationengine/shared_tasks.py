@@ -368,11 +368,11 @@ def update_metadata(self, mat_metadata: dict):
     autoretry_for=(Exception,),
     max_retries=3,
 )
-def add_index(self, database: dict, command: str):
+def add_index(self, database: str, command: str):
     """Add an index or a contrainst to a table.
 
     Args:
-        mat_metadata (dict): datastack info for the aligned_volume derived from the infoservice
+        database (str): database name
         command (str): sql command to create an index or constraint
 
     Raises:
