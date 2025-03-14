@@ -229,6 +229,7 @@ def process_dense_missing_roots_table_workflow(
         datastack_info=datastack_info,
         materialization_time_stamp=materialization_time_stamp,
         table_name=table_name,
+        skip_row_count=True,
     )
     # filter for missing root ids (min/max ids)
     for mat_metadata in mat_info:
