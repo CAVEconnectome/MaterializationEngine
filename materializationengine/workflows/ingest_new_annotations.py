@@ -286,7 +286,9 @@ def process_sparse_missing_roots_workflow(
         individual table to run this workflow on
 
     """
-    mat_metadata = get_materialization_info(datastack_info, table_name=table_name)[0]
+    mat_metadata = get_materialization_info(
+        datastack_info, table_name=table_name, skip_row_count=True
+    )[0]
     mat_metadata["materialization_time_stamp"] = mat_metadata[
         "last_updated_time_stamp"
     ]  # override materialization time stamp
@@ -433,6 +435,9 @@ def get_dense_ids_with_missing_roots(mat_metadata: dict) -> List:
         session.query(func.min(SegmentationModel.id))
         .filter(or_(*query_columns))
         .scalar()
+    )
+    celery_logger.info(
+        f"Min and Max ID found: {min_id}-{max_id} in '{SegmentationModel.__table__.name}'"
     )
     if min_id and max_id:
         if min_id < max_id:
