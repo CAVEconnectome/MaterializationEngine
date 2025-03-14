@@ -262,6 +262,34 @@ class LookupDenseMissingRootIdsResource(Resource):
 
 
 @mat_bp.route(
+    "/materialize/run/lookup_root_ids/datastack/<string:datastack_name>/table/<string:table_name>"
+)
+class LookupMissingRootIdsTableResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc(
+        "Find all null root ids and lookup new roots in a table", security="apikey"
+    )
+    def post(self, datastack_name: str, table_name: str):
+        """Run workflow to lookup missing root ids and insert into database across
+        all tables in the database.
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+            table_name (str): name of table
+        """
+        from materializationengine.workflows.ingest_new_annotations import (
+            process_dense_missing_roots_table_workflow,
+        )
+
+        datastack_info = get_datastack_info(datastack_name)
+        process_dense_missing_roots_table_workflow.s(
+            datastack_info, table_name
+        ).apply_async()
+        return 200
+
+
+@mat_bp.route(
     "/materialize/run/sparse_lookup_root_ids/datastack/<string:datastack_name>/table/<string:table_name>"
 )
 class LookupSparseMissingRootIdsResource(Resource):
