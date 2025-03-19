@@ -1,4 +1,7 @@
 from typing import Any, Dict
+import datetime
+import functools
+import os
 
 from dynamicannotationdb.models import AnalysisVersion
 from dynamicannotationdb.schema import DynamicSchemaClient
@@ -26,10 +29,11 @@ from materializationengine.blueprints.upload.tasks import (
     get_job_status,
     process_and_upload,
 )
-from materializationengine.database import sqlalchemy_cache
+from materializationengine.database import db_manager
 from materializationengine.info_client import get_datastack_info
 from materializationengine.utils import get_config_param
 from middle_auth_client import auth_requires_admin, auth_requires_permission
+from materializationengine.blueprints.upload.checkpoint_manager import RedisCheckpointManager
 
 __version__ = "4.35.0"
 
@@ -51,22 +55,54 @@ REDIS_CLIENT = StrictRedis(
     db=0,
 )
 
+def is_auth_disabled():
+    """
+    Check if authentication is disabled.
+    
+    Returns:
+        bool: True if authentication is disabled, False otherwise
+    """
+    return current_app.config.get('AUTH_DISABLED', 
+           os.environ.get('AUTH_DISABLED', '').lower() in ('true', '1', 'yes'))
 
-def create_storage_service():
-    config = StorageConfig(
-        allowed_origin=current_app.config.get("ALLOWED_ORIGIN"),
-    )
-    bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
-    return StorageService(bucket_name, logger=current_app.logger)
+
+def check_user_permissions():
+    """
+    Check if the authenticated user has upload permissions.
+    
+    Returns:
+        bool: True if user has required permissions or auth is disabled
+    """
+    if is_auth_disabled():
+        return True
+    
+    if not g.get('auth_user'):
+        return False
+    
+    permissions = g.auth_user.get('permissions', [])
+    return 'datasets_admin' in permissions or 'groups_admin' in permissions
+
+def require_upload_permissions(f):
+    """
+    Decorator to require upload permissions.
+    Redirects to permission warning page if user lacks required permissions.
+    """
+    @functools.wraps(f)
+    def decorated_function(*args, **kwargs):
+        if is_auth_disabled() or check_user_permissions():
+            return f(*args, **kwargs)
+        return redirect(url_for('upload.permission_warning'))
+    return decorated_function
 
 
 @upload_bp.route("/")
+@require_upload_permissions
 def index():
     """Redirect to step 1 of the wizard"""
     return redirect(url_for("upload.wizard_step", step_number=1))
 
-
 @upload_bp.route("/step<int:step_number>")
+@require_upload_permissions
 def wizard_step(step_number):
     if step_number < 1 or step_number > 4:
         return redirect(url_for("upload.wizard_step", step_number=1))
@@ -77,6 +113,29 @@ def wizard_step(step_number):
         step_template=f"upload/step{step_number}.html",
         version=__version__,
     )
+
+@upload_bp.route("/permission-warning")
+def permission_warning():
+    """
+    Display a warning page when user lacks upload permissions
+    """
+    if is_auth_disabled():
+        return redirect(url_for("upload.wizard_step", step_number=1))
+    
+    return render_template(
+        "permission_warning.html", 
+        version=__version__,
+        current_user=g.get('auth_user', {})
+    )
+
+
+def create_storage_service():
+    config = StorageConfig(
+        allowed_origin=current_app.config.get("ALLOWED_ORIGIN"),
+    )
+    bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
+    return StorageService(bucket_name, logger=current_app.logger)
+
 
 
 @upload_bp.route("/generate-presigned-url", methods=["POST"])
@@ -361,31 +420,31 @@ def get_aligned_volumes():
 def get_materialized_versions(aligned_volume):
     """Get available materialized versions for an aligned volume"""
     try:
-        session = sqlalchemy_cache.get(aligned_volume)
+        with db_manager.session_scope(aligned_volume) as session:
 
-        versions = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.valid == True)
-            .filter(AnalysisVersion.datastack == aligned_volume)
-            .order_by(AnalysisVersion.version.desc())
-            .all()
-        )
-
-        versions_list = []
-        for version in versions:
-            versions_list.append(
-                {
-                    "version": version.version,
-                    "created": version.time_stamp.isoformat(),
-                    "expires": (
-                        version.expires_on.isoformat() if version.expires_on else None
-                    ),
-                    "status": version.status,
-                    "is_merged": version.is_merged,
-                }
+            versions = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.valid == True)
+                .filter(AnalysisVersion.datastack == aligned_volume)
+                .order_by(AnalysisVersion.version.desc())
+                .all()
             )
 
-        return jsonify({"status": "success", "versions": versions_list})
+            versions_list = []
+            for version in versions:
+                versions_list.append(
+                    {
+                        "version": version.version,
+                        "created": version.time_stamp.isoformat(),
+                        "expires": (
+                            version.expires_on.isoformat() if version.expires_on else None
+                        ),
+                        "status": version.status,
+                        "is_merged": version.is_merged,
+                    }
+                )
+
+            return jsonify({"status": "success", "versions": versions_list})
     except Exception as e:
         current_app.logger.error(
             f"Error getting versions for {aligned_volume}: {str(e)}"
@@ -461,4 +520,91 @@ def cancel_processing_job(job_id):
         )
 
     except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@upload_bp.route("/api/spatial-lookup/status/<table_name>", methods=["GET"])
+def get_spatial_lookup_status(table_name):
+    """Get the status of a spatial lookup workflow for a specific table."""
+    try:
+        staging_database = get_config_param("STAGING_DATABASE_NAME")
+        database = request.args.get("database", staging_database)
+        
+        checkpoint_manager = RedisCheckpointManager(database)
+        
+        checkpoint = checkpoint_manager.get_workflow_data(table_name)
+        
+        if checkpoint:
+            
+            status = {
+                "status": "inactive",
+                "table_name": table_name,
+                "database": database,
+                "total_chunks": checkpoint.get("total_chunks", 0),
+                "completed_chunks": checkpoint.get("completed_chunks", 0),
+                "progress": (checkpoint.get("completed_chunks", 0) / checkpoint.get("total_chunks", 1) * 100) 
+                            if checkpoint.get("total_chunks", 0) > 0 else 0,
+                "last_error": checkpoint.get("last_error"),
+                "updated_at": checkpoint.get("updated_at"),
+                "created_at": checkpoint.get("created_at"),
+                "note": "Status reconstructed from checkpoint (status expired)"
+            }
+            return jsonify({"status": "success", "data": status})
+            
+        
+        if "completed_chunks" in status and "total_chunks" in status and status["total_chunks"] > 0:
+            status["progress_percentage"] = round((status["completed_chunks"] / status["total_chunks"]) * 100, 2)
+        
+        if "start_time" in status and status["status"] not in ["completed", "failed"]:
+            try:
+                start_time = datetime.datetime.fromisoformat(status["start_time"])
+                now = datetime.datetime.now(datetime.timezone.utc)
+                status["elapsed_time_seconds"] = (now - start_time).total_seconds()
+                
+                elapsed_seconds = status["elapsed_time_seconds"]
+                hours, remainder = divmod(elapsed_seconds, 3600)
+                minutes, seconds = divmod(remainder, 60)
+                status["elapsed_time_formatted"] = f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
+            except Exception:
+                pass
+        
+        return jsonify({"status": "success", "data": status})
+    
+    except Exception as e:
+        current_app.logger.error(f"Error getting spatial lookup status: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@upload_bp.route("/api/spatial-lookup/active", methods=["GET"])
+def get_active_spatial_lookups():
+    """Get a list of all active spatial lookup workflows."""
+    try:
+        staging_database = get_config_param("STAGING_DATABASE_NAME")
+        database = request.args.get("database", staging_database)
+        
+        checkpoint_manager = RedisCheckpointManager(database)
+        
+        workflows = checkpoint_manager.get_active_workflows()
+        
+        for workflow in workflows:
+            if "completed_chunks" in workflow and "total_chunks" in workflow and workflow["total_chunks"] > 0:
+                workflow["progress_percentage"] = round((workflow["completed_chunks"] / workflow["total_chunks"]) * 100, 2)
+            
+            if "start_time" in workflow and workflow["status"] not in ["completed", "failed"]:
+                try:
+                    start_time = datetime.datetime.fromisoformat(workflow["start_time"])
+                    now = datetime.datetime.now(datetime.timezone.utc)
+                    workflow["elapsed_time_seconds"] = (now - start_time).total_seconds()
+                    
+                    elapsed_seconds = workflow["elapsed_time_seconds"]
+                    hours, remainder = divmod(elapsed_seconds, 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    workflow["elapsed_time_formatted"] = f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
+                except Exception:
+                    pass
+        
+        return jsonify({"status": "success", "data": workflows})
+    
+    except Exception as e:
+        current_app.logger.error(f"Error getting active spatial lookups: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
