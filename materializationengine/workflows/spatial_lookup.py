@@ -1,225 +1,464 @@
-import collections
 import datetime
-import itertools
-import random
+import functools
 import time
-from itertools import islice
 from typing import List
 
 import numpy as np
 import pandas as pd
 from celery.utils.log import get_task_logger
+from celery import chain
+from cloudvolume.lib import Vec
 from geoalchemy2 import Geometry
-from sqlalchemy import case, func, literal, select, union_all
+from sqlalchemy import (
+    case,
+    func,
+    literal,
+    select,
+    union_all,
+)
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
 
 from materializationengine.celery_init import celery
 from materializationengine.cloudvolume_gateway import cloudvolume_cache
-from materializationengine.database import dynamic_annotation_cache, sqlalchemy_cache
+from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.shared_tasks import (
     get_materialization_info,
     workflow_complete,
+    add_index,
 )
-from materializationengine.utils import get_geom_from_wkb
-from materializationengine.throttle import throttle_celery
+from materializationengine.index_manager import index_cache
+from materializationengine.throttle import throttle_celery, get_queue_length
+from materializationengine.utils import (
+    create_annotation_model,
+    create_segmentation_model,
+    get_config_param,
+    get_geom_from_wkb,
+)
+from materializationengine.workflows.chunking import ChunkingStrategy
 from materializationengine.workflows.ingest_new_annotations import (
     create_missing_segmentation_table,
     get_new_root_ids,
 )
-from materializationengine.utils import (
-    create_segmentation_model,
-    create_annotation_model,
-    get_config_param,
+
+from materializationengine.blueprints.upload.checkpoint_manager import (
+    RedisCheckpointManager,
 )
-from cloudvolume.lib import Vec
+
+Base = declarative_base()
 
 celery_logger = get_task_logger(__name__)
 
 
 @celery.task(
-    name="workflow:spatial_lookup_workflow",
+    name="workflow:run_spatial_lookup_workflow",
     bind=True,
     acks_late=True,
     autoretry_for=(Exception,),
-    max_retries=3,
+    max_retries=1,
+    retry_backoff=True,
 )
 def run_spatial_lookup_workflow(
     self,
     datastack_info: dict,
     table_name: str,
-    chunk_scale_factor: int = 8,
+    chunk_scale_factor: int = 1,
     get_root_ids: bool = True,
     upload_to_database: bool = True,
-    task_group_chunk_size: int = 100,
     use_staging_database: bool = False,
+    resume_from_checkpoint: bool = True,
 ):
-    """Run the spatial lookup workflow.
+    """Spatial Lookup Workflow processes a table's points in chunks and inserts supervoxel IDs into the database."""
+    task_id = self.request.id
+    start_time = time.time()
 
-    Args:
-        self (celery.task): Celery task
-        datastack_info (dict): Datastack info
-        table_name (str): Annotation table name
-        chunk_scale_factor (int, optional): Scale factor for chunk size. Defaults to 10.
-        get_root_ids (bool, optional): Get the root ids for the supervoxel ids. Defaults to True.
-        upload_to_database (bool, optional): Upload the data to the database. Defaults to True.
-        task_group_chunk_size (int, optional): Chunk size for the task group. Defaults to 100.
-        staging_database (bool, optional): Staging database name. Defaults to False.
-
-    Raises:
-        e: Exception
-
-    Returns:
-        celery.task: Celery task
-    """
-    materialization_time_stamp = datetime.datetime.utcnow()
+    # Setup database and checkpoint manager
     staging_database = get_config_param("STAGING_DATABASE_NAME")
-    
+    database = (
+        staging_database
+        if use_staging_database
+        else datastack_info["aligned_volume"]["name"]
+    )
+    checkpoint_manager = RedisCheckpointManager(database)
+
+    # Initialize workflow state
+    checkpoint_manager.initialize_workflow(table_name, task_id)
+
+    # Set materialization timestamp
+    materialization_time_stamp = datetime.datetime.utcnow()
+
+    # Get table information
     table_info = get_materialization_info(
         datastack_info=datastack_info,
         materialization_time_stamp=materialization_time_stamp,
         table_name=table_name,
         skip_row_count=True,
-        database=staging_database if use_staging_database and staging_database else None,
+        database=database,
     )
-    celery_logger.info(f"Table info: {table_info}")
-    for mat_info in table_info:
-        try:
-            table_created = create_missing_segmentation_table(mat_info)
-            celery_logger.info(f"Segmentation table created or exits: {table_created}")
-            cv_info = get_cloud_volume_info(mat_info["segmentation_source"])
-            celery_logger.info(f"Cloud volume info: {cv_info}")
 
-            min_enclosing_bbox, _ = get_min_enclosing_bbox(
-                cv_info,
-                mat_info,
+    # Initialize variables for chunking
+    engine = db_manager.get_engine(database)
+    completed_chunks = 0
+
+    # Create chunking strategy with appropriate size
+    chunking = ChunkingStrategy(
+        engine=engine,
+        table_name=table_name,
+        database=database,
+        base_chunk_size=chunk_scale_factor * 1024,
+    )
+
+    # Try to restore from checkpoint
+    if resume_from_checkpoint:
+        checkpoint_data = checkpoint_manager.get_workflow_data(table_name)
+        if checkpoint_data:
+            completed_chunks = checkpoint_data.completed_chunks or 0
+            celery_logger.info(
+                f"Resuming from checkpoint: {completed_chunks} chunks already processed"
             )
-            celery_logger.info(f"Mim enclosing bbox: {min_enclosing_bbox}")
-        except Exception as e:
-            celery_logger.error(e)
-            raise self.retry(exc=e, countdown=3)
 
-        chunks = chunk_tasks(
-            chunk_generator(
-                min_enclosing_bbox[0],
-                min_enclosing_bbox[1],
-                cv_info,
-                mat_info,
-                chunk_scale_factor,
-            ),
-            task_group_chunk_size,
+            # Restore strategy from checkpoint if available
+            if hasattr(checkpoint_data, "chunking_strategy"):
+                chunking = ChunkingStrategy.from_checkpoint(
+                    checkpoint_data, engine, table_name, database
+                )
+
+    # Ensure we have a valid strategy - this will determine bounds if needed
+    strategy = chunking.select_strategy()
+
+    # Update checkpoint with chunking information
+    checkpoint_manager.update_workflow(
+        table_name=table_name,
+        min_enclosing_bbox=np.array([chunking.min_coords, chunking.max_coords]),
+        total_chunks=chunking.total_chunks,
+        chunking_strategy=strategy,
+        used_chunk_size=chunking.actual_chunk_size,
+        completed_chunks=completed_chunks,
+        total_row_estimate=chunking.estimated_rows,
+        status="processing",
+    )
+
+    # Get a chunk generator that starts from the completed chunk index
+    if completed_chunks > 0:
+        chunk_generator = chunking.skip_to_index(completed_chunks)
+    else:
+        chunk_generator = chunking.create_chunk_generator()
+
+    # Process each table in the materialization info
+    task_count = 0
+
+    for mat_metadata in table_info:
+        # Create segmentation table if it doesn't exist
+        create_missing_segmentation_table(mat_metadata)
+
+        #  drop existing indices on the table
+        index_cache.drop_table_indices(
+            mat_metadata["segmentation_table_name"], engine, drop_primary_key=False
         )
-        for i, chunk_data in enumerate(chunks):
-            celery_logger.debug(f"Chunk {i}")
-            for j, chunk_info in enumerate(chunk_data):
-                min_corner, max_corner, chunk_index, num_chunks = chunk_info
-                celery_logger.debug(
-                    f"Sub-Chunk {chunk_index}: {min_corner} to {max_corner}"
+
+        # Submit tasks for each chunk
+        chunk_tasks = 0
+        for chunk_idx, (min_corner, max_corner) in enumerate(
+            chunk_generator(), completed_chunks
+        ):
+            # Submit a task to process this chunk
+            submit_task(
+                min_corner=min_corner,
+                max_corner=max_corner,
+                mat_metadata=mat_metadata,
+                get_root_ids=get_root_ids,
+                upload_to_database=upload_to_database,
+                chunk_idx=chunk_idx,
+                total_chunks=chunking.total_chunks,
+                database=database,
+                table_name=table_name,
+            )
+
+            chunk_tasks += 1
+
+            # Update checkpoint periodically
+            if chunk_tasks % 10 == 0:
+                checkpoint_manager.update_workflow(
+                    table_name=table_name,
+                    completed_chunks=completed_chunks + chunk_tasks,
                 )
 
-                task = process_spatially_chunked_svids.si(
-                    min_corner=min_corner.tolist(),
-                    max_corner=max_corner.tolist(),
-                    mat_info=mat_info,
-                    get_root_ids=get_root_ids,
-                    upload_to_database=upload_to_database,
-                )
-                result = task.apply_async()
+            # Throttle if needed
+            if mat_metadata.get("throttle_queues"):
+                throttle_celery.wait_if_queue_full(queue_name="process")
 
-                if mat_info.get("throttle_queues"):
-                    throttle_celery.wait_if_queue_full(queue_name="process")
+        task_count += chunk_tasks
 
-    return workflow_complete.si("Spatial Lookup Workflow")
+        # Final checkpoint update
+        if chunk_tasks > 0:
+            checkpoint_manager.update_workflow(
+                table_name=table_name,
+                completed_chunks=completed_chunks + chunk_tasks,
+            )
+
+    # Update workflow status on completion
+    completion_time = time.time() - start_time
+    checkpoint_manager.update_workflow(
+        table_name=table_name,
+        status="submitted",
+        total_time_seconds=completion_time,
+    )
+
+    monitor_spatial_lookup_completion.s(
+        table_name=table_name,
+        database=database,
+        total_chunks=chunking.total_chunks,
+        queue_name="process",
+        table_info=table_info,
+    ).apply_async()
+
+    celery_logger.info(
+        f"Completed workflow setup in {completion_time:.2f}s, {task_count} tasks submitted"
+    )
+
+    return f"Spatial Lookup submitted {task_count} chunks for processing, chunks will be processed in the background"
 
 
-def get_min_enclosing_bbox(cv_info: dict, mat_info: dict) -> tuple:
-    """Calculate the minimum enclosing bounding box and sub-volumes using
-    the cloud volume bounding box and the annotation table bounding boxes.
+def submit_task(
+    min_corner,
+    max_corner,
+    mat_metadata,
+    get_root_ids,
+    upload_to_database,
+    chunk_idx,
+    total_chunks,
+    database,
+    table_name,
+):
+    """Submit a task to process a single chunk."""
+    min_corner_list = (
+        min_corner.tolist() if isinstance(min_corner, np.ndarray) else min_corner
+    )
+    max_corner_list = (
+        max_corner.tolist() if isinstance(max_corner, np.ndarray) else max_corner
+    )
 
-    Args:
-        cv_info (dict): Dictionary of the cloudvolume bounding box, chunk size, and resolution
-        mat_info (dict): Materialization info for a given table
-
-    Returns:
-        tuple: The minimum enclosing bounding box and sub-volumes
-    """
-    database = mat_info["database"]
-    table_name = mat_info["annotation_table_name"]
-    coord_resolution = mat_info["coord_resolution"]
-    segmentation_source = mat_info["pcg_table_name"]
-
-    annotation_table_bounding_boxes = get_table_bounding_boxes(
+    task = process_chunk.si(
+        min_corner=min_corner_list,
+        max_corner=max_corner_list,
+        mat_info=mat_metadata,
+        get_root_ids=get_root_ids,
+        upload_to_database=upload_to_database,
+        chunk_info=f"Chunk {chunk_idx+1}/{total_chunks}",
         database=database,
         table_name=table_name,
-        segmentation_source=segmentation_source,
+        report_completion=True,
     )
-    min_enclosing_bbox, outside_volume = calc_min_enclosing_and_sub_volumes(
-        annotation_table_bounding_boxes,
-        cv_info["bbox"],
-        cv_info["chunk_size"],
-        cv_resolution=cv_info["resolution"],
-        coord_resolution=coord_resolution,
-    )
-    return min_enclosing_bbox, outside_volume
+    task.apply_async()
 
 
 @celery.task(
-    name="process:process_spatially_chunked_svids",
+    name="process:process_chunk",
     bind=True,
     acks_late=True,
     autoretry_for=(Exception,),
     max_retries=10,
+    retry_backoff=True,
+    ignore_result=True,
 )
-def process_spatially_chunked_svids(
+def process_chunk(
     self,
     min_corner,
     max_corner,
     mat_info,
-    get_root_ids: bool = True,
-    upload_to_database: bool = True,
+    get_root_ids=True,
+    upload_to_database=True,
+    chunk_info="",
+    database=None,
+    table_name=None,
+    report_completion=False,
 ):
-    """Reads the points from the database and gets the supervoxel ids for each point.
+    """Query points in a bounding box and process supervoxel IDs and root IDS for a single chunk and inserts into the database.
 
     Args:
-        self (celery.task): Celery task
-        stmt_str (str): sqlalchemy query statement string
-        mat_info (dict): Materialization info for a given table
-
-    Raises:
-        e: Exception
-
-    Returns:
-        celery.task: Celery task
+        min_corner (_type_): _description_
+        max_corner (_type_): _description_
+        mat_info (_type_): _description_
+        get_root_ids (bool, optional): _description_. Defaults to True.
+        upload_to_database (bool, optional): _description_. Defaults to True.
+        chunk_info (str, optional): _description_. Defaults to "".
+        database (_type_, optional): _description_. Defaults to None.
+        table_name (_type_, optional): _description_. Defaults to None.
+        report_completion (bool, optional): _description_. Defaults to False.
     """
+    task_id = self.request.id
+    start_time = time.time()
+    celery_logger.debug(
+        f"Starting optimized_process_svids [{chunk_info}] (task_id: {task_id})"
+    )
+
+    checkpoint_manager = (
+        RedisCheckpointManager(database)
+        if database and table_name and report_completion
+        else None
+    )
 
     try:
-        start_time = time.time()
+        pts_start_time = time.time()
         pts_df = get_pts_from_bbox(np.array(min_corner), np.array(max_corner), mat_info)
-        celery_logger.info(f"min corner: {min_corner}, max corner: {max_corner}")
-        celery_logger.info(f"Time to get points from bbox: {time.time() - start_time}")
-        if pts_df is None:
-            return None
-        data = get_svids_from_df(pts_df, mat_info)
-        # time to get svids
-        celery_logger.info(f"Total Time to get svids: {time.time() - start_time}")
-        celery_logger.info(f"Number of svids: {len(data['id'])}")
-        if get_root_ids:
-            # get time for root ids
-            start_time = time.time()
-            data = get_new_root_ids(data, mat_info)
-            celery_logger.info(f"Time to get root ids: {time.time() - start_time}")
-        if upload_to_database:
-            # time to insert data
-            start_time = time.time()
-            is_inserted = insert_segmentation_data(data, mat_info)
-            celery_logger.info(f"Time to insert data: {time.time() - start_time}")
+        pts_time = time.time() - pts_start_time
 
+        if pts_df is None or pts_df.empty:
+            if report_completion and checkpoint_manager:
+                checkpoint_manager.increment_completed(
+                    table_name=table_name, rows_processed=0
+                )
+            return None
+
+        points_count = len(pts_df)
+        celery_logger.info(f"Found {points_count} points in bounding box")
+
+        svids_start_time = time.time()
+        data = get_scatter_points(pts_df, mat_info, batch_size=50)
+        if data is None:
+            return
+        svids_time = time.time() - svids_start_time
+
+        svids_count = len(data["id"])
+        celery_logger.info(
+            f"Processed {svids_count} supervoxel IDs in {svids_time:.2f}s"
+        )
+
+        if get_root_ids and svids_count > 0:
+            root_ids_start_time = time.time()
+            root_id_data = get_new_root_ids(data, mat_info)
+            root_ids_time = time.time() - root_ids_start_time
             celery_logger.info(
-                f"Data inserted: {is_inserted}, Number of rows: {len(data)}"
+                f"Retrieved {len(root_id_data)} root IDs in {root_ids_time:.2f}s"
             )
+
+        if upload_to_database and len(root_id_data) > 0:
+            upload_start_time = time.time()
+            is_inserted = insert_segmentation_data(root_id_data, mat_info)
+            upload_time = time.time() - upload_start_time
+            celery_logger.info(
+                f"Inserted {len(root_id_data)} rows in {upload_time:.2f}s"
+            )
+
+        if report_completion and checkpoint_manager:
+            checkpoint_manager.increment_completed(
+                table_name=table_name, rows_processed=points_count
+            )
+
+        total_time = time.time() - start_time
+        celery_logger.debug(
+            f"Completed chunk {chunk_info} in {total_time:.2f}s: "
+            f"{points_count} points, {svids_count} supervoxels"
+        )
+
+        return {
+            "status": "success",
+            "points_processed": points_count,
+            "svids_found": svids_count,
+            "processing_time": total_time,
+        }
+
     except Exception as e:
-        celery_logger.error(e)
-        self.retry(exc=e, countdown=int(random.uniform(2, 6) ** self.request.retries))
+        celery_logger.error(f"Error processing chunk {chunk_info}: {str(e)}")
+        self.retry(exc=e, countdown=int(2**self.request.retries))
+
+
+@celery.task(name="workflow:monitor_spatial_lookup_completion")
+def monitor_spatial_lookup_completion(
+    table_name: str,
+    database: str,
+    total_chunks: int,
+    queue_name: str = "process",
+    table_info: List[dict] = None,
+):
+    """
+    Monitor task completion by checking:
+    1. Queue is empty
+    2. All chunks processed in checkpoint
+    """
+    checkpoint_manager = RedisCheckpointManager(database)
+    max_wait_time = 3600 * 24 * 3  # 72-hour timeout
+    start_time = time.time()
+    polling_interval = 360
+
+    while True:
+        current_time = time.time()
+
+        # Check queue length
+        queue_length = get_queue_length(queue_name)
+
+        workflow_data = checkpoint_manager.get_workflow_data(table_name)
+
+        if workflow_data:
+            current_completed = workflow_data.completed_chunks
+
+            # Completion conditions:
+            # 1. Queue is empty
+            # 2. All chunks processed
+            if queue_length == 0 and current_completed >= total_chunks:
+
+                try:
+
+                    rebuild_indices_for_spatial_lookup(table_info, database)
+
+                    # Update workflow status
+                    checkpoint_manager.update_workflow(
+                        table_name=table_name,
+                        status="completed",
+                        index_rebuild_complete=True,
+                    )
+
+                    celery_logger.info(f"Spatial lookup completed for {table_name}")
+                    break
+                except Exception as e:
+                    celery_logger.error(f"Error in completion process: {e}")
+                    checkpoint_manager.update_workflow(
+                        table_name=table_name, status="error", last_error=str(e)
+                    )
+                    break
+
+        # Timeout protection
+        if current_time - start_time > max_wait_time:
+            celery_logger.error(f"Spatial lookup monitoring timed out for {table_name}")
+            checkpoint_manager.update_workflow(
+                table_name=table_name, status="error", last_error="Monitoring timed out"
+            )
+            break
+
+        # Sleep to prevent tight looping
+        time.sleep(polling_interval)
+
+
+def rebuild_indices_for_spatial_lookup(table_info: list, database: str):
+    """Rebuild indices for a table after spatial lookup completion."""
+    engine = db_manager.get_engine(database)
+    mat_metadata = table_info[0]
+    segmentation_table_name = mat_metadata["segmentation_table_name"]
+
+    seg_model = create_segmentation_model(mat_metadata)
+
+    # Drop existing indices on the table
+    index_cache.drop_table_indices(
+        segmentation_table_name, engine, drop_primary_key=True
+    )
+
+    seg_indices = index_cache.add_indices_sql_commands(
+        table_name=segmentation_table_name, model=seg_model, engine=engine
+    )
+
+    if seg_indices:
+        add_index_tasks = [add_index.si(database, command) for command in seg_indices]
+
+        # add workflow complete task to the end of the chain
+        add_index_tasks.append(
+            workflow_complete.si(
+                f"Spatial Lookup for {segmentation_table_name} completed"
+            )
+        )
+
+        # chain the tasks
+        chain(add_index_tasks).apply_async()
 
 
 def get_pts_from_bbox(min_corner, max_corner, mat_info):
@@ -227,22 +466,19 @@ def get_pts_from_bbox(min_corner, max_corner, mat_info):
         [select_all_points_in_bbox(min_corner, max_corner, mat_info)]
     ).compile(compile_kwargs={"literal_binds": True})
 
-    engine = sqlalchemy_cache.get_engine(aligned_volume=mat_info["aligned_volume"])
-    with engine.connect() as connection:
+    with db_manager.get_engine(mat_info["aligned_volume"]).begin() as connection:
         df = pd.read_sql(stmt, connection)
         # if the dataframe is empty then there are no points in the bounding box
         # so we can skip the rest of the workflow
         if df.empty:
-            # self.request.chain = None
             return None
-        # convert the point column to a numpy array
         df["pt_position"] = df["pt_position"].apply(lambda pt: get_geom_from_wkb(pt))
 
         return df
 
 
 def match_point_and_get_value(point, points_map):
-    point_tuple = tuple(point)  # Convert list to tuple
+    point_tuple = tuple(point)
     return points_map.get(point_tuple, 0)
 
 
@@ -275,311 +511,80 @@ def point_to_chunk_position(cv, pt, mip=None):
     return (pt // cv.graph_chunk_size).astype(np.int32)
 
 
-def get_svids_from_df(df, mat_info: dict) -> pd.DataFrame:
-    """Get the supervoxel ids from a dataframe of points.
-
-    Args:
-        df (pd.DataFrame): Dataframe containing annotation points
-        mat_info (dict): Materialization info for a given table
-
-    Returns:
-        pd.DataFrame: Dataframe of points with supervoxel ids
-    """
-    start_time = time.time()
+def get_scatter_points(pts_df, mat_info, batch_size=500):
+    """Process supervoxel ID lookups in smaller batches to improve performance."""
     segmentation_source = mat_info["segmentation_source"]
     coord_resolution = mat_info["coord_resolution"]
     cv = cloudvolume_cache.get_cv(segmentation_source)
     scale_factor = cv.resolution / coord_resolution
 
-    celery_logger.info(f"Time to initialize cv: {time.time() - start_time}")
-    start_time = time.time()
-    # Scale the points to the resolution of the cloudvolume
+    all_points = []
+    all_types = []
+    all_ids = []
+    sv_id_data = {}  # To accumulate supervoxel IDs
+
+    df = pts_df.copy()
     df["pt_position_scaled"] = df["pt_position"].apply(
         lambda x: normalize_positions(x, scale_factor)
     )
-    chunk_pos = df.pt_position_scaled.apply(
+    df["chunk_key"] = df.pt_position_scaled.apply(
         lambda x: str(point_to_chunk_position(cv.meta, x, mip=0))
     )
-    # find out how many unique chunks are there
-    unique_chunks = chunk_pos.unique()
-    celery_logger.info(f"# unique_chunks: {len(unique_chunks)}")
 
-    celery_logger.info(f"normalize positions: {time.time() - start_time}")
-    start_time = time.time()
-    sv_id_data = {}
-    # for pt in df["pt_position_scaled"]:
-    #     cv_pt = cv.download_point(pt, parallel=1, size=1)
-    #     sv_id_data[tuple(pt)] = cv_pt
+    df = df.sort_values(by="chunk_key")
 
-    sv_id_data = cv.scattered_points(
-        df["pt_position"], coord_resolution=coord_resolution
+    total_batches = (len(df) + batch_size - 1) // batch_size
+    celery_logger.info(
+        f"Processing {len(df)} points in {total_batches} batches of {batch_size}"
     )
-    celery_logger.info(f"cv scattered_points : {time.time() - start_time}")
-    start_time = time.time()
 
-    # Match points to svids using the scaled coordinates
-    df["svids"] = df["pt_position_scaled"].apply(
+    for batch_idx, batch_start in enumerate(range(0, len(df), batch_size)):
+        batch_end = min(batch_start + batch_size, len(df))
+        batch_df = df.iloc[batch_start:batch_end]
+
+        celery_logger.info(
+            f"Processing batch {batch_idx+1}/{total_batches} with {len(batch_df)} points"
+        )
+
+        # Get point data
+        batch_points = batch_df["pt_position"].tolist()
+        batch_types = batch_df["type"].tolist()
+        batch_ids = batch_df["id"].tolist()
+
+        # Call scattered_points on this batch
+        start_time = time.time()
+        batch_sv_data = cv.scattered_points(
+            batch_points, coord_resolution=coord_resolution
+        )
+        elapsed = time.time() - start_time
+        celery_logger.info(
+            f"Batch {batch_idx+1} scattered_points call took {elapsed:.2f}s"
+        )
+
+        # Accumulate results
+        all_points.extend(batch_points)
+        all_types.extend(batch_types)
+        all_ids.extend(batch_ids)
+        sv_id_data.update(batch_sv_data)
+
+    result_df = pd.DataFrame(
+        {"id": all_ids, "type": all_types, "pt_position": all_points}
+    )
+
+    result_df["pt_position_scaled"] = result_df["pt_position"].apply(
+        lambda x: normalize_positions(x, scale_factor)
+    )
+    result_df["svids"] = result_df["pt_position_scaled"].apply(
         lambda x: match_point_and_get_value(x, sv_id_data)
     )
-    celery_logger.info(f"cv match_point_and_get_value: {time.time() - start_time}")
-    start_time = time.time()
-    # Drop the temporary scaled coordinates column
-    df.drop(columns=["pt_position_scaled"], inplace=True)
 
-    # Add the supervoxel id column to the type column name
-    if df["type"].str.contains("pt").all():
-        df["type"] = df["type"].apply(lambda x: f"{x}_supervoxel_id")
+    result_df.drop(columns=["pt_position_scaled"], inplace=True)
+    if result_df["type"].str.contains("pt").all():
+        result_df["type"] = result_df["type"].apply(lambda x: f"{x}_supervoxel_id")
     else:
-        df["type"] = df["type"].apply(lambda x: f"{x}_pt_supervoxel_id")
-    celery_logger.info(
-        f"drop columns and add superoxel column: {time.time() - start_time}"
-    )
-    start_time = time.time()
-    # custom pivot to preserve uint64 dtype values since they are normally converted to float64
-    # add we loose precision when converting back to uint64
-    svid_dict = _safe_pivot_svid_df_to_dict(df)
-    celery_logger.info(f"_safe_pivot_svid_df_to_dict: {time.time() - start_time}")
-    start_time = time.time()
+        result_df["type"] = result_df["type"].apply(lambda x: f"{x}_pt_supervoxel_id")
 
-    celery_logger.info(f"Time to get svids from df: {time.time() - start_time}")
-    return svid_dict
-
-
-def get_cloud_volume_info(segmentation_source: str) -> dict:
-    """Get the bounding box, chunk size, and resolution from cloudvolume.
-
-    Args:
-        segmentation_source (str): Name of the cloud volume source
-
-    Raises:
-        e: Cloud volume error
-
-    Returns:
-        dict: Dictionary of the cloudvolume bounding box, chunk size, and resolution
-    """
-    try:
-        cv = cloudvolume_cache.get_cv(segmentation_source)
-    except Exception as e:
-        celery_logger.error(e)
-        raise e
-
-    bbox = cv.bounds.expand_to_chunk_size(cv.chunk_size, cv.voxel_offset)
-    bbox = bbox.to_list()
-    chunk_size = cv.chunk_size.tolist()
-
-    return {
-        "bbox": bbox,
-        "chunk_size": np.array(chunk_size),
-        "resolution": cv.scale["resolution"]
-    }
-
-
-def get_table_bounding_boxes(
-    database: str, table_name: str, segmentation_source: str
-) -> dict:
-    """Get the bounding boxes of the annotation table.
-
-    Args:
-        database (str): Name of the database
-        table_name (str): Name of the annotation table
-        segmentation_source (str): Name of the PCG table
-
-    Returns:
-        dict: Dictionary of bounding boxes for each column in the annotation table
-    """
-    db = dynamic_annotation_cache.get_db(database)
-    schema = db.database.get_table_schema(table_name)
-    mat_metadata = {
-        "annotation_table_name": table_name,
-        "schema": schema,
-        "pcg_table_name": segmentation_source,
-    }
-    AnnotationModel = create_annotation_model(mat_metadata)
-    SegmentationModel = create_segmentation_model(mat_metadata)
-
-    engine = sqlalchemy_cache.get_engine(database)
-    bbox_data = []
-
-    for annotation_column in AnnotationModel.__table__.columns:
-        if (
-            isinstance(annotation_column.type, Geometry)
-            and "Z" in annotation_column.type.geometry_type.upper()
-        ):
-            supervoxel_column_name = (
-                f"{annotation_column.name.rsplit('_', 1)[0]}_supervoxel_id"
-            )
-            # skip lookup for column if not in Segmentation Model
-            if getattr(SegmentationModel, supervoxel_column_name, None):
-                with engine.begin() as connection:
-                    start_time = time.time()
-                    query_str = f"SELECT ST_3DExtent({annotation_column}) FROM {AnnotationModel.__table__}"
-                    bbox3d = connection.execute(query_str).scalar()
-                    celery_logger.debug(bbox3d)
-                    total_time = time.time() - start_time
-
-                    coords = bbox3d[6:-1].split(",")
-                    box3d_array = np.array(
-                        [
-                            list(map(lambda x: int(round(float(x))), coord.split()))
-                            for coord in coords
-                        ]
-                    )
-                    bbox_data.append(box3d_array)
-                    celery_logger.debug(
-                        f"Time to find bounding box of column {annotation_column} is {total_time}"
-                    )
-                    celery_logger.debug(
-                        f"Bounding box for {annotation_column}:  min_max_xyz): {box3d_array}"
-                    )
-            else:
-                continue
-
-    return bbox_data
-
-
-def chunk_generator(
-    min_coord: np.array,
-    max_coord: np.array,
-    cv_info: List,
-    mat_info: dict,
-    chunk_scale_factor: int = 1,
-) -> tuple:
-    """Generate chunks of a given size that cover a given bounding box.
-
-    Args:
-        min_coord (np.array): Min corner of the bounding box
-        max_coord (np.array): Max corner of the bounding box
-        cv_info (List): cloud volume info
-        chunk_scale_factor (int, optional): Scale factor for chunk size. Defaults to 1.
-
-    Yields:
-        Iterator[tuple]: chunk min corner, chunk max corner, chunk index, total number of chunks
-    """
-    # Determine the number of chunks in each dimension
-    anno_resolution = mat_info["coord_resolution"]
-    cv_chunk_size = cv_info["chunk_size"]
-    cv_resolution = cv_info["resolution"]
-    scale_factor = np.array(cv_resolution) / np.array(anno_resolution)
-    scaled_chunks = cv_chunk_size * scale_factor
-
-    chunk_size = scaled_chunks * chunk_scale_factor
-    num_chunks = np.ceil((max_coord - min_coord) / chunk_size).astype(int)
-    i_chunks = np.prod(num_chunks)
-    # Iterate over the chunks
-    for chunk_index in itertools.product(*(range(n) for n in num_chunks)):
-        chunk_index = np.array(chunk_index)
-
-        # Determine the min and max corner of this chunk
-        min_corner = min_coord + chunk_index * chunk_size
-        max_corner = np.minimum(min_corner + chunk_size, max_coord)
-
-        yield min_corner, max_corner, chunk_index, i_chunks
-
-
-def calc_min_enclosing_and_sub_volumes(
-    input_bboxes: List,
-    global_bbox: List,
-    chunk_size: List,
-    cv_resolution: List,
-    coord_resolution: List,
-) -> tuple:
-    """Calculate the minimum enclosing bounding box and sub-volumes
-    that are outside of the global bounding box.
-
-    Args:
-        input_bboxes (List): bounding boxes of the annotation table
-        global_bbox (List): the cloud volume bounding box
-        chunk_size (List): cloud volume chunk size
-        cv_resolution (List): cloud volume resolution
-        coord_resolution (List): annotation table resolution
-
-    Returns:
-        tuple: the minimum enclosing bounding box and sub-volumes that are outside of the global bounding box
-    """
-    min_corner = np.array([np.inf, np.inf, np.inf])
-    max_corner = np.array([-np.inf, -np.inf, -np.inf])
-    global_bbox = np.array([global_bbox], dtype=float).reshape(2, 3)
-    sub_volumes = []
-
-    scale_factor = np.array(cv_resolution) / np.array(coord_resolution)
-    global_bbox *= scale_factor
-
-    for bbox in input_bboxes:
-        # Align bbox to chunk size
-        min_chunk_aligned = bbox[0] // chunk_size * chunk_size
-        max_chunk_aligned = (bbox[1] + chunk_size - 1) // chunk_size * chunk_size
-        aligned_bbox = np.array([min_chunk_aligned, max_chunk_aligned])
-        # Check if bbox is not within global bbox
-        if np.any(global_bbox[0] > aligned_bbox[0]) or np.any(
-            aligned_bbox[1] > global_bbox[1]
-        ):
-            # Calculate sub-volumes that are outside of the global bbox
-            outside_min = np.minimum(aligned_bbox[0], global_bbox[0])
-            outside_max = np.maximum(aligned_bbox[1], global_bbox[1])
-
-            if outside_min[0] < global_bbox[0, 0]:
-                sub_volumes.append(
-                    np.array(
-                        [
-                            outside_min,
-                            [global_bbox[0, 0] - 1, outside_max[1], outside_max[2]],
-                        ]
-                    )
-                )
-            if outside_max[0] > global_bbox[1, 0]:
-                sub_volumes.append(
-                    np.array(
-                        [
-                            [global_bbox[1, 0] + 1, outside_min[1], outside_min[2]],
-                            outside_max,
-                        ]
-                    )
-                )
-            if outside_min[1] < global_bbox[0, 1]:
-                sub_volumes.append(
-                    np.array(
-                        [
-                            outside_min,
-                            [outside_max[0], global_bbox[0, 1] - 1, outside_max[2]],
-                        ]
-                    )
-                )["chunk_size"]
-            if outside_max[1] > global_bbox[1, 1]:
-                sub_volumes.append(
-                    np.array(
-                        [
-                            [outside_min[0], global_bbox[1, 1] + 1, outside_min[2]],
-                            outside_max,
-                        ]
-                    )
-                )
-            if outside_min[2] < global_bbox[0, 2]:
-                sub_volumes.append(
-                    np.array(
-                        [
-                            outside_min,
-                            [outside_max[0], outside_max[1], global_bbox[0, 2] - 1],
-                        ]
-                    )
-                )
-            if outside_max[2] > global_bbox[1, 2]:
-                sub_volumes.append(
-                    np.array(
-                        [
-                            [outside_min[0], outside_min[1], global_bbox[1, 2] + 1],
-                            outside_max,
-                        ]
-                    )
-                )
-
-        # Update min and max corners within global_bbox
-        min_corner = np.minimum(min_corner, np.maximum(aligned_bbox[0], global_bbox[0]))
-        max_corner = np.maximum(max_corner, np.minimum(aligned_bbox[1], global_bbox[1]))
-    if np.any(min_corner == np.inf) or np.any(max_corner == -np.inf):
-        return None, []  # No input bounding boxes were within the global bounding box
-
-    aligned_bbox = np.array([min_corner, max_corner], dtype=int)
-    return aligned_bbox, sub_volumes
+    return _safe_pivot_svid_df_to_dict(result_df)
 
 
 def select_3D_points_in_bbox(
@@ -663,102 +668,6 @@ def select_all_points_in_bbox(
     return union_all(*selects).alias("points_in_bbox")
 
 
-def format_pt_data(pt_array: np.array, chunk_size: List) -> collections.defaultdict:
-    """Format point data into a dictionary of chunk start and points in that chunk.
-
-    Args:
-        pt_array (np.array): An array of points
-        chunk_size (List): Chunk size to use for formatting
-
-    Returns:
-        collections.defaultdict: Dictionary of chunk start and points in that chunk
-    """
-    chunk_map_dict = collections.defaultdict(set)
-
-    processing_chunk_size = np.array(chunk_size)
-    chunk_starts = (
-        (pt_array).astype(int) // processing_chunk_size * processing_chunk_size
-    )  # // is floor division
-    for point, chunk_start in zip(pt_array, chunk_starts):
-        celery_logger.debug(f"POINT: {point}, CHUNK START: {chunk_start}")
-        chunk_map_dict[tuple(chunk_start)].add(tuple(point))
-    return chunk_map_dict
-
-
-def load_chunk(
-    cv: cloudvolume_cache, chunk_start: np.array, chunk_end: np.array
-) -> np.array:
-    """Load a chunk from cloudvolume.
-
-    Args:
-        cv (cloudvolume_cache): Cloudvolume instance
-        chunk_start (np.array): Start of the chunk coordinates
-        chunk_end (np.array): End of the chunk coordinates
-
-    Returns:
-        np.array: A cutout of the volume
-    """
-    return cv[
-        chunk_start[0] : chunk_end[0],
-        chunk_start[1] : chunk_end[1],
-        chunk_start[2] : chunk_end[2],
-    ]
-
-
-def get_svids_in_chunk(
-    cv: cloudvolume_cache,
-    chunk_map_key: tuple,
-    chunk_data: np.array,
-    coord_resolution: List,
-) -> tuple:
-    """Get the supervoxel ids in a chunk.
-
-    Args:
-        cv (cloudvolume_cache): Cloudvolume instance
-        chunk_map_key (tuple): Chunk start coordinates
-        chunk_data (np.array): Points in the chunk
-        coord_resolution (List): Annotation table resolution
-
-    Returns:
-        tuple: Points in the chunk, supervoxel ids in the chunk
-    """
-    chunk_start = np.array(chunk_map_key)
-    points = np.array(list(chunk_data))
-
-    resolution = np.array(cv.scale["resolution"]) / coord_resolution
-
-    indices = (points // resolution).astype(int) - chunk_start
-
-    mn, mx = indices.min(axis=0), indices.max(axis=0)
-    chunk_end = chunk_start + mx + 1
-    chunk_start += mn
-    indices -= mn
-    try:
-        chunk = load_chunk(cv, chunk_start, chunk_end)
-    except IndexError:
-        return points, np.zeros(len(points), dtype=np.uint64)
-
-    return points, chunk[indices[:, 0], indices[:, 1], indices[:, 2]]
-
-
-def process_chunks(chunk_map_dict, cv, coord_resolution):
-    for k, v in chunk_map_dict.items():
-        yield get_svids_in_chunk(
-            cv, chunk_map_key=k, chunk_data=v, coord_resolution=coord_resolution
-        )
-
-
-# Create a group for the tasks
-def chunk_tasks(iterable, n):
-    """Yield successive n-sized chunks from iterable."""
-    iterable = iter(iterable)
-    while True:
-        chunk = list(islice(iterable, n))
-        if not chunk:
-            return
-        yield chunk
-
-
 def convert_array_to_int(value):
     # Check if the value is a NumPy array
     if isinstance(value, np.ndarray):
@@ -794,7 +703,6 @@ def insert_segmentation_data(
     # pcg_table_name = mat_info["pcg_table_name"]
     db = dynamic_annotation_cache.get_db(database)
     schema = db.database.get_table_schema(table_name)
-    engine = sqlalchemy_cache.get_engine(database)
     mat_info["schema"] = schema
     SegmentationModel = create_segmentation_model(mat_info)
     seg_columns = SegmentationModel.__table__.columns.keys()
@@ -811,8 +719,10 @@ def insert_segmentation_data(
     common_cols = segmentation_dataframe.columns.intersection(data_df.columns)
 
     # merge the dataframes and fill the missing values with 0, data might get updated in the next chunk lookup
-    df = pd.merge(segmentation_dataframe[common_cols], data_df[common_cols], how="right")
-    
+    df = pd.merge(
+        segmentation_dataframe[common_cols], data_df[common_cols], how="right"
+    )
+
     # fill the missing values with 0
     df = df.infer_objects().fillna(0)
 
@@ -839,7 +749,7 @@ def insert_segmentation_data(
     )
 
     # insert the data or update if it already exists
-    with engine.begin() as connection:
+    with db_manager.get_engine(database).begin() as connection:
         connection.execute(do_update_stmt)
     celery_logger.info(f"Insertion time: {time.time() - start_time} seconds")
     return True
