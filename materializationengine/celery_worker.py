@@ -25,7 +25,7 @@ celery_logger = get_task_logger(__name__)
 def create_celery(app=None):
 
     celery.conf.broker_url = app.config["CELERY_BROKER_URL"]
-    celery.conf.result_backend = app.config["CELERY_RESULT_BACKEND"]
+    celery.conf.result_backend = app.config["RESULT_BACKEND"]
     if app.config.get("USE_SENTINEL", False):
         celery.conf.broker_transport_options = {
             "master_name": app.config["MASTER_NAME"]

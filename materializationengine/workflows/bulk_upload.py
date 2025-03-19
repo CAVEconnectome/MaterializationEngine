@@ -12,7 +12,7 @@ from dynamicannotationdb.models import AnnoMetadata, SegmentationMetadata
 
 from dynamicannotationdb.schema import DynamicSchemaClient
 from materializationengine.celery_init import celery
-from materializationengine.database import sqlalchemy_cache
+from materializationengine.database import db_manager
 from materializationengine.index_manager import index_cache
 from materializationengine.shared_tasks import fin, add_index
 from materializationengine.utils import (
@@ -148,63 +148,56 @@ def create_tables(self, bulk_upload_params: dict):
     last_updated = bulk_upload_params["last_updated"]
     seg_table_name = bulk_upload_params["seg_table_name"]
     upload_creation_time = bulk_upload_params["upload_creation_time"]
-    session = sqlalchemy_cache.get(aligned_volume)
-    engine = sqlalchemy_cache.get_engine(aligned_volume)
+    
 
-    if (
-        not session.query(AnnoMetadata)
-        .filter(AnnoMetadata.table_name == table_name)
-        .scalar()
-    ):
-        AnnotationModel = create_annotation_model(bulk_upload_params)
-        AnnotationModel.__table__.create(bind=engine, checkfirst=True)
-        anno_metadata_dict = {
-            "table_name": table_name,
-            "schema_type": bulk_upload_params.get("schema"),
-            "valid": True,
-            "created": upload_creation_time,
-            "user_id": bulk_upload_params.get("user_id", "foo@bar.com"),
-            "description": bulk_upload_params["description"],
-            "reference_table": bulk_upload_params.get("reference_table"),
-            "flat_segmentation_source": bulk_upload_params.get(
-                "flat_segmentation_source"
-            ),
-        }
-        anno_metadata = AnnoMetadata(**anno_metadata_dict)
+    engine = db_manager.get_engine(aligned_volume)
+
+    with db_manager.session_scope(aligned_volume) as session:
+        if not session.query(AnnoMetadata).filter(AnnoMetadata.table_name == table_name).scalar():
+            AnnotationModel = create_annotation_model(bulk_upload_params)
+            AnnotationModel.__table__.create(bind=engine, checkfirst=True)
+            anno_metadata_dict = {
+                "table_name": table_name,
+                "schema_type": bulk_upload_params.get("schema"),
+                "valid": True,
+                "created": upload_creation_time,
+                "user_id": bulk_upload_params.get("user_id"),
+                "description": bulk_upload_params["description"],
+                "reference_table": bulk_upload_params.get("reference_table"),
+                "flat_segmentation_source": bulk_upload_params.get("flat_segmentation_source"),
+            }
+            anno_metadata = AnnoMetadata(**anno_metadata_dict)
+            session.add(anno_metadata)
+
         session.add(anno_metadata)
 
-    if (
-        not session.query(SegmentationMetadata)
-        .filter(SegmentationMetadata.table_name == table_name)
-        .scalar()
-    ):
-        SegmentationModel = create_segmentation_model(bulk_upload_params)
-        SegmentationModel.__table__.create(bind=engine, checkfirst=True)
-        seg_metadata_dict = {
-            "annotation_table": table_name,
-            "schema_type": bulk_upload_params.get("schema"),
-            "table_name": seg_table_name,
-            "valid": True,
-            "created": upload_creation_time,
-            "pcg_table_name": pcg_table_name,
-            "last_updated": last_updated,
-        }
+        if (
+            not session.query(SegmentationMetadata)
+            .filter(SegmentationMetadata.table_name == table_name)
+            .scalar()
+        ):
+            SegmentationModel = create_segmentation_model(bulk_upload_params)
+            SegmentationModel.__table__.create(bind=engine, checkfirst=True)
+            seg_metadata_dict = {
+                "annotation_table": table_name,
+                "schema_type": bulk_upload_params.get("schema"),
+                "table_name": seg_table_name,
+                "valid": True,
+                "created": upload_creation_time,
+                "pcg_table_name": pcg_table_name,
+                "last_updated": last_updated,
+            }
 
-        seg_metadata = SegmentationMetadata(**seg_metadata_dict)
+            seg_metadata = SegmentationMetadata(**seg_metadata_dict)
 
-    try:
-        session.flush()
-        session.add(seg_metadata)
-        session.commit()
-    except Exception as e:
-        celery_logger.error(f"SQL ERROR: {e}")
-        session.rollback()
-        raise e
-    finally:
+
+            session.flush()
+            session.add(seg_metadata)
+
+
         drop_seg_indexes = index_cache.drop_table_indices(
             SegmentationModel.__table__.name, engine
         )
-        # wait for indexes to drop
         time.sleep(10)
         drop_anno_indexes = index_cache.drop_table_indices(
             AnnotationModel.__table__.name, engine
@@ -215,8 +208,6 @@ def create_tables(self, bulk_upload_params: dict):
         celery_logger.info(
             f"Table {SegmentationModel.__table__.name} indices have been dropped {drop_seg_indexes}."
         )
-
-        session.close()
 
     return f"Tables {table_name}, {seg_table_name} created."
 
@@ -367,8 +358,7 @@ def upload_data(self, data: List, bulk_upload_info: dict):
     AnnotationModel = create_annotation_model(model_data)
     SegmentationModel = create_segmentation_model(model_data)
 
-    session = sqlalchemy_cache.get(aligned_volume)
-    engine = sqlalchemy_cache.get_engine(aligned_volume)
+    engine = db_manager.get_engine(aligned_volume)
 
     try:
         with engine.begin() as connection:
@@ -378,7 +368,6 @@ def upload_data(self, data: List, bulk_upload_info: dict):
         celery_logger.error(f"ERROR: {e}")
         raise self.retry(exc=Exception, countdown=3)
     finally:
-        session.close()
         engine.dispose()
     return True
 
@@ -391,7 +380,7 @@ def add_table_indices(self, bulk_upload_info: dict):
     segmentation_source = bulk_upload_info["pcg_table_name"]
     schema = bulk_upload_info["schema"]
 
-    engine = sqlalchemy_cache.get_engine(aligned_volume)
+    engine = db_manager.get_engine(aligned_volume)
     schema_client = DynamicSchemaClient()
     anno_model = schema_client.create_annotation_model(annotation_table_name, schema)
     seg_model = schema_client.create_segmentation_model(
@@ -442,7 +431,7 @@ def find_missing_chunks_by_ids(self, bulk_upload_info: dict, chunk_size: int = 1
     project = bulk_upload_info["project"]
     aligned_volume = bulk_upload_info["aligned_volume"]
 
-    engine = sqlalchemy_cache.get_engine(aligned_volume)
+    engine = db_manager.get_engine(aligned_volume)
 
     fs = gcsfs.GCSFileSystem(project=project)
     with fs.open(filename, "rb") as fhandle:

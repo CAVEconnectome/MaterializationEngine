@@ -3,9 +3,8 @@ import logging
 from datetime import date, datetime, timedelta
 
 import numpy as np
-import redis
-from dynamicannotationdb.models import AnalysisVersion, Base
-from flask import Blueprint, Flask, current_app, jsonify, redirect
+from dynamicannotationdb.models import Base, AnalysisVersion
+from flask import Blueprint, Flask, current_app, jsonify, redirect, url_for
 from flask_cors import CORS
 from flask_restx import Api
 from flask_sqlalchemy import SQLAlchemy
@@ -19,12 +18,12 @@ from materializationengine.blueprints.upload.api import upload_bp
 from materializationengine.blueprints.upload.storage import StorageService
 from materializationengine.blueprints.upload.models import init_staging_database
 from materializationengine.config import config, configure_app
-from materializationengine.database import sqlalchemy_cache
-from materializationengine.limiter import limiter
-from materializationengine.migrate import migrator
+from materializationengine.database import db_manager
 from materializationengine.schemas import ma
 from materializationengine.utils import get_instance_folder_path
 from materializationengine.views import views_bp
+from materializationengine.limiter import limiter
+from materializationengine.migrate import migrator
 
 db = SQLAlchemy(model_class=Base)
 
@@ -50,7 +49,7 @@ def create_app(config_name: str = None):
         instance_relative_config=True,
         template_folder="../templates",
     )
-    CORS(app, expose_headers="WWW-Authenticate")
+    CORS(app, expose_headers=["WWW-Authenticate", "column_names"])
     logging.basicConfig(level=logging.INFO)
     app.json_encoder = AEEncoder
     app.config["RESTX_JSON"] = {"cls": AEEncoder}
@@ -72,6 +71,10 @@ def create_app(config_name: str = None):
     def version():
         return jsonify(__version__), 200
 
+    @apibp.route("/")
+    def index():
+        return redirect("/materialize/views/")
+
     db.init_app(app)
     ma.init_app(app)
 
@@ -80,7 +83,10 @@ def create_app(config_name: str = None):
 
     with app.app_context():
         api = Api(
-            apibp, title="Materialization Engine API", version=__version__, doc="/api/doc"
+            apibp,
+            title="Materialization Engine API",
+            version=__version__,
+            doc="/api/doc",
         )
         api.add_namespace(mat_bp, path="/api/v2")
         api.add_namespace(client_bp, path="/api/v2")
@@ -106,19 +112,12 @@ def create_app(config_name: str = None):
     @app.route("/health")
     def health():
         aligned_volume = current_app.config.get("TEST_DB_NAME", "annotation")
-        session = sqlalchemy_cache.get(aligned_volume)
-        n_versions = session.query(AnalysisVersion).count()
-        session.close()
+        with db_manager.session_scope(aligned_volume) as session:
+            n_versions = session.query(AnalysisVersion).count()
+        
         return jsonify({aligned_volume: n_versions}), 200
-
-    @app.route("/materialize/")
-    def index():
-        return redirect("/materialize/views")
 
     @app.teardown_appcontext
     def shutdown_session(exception=None):
-        for key in sqlalchemy_cache._sessions:
-            session = sqlalchemy_cache.get(key)
-            session.remove()
-
+        db_manager.cleanup()
     return app
