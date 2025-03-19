@@ -137,7 +137,7 @@ class IndexCache:
                     index_map[fkey_column_key] = foreign_key_map
         return index_map
 
-    def drop_table_indices(self, table_name: str, engine):
+    def drop_table_indices(self, table_name: str, engine, drop_primary_key=True):
         """Generate SQL command to drop all indices and
         constraints on target table.
 
@@ -160,7 +160,7 @@ class IndexCache:
                 constraints_list.append(
                     f"{command} DROP CONSTRAINT IF EXISTS {column_info['foreign_key_name']}"
                 )
-            if "primary_key" in column_info["type"]:
+            if "primary_key" in column_info["type"] and drop_primary_key:
                 constraints_list.append(
                     f"{command} DROP CONSTRAINT IF EXISTS {column_info['index_name']}"
                 )
