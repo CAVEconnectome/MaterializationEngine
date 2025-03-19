@@ -164,7 +164,8 @@ class IndexCache:
                 constraints_list.append(
                     f"{command} DROP CONSTRAINT IF EXISTS {column_info['index_name']}"
                 )
-
+        if not constraints_list:
+            return f"No constraints on '{table_name}' found"
         drop_constraint = f"{'; '.join(constraints_list)} CASCADE"
         command = f"{drop_constraint};"
         index_list = [
