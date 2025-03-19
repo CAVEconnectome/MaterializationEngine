@@ -66,7 +66,8 @@ materialize_parser.add_argument("merge_tables", required=True, type=inputs.boole
 
 
 spatial_svid_parser = reqparse.RequestParser()
-spatial_svid_parser.add_argument("chunk_scale_factor", default=1, type=int)
+spatial_svid_parser.add_argument("chunk_scale_factor", default=1, type=int, help="Chunk scale factor for spatial lookup. Chunk size is 1024 * scale_factor")
+spatial_svid_parser.add_argument("supervoxel_batch_size", default=50, type=int, help="Number of supervoxels to lookup at a time per cloud volume call")
 spatial_svid_parser.add_argument("get_root_ids", default=True, type=inputs.boolean)
 spatial_svid_parser.add_argument("upload_to_database", default=True, type=inputs.boolean)
 spatial_svid_parser.add_argument("use_staging_database", default=False, type=inputs.boolean)
@@ -273,6 +274,7 @@ class SpatialSVIDLookupTableResource(Resource):
         datastack_info = get_datastack_info(datastack_name)
 
         chunk_scale_factor = args["chunk_scale_factor"]
+        supervoxel_batch_size = args["supervoxel_batch_size"]
         get_root_ids = args["get_root_ids"]
         upload_to_database = args["upload_to_database"]
         use_staging_database = args["use_staging_database"]
@@ -282,6 +284,7 @@ class SpatialSVIDLookupTableResource(Resource):
                 datastack_info,
                 table_name=table_name,
                 chunk_scale_factor=chunk_scale_factor,
+                supervoxel_batch_size=supervoxel_batch_size,
                 get_root_ids=get_root_ids,
                 upload_to_database=upload_to_database,
                 use_staging_database=use_staging_database,

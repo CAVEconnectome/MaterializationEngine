@@ -64,6 +64,7 @@ def run_spatial_lookup_workflow(
     datastack_info: dict,
     table_name: str,
     chunk_scale_factor: int = 1,
+    supervoxel_batch_size: int = 50,
     get_root_ids: bool = True,
     upload_to_database: bool = True,
     use_staging_database: bool = False,
@@ -173,16 +174,11 @@ def run_spatial_lookup_workflow(
                 total_chunks=chunking.total_chunks,
                 database=database,
                 table_name=table_name,
+                supervoxel_batch_size=supervoxel_batch_size,
             )
 
             chunk_tasks += 1
 
-            # Update checkpoint periodically
-            if chunk_tasks % 10 == 0:
-                checkpoint_manager.update_workflow(
-                    table_name=table_name,
-                    completed_chunks=completed_chunks + chunk_tasks,
-                )
 
             # Throttle if needed
             if mat_metadata.get("throttle_queues"):
@@ -226,10 +222,11 @@ def submit_task(
     mat_metadata,
     get_root_ids,
     upload_to_database,
-    chunk_idx,
+    chunk_idx,  
     total_chunks,
     database,
     table_name,
+    supervoxel_batch_size
 ):
     """Submit a task to process a single chunk."""
     min_corner_list = (
@@ -249,6 +246,7 @@ def submit_task(
         database=database,
         table_name=table_name,
         report_completion=True,
+        supervoxel_batch_size=supervoxel_batch_size,
     )
     task.apply_async()
 
@@ -273,6 +271,7 @@ def process_chunk(
     database=None,
     table_name=None,
     report_completion=False,
+    supervoxel_batch_size=50,
 ):
     """Query points in a bounding box and process supervoxel IDs and root IDS for a single chunk and inserts into the database.
 
@@ -315,7 +314,7 @@ def process_chunk(
         celery_logger.info(f"Found {points_count} points in bounding box")
 
         svids_start_time = time.time()
-        data = get_scatter_points(pts_df, mat_info, batch_size=50)
+        data = get_scatter_points(pts_df, mat_info, batch_size=supervoxel_batch_size)
         if data is None:
             return
         svids_time = time.time() - svids_start_time
