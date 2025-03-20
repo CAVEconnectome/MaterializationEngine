@@ -23,9 +23,8 @@ celery_logger = get_task_logger(__name__)
 
 
 def create_celery(app=None):
-
     celery.conf.broker_url = app.config["CELERY_BROKER_URL"]
-    celery.conf.result_backend = app.config["RESULT_BACKEND"]
+    celery.conf.result_backend = app.config["CELERY_RESULT_BACKEND"]
     if app.config.get("USE_SENTINEL", False):
         celery.conf.broker_transport_options = {
             "master_name": app.config["MASTER_NAME"]
@@ -207,7 +206,6 @@ def schedule_workflow(task_name: str, datastack_params: Dict[str, Any]) -> Calla
         )
 
     elif task_name == "run_periodic_materialization":
-
         return run_periodic_materialization.s(
             days_to_expire=datastack_params.get("days_to_expire", 2),
             merge_tables=datastack_params.get("merge_tables", False),
