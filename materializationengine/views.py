@@ -214,7 +214,7 @@ def datastack_view(datastack_name):
             df = df.reindex(columns=column_order)
 
             classes = ["table table-borderless"]
-            with pd.option_context("display.max_colwidth", -1):
+            with pd.option_context("display.max_colwidth", None):
                 output_html = df.to_html(
                     escape=False, classes=classes, index=False, justify="left", border=0
                 )
@@ -359,7 +359,7 @@ def version_view(
         df = df.reindex(columns=list(column_order) + ["ng_link"])
 
         classes = ["table table-borderless"]
-        with pd.option_context("display.max_colwidth", -1):
+        with pd.option_context("display.max_colwidth", None):
             output_html = df.to_html(
                 escape=False, classes=classes, index=False, justify="left", border=0
             )
@@ -382,7 +382,7 @@ def version_view(
                 axis=1,
             )
             classes = ["table table-borderless"]
-            with pd.option_context("display.max_colwidth", -1):
+            with pd.option_context("display.max_colwidth", None):
                 output_view_html = views_df.to_html(
                     escape=False, classes=classes, index=False, justify="left", border=0
                 )
@@ -697,7 +697,7 @@ def generic_report(datastack_name, id):
         return redirect(url)
     
     classes = ["table table-borderless"]
-    with pd.option_context("display.max_colwidth", -1):
+    with pd.option_context("display.max_colwidth", None):
         output_html = df.to_html(
             escape=False,
             classes=classes,
