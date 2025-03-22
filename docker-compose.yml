@@ -96,7 +96,6 @@ services:
       - .:/app
     env_file:
       - ./dev.env
-      - ./.env
     depends_on:
       - db
       - redis-master
