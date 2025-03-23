@@ -68,7 +68,8 @@ class CeleryThrottle:
         max_queue_length: int = 100,
         queues_to_throttle: List[str] = None,
         poll_interval: float = 3.0,
-        memory_limit: int = 858993459,
+        memory_limit: int = 1024 * 1024 * 1024,
+        memory_threshold_percent: int = 75,
     ):
         """Create a throttle to prevent too many tasks being sent
         to the broker. Will calculate wait time for task completion and
@@ -88,6 +89,8 @@ class CeleryThrottle:
         self.poll_interval = poll_interval
         self.memory_limit = memory_limit
         self.queues_to_throttle = queues_to_throttle
+        self.memory_threshold = memory_limit * (memory_threshold_percent / 100)
+
 
     def wait_if_queue_full(self, queue_name: str):
         """Pause the calling function or let it proceed, depending on the
