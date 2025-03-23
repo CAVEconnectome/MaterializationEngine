@@ -178,7 +178,6 @@ def run_spatial_lookup_workflow(
             )
 
             chunk_tasks += 1
-            
 
             # Throttle if needed
             if mat_metadata.get("throttle_queues"):
@@ -300,7 +299,9 @@ def process_chunk(
 
     try:
         pts_start_time = time.time()
-        pts_df = get_pts_from_bbox(database, np.array(min_corner), np.array(max_corner), mat_info)
+        pts_df = get_pts_from_bbox(
+            database, np.array(min_corner), np.array(max_corner), mat_info
+        )
         pts_time = time.time() - pts_start_time
 
         if pts_df is None or pts_df.empty:
@@ -462,21 +463,27 @@ def rebuild_indices_for_spatial_lookup(table_info: list, database: str):
 
 def get_pts_from_bbox(database, min_corner, max_corner, mat_info):
     try:
-        stmt = select([select_all_points_in_bbox(min_corner, max_corner, mat_info)])
-
         with db_manager.get_engine(database).begin() as connection:
-            df = pd.read_sql(stmt, connection)
-            # if the dataframe is empty then there are no points in the bounding box
-            # so we can skip the rest of the workflow
+            query = select_all_points_in_bbox(min_corner, max_corner, mat_info)
+            result = connection.execute(select([query]))
+            
+            df = pd.DataFrame(result.fetchall())
+            
             if df.empty:
                 return None
-            df["pt_position"] = df["pt_position"].apply(lambda pt: get_geom_from_wkb(pt))
-
+                
+            df.columns = result.keys()
+            
+            df["pt_position"] = df["pt_position"].apply(
+                lambda pt: get_geom_from_wkb(pt)
+            )
             return df
+        
     except Exception as e:
         celery_logger.error(f"Error in get_pts_from_bbox: {str(e)}")
         celery_logger.error(f"min_corner: {min_corner}, max_corner: {max_corner}")
         celery_logger.error(f"aligned_volume: {mat_info.get('aligned_volume')}")
+        raise e
 
 def match_point_and_get_value(point, points_map):
     point_tuple = tuple(point)
