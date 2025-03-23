@@ -178,7 +178,7 @@ def run_spatial_lookup_workflow(
             )
 
             chunk_tasks += 1
-
+            
 
             # Throttle if needed
             if mat_metadata.get("throttle_queues"):
@@ -222,11 +222,11 @@ def submit_task(
     mat_metadata,
     get_root_ids,
     upload_to_database,
-    chunk_idx,  
+    chunk_idx,
     total_chunks,
     database,
     table_name,
-    supervoxel_batch_size
+    supervoxel_batch_size,
 ):
     """Submit a task to process a single chunk."""
     min_corner_list = (
@@ -265,11 +265,11 @@ def process_chunk(
     min_corner,
     max_corner,
     mat_info,
-    get_root_ids=True,
-    upload_to_database=True,
-    chunk_info="",
-    database=None,
-    table_name=None,
+    get_root_ids,
+    upload_to_database,
+    chunk_info,
+    database,
+    table_name,
     report_completion=False,
     supervoxel_batch_size=50,
 ):
@@ -300,7 +300,7 @@ def process_chunk(
 
     try:
         pts_start_time = time.time()
-        pts_df = get_pts_from_bbox(np.array(min_corner), np.array(max_corner), mat_info)
+        pts_df = get_pts_from_bbox(database, np.array(min_corner), np.array(max_corner), mat_info)
         pts_time = time.time() - pts_start_time
 
         if pts_df is None or pts_df.empty:
@@ -460,21 +460,23 @@ def rebuild_indices_for_spatial_lookup(table_info: list, database: str):
         chain(add_index_tasks).apply_async()
 
 
-def get_pts_from_bbox(min_corner, max_corner, mat_info):
-    stmt = select(
-        [select_all_points_in_bbox(min_corner, max_corner, mat_info)]
-    ).compile(compile_kwargs={"literal_binds": True})
+def get_pts_from_bbox(database, min_corner, max_corner, mat_info):
+    try:
+        stmt = select([select_all_points_in_bbox(min_corner, max_corner, mat_info)])
 
-    with db_manager.get_engine(mat_info["aligned_volume"]).begin() as connection:
-        df = pd.read_sql(stmt, connection)
-        # if the dataframe is empty then there are no points in the bounding box
-        # so we can skip the rest of the workflow
-        if df.empty:
-            return None
-        df["pt_position"] = df["pt_position"].apply(lambda pt: get_geom_from_wkb(pt))
+        with db_manager.get_engine(database).begin() as connection:
+            df = pd.read_sql(stmt, connection)
+            # if the dataframe is empty then there are no points in the bounding box
+            # so we can skip the rest of the workflow
+            if df.empty:
+                return None
+            df["pt_position"] = df["pt_position"].apply(lambda pt: get_geom_from_wkb(pt))
 
-        return df
-
+            return df
+    except Exception as e:
+        celery_logger.error(f"Error in get_pts_from_bbox: {str(e)}")
+        celery_logger.error(f"min_corner: {min_corner}, max_corner: {max_corner}")
+        celery_logger.error(f"aligned_volume: {mat_info.get('aligned_volume')}")
 
 def match_point_and_get_value(point, points_map):
     point_tuple = tuple(point)

@@ -100,7 +100,9 @@ def create_app(config_name: str = None):
         db.init_app(app)
         db.create_all()
         admin = setup_admin(app, db)
-        init_staging_database(app)
+        if app.config.get("STAGING_DATABASE_NAME"):
+            init_staging_database(app)
+            
         # setup cors on upload bucket
         try:
             bucket_name = app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
