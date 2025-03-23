@@ -27,6 +27,7 @@ from materializationengine.shared_tasks import (
     get_materialization_info,
     workflow_complete,
     add_index,
+    update_metadata
 )
 from materializationengine.index_manager import index_cache
 from materializationengine.throttle import throttle_celery, get_queue_length
@@ -364,8 +365,9 @@ def process_chunk(
         self.retry(exc=e, countdown=int(2**self.request.retries))
 
 
-@celery.task(name="workflow:monitor_spatial_lookup_completion")
+@celery.task(name="workflow:monitor_spatial_lookup_completion", bind=True, acks_late=True)
 def monitor_spatial_lookup_completion(
+    self,
     table_name: str,
     database: str,
     total_chunks: int,
@@ -448,17 +450,15 @@ def rebuild_indices_for_spatial_lookup(table_info: list, database: str):
     )
 
     if seg_indices:
-        add_index_tasks = [add_index.si(database, command) for command in seg_indices]
-
-        # add workflow complete task to the end of the chain
-        add_index_tasks.append(
+        add_final_tasks = [add_index.si(database, command) for command in seg_indices]
+        add_final_tasks.append(update_metadata.si(mat_metadata))
+        add_final_tasks.append(
             workflow_complete.si(
                 f"Spatial Lookup for {segmentation_table_name} completed"
             )
         )
+        chain(add_final_tasks).apply_async()
 
-        # chain the tasks
-        chain(add_index_tasks).apply_async()
 
 
 def get_pts_from_bbox(database, min_corner, max_corner, mat_info):
