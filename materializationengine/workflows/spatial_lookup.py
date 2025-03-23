@@ -182,7 +182,7 @@ def run_spatial_lookup_workflow(
 
             # Throttle if needed
             if mat_metadata.get("throttle_queues"):
-                throttle_celery.wait_if_queue_full(queue_name="process")
+                throttle_celery.wait_if_needed(queue_name="process")
 
         task_count += chunk_tasks
 

@@ -68,7 +68,7 @@ class CeleryThrottle:
         max_queue_length: int = 100,
         queues_to_throttle: List[str] = None,
         poll_interval: float = 3.0,
-        memory_limit: int = 1073741824,
+        memory_limit: int = 858993459,
     ):
         """Create a throttle to prevent too many tasks being sent
         to the broker. Will calculate wait time for task completion and
@@ -119,6 +119,32 @@ class CeleryThrottle:
                 self.memory_remaining = self.memory_limit - memory_used
                 break
 
+            
+    def wait_if_needed(self, queue_name: str):
+        """Combined throttling check for both queue length and memory usage."""
+        # First check queue length
+        if queue_name in self.queues_to_throttle:
+            queue_length = get_queue_length(queue_name)
+            if queue_length > self.max_queue_length:
+                celery_logger.info(f"Queue {queue_name} full ({queue_length} tasks), throttling")
+                time.sleep(self.poll_interval)
+                return True  # Throttling was needed
+                
+        # Then check memory usage
+        memory_used = get_redis_memory_usage()
+        memory_percent = memory_used / self.memory_limit * 100
+        
+        if memory_used > self.memory_threshold:
+            celery_logger.info(
+                f"Redis memory usage high: {memory_used/1024/1024:.1f}MB "
+                f"({memory_percent:.1f}% of limit), throttling"
+            )
+            time.sleep(self.poll_interval)
+            return True  # Throttling was needed
+            
+        # No throttling needed
+        self.memory_remaining = self.memory_limit - memory_used
+        return False
 
 throttle_celery = CeleryThrottle(
     max_queue_length=int(get_config_param("QUEUE_LENGTH_LIMIT")),
