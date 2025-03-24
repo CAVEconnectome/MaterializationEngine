@@ -1,12 +1,11 @@
 import datetime
-import functools
 import time
 from typing import List
 
 import numpy as np
 import pandas as pd
-from celery.utils.log import get_task_logger
 from celery import chain
+from celery.utils.log import get_task_logger
 from cloudvolume.lib import Vec
 from geoalchemy2 import Geometry
 from sqlalchemy import (
@@ -20,17 +19,20 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
 
+from materializationengine.blueprints.upload.checkpoint_manager import (
+    RedisCheckpointManager,
+)
 from materializationengine.celery_init import celery
 from materializationengine.cloudvolume_gateway import cloudvolume_cache
 from materializationengine.database import db_manager, dynamic_annotation_cache
-from materializationengine.shared_tasks import (
-    get_materialization_info,
-    workflow_complete,
-    add_index,
-    update_metadata
-)
 from materializationengine.index_manager import index_cache
-from materializationengine.throttle import throttle_celery, get_queue_length
+from materializationengine.shared_tasks import (
+    add_index,
+    get_materialization_info,
+    update_metadata,
+    workflow_complete,
+)
+from materializationengine.throttle import get_queue_length, throttle_celery
 from materializationengine.utils import (
     create_annotation_model,
     create_segmentation_model,
@@ -41,10 +43,6 @@ from materializationengine.workflows.chunking import ChunkingStrategy
 from materializationengine.workflows.ingest_new_annotations import (
     create_missing_segmentation_table,
     get_new_root_ids,
-)
-
-from materializationengine.blueprints.upload.checkpoint_manager import (
-    RedisCheckpointManager,
 )
 
 Base = declarative_base()
@@ -102,7 +100,7 @@ def run_spatial_lookup_workflow(
     # Initialize variables for chunking
     engine = db_manager.get_engine(database)
     completed_chunks = 0
-
+    starting_chunk = 0
     # Create chunking strategy with appropriate size
     chunking = ChunkingStrategy(
         engine=engine,
@@ -116,14 +114,17 @@ def run_spatial_lookup_workflow(
         checkpoint_data = checkpoint_manager.get_workflow_data(table_name)
         if checkpoint_data:
             completed_chunks = checkpoint_data.completed_chunks or 0
-            celery_logger.info(
-                f"Resuming from checkpoint: {completed_chunks} chunks already processed"
-            )
-
-            # Restore strategy from checkpoint if available
-            if hasattr(checkpoint_data, "chunking_strategy"):
-                chunking = ChunkingStrategy.from_checkpoint(
-                    checkpoint_data, engine, table_name, database
+            
+            starting_chunk = completed_chunks
+            if checkpoint_data.last_processed_chunk:
+                starting_chunk = checkpoint_data.last_processed_chunk.index + 1
+                celery_logger.info(
+                    f"Resuming from last processed chunk {checkpoint_data.last_processed_chunk.index}, "
+                    f"starting at chunk {starting_chunk}"
+                )
+            else:
+                celery_logger.info(
+                    f"Resuming based on completed count: {completed_chunks} chunks already processed"
                 )
 
     # Ensure we have a valid strategy - this will determine bounds if needed
@@ -141,9 +142,8 @@ def run_spatial_lookup_workflow(
         status="processing",
     )
 
-    # Get a chunk generator that starts from the completed chunk index
-    if completed_chunks > 0:
-        chunk_generator = chunking.skip_to_index(completed_chunks)
+    if starting_chunk > 0 and resume_from_checkpoint:
+        chunk_generator = chunking.skip_to_index(starting_chunk)
     else:
         chunk_generator = chunking.create_chunk_generator()
 
@@ -179,6 +179,12 @@ def run_spatial_lookup_workflow(
             )
 
             chunk_tasks += 1
+
+            process_rate = checkpoint_manager.get_processing_rate(table_name)
+
+            celery_logger.info(
+                f"Submitted chunk {chunk_idx}/{chunking.total_chunks} for processing, "
+                f"rate: {process_rate}")
 
             # Throttle if needed
             if mat_metadata.get("throttle_queues"):
@@ -242,14 +248,13 @@ def submit_task(
         mat_info=mat_metadata,
         get_root_ids=get_root_ids,
         upload_to_database=upload_to_database,
-        chunk_info=f"Chunk {chunk_idx+1}/{total_chunks}",
+        chunk_info={"chunk_idx": chunk_idx, "total_chunks": total_chunks},
         database=database,
         table_name=table_name,
         report_completion=True,
         supervoxel_batch_size=supervoxel_batch_size,
     )
     task.apply_async()
-
 
 @celery.task(
     name="process:process_chunk",
@@ -288,8 +293,10 @@ def process_chunk(
     """
     task_id = self.request.id
     start_time = time.time()
+    chunk_progress=f"Chunk {chunk_info['chunk_idx']}/{chunk_info['total_chunks']}"
+
     celery_logger.debug(
-        f"Starting optimized_process_svids [{chunk_info}] (task_id: {task_id})"
+        f"Starting optimized_process_svids [{chunk_progress}] (task_id: {task_id})"
     )
 
     checkpoint_manager = (
@@ -336,15 +343,23 @@ def process_chunk(
 
         if upload_to_database and len(root_id_data) > 0:
             upload_start_time = time.time()
-            is_inserted = insert_segmentation_data(root_id_data, mat_info)
+            affected_rows = insert_segmentation_data(root_id_data, mat_info)
             upload_time = time.time() - upload_start_time
             celery_logger.info(
                 f"Inserted {len(root_id_data)} rows in {upload_time:.2f}s"
             )
 
         if report_completion and checkpoint_manager:
+            chunk_data = {
+                "min_corner": min_corner,
+                "max_corner": max_corner,
+                "index": chunk_info["chunk_idx"]
+            }
             checkpoint_manager.increment_completed(
-                table_name=table_name, rows_processed=points_count
+                table_name=table_name, 
+                rows_processed=affected_rows,
+                last_processed_chunk=chunk_data,
+                last_chunk_index=chunk_info["chunk_idx"],
             )
 
         total_time = time.time() - start_time
@@ -758,9 +773,11 @@ def insert_segmentation_data(
 
     # insert the data or update if it already exists
     with db_manager.get_engine(database).begin() as connection:
-        connection.execute(do_update_stmt)
+        result = connection.execute(do_update_stmt)
+        # return the number of rows inserted
+        affected_rows = result.rowcount
     celery_logger.info(f"Insertion time: {time.time() - start_time} seconds")
-    return True
+    return affected_rows
 
 
 def _safe_pivot_svid_df_to_dict(df: pd.DataFrame) -> dict:
