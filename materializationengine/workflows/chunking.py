@@ -412,23 +412,68 @@ class ChunkingStrategy:
         
         Args:
             start_index: Index to start from
-            
+                
         Returns:
             function: Generator that yields (min_corner, max_corner) tuples
         """
         if start_index <= 0:
             return self.create_chunk_generator()
+        
+        if self.strategy_name == "grid" and self._chunk_info:
+            def grid_skip_generator():
+                min_coords = self._chunk_info["min_coords"]
+                max_coords = self._chunk_info["max_coords"]
+                x_chunks = self._chunk_info["x_chunks"]
+                y_chunks = self._chunk_info["y_chunks"]
+                z_chunks = self._chunk_info["z_chunks"]
+                chunk_size = self._chunk_info["chunk_size"]
+                
+                remaining = start_index
+                x_idx = remaining // (y_chunks * z_chunks)
+                remaining %= (y_chunks * z_chunks)
+                y_idx = remaining // z_chunks
+                z_idx = remaining % z_chunks
+                
+                for x_i in range(x_idx, x_chunks):
+                    for y_i in range(y_idx if x_i == x_idx else 0, y_chunks):
+                        for z_i in range(z_idx if (x_i == x_idx and y_i == y_idx) else 0, z_chunks):
+                            x_start = min_coords[0] + x_i * chunk_size
+                            y_start = min_coords[1] + y_i * chunk_size
+                            z_start = min_coords[2] + z_i * chunk_size
+                            x_end = min(x_start + chunk_size, max_coords[0])
+                            y_end = min(y_start + chunk_size, max_coords[1])
+                            z_end = min(z_start + chunk_size, max_coords[2])
+
+                            min_corner = np.array([x_start, y_start, z_start])
+                            max_corner = np.array([x_end, y_end, z_end])
+                            
+                            yield (min_corner, max_corner)
             
+            return grid_skip_generator
+        
+
         generator = self.create_chunk_generator()
         
-        def skipped_generator():
-            # Skip the first start_index chunks
-            for i, chunk in enumerate(generator()):
-                if i >= start_index:
-                    yield chunk
-                    
-        return skipped_generator
+        def skip_generator():
+            gen = generator()
+            skipped = 0
+            try:
+                while skipped < start_index:
+                    next(gen)
+                    skipped += 1
+            except StopIteration:
+                # Ran out of chunks to skip
+                return
+            
+            # Yield all remaining chunks
+            try:
+                while True:
+                    yield next(gen)
+            except StopIteration:
+                return
         
+        return skip_generator
+            
     def to_dict(self):
         """
         Convert strategy to a dictionary for serialization.
