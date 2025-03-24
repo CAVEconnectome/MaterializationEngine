@@ -191,8 +191,18 @@ class RedisCheckpointManager:
 
         REDIS_CLIENT.set(key, json.dumps(asdict(workflow_data)), ex=self.expiry_time)
         return True
+    
+    def get_processing_rate(self, table_name: str) -> Optional[str]:
+        """Get the processing rate for a workflow."""
+        workflow_data = self.get_workflow_data(table_name)
+        if workflow_data:
+            return workflow_data.processing_rate
+        return None
 
-    def increment_completed(self, table_name: str, rows_processed: int = 0) -> bool:
+    def increment_completed(
+        self, table_name: str, rows_processed: int = 0, 
+        last_processed_chunk: Dict = None, last_chunk_index: int = None
+    ) -> bool:
         """Increment completed chunks counter and update metrics atomically."""
         key = f"{self.workflow_prefix}{table_name}"
 
@@ -207,6 +217,17 @@ class RedisCheckpointManager:
 
                 data_dict = json.loads(workflow_json)
 
+                if last_processed_chunk is not None:
+                    min_corner = last_processed_chunk.get("min_corner")
+                    max_corner = last_processed_chunk.get("max_corner")
+                    index = last_processed_chunk.get("index", last_chunk_index)
+                    
+                    data_dict["last_processed_chunk"] = {
+                        "min_corner": min_corner,
+                        "max_corner": max_corner,
+                        "index": index
+                    }
+
                 last_chunk = data_dict.get("last_processed_chunk")
                 if last_chunk:
                     data_dict["last_processed_chunk"] = ChunkInfo(**last_chunk)
@@ -219,7 +240,7 @@ class RedisCheckpointManager:
                     datetime.timezone.utc
                 ).isoformat()
 
-                if workflow_data.start_time and workflow_data.rows_processed > 0:
+                if workflow_data.start_time:
                     start_time = datetime.datetime.fromisoformat(
                         workflow_data.start_time
                     )
