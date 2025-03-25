@@ -69,5 +69,5 @@ class CloudVolumeGateway:
 
 
 cloudvolume_cache = CloudVolumeGateway(
-    lru_bytes=int(os.environ.get("CELERY_CLOUDVOLUME_CACHE_BYTES", "1e8"))
+    lru_bytes=int(os.environ.get("CELERY_CLOUDVOLUME_CACHE_BYTES", 1024 * 1024 * 100))
 )
