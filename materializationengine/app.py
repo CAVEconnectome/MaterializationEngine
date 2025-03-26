@@ -59,6 +59,8 @@ def create_app(config_name: str = None):
         app.config.from_object(config[config_name])
     else:
         app = configure_app(app)
+
+
     
     # register blueprints
     apibp = Blueprint("api", __name__, url_prefix="/materialize")
@@ -74,6 +76,12 @@ def create_app(config_name: str = None):
     @apibp.route("/")
     def index():
         return redirect("/materialize/views/")
+
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+        'pool_pre_ping': True,
+        'pool_recycle': 3600,
+    }
+    
 
     db.init_app(app)
     ma.init_app(app)
@@ -96,9 +104,11 @@ def create_app(config_name: str = None):
         app.register_blueprint(views_bp)
         app.register_blueprint(upload_bp)
         limiter.init_app(app)
-
-        db.init_app(app)
-        db.create_all()
+        try:
+            db.create_all()
+        except Exception as e:
+            app.logger.error(f"Error creating database tables: {e}")
+            
         admin = setup_admin(app, db)
         if app.config.get("STAGING_DATABASE_NAME"):
             init_staging_database(app)
