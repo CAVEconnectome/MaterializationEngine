@@ -31,6 +31,9 @@ class ChunkInfo:
     min_corner: List[float]
     max_corner: List[float]
     index: int = 0
+    updated_at: str = field(
+        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
+    )
 
 
 @dataclass
@@ -43,6 +46,7 @@ class WorkflowData:
 
     total_chunks: int = 0
     completed_chunks: int = 0
+    submitted_chunks: int = 0
     rows_processed: int = 0
 
     start_time: str = field(
@@ -68,6 +72,8 @@ class WorkflowData:
     used_chunk_size: int = 1024
 
     last_error: Optional[str] = None
+    last_failed_chunk_index: Optional[int] = None
+    last_failure_time: Optional[str] = None
 
     @property
     def progress(self) -> float:
@@ -138,7 +144,7 @@ class RedisCheckpointManager:
 
     def update_workflow(
         self, table_name: str, min_enclosing_bbox: Optional[np.ndarray] = None, **kwargs
-    ) -> bool:
+        ) -> bool:
         """Update workflow data."""
         key = f"{self.workflow_prefix}{table_name}"
 
@@ -175,6 +181,10 @@ class RedisCheckpointManager:
                 else min_enclosing_bbox
             )
             workflow_data.bbox_hash = self.get_bbox_hash(min_enclosing_bbox)
+
+        if "last_error" in kwargs and kwargs["last_error"]:
+            timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            workflow_data.last_error = f"[{timestamp}] {kwargs['last_error']}"
 
         valid_fields = {f.name for f in fields(WorkflowData)}
         for field_name, value in kwargs.items():
@@ -225,7 +235,8 @@ class RedisCheckpointManager:
                     data_dict["last_processed_chunk"] = {
                         "min_corner": min_corner,
                         "max_corner": max_corner,
-                        "index": index
+                        "index": index,
+                        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
                     }
 
                 last_chunk = data_dict.get("last_processed_chunk")
@@ -298,7 +309,7 @@ class RedisCheckpointManager:
                 time.sleep(0.5)
 
         return False
-
+    
     def get_active_workflows(self) -> List[Dict[str, Any]]:
         """Get a list of all active workflow data."""
         active_workflows = []
@@ -331,3 +342,18 @@ class RedisCheckpointManager:
                 ),
             )
         return (0, 0)
+    
+    def record_chunk_failure(self, table_name: str, chunk_index: int, error: str = None) -> bool:
+        """Record a chunk failure."""
+        try:
+            error_msg = f"Chunk {chunk_index} failed: {error}" if error else f"Chunk {chunk_index} failed"
+            self.update_workflow(
+                table_name=table_name,
+                last_error=error_msg,
+                last_failed_chunk_index=chunk_index,
+                last_failure_time=datetime.datetime.now(datetime.timezone.utc).isoformat()
+            )
+            return True
+        except Exception as e:
+            celery_logger.error(f"Error recording chunk failure: {str(e)}")
+            return False

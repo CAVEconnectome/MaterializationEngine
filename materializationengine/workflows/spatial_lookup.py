@@ -14,6 +14,7 @@ from sqlalchemy import (
     literal,
     select,
     union_all,
+    text,
 )
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.declarative import declarative_base
@@ -114,7 +115,7 @@ def run_spatial_lookup_workflow(
         checkpoint_data = checkpoint_manager.get_workflow_data(table_name)
         if checkpoint_data:
             completed_chunks = checkpoint_data.completed_chunks or 0
-            
+
             starting_chunk = completed_chunks
             if checkpoint_data.last_processed_chunk:
                 starting_chunk = checkpoint_data.last_processed_chunk.index + 1
@@ -149,7 +150,7 @@ def run_spatial_lookup_workflow(
 
     # Process each table in the materialization info
     task_count = 0
-
+    submitted_count = completed_chunks
     for mat_metadata in table_info:
         # Create segmentation table if it doesn't exist
         create_missing_segmentation_table(mat_metadata)
@@ -161,6 +162,7 @@ def run_spatial_lookup_workflow(
 
         # Submit tasks for each chunk
         chunk_tasks = 0
+        submit_batch_size = 100
         for chunk_idx, (min_corner, max_corner) in enumerate(
             chunk_generator(), completed_chunks
         ):
@@ -179,12 +181,19 @@ def run_spatial_lookup_workflow(
             )
 
             chunk_tasks += 1
-
+            task_count += 1
+            submitted_count += 1
+            if chunk_tasks % submit_batch_size == 0:
+                checkpoint_manager.update_workflow(
+                    table_name=table_name, submitted_chunks=submitted_count
+                )
+                celery_logger.info(f"Updated submitted count: {submitted_count} chunks")
             process_rate = checkpoint_manager.get_processing_rate(table_name)
 
             celery_logger.info(
                 f"Submitted chunk {chunk_idx}/{chunking.total_chunks} for processing, "
-                f"rate: {process_rate}")
+                f"rate: {process_rate}"
+            )
 
             # Throttle if needed
             if mat_metadata.get("throttle_queues"):
@@ -195,14 +204,14 @@ def run_spatial_lookup_workflow(
         # Final checkpoint update
         if chunk_tasks > 0:
             checkpoint_manager.update_workflow(
-                table_name=table_name,
-                completed_chunks=completed_chunks + chunk_tasks,
+                table_name=table_name, submitted_chunks=completed_chunks + chunk_tasks
             )
 
     # Update workflow status on completion
     completion_time = time.time() - start_time
     checkpoint_manager.update_workflow(
         table_name=table_name,
+        submitted_chunks=submitted_count,
         status="submitted",
         total_time_seconds=completion_time,
     )
@@ -256,6 +265,7 @@ def submit_task(
     )
     task.apply_async()
 
+
 @celery.task(
     name="process:process_chunk",
     bind=True,
@@ -275,28 +285,16 @@ def process_chunk(
     chunk_info,
     database,
     table_name,
-    report_completion=False,
+    report_completion=True,
     supervoxel_batch_size=50,
 ):
-    """Query points in a bounding box and process supervoxel IDs and root IDS for a single chunk and inserts into the database.
-
-    Args:
-        min_corner (_type_): _description_
-        max_corner (_type_): _description_
-        mat_info (_type_): _description_
-        get_root_ids (bool, optional): _description_. Defaults to True.
-        upload_to_database (bool, optional): _description_. Defaults to True.
-        chunk_info (str, optional): _description_. Defaults to "".
-        database (_type_, optional): _description_. Defaults to None.
-        table_name (_type_, optional): _description_. Defaults to None.
-        report_completion (bool, optional): _description_. Defaults to False.
-    """
+    """Query points in a bounding box and process supervoxel IDs and root IDS for a single chunk and inserts into the database."""
     task_id = self.request.id
     start_time = time.time()
-    chunk_progress=f"Chunk {chunk_info['chunk_idx']}/{chunk_info['total_chunks']}"
+    chunk_progress = f"Chunk {chunk_info['chunk_idx']}/{chunk_info['total_chunks']}"
 
     celery_logger.debug(
-        f"Starting optimized_process_svids [{chunk_progress}] (task_id: {task_id})"
+        f"Starting process_chunk [{chunk_progress}] (task_id: {task_id})"
     )
 
     checkpoint_manager = (
@@ -314,9 +312,18 @@ def process_chunk(
 
         if pts_df is None or pts_df.empty:
             if report_completion and checkpoint_manager:
+                chunk_data = {
+                    "min_corner": min_corner,
+                    "max_corner": max_corner,
+                    "index": chunk_info["chunk_idx"],
+                }
                 checkpoint_manager.increment_completed(
-                    table_name=table_name, rows_processed=0
+                    table_name=table_name,
+                    rows_processed=0,
+                    last_processed_chunk=chunk_data,
+                    last_chunk_index=chunk_info["chunk_idx"],
                 )
+            celery_logger.info(f"No points found in chunk {chunk_info['chunk_idx']}")
             return None
 
         points_count = len(pts_df)
@@ -325,13 +332,31 @@ def process_chunk(
         svids_start_time = time.time()
         data = get_scatter_points(pts_df, mat_info, batch_size=supervoxel_batch_size)
         if data is None:
-            return
+            if report_completion and checkpoint_manager:
+                chunk_data = {
+                    "min_corner": min_corner,
+                    "max_corner": max_corner,
+                    "index": chunk_info["chunk_idx"],
+                }
+                checkpoint_manager.increment_completed(
+                    table_name=table_name,
+                    rows_processed=0,
+                    last_processed_chunk=chunk_data,
+                    last_chunk_index=chunk_info["chunk_idx"],
+                )
+            celery_logger.info(
+                f"No supervoxel IDs found for chunk {chunk_info['chunk_idx']}"
+            )
+            return None
+
         svids_time = time.time() - svids_start_time
 
         svids_count = len(data["id"])
         celery_logger.info(
             f"Processed {svids_count} supervoxel IDs in {svids_time:.2f}s"
         )
+
+        affected_rows = 0
 
         if get_root_ids and svids_count > 0:
             root_ids_start_time = time.time()
@@ -341,46 +366,49 @@ def process_chunk(
                 f"Retrieved {len(root_id_data)} root IDs in {root_ids_time:.2f}s"
             )
 
-        if upload_to_database and len(root_id_data) > 0:
-            upload_start_time = time.time()
-            affected_rows = insert_segmentation_data(root_id_data, mat_info)
-            upload_time = time.time() - upload_start_time
-            celery_logger.info(
-                f"Inserted {len(root_id_data)} rows in {upload_time:.2f}s"
-            )
+            if upload_to_database and len(root_id_data) > 0:
+                upload_start_time = time.time()
+                affected_rows = insert_segmentation_data(root_id_data, mat_info)
+                upload_time = time.time() - upload_start_time
+                celery_logger.info(
+                    f"Inserted {affected_rows} rows in {upload_time:.2f}s"
+                )
 
         if report_completion and checkpoint_manager:
             chunk_data = {
                 "min_corner": min_corner,
                 "max_corner": max_corner,
-                "index": chunk_info["chunk_idx"]
+                "index": chunk_info["chunk_idx"],
             }
             checkpoint_manager.increment_completed(
-                table_name=table_name, 
+                table_name=table_name,
                 rows_processed=affected_rows,
                 last_processed_chunk=chunk_data,
                 last_chunk_index=chunk_info["chunk_idx"],
             )
 
         total_time = time.time() - start_time
-        celery_logger.debug(
-            f"Completed chunk {chunk_info} in {total_time:.2f}s: "
-            f"{points_count} points, {svids_count} supervoxels"
+        celery_logger.info(
+            f"Completed chunk {chunk_info['chunk_idx']} in {total_time:.2f}s: "
+            f"{points_count} points, {svids_count} supervoxels, {affected_rows} rows affected"
         )
 
-        return {
-            "status": "success",
-            "points_processed": points_count,
-            "svids_found": svids_count,
-            "processing_time": total_time,
-        }
+        return None
 
     except Exception as e:
-        celery_logger.error(f"Error processing chunk {chunk_info}: {str(e)}")
+        error_msg = f"Error processing chunk {chunk_info['chunk_idx']}: {str(e)}"
+        celery_logger.error(error_msg)
+
+        if checkpoint_manager:
+            checkpoint_manager.record_chunk_failure(
+                table_name=table_name, chunk_index=chunk_info["chunk_idx"], error=str(e)
+            )
         self.retry(exc=e, countdown=int(2**self.request.retries))
 
 
-@celery.task(name="workflow:monitor_spatial_lookup_completion", bind=True, acks_late=True)
+@celery.task(
+    name="workflow:monitor_spatial_lookup_completion", bind=True, acks_late=True
+)
 def monitor_spatial_lookup_completion(
     self,
     table_name: str,
@@ -391,35 +419,129 @@ def monitor_spatial_lookup_completion(
 ):
     """
     Monitor task completion by checking:
-    1. Queue is empty
-    2. All chunks processed in checkpoint
+    - Queue length
+    - Workflow data
+    - Database connection
+    - Row count verification
+    - Timeout
+
     """
     checkpoint_manager = RedisCheckpointManager(database)
     max_wait_time = 3600 * 24 * 3  # 72-hour timeout
     start_time = time.time()
-    polling_interval = 360
+    polling_interval = 60
+    database_error_counter = 0
+    max_allowed_database_errors = 3
 
     while True:
-        current_time = time.time()
+        try:
+            current_time = time.time()
+            queue_length = get_queue_length(queue_name)
+            workflow_data = checkpoint_manager.get_workflow_data(table_name)
 
-        # Check queue length
-        queue_length = get_queue_length(queue_name)
+            if not workflow_data:
+                celery_logger.error(f"No workflow data found for {table_name}")
+                return f"Error: No workflow data for {table_name}"
 
-        workflow_data = checkpoint_manager.get_workflow_data(table_name)
-
-        if workflow_data:
             current_completed = workflow_data.completed_chunks
+            rows_processed = workflow_data.rows_processed
+            total_row_estimate = workflow_data.total_row_estimate or 0
 
-            # Completion conditions:
-            # 1. Queue is empty
-            # 2. All chunks processed
+            submitted = workflow_data.submitted_chunks
+            if submitted > 0 and submitted != current_completed and queue_length == 0:
+                celery_logger.error(
+                    f"Mismatch between submitted ({submitted}) and completed ({current_completed}) chunks. "
+                    f"This suggests tasks were lost or failed silently."
+                )
+
+            if workflow_data.last_failed_chunk_index is not None:
+                celery_logger.warning(
+                    f"Last failed chunk: {workflow_data.last_failed_chunk_index}, "
+                    f"at {workflow_data.last_failure_time}"
+                )
+                celery_logger.warning(f"Error: {workflow_data.last_error}")
+
+            celery_logger.info(
+                f"Progress for {table_name}: {current_completed}/{total_chunks} chunks "
+                f"({current_completed/total_chunks*100:.1f}%), "
+                f"Submitted: {submitted}, "
+                f"Rows: {rows_processed}/{total_row_estimate if total_row_estimate > 0 else '?'}"
+            )
+            # Queue empty but chunks incomplete - potential task failure
+            if queue_length == 0 and current_completed < total_chunks:
+                celery_logger.error(
+                    f"Queue is empty but processing incomplete for {table_name}: "
+                    f"{current_completed}/{total_chunks} chunks, "
+                    f"{rows_processed} rows processed. "
+                    f"Some tasks may have failed silently."
+                )
+
+                checkpoint_manager.update_workflow(
+                    table_name=table_name,
+                    status="incomplete_error",
+                    last_error=f"Processing stopped at {current_completed}/{total_chunks} chunks",
+                )
+
+                # Don't break - keep monitoring in case more tasks appear
+                time.sleep(polling_interval)
+                continue
+
+            # Check for completion - with row verification
             if queue_length == 0 and current_completed >= total_chunks:
-
                 try:
+                    engine = db_manager.get_engine(database)
+                    with engine.connect() as conn:
+                        result = conn.execute(text("SELECT 1"))
+                        if not result.scalar():
+                            raise Exception("Database connection test failed")
 
+                        # Now verify actual row count in the database
+                        if table_info and table_info[0].get("segmentation_table_name"):
+                            segmentation_table = table_info[0][
+                                "segmentation_table_name"
+                            ]
+                            try:
+                                db_row_count = conn.execute(
+                                    text(f"SELECT COUNT(*) FROM {segmentation_table}")
+                                ).scalar()
+
+                                celery_logger.info(
+                                    f"Row count verification for {table_name}: "
+                                    f"Checkpoint reports {rows_processed}, "
+                                    f"Database has {db_row_count} rows"
+                                )
+
+                                # If row counts don't roughly match or table is too small,
+                                # something is wrong
+                                min_expected_rows = max(
+                                    1000, rows_processed * 0.8
+                                )
+
+                                if db_row_count < min_expected_rows:
+                                    celery_logger.error(
+                                        f"Row count mismatch! Database has {db_row_count} rows, "
+                                        f"expected at least {min_expected_rows}"
+                                    )
+                                    checkpoint_manager.update_workflow(
+                                        table_name=table_name,
+                                        status="data_verification_failed",
+                                        last_error=f"Row count verification failed: {db_row_count} < {min_expected_rows}",
+                                    )
+                                    # Don't declare success - something is wrong
+                                    time.sleep(polling_interval)
+                                    continue
+                            except Exception as e:
+                                celery_logger.error(
+                                    f"Error verifying row count: {str(e)}"
+                                )
+                                # Don't immediately fail - just try again later
+                                time.sleep(polling_interval)
+                                continue
+
+                    # If we get here, all verification passed
+                    celery_logger.info(f"Rebuilding indices for {table_name}...")
                     rebuild_indices_for_spatial_lookup(table_info, database)
 
-                    # Update workflow status
                     checkpoint_manager.update_workflow(
                         table_name=table_name,
                         status="completed",
@@ -427,24 +549,38 @@ def monitor_spatial_lookup_completion(
                     )
 
                     celery_logger.info(f"Spatial lookup completed for {table_name}")
-                    break
+                    return f"Spatial lookup completed for {table_name}"
+
                 except Exception as e:
-                    celery_logger.error(f"Error in completion process: {e}")
-                    checkpoint_manager.update_workflow(
-                        table_name=table_name, status="error", last_error=str(e)
-                    )
-                    break
+                    database_error_counter += 1
+                    celery_logger.error(f"Database error: {str(e)}")
 
-        # Timeout protection
-        if current_time - start_time > max_wait_time:
-            celery_logger.error(f"Spatial lookup monitoring timed out for {table_name}")
-            checkpoint_manager.update_workflow(
-                table_name=table_name, status="error", last_error="Monitoring timed out"
-            )
-            break
+                    if database_error_counter >= max_allowed_database_errors:
+                        checkpoint_manager.update_workflow(
+                            table_name=table_name,
+                            status="database_error",
+                            last_error=f"Database errors prevented completion verification: {str(e)}",
+                        )
+                        return f"Error: Database connection issues"
 
-        # Sleep to prevent tight looping
-        time.sleep(polling_interval)
+                    time.sleep(30)
+                    continue
+
+            # Timeout protection
+            if current_time - start_time > max_wait_time:
+                celery_logger.error(f"Monitoring timed out for {table_name}")
+                checkpoint_manager.update_workflow(
+                    table_name=table_name,
+                    status="timeout",
+                    last_error="Monitoring timed out",
+                )
+                return f"Error: Monitoring timed out for {table_name}"
+
+            time.sleep(polling_interval)
+
+        except Exception as e:
+            celery_logger.error(f"Error in monitoring task: {str(e)}")
+            time.sleep(polling_interval)
 
 
 def rebuild_indices_for_spatial_lookup(table_info: list, database: str):
@@ -475,30 +611,30 @@ def rebuild_indices_for_spatial_lookup(table_info: list, database: str):
         chain(add_final_tasks).apply_async()
 
 
-
 def get_pts_from_bbox(database, min_corner, max_corner, mat_info):
     try:
         with db_manager.get_engine(database).begin() as connection:
             query = select_all_points_in_bbox(min_corner, max_corner, mat_info)
             result = connection.execute(select([query]))
-            
+
             df = pd.DataFrame(result.fetchall())
-            
+
             if df.empty:
                 return None
-                
+
             df.columns = result.keys()
-            
+
             df["pt_position"] = df["pt_position"].apply(
                 lambda pt: get_geom_from_wkb(pt)
             )
             return df
-        
+
     except Exception as e:
         celery_logger.error(f"Error in get_pts_from_bbox: {str(e)}")
         celery_logger.error(f"min_corner: {min_corner}, max_corner: {max_corner}")
         celery_logger.error(f"aligned_volume: {mat_info.get('aligned_volume')}")
         raise e
+
 
 def match_point_and_get_value(point, points_map):
     point_tuple = tuple(point)
