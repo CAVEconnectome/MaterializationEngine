@@ -84,7 +84,8 @@ def run_spatial_lookup_workflow(
     checkpoint_manager = RedisCheckpointManager(database)
 
     # Initialize workflow state
-    checkpoint_manager.initialize_workflow(table_name, task_id)
+    if not resume_from_checkpoint:
+        checkpoint_manager.initialize_workflow(table_name, task_id)
 
     # Set materialization timestamp
     materialization_time_stamp = datetime.datetime.utcnow()
@@ -110,28 +111,32 @@ def run_spatial_lookup_workflow(
         base_chunk_size=chunk_scale_factor * 1024,
     )
 
-    # Try to restore from checkpoint
     if resume_from_checkpoint:
         checkpoint_data = checkpoint_manager.get_workflow_data(table_name)
         if checkpoint_data:
             completed_chunks = checkpoint_data.completed_chunks or 0
-
-            starting_chunk = completed_chunks
+            submitted_chunks = checkpoint_data.submitted_chunks or 0
+            
             if checkpoint_data.last_processed_chunk:
-                starting_chunk = checkpoint_data.last_processed_chunk.index + 1
+                starting_chunk = checkpoint_data.last_processed_chunk.index
+
+                # Log the situation for debugging
                 celery_logger.info(
-                    f"Resuming from last processed chunk {checkpoint_data.last_processed_chunk.index}, "
-                    f"starting at chunk {starting_chunk}"
+                    f"Resuming from last processed chunk {starting_chunk}, "
+                    f"starting at chunk {starting_chunk} "
+                    f"(completed count: {completed_chunks}, submitted: {submitted_chunks})"
                 )
             else:
+                buffer = min(50, completed_chunks // 10)
+                starting_chunk = max(0, completed_chunks - buffer)
+                
                 celery_logger.info(
-                    f"Resuming based on completed count: {completed_chunks} chunks already processed"
+                    f"Resuming with buffer: {completed_chunks} chunks completed, "
+                    f"starting from chunk {starting_chunk} (buffer: {buffer})"
                 )
 
-    # Ensure we have a valid strategy - this will determine bounds if needed
     strategy = chunking.select_strategy()
 
-    # Update checkpoint with chunking information
     checkpoint_manager.update_workflow(
         table_name=table_name,
         min_enclosing_bbox=np.array([chunking.min_coords, chunking.max_coords]),
@@ -148,11 +153,9 @@ def run_spatial_lookup_workflow(
     else:
         chunk_generator = chunking.create_chunk_generator()
 
-    # Process each table in the materialization info
     task_count = 0
     submitted_count = completed_chunks
     for mat_metadata in table_info:
-        # Create segmentation table if it doesn't exist
         create_missing_segmentation_table(mat_metadata)
 
         #  drop existing indices on the table
@@ -198,8 +201,6 @@ def run_spatial_lookup_workflow(
             # Throttle if needed
             if mat_metadata.get("throttle_queues"):
                 throttle_celery.wait_if_needed(queue_name="process")
-
-        task_count += chunk_tasks
 
         # Final checkpoint update
         if chunk_tasks > 0:
@@ -326,7 +327,7 @@ def process_chunk(
             celery_logger.info(f"No points found in chunk {chunk_info['chunk_idx']}")
             return None
 
-        points_count = len(pts_df)
+        points_count = len(pts_df["id"])
         celery_logger.info(f"Found {points_count} points in bounding box")
 
         svids_start_time = time.time()
