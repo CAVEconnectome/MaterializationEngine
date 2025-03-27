@@ -1,29 +1,37 @@
-from typing import Any, Dict
 import datetime
 import functools
 import os
+from typing import Any, Dict
 
 from dynamicannotationdb.models import AnalysisVersion
 from dynamicannotationdb.schema import DynamicSchemaClient
 from flask import (
     Blueprint,
+    abort,
     current_app,
+    g,
     jsonify,
     redirect,
     render_template,
     request,
     url_for,
-    g
 )
+from flask_accepts import accepts
+from flask_restx import Namespace, Resource, fields, inputs, reqparse
 from google.cloud import storage
+from middle_auth_client import auth_requires_admin, auth_requires_permission
 from redis import StrictRedis
 
+from materializationengine.blueprints.reset_auth import reset_auth
+from materializationengine.blueprints.upload.checkpoint_manager import (
+    RedisCheckpointManager,
+)
 from materializationengine.blueprints.upload.schema_helper import get_schema_types
+from materializationengine.blueprints.upload.schemas import UploadRequestSchema
 from materializationengine.blueprints.upload.storage import (
     StorageConfig,
     StorageService,
 )
-from materializationengine.blueprints.upload.schemas import UploadRequestSchema
 from materializationengine.blueprints.upload.tasks import (
     cancel_processing,
     get_job_status,
@@ -32,8 +40,6 @@ from materializationengine.blueprints.upload.tasks import (
 from materializationengine.database import db_manager
 from materializationengine.info_client import get_datastack_info
 from materializationengine.utils import get_config_param
-from middle_auth_client import auth_requires_admin, auth_requires_permission
-from materializationengine.blueprints.upload.checkpoint_manager import RedisCheckpointManager
 
 __version__ = "4.35.0"
 
@@ -47,6 +53,29 @@ upload_bp = Blueprint(
     __name__,
     url_prefix="/materialize/upload",
 )
+
+spatial_lookup_bp = Namespace(
+    "Spatial Lookup",
+    authorizations=authorizations,
+    description="Spatial Lookup Operations",
+    path="/api/spatial-lookup"
+)
+
+
+
+spatial_svid_parser = reqparse.RequestParser()
+spatial_svid_parser.add_argument("chunk_scale_factor", default=1, type=int, help="Chunk scale factor for spatial lookup. Chunk size is 1024 * scale_factor")
+spatial_svid_parser.add_argument("supervoxel_batch_size", default=50, type=int, help="Number of supervoxels to lookup at a time per cloud volume call")
+spatial_svid_parser.add_argument("get_root_ids", default=True, type=inputs.boolean)
+spatial_svid_parser.add_argument("upload_to_database", default=True, type=inputs.boolean)
+spatial_svid_parser.add_argument("use_staging_database", default=False, type=inputs.boolean)
+spatial_svid_parser.add_argument("resume_from_checkpoint", default=False, type=inputs.boolean)
+
+
+
+spatial_lookup_status = reqparse.RequestParser()
+spatial_lookup_status.add_argument("use_staging_database", type=inputs.boolean, default=False, help="Use staging database for spatial lookup")
+
 
 REDIS_CLIENT = StrictRedis(
     host=get_config_param("REDIS_HOST"),
@@ -139,6 +168,7 @@ def create_storage_service():
 
 
 @upload_bp.route("/generate-presigned-url", methods=["POST"])
+@auth_requires_permission("edit", table_arg="datastack_name")
 def generate_presigned_url():
     data = request.json
     filename = data["filename"]
@@ -186,6 +216,7 @@ def get_schema_types_endpoint():
 
 
 @upload_bp.route("/api/get-schema-model", methods=["GET"])
+@auth_requires_permission("edit", table_arg="datastack_name")
 def get_schema_model():
     """Endpoint to get schema model for a specific schema type"""
     try:
@@ -236,6 +267,7 @@ def get_schema_model():
 
 
 @upload_bp.route("/api/save-mapping", methods=["POST"])
+@auth_requires_permission("edit", table_arg="datastack_name")
 def save_mapping():
     """Save the column mapping and ignored columns configuration"""
     try:
@@ -323,6 +355,7 @@ def validate_metadata(metadata: Dict[str, Any]) -> tuple[bool, str]:
 
 
 @upload_bp.route("/api/save-metadata", methods=["POST"])
+@auth_requires_permission("edit", table_arg="datastack_name")
 def save_metadata():
     """Save the annotation table metadata"""
     try:
@@ -391,6 +424,7 @@ def save_metadata():
 
 
 @upload_bp.route("/api/aligned_volumes", methods=["GET"])
+@auth_requires_permission("edit", table_arg="datastack_name")
 def get_aligned_volumes():
     """Get list of available aligned volumes (databases)"""
     try:
@@ -417,6 +451,7 @@ def get_aligned_volumes():
 
 
 @upload_bp.route("/api/aligned_volumes/<aligned_volume>/versions", methods=["GET"])
+@auth_requires_permission("edit", table_arg="datastack_name")
 def get_materialized_versions(aligned_volume):
     """Get available materialized versions for an aligned volume"""
     try:
@@ -495,6 +530,7 @@ def start_csv_processing():
 
 
 @upload_bp.route("/api/process/status/<job_id>", methods=["GET"])
+@auth_requires_permission("edit", table_arg="datastack_name")
 def check_processing_status(job_id):
     """Get processing job status"""
     try:
@@ -509,6 +545,7 @@ def check_processing_status(job_id):
 
 
 @upload_bp.route("/api/process/cancel/<job_id>", methods=["POST"])
+@auth_requires_permission("edit", table_arg="datastack_name")
 def cancel_processing_job(job_id):
     """Cancel processing job"""
     try:
@@ -523,88 +560,180 @@ def cancel_processing_job(job_id):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@upload_bp.route("/api/spatial-lookup/status/<table_name>", methods=["GET"])
-def get_spatial_lookup_status(table_name):
-    """Get the status of a spatial lookup workflow for a specific table."""
-    try:
-        staging_database = get_config_param("STAGING_DATABASE_NAME")
-        database = request.args.get("database", staging_database)
+
+@spatial_lookup_bp.expect(spatial_svid_parser)
+@spatial_lookup_bp.route(
+    "/run/spatial_lookup/datastack/<string:datastack_name>/<string:table_name>"
+)
+class SpatialSVIDLookupTableResource(Resource):
+    @reset_auth
+    @auth_requires_permission("edit", table_arg="datastack_name")
+    @spatial_lookup_bp.doc("Lookup spatially chunked svid workflow", security="apikey")
+    def post(self, datastack_name: str, table_name: str):
+        """Process newly added annotations and lookup segmentation data using
+        a spatially chunked svid lookup strategy. Optionally also lookups root ids.
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+            table_name (str): name of table
+        """
+        from materializationengine.workflows.spatial_lookup import (
+            run_spatial_lookup_workflow,
+        )
+        args = spatial_svid_parser.parse_args()
+
+
+        if datastack_name not in current_app.config["DATASTACKS"]:
+            abort(404, f"datastack {datastack_name} not configured for materialization")
+
+        datastack_info = get_datastack_info(datastack_name)
+
+        chunk_scale_factor = args["chunk_scale_factor"]
+        supervoxel_batch_size = args["supervoxel_batch_size"]
+        get_root_ids = args["get_root_ids"]
+        upload_to_database = args["upload_to_database"]
+        use_staging_database = args["use_staging_database"]
+        resume_from_checkpoint = args["resume_from_checkpoint"]
+        try:
+            run_spatial_lookup_workflow.si(
+                datastack_info,
+                table_name=table_name,
+                chunk_scale_factor=chunk_scale_factor,
+                supervoxel_batch_size=supervoxel_batch_size,
+                get_root_ids=get_root_ids,
+                upload_to_database=upload_to_database,
+                use_staging_database=use_staging_database,
+                resume_from_checkpoint=resume_from_checkpoint,
+            ).apply_async()
+        except Exception as e:
+            current_app.error(e)
+            return abort(400, f"Error running spatial lookup workflow: {e}")
+        return 200
+
+@spatial_lookup_bp.expect(spatial_lookup_status)
+@spatial_lookup_bp.route("/status/datastack/<string:datastack_name>/<string:table_name>")
+class SpatialLookupStatus(Resource):
+    @reset_auth
+    @auth_requires_permission("edit", table_arg="datastack_name")
+    @spatial_lookup_bp.doc("get_spatial_lookup_status", security="apikey")
+    def get(self, datastack_name: str, table_name: str):
+        """Get the status of a spatial lookup workflow for a specific table."""
+        try:
+            if datastack_name not in current_app.config["DATASTACKS"]:
+                abort(404, f"datastack {datastack_name} not configured for materialization")
+
+            datastack_info = get_datastack_info(datastack_name)
+            aligned_volume_name = datastack_info["aligned_volume"]["name"]
+
+            args = spatial_lookup_status.parse_args()
+            use_staging_database = args["use_staging_database"]
         
-        checkpoint_manager = RedisCheckpointManager(database)
-        
-        checkpoint = checkpoint_manager.get_workflow_data(table_name)
-        
-        if checkpoint:
+            if use_staging_database:
+
+                staging_database = get_config_param("STAGING_DATABASE_NAME")
+                database = request.args.get("database", staging_database)
+            else:
+                database = aligned_volume_name
             
-            status = {
-                "status": "inactive",
-                "table_name": table_name,
-                "database": database,
-                "total_chunks": checkpoint.get("total_chunks", 0),
-                "completed_chunks": checkpoint.get("completed_chunks", 0),
-                "progress": (checkpoint.get("completed_chunks", 0) / checkpoint.get("total_chunks", 1) * 100) 
-                            if checkpoint.get("total_chunks", 0) > 0 else 0,
-                "last_error": checkpoint.get("last_error"),
-                "updated_at": checkpoint.get("updated_at"),
-                "created_at": checkpoint.get("created_at"),
-                "note": "Status reconstructed from checkpoint (status expired)"
-            }
-            return jsonify({"status": "success", "data": status})
+            checkpoint_manager = RedisCheckpointManager(database)
+            checkpoint = checkpoint_manager.get_workflow_data(table_name)
             
-        
-        if "completed_chunks" in status and "total_chunks" in status and status["total_chunks"] > 0:
-            status["progress_percentage"] = round((status["completed_chunks"] / status["total_chunks"]) * 100, 2)
-        
-        if "start_time" in status and status["status"] not in ["completed", "failed"]:
-            try:
-                start_time = datetime.datetime.fromisoformat(status["start_time"])
-                now = datetime.datetime.now(datetime.timezone.utc)
-                status["elapsed_time_seconds"] = (now - start_time).total_seconds()
+            if checkpoint:
+                status = {
+                    "status": checkpoint.status,
+                    "table_name": checkpoint.table_name,
+                    "database": database,
+                    "total_chunks": checkpoint.total_chunks,
+                    "completed_chunks": checkpoint.completed_chunks,
+                    "progress": checkpoint.progress,
+                    "submitted_chunks": checkpoint.submitted_chunks,
+                    "rows_processed": checkpoint.rows_processed,
+                    "processing_rate": checkpoint.processing_rate,
+                    "estimated_completion": checkpoint.estimated_completion,
+                    "last_error": checkpoint.last_error,
+                    "updated_at": checkpoint.updated_at,
+                    "created_at": checkpoint.created_at,
+                    "chunking_strategy": checkpoint.chunking_strategy,
+                    "used_chunk_size": checkpoint.used_chunk_size
+                }
                 
-                elapsed_seconds = status["elapsed_time_seconds"]
-                hours, remainder = divmod(elapsed_seconds, 3600)
-                minutes, seconds = divmod(remainder, 60)
-                status["elapsed_time_formatted"] = f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
-            except Exception:
-                pass
-        
-        return jsonify({"status": "success", "data": status})
-    
-    except Exception as e:
-        current_app.logger.error(f"Error getting spatial lookup status: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@upload_bp.route("/api/spatial-lookup/active", methods=["GET"])
-def get_active_spatial_lookups():
-    """Get a list of all active spatial lookup workflows."""
-    try:
-        staging_database = get_config_param("STAGING_DATABASE_NAME")
-        database = request.args.get("database", staging_database)
-        
-        checkpoint_manager = RedisCheckpointManager(database)
-        
-        workflows = checkpoint_manager.get_active_workflows()
-        
-        for workflow in workflows:
-            if "completed_chunks" in workflow and "total_chunks" in workflow and workflow["total_chunks"] > 0:
-                workflow["progress_percentage"] = round((workflow["completed_chunks"] / workflow["total_chunks"]) * 100, 2)
+                if checkpoint.last_processed_chunk:
+                    status["last_processed_chunk"] = {
+                        "min_corner": checkpoint.last_processed_chunk.min_corner,
+                        "max_corner": checkpoint.last_processed_chunk.max_corner,
+                        "index": checkpoint.last_processed_chunk.index
+                    }
+                
+                if checkpoint.start_time and checkpoint.status not in ["completed", "failed"]:
+                    try:
+                        start_time = datetime.datetime.fromisoformat(checkpoint.start_time)
+                        now = datetime.datetime.now(datetime.timezone.utc)
+                        elapsed_seconds = (now - start_time).total_seconds()
+                        
+                        hours, remainder = divmod(elapsed_seconds, 3600)
+                        minutes, seconds = divmod(remainder, 60)
+                        status["elapsed_time_formatted"] = f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
+                        status["elapsed_time_seconds"] = elapsed_seconds
+                    except Exception as e:
+                        current_app.logger.error(f"Error calculating elapsed time: {e}")
+                
+                return {"status": status}
             
-            if "start_time" in workflow and workflow["status"] not in ["completed", "failed"]:
-                try:
-                    start_time = datetime.datetime.fromisoformat(workflow["start_time"])
-                    now = datetime.datetime.now(datetime.timezone.utc)
-                    workflow["elapsed_time_seconds"] = (now - start_time).total_seconds()
-                    
-                    elapsed_seconds = workflow["elapsed_time_seconds"]
-                    hours, remainder = divmod(elapsed_seconds, 3600)
-                    minutes, seconds = divmod(remainder, 60)
-                    workflow["elapsed_time_formatted"] = f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
-                except Exception:
-                    pass
+            return {"status": "error", "message": f"No workflow data found for table {table_name}"}, 404
         
-        return jsonify({"status": "success", "data": workflows})
-    
-    except Exception as e:
-        current_app.logger.error(f"Error getting active spatial lookups: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        except Exception as e:
+            current_app.logger.error(f"Error getting spatial lookup status: {str(e)}")
+            return {"status": "error", "message": str(e)}, 500
+
+@spatial_lookup_bp.expect(spatial_lookup_status)
+@spatial_lookup_bp.route("/active/datastack/<string:datastack_name>")
+class ActiveSpatialLookups(Resource):
+    @reset_auth
+    @auth_requires_permission("edit", table_arg="datastack_name")
+    @spatial_lookup_bp.doc("get_active_spatial_lookups", security="apikey")
+    def get(self, datastack_name: str):
+        """Get a list of all active spatial lookup workflows."""
+        try:
+            if datastack_name not in current_app.config["DATASTACKS"]:
+                abort(404, f"datastack {datastack_name} not configured for materialization")
+
+            datastack_info = get_datastack_info(datastack_name)
+            aligned_volume_name = datastack_info["aligned_volume"]["name"]
+
+            args = spatial_lookup_status.parse_args()
+            use_staging_database = args["use_staging_database"]
+        
+            if use_staging_database:
+                staging_database = get_config_param("STAGING_DATABASE_NAME")
+                database = request.args.get("database", staging_database)
+            else:
+                database = aligned_volume_name
+            checkpoint_manager = RedisCheckpointManager(database)
+            # This already returns a list of dictionaries5
+            workflows = checkpoint_manager.get_active_workflows()
+            
+            for workflow in workflows:
+                # Process each workflow to add calculated fields
+                if workflow.get("completed_chunks") and workflow.get("total_chunks") and workflow["total_chunks"] > 0:
+                    workflow["progress_percentage"] = round((workflow["completed_chunks"] / workflow["total_chunks"]) * 100, 2)
+                
+                if workflow.get("start_time") and workflow.get("status") not in ["completed", "failed"]:
+                    try:
+                        start_time = datetime.datetime.fromisoformat(workflow["start_time"])
+                        now = datetime.datetime.now(datetime.timezone.utc)
+                        elapsed_seconds = (now - start_time).total_seconds()
+                        
+                        hours, remainder = divmod(elapsed_seconds, 3600)
+                        minutes, seconds = divmod(remainder, 60)
+                        workflow["elapsed_time_formatted"] = f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
+                        workflow["elapsed_time_seconds"] = elapsed_seconds
+                    except Exception as e:
+                        current_app.logger.debug(f"Error calculating elapsed time: {e}")
+            
+            return {"workflows": workflows}
+        
+        except Exception as e:
+            current_app.logger.error(f"Error getting active spatial lookups: {str(e)}")
+            return {"status": "error", "message": str(e)}, 500
+
+

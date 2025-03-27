@@ -64,16 +64,6 @@ materialize_parser = reqparse.RequestParser()
 materialize_parser.add_argument("days_to_expire", required=True, default=None, type=int)
 materialize_parser.add_argument("merge_tables", required=True, type=inputs.boolean)
 
-
-spatial_svid_parser = reqparse.RequestParser()
-spatial_svid_parser.add_argument("chunk_scale_factor", default=1, type=int, help="Chunk scale factor for spatial lookup. Chunk size is 1024 * scale_factor")
-spatial_svid_parser.add_argument("supervoxel_batch_size", default=50, type=int, help="Number of supervoxels to lookup at a time per cloud volume call")
-spatial_svid_parser.add_argument("get_root_ids", default=True, type=inputs.boolean)
-spatial_svid_parser.add_argument("upload_to_database", default=True, type=inputs.boolean)
-spatial_svid_parser.add_argument("use_staging_database", default=False, type=inputs.boolean)
-spatial_svid_parser.add_argument("resume_from_checkpoint", default=False, type=inputs.boolean)
-
-
 authorizations = {
     "apikey": {"type": "apiKey", "in": "query", "name": "middle_auth_token"}
 }
@@ -244,55 +234,6 @@ class ProcessNewAnnotationsTableResource(Resource):
         process_new_annotations_workflow.s(
             datastack_info, table_name=table_name
         ).apply_async()
-        return 200
-
-@mat_bp.expect(spatial_svid_parser)
-@mat_bp.route(
-    "/materialize/run/spatial_lookup/datastack/<string:datastack_name>/<string:table_name>"
-)
-class SpatialSVIDLookupTableResource(Resource):
-    @reset_auth
-    @auth_requires_permission("edit", table_arg="datastack_name")
-    @mat_bp.doc("Lookup spatially chunked svid workflow", security="apikey")
-    def post(self, datastack_name: str, table_name: str):
-        """Process newly added annotations and lookup segmentation data using
-        a spatially chunked svid lookup strategy. Optionally also lookups root ids.
-
-        Args:
-            datastack_name (str): name of datastack from infoservice
-            table_name (str): name of table
-        """
-        from materializationengine.workflows.spatial_lookup import (
-            run_spatial_lookup_workflow,
-        )
-        args = spatial_svid_parser.parse_args()
-
-
-        if datastack_name not in current_app.config["DATASTACKS"]:
-            abort(404, f"datastack {datastack_name} not configured for materialization")
-
-        datastack_info = get_datastack_info(datastack_name)
-
-        chunk_scale_factor = args["chunk_scale_factor"]
-        supervoxel_batch_size = args["supervoxel_batch_size"]
-        get_root_ids = args["get_root_ids"]
-        upload_to_database = args["upload_to_database"]
-        use_staging_database = args["use_staging_database"]
-        resume_from_checkpoint = args["resume_from_checkpoint"]
-        try:
-            run_spatial_lookup_workflow.si(
-                datastack_info,
-                table_name=table_name,
-                chunk_scale_factor=chunk_scale_factor,
-                supervoxel_batch_size=supervoxel_batch_size,
-                get_root_ids=get_root_ids,
-                upload_to_database=upload_to_database,
-                use_staging_database=use_staging_database,
-                resume_from_checkpoint=resume_from_checkpoint,
-            ).apply_async()
-        except Exception as e:
-            logging.error(e)
-            return abort(400, f"Error running spatial lookup workflow: {e}")
         return 200
 
 

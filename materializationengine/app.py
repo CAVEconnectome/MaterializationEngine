@@ -14,7 +14,7 @@ from materializationengine.admin import setup_admin
 from materializationengine.blueprints.client.api import client_bp
 from materializationengine.blueprints.client.api2 import client_bp as client_bp2
 from materializationengine.blueprints.materialize.api import mat_bp
-from materializationengine.blueprints.upload.api import upload_bp
+from materializationengine.blueprints.upload.api import upload_bp, spatial_lookup_bp
 from materializationengine.blueprints.upload.storage import StorageService
 from materializationengine.blueprints.upload.models import init_staging_database
 from materializationengine.config import config, configure_app
@@ -99,6 +99,7 @@ def create_app(config_name: str = None):
         api.add_namespace(mat_bp, path="/api/v2")
         api.add_namespace(client_bp, path="/api/v2")
         api.add_namespace(client_bp2, path="/api/v3")
+        api.add_namespace(spatial_lookup_bp, path="/api/v2")
 
         app.register_blueprint(apibp)
         app.register_blueprint(views_bp)
