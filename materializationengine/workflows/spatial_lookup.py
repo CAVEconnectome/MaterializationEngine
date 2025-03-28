@@ -19,7 +19,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
-
+from sqlalchemy.exc import OperationalError, DisconnectionError
 from materializationengine.blueprints.upload.checkpoint_manager import (
     RedisCheckpointManager,
 )
@@ -267,6 +267,7 @@ def submit_task(
     task.apply_async()
 
 
+
 @celery.task(
     name="process:process_chunk",
     bind=True,
@@ -274,7 +275,6 @@ def submit_task(
     autoretry_for=(Exception,),
     max_retries=10,
     retry_backoff=True,
-    ignore_result=True,
 )
 def process_chunk(
     self,
@@ -289,7 +289,21 @@ def process_chunk(
     report_completion=True,
     supervoxel_batch_size=50,
 ):
-    """Query points in a bounding box and process supervoxel IDs and root IDS for a single chunk and inserts into the database."""
+    """
+    Process a single spatial chunk - lookup supervoxel IDs and root IDs.
+
+    Args:
+        min_corner: Minimum corner of chunk bounding box
+        max_corner: Maximum corner of chunk bounding box
+        mat_info: Materialization metadata
+        get_root_ids: Whether to lookup root IDs
+        upload_to_database: Whether to upload results to database
+        chunk_info: Information about this chunk
+        database: Database name
+        table_name: Table name
+        report_completion: Whether to report completion to checkpoint manager
+        supervoxel_batch_size: Number of supervoxels to process at once
+    """
     task_id = self.request.id
     start_time = time.time()
     chunk_progress = f"Chunk {chunk_info['chunk_idx']}/{chunk_info['total_chunks']}"
@@ -305,13 +319,13 @@ def process_chunk(
     )
 
     try:
-        pts_start_time = time.time()
+        # Get points from bounding box
         pts_df = get_pts_from_bbox(
             database, np.array(min_corner), np.array(max_corner), mat_info
         )
-        pts_time = time.time() - pts_start_time
 
         if pts_df is None or pts_df.empty:
+            # No points in this chunk, mark as completed
             if report_completion and checkpoint_manager:
                 chunk_data = {
                     "min_corner": min_corner,
@@ -324,13 +338,12 @@ def process_chunk(
                     last_processed_chunk=chunk_data,
                     last_chunk_index=chunk_info["chunk_idx"],
                 )
-            celery_logger.info(f"No points found in chunk {chunk_info['chunk_idx']}")
-            return None
+            return {"status": "completed", "points_processed": 0, "affected_rows": 0}
 
         points_count = len(pts_df["id"])
         celery_logger.info(f"Found {points_count} points in bounding box")
 
-        svids_start_time = time.time()
+        # Process points to get supervoxel IDs
         data = get_scatter_points(pts_df, mat_info, batch_size=supervoxel_batch_size)
         if data is None:
             if report_completion and checkpoint_manager:
@@ -345,35 +358,18 @@ def process_chunk(
                     last_processed_chunk=chunk_data,
                     last_chunk_index=chunk_info["chunk_idx"],
                 )
-            celery_logger.info(
-                f"No supervoxel IDs found for chunk {chunk_info['chunk_idx']}"
-            )
-            return None
-
-        svids_time = time.time() - svids_start_time
+            return {"status": "completed", "points_processed": 0, "affected_rows": 0}
 
         svids_count = len(data["id"])
-        celery_logger.info(
-            f"Processed {svids_count} supervoxel IDs in {svids_time:.2f}s"
-        )
 
         affected_rows = 0
-
         if get_root_ids and svids_count > 0:
-            root_ids_start_time = time.time()
+            # Get root IDs for supervoxels
             root_id_data = get_new_root_ids(data, mat_info)
-            root_ids_time = time.time() - root_ids_start_time
-            celery_logger.info(
-                f"Retrieved {len(root_id_data)} root IDs in {root_ids_time:.2f}s"
-            )
 
             if upload_to_database and len(root_id_data) > 0:
-                upload_start_time = time.time()
+                # Insert data into database
                 affected_rows = insert_segmentation_data(root_id_data, mat_info)
-                upload_time = time.time() - upload_start_time
-                celery_logger.info(
-                    f"Inserted {affected_rows} rows in {upload_time:.2f}s"
-                )
 
         if report_completion and checkpoint_manager:
             chunk_data = {
@@ -394,8 +390,18 @@ def process_chunk(
             f"{points_count} points, {svids_count} supervoxels, {affected_rows} rows affected"
         )
 
-        return None
-
+        return {
+            "status": "completed",
+            "points_processed": points_count,
+            "affected_rows": affected_rows,
+        }
+    except (OperationalError, DisconnectionError) as db_error:
+        celery_logger.warning(
+            f"Database connection error in chunk {chunk_info['chunk_idx']}: {str(db_error)}"
+            f"This may be due to a concurrent database operation. Retrying..."
+        )
+        db_manager.cleanup()
+        raise self.retry(exc=db_error, countdown=int(2**self.request.retries))
     except Exception as e:
         error_msg = f"Error processing chunk {chunk_info['chunk_idx']}: {str(e)}"
         celery_logger.error(error_msg)
@@ -404,7 +410,10 @@ def process_chunk(
             checkpoint_manager.record_chunk_failure(
                 table_name=table_name, chunk_index=chunk_info["chunk_idx"], error=str(e)
             )
-        self.retry(exc=e, countdown=int(2**self.request.retries))
+
+        # Raise for automatic retry (with backoff)
+        raise self.retry(exc=e, countdown=int(2**self.request.retries))
+
 
 
 @celery.task(
