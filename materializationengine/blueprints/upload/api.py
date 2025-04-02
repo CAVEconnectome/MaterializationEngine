@@ -125,13 +125,15 @@ def require_upload_permissions(f):
 
 
 @upload_bp.route("/")
-@require_upload_permissions
+@reset_auth
+@auth_requires_admin
 def index():
     """Redirect to step 1 of the wizard"""
     return redirect(url_for("upload.wizard_step", step_number=1))
 
 @upload_bp.route("/step<int:step_number>")
-@require_upload_permissions
+@reset_auth
+@auth_requires_admin
 def wizard_step(step_number):
     if step_number < 1 or step_number > 4:
         return redirect(url_for("upload.wizard_step", step_number=1))
