@@ -2034,7 +2034,6 @@ def format_df_to_bytes(df, datastack_name, table_name):
 )
 class LiveTablePrecomputedRelationship(Resource):
     method_decorators = [
-        limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
     ]
