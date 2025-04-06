@@ -1903,6 +1903,7 @@ def get_precomputed_info(datastack_name, table_name):
         "properties": [p.to_json() for p in properties],
         "relationships": [{"id": r, "key": f"{r}"} for r in relationships],
         "by_id": {"key": "by_id"},
+        "spatial": [],
     }
     return metadata
 
