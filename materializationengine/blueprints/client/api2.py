@@ -2062,14 +2062,14 @@ class LiveTablePrecomputedRelationship(Resource):
         response.headers["Content-Disposition"] = (
             f"attachment; filename={datastack_name}_{table_name}_{column_name}_{segid}.bin"
         )
-        response.headers["Content-Type"] = "application/octet-stream"
-        response.headers["Content-Length"] = str(len(bytes))
-        response.headers["Accept-Ranges"] = "bytes"
-        response.headers["Content-Transfer-Encoding"] = "binary"
-        response.headers["Content-Description"] = "File Transfer"
-        response.headers["Content-Name"] = (
-            f"{datastack_name}_{table_name}_{column_name}_{segid}.bin"
-        )
+        headers = {
+            "access-control-allow-credentials": "true",
+            "access-control-expose-headers": "Cache-Control, Content-Disposition, Content-Encoding, Content-Length, Content-Type, Date, ETag, Server, Vary, X-Content-Type-Options, X-Frame-Options, X-Powered-By, X-XSS-Protection",
+            "content-disposition": "attachment",
+            "Content-Type": "application/octet-stream",
+            "Content-Name": f"{datastack_name}_{table_name}_{column_name}_{segid}.bin",
+        }
+        response.headers.update(headers)
 
         return response
 
