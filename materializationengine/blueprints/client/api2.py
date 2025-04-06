@@ -2026,7 +2026,7 @@ def format_df_to_bytes(df, datastack_name, table_name):
 
     bytes = writer._encode_multiple_annotations(writer.annotations)
 
-    return bytes, 200
+    return bytes
 
 
 @client_bp.route(
@@ -2057,7 +2057,22 @@ class LiveTablePrecomputedRelationship(Resource):
 
         df = live_query_by_relationship(datastack_name, table_name, column_name, segid)
         bytes = format_df_to_bytes(df, datastack_name, table_name)
-        return df.to_json(), 200
+
+        # format a flask response with bytes as raw bytes conent
+        response = Response(bytes, status=200, mimetype="application/octet-stream")
+        response.headers["Content-Disposition"] = (
+            f"attachment; filename={datastack_name}_{table_name}_{column_name}_{segid}.bin"
+        )
+        response.headers["Content-Type"] = "application/octet-stream"
+        response.headers["Content-Length"] = str(len(bytes))
+        response.headers["Accept-Ranges"] = "bytes"
+        response.headers["Content-Transfer-Encoding"] = "binary"
+        response.headers["Content-Description"] = "File Transfer"
+        response.headers["Content-Name"] = (
+            f"{datastack_name}_{table_name}_{column_name}_{segid}.bin"
+        )
+
+        return response
 
 
 @client_bp.expect(query_parser)
