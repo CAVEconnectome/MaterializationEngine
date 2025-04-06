@@ -3,7 +3,6 @@ import pytz
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
 from cachetools import TTLCache, cached, LRUCache
-from cachetools.keys import hashkey
 from functools import wraps
 from flask import Response, abort, request, current_app, g
 from flask_accepts import accepts
@@ -14,14 +13,17 @@ from middle_auth_client import (
 import pandas as pd
 import numpy as np
 from marshmallow import fields as mm_fields
-from emannotationschemas.schemas.base import SegmentationField, PostGISField
+from emannotationschemas.schemas.base import PostGISField
 import datetime
 from typing import List
 import werkzeug
 from sqlalchemy.sql.sqltypes import String, Integer, Float, DateTime, Boolean, Numeric
-
+import io
 from geoalchemy2.types import Geometry
 import nglui
+from neuroglancer import viewer_state
+import cloudvolume
+
 from materializationengine.blueprints.client.datastack import validate_datastack
 from materializationengine.blueprints.client.new_query import (
     remap_query,
@@ -63,6 +65,7 @@ from materializationengine.info_client import get_aligned_volumes, get_datastack
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from materializationengine.blueprints.client.utils import update_notice_text_warnings
 from materializationengine.blueprints.client.utils import after_request
+from materializationengine.blueprints.client.precomputed import AnnotationWriter
 
 __version__ = "4.36.6"
 
@@ -1723,6 +1726,337 @@ class LiveTableQuery(Resource):
             arrow_format=args["arrow_format"],
             ipc_compress=args["ipc_compress"],
         )
+
+
+def find_position_prefixes(df):
+    """
+    Find common prefixes in a DataFrame for which there are x, y, z components.
+
+    Args:
+        df (pd.DataFrame): The DataFrame containing the columns.
+
+    Returns:
+        set: A set of prefixes that have x, y, and z components.
+    """
+    # Dictionary to track components for each prefix
+    prefix_map = {}
+
+    for col in df.columns:
+        if col.endswith("_x") or col.endswith("_y") or col.endswith("_z"):
+            # Extract the prefix by removing the suffix
+            prefix = col.rsplit("_", 1)[0]
+            if prefix != "ctr_pt_position":
+                if prefix not in prefix_map:
+                    prefix_map[prefix] = set()
+                # Add the component (x, y, or z) to the prefix
+                prefix_map[prefix].add(col.split("_")[-1])
+
+    # Find prefixes that have all three components (x, y, z)
+    position_prefixes = {
+        prefix
+        for prefix, components in prefix_map.items()
+        if {"x", "y", "z"}.issubset(components)
+    }
+    columns = []
+    # get the set of columns that are covered by the prefixes
+    for prefix in position_prefixes:
+        for suffix in ["_x", "_y", "_z"]:
+            col = f"{prefix}{suffix}"
+            if col in df.columns:
+                columns.append(col)
+    return position_prefixes, columns
+
+
+@cached(LRUCache(maxsize=256))
+def get_precomputed_properties_and_relationships(datastack_name, table_name):
+    """Get precomputed relationships from the database.
+
+    Args:
+        db: The database connection.
+        table_name (str): The name of the table.
+    """
+
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+    db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    # check if this is a reference table
+    table_metadata = db.database.get_table_metadata(table_name)
+
+    user_data = {
+        "table": table_name,
+        "timestamp": datetime.datetime.now(tz=pytz.utc),
+        "suffixes": {table_name: ""},
+        "desired_resolution": [1, 1, 1],
+        "limit": 1,
+    }
+
+    if table_metadata["reference_table"]:
+        ref_table = table_metadata["reference_table"]
+        user_data["suffixes"][ref_table] = "_ref"
+        user_data["joins"] = [[table_name, "target_id", ref_table, "id"]]
+
+    return_vals = assemble_live_query_dataframe(
+        user_data, datastack_name=datastack_name, args={}
+    )
+    df, column_names, mat_warnings, prod_warnings, remap_warnings = return_vals
+
+    relationships = []
+    for c in df.columns:
+        if c.endswith("_pt_root_id"):
+            relationships.append(c)
+    unique_values = db.database.get_unique_string_values(table_name)
+
+    properties = []
+    # find all the columns that start with the same thing
+    # but end with _pt_position_{x,y,z}
+    geometry_prefixes, geometry_columns = find_position_prefixes(df)
+
+    for c in df.columns:
+        if c.endswith("id"):
+            continue
+        elif c.endswith("valid"):
+            continue
+        elif c.endswith("pt_root_id"):
+            continue
+        if c in geometry_columns:
+            continue
+        elif c in unique_values.keys():
+            prop = viewer_state.AnnotationPropertySpec(
+                id=c,
+                type="uint32",
+                enum_values=np.arange(0, len(unique_values[c])),
+                enum_labels=unique_values[c],
+            )
+        else:
+            if df[c].dtype == "float64":
+                type = "float32"
+            elif df[c].dtype == "int64":
+                type = "int32"
+            elif df[c].dtype == "int32":
+                type = "int32"
+            else:
+                continue
+            prop = viewer_state.AnnotationPropertySpec(id=c, type=type, description=c)
+        properties.append(prop)
+
+    relationships = [c for c in df.columns if c.endswith("_pt_root_id")]
+    if len(geometry_prefixes) == 0:
+        abort(400, "No geometry columns found for table {}".format(table_name))
+    if len(geometry_prefixes) == 1:
+        ann_type = "point"
+    elif len(geometry_prefixes) == 2:
+        ann_type = "line"
+    else:
+        abort(400, "More than 2 geometry columns found for table {}".format(table_name))
+
+    return relationships, properties, list(geometry_prefixes), ann_type
+
+
+bounds_cache = LRUCache(maxsize=128)
+
+
+@cached(bounds_cache)
+def get_precomputed_bounds(datastack_name):
+    """Get precomputed bounds from the database.
+
+    Args:
+        datastack_name: The datastack name.
+        table_name (str): The name of the table.
+
+    Returns:
+        dict: the bounds for the precomputed table.
+    """
+    ds_info = get_datastack_info(datastack_name)
+    img_source = ds_info["aligned_volume"]["image_source"]
+    cv = cloudvolume.CloudVolume(img_source, use_https=True)
+    bbox = cv.bounds * cv.resolution
+    lower_bound = bbox.minpt.tolist()
+    upper_bound = bbox.maxpt.tolist()
+    return lower_bound, upper_bound
+
+
+def get_precomputed_info(datastack_name, table_name):
+    """Get precomputed properties from the database.
+
+    Args:
+        datastack_name: The datastack name.
+        table_name (str): The name of the table.
+
+    Returns:
+        dict: the info file for the precomputed table.
+    """
+
+    vals = get_precomputed_properties_and_relationships(datastack_name, table_name)
+    relationships, properties, geometry_columns, ann_type = vals
+
+    lower_bound, upper_bound = get_precomputed_bounds(datastack_name)
+
+    metadata = {
+        "@type": "neuroglancer_annotations_v1",
+        "dimensions": {
+            "x": [np.float64(1e-09), "m"],
+            "y": [np.float64(1e-09), "m"],
+            "z": [np.float64(1e-09), "m"],
+        },
+        "lower_bound": lower_bound,
+        "upper_bound": upper_bound,
+        "annotation_type": ann_type,
+        "properties": [p.to_json() for p in properties],
+        "relationships": [{"id": r, "key": f"{r}"} for r in relationships],
+        "by_id": {"key": "by_id"},
+    }
+    return metadata
+
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/info"
+)
+class LiveTablePrecomputedInfo(Resource):
+    method_decorators = [
+        limit_by_category("query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    @client_bp.doc("get_precomputed_info", security="apikey")
+    def get(self, datastack_name: str, table_name: str):
+        """get precomputed info for a table
+
+        Args:
+            datastack_name (str): datastack name
+            table_name (str): table name
+
+        Returns:
+            dict: dictionary of precomputed info
+        """
+        info = get_precomputed_info(datastack_name, table_name)
+
+        return info, 200
+
+
+def live_query_by_relationship(
+    datastack_name: str,
+    table_name: str,
+    column_name: str,
+    segid: int,
+):
+    """get precomputed relationships for a table
+
+    Args:
+        datastack_name (str): datastack name
+        table_name (str): table name
+        column_name (str): column name
+        segid (int): segment id
+
+    Returns:
+        pd.DataFrame: dataframe of precomputed relationships
+    """
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+    db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    table_metadata = db.database.get_table_metadata(table_name)
+
+    cg_client = chunkedgraph_cache.get_client(pcg_table_name)
+    timestamp = cg_client.get_root_timestamps(segid, latest=True)[0]
+    user_data = {
+        "table": table_name,
+        "timestamp": timestamp,
+        "suffixes": {table_name: ""},
+        "filter_equal_dict": {
+            table_name: {column_name: segid},
+        },
+        "desired_resolution": [1, 1, 1],
+    }
+    if table_metadata["reference_table"]:
+        ref_table = table_metadata["reference_table"]
+        user_data["suffixes"][ref_table] = "_ref"
+        user_data["joins"] = [[table_name, "target_id", ref_table, "id"]]
+
+    return_vals = assemble_live_query_dataframe(
+        user_data, datastack_name=datastack_name, args={}
+    )
+    df, column_names, mat_warnings, prod_warnings, remap_warnings = return_vals
+
+    return df
+
+
+def format_df_to_bytes(df, datastack_name, table_name):
+    """format the dataframe to bytes
+
+    Args:
+        df (pd.DataFrame): dataframe
+        datastack_name (str): datastack name
+        table_name (str): table name
+
+    Returns:
+        bytes: byte stream of dataframe
+    """
+    vals = get_precomputed_properties_and_relationships(datastack_name, table_name)
+    relationships, properties, geometry_columns, anntype = vals
+    writer = AnnotationWriter(
+        anntype, relationships=relationships, properties=properties
+    )
+    if anntype == "point":
+        point_cols = [
+            geometry_columns[0] + "_x",
+            geometry_columns[0] + "_y",
+            geometry_columns[0] + "_z",
+        ]
+    if anntype == "line":
+        pointa_cols = [
+            geometry_columns[0] + "_x",
+            geometry_columns[0] + "_y",
+            geometry_columns[0] + "_z",
+        ]
+        pointb_cols = [
+            geometry_columns[1] + "_x",
+            geometry_columns[1] + "_y",
+            geometry_columns[1] + "_z",
+        ]
+
+    for i, row in df.iterrows():
+        kwargs = {p.id: df.loc[i, p.id] for p in properties}
+        if row["valid"]:
+            if anntype == "point":
+                point = df.loc[i, point_cols].tolist()
+                writer.add_point(point, id=df.loc[i, "id"], **kwargs)
+            elif anntype == "line":
+                point_a = df.loc[i, pointa_cols].tolist()
+                point_b = df.loc[i, pointb_cols].tolist()
+                writer.add_line(point_a, point_b, id=df.loc[i, "id"], **kwargs)
+
+    bytes = writer._encode_multiple_annotations(writer.annotations)
+
+    return bytes, 200
+
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/<string:column_name>/<int:segid>"
+)
+class LiveTablePrecomputedRelationship(Resource):
+    method_decorators = [
+        limit_by_category("query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    @client_bp.doc("get_precomputed_relationships", security="apikey")
+    def get(self, datastack_name: str, table_name: str, column_name: str, segid: int):
+        """get precomputed relationships for a table
+
+        Args:
+            datastack_name (str): datastack name
+            table_name (str): table name
+            column_name (str): column name
+            segid (int): segment id
+
+        Returns:
+            bytes: byte stream of precomputed relationships
+        """
+        if not column_name.endswith("_pt_root_id"):
+            abort(400, "column_name must end with _pt_root_id")
+
+        df = live_query_by_relationship(datastack_name, table_name, column_name, segid)
+        bytes = format_df_to_bytes(df, datastack_name, table_name)
+        return df.to_json(), 200
 
 
 @client_bp.expect(query_parser)
