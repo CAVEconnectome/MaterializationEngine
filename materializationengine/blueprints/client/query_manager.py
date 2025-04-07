@@ -208,7 +208,6 @@ class QueryManager:
         return model
 
     def join_tables(self, table1, column1, table2, column2, isouter=False):
-
         self.add_table(table1, random_sample=True)
         self.add_table(table2)
 
@@ -302,7 +301,6 @@ class QueryManager:
         # if the column_name is not in the table_name list
         # then we should add it
         if column_name not in self._selected_columns[table_name]:
-
             model = self._find_relevant_model(
                 table_name=table_name, column_name=column_name
             )
@@ -459,7 +457,8 @@ class QueryManager:
             user_data.get("filter_less_dict", None), self.apply_less_filter
         )
         self.apply_filter(
-            user_data.get("filter_greater_equal_dict", None), self.apply_greater_equal_filter
+            user_data.get("filter_greater_equal_dict", None),
+            self.apply_greater_equal_filter,
         )
         self.apply_filter(
             user_data.get("filter_less_equal_dict", None), self.apply_less_equal_filter
@@ -566,7 +565,6 @@ class QueryManager:
                         ]
                         query_args += column_args
                     else:
-
                         if self._split_mode and (
                             column.key.endswith("_root_id")
                             or column.key.endswith("_supervoxel_id")

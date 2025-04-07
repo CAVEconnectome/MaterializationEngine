@@ -1360,7 +1360,7 @@ class MatTableSegmentInfoLive(Resource):
         if table_metadata["reference_table"]:
             ref_table = table_metadata["reference_table"]
             user_data["suffixes"][ref_table] = "_ref"
-            user_data["joins"] = [[table_name, "target_id", ref_table, "id"]]
+            user_data["join_tables"] = [[table_name, "target_id", ref_table, "id"]]
 
         return_vals = assemble_live_query_dataframe(
             user_data, datastack_name=datastack_name, args={}
@@ -1745,7 +1745,9 @@ def find_position_prefixes(df):
         if col.endswith("_x") or col.endswith("_y") or col.endswith("_z"):
             # Extract the prefix by removing the suffix
             prefix = col.rsplit("_", 1)[0]
-            if prefix != "ctr_pt_position":
+            if not (
+                prefix in ["ctr_pt_position", "bb_start_position", "bb_end_position"]
+            ):
                 if prefix not in prefix_map:
                     prefix_map[prefix] = set()
                 # Add the component (x, y, or z) to the prefix
@@ -1792,7 +1794,7 @@ def get_precomputed_properties_and_relationships(datastack_name, table_name):
     if table_metadata["reference_table"]:
         ref_table = table_metadata["reference_table"]
         user_data["suffixes"][ref_table] = "_ref"
-        user_data["joins"] = [[table_name, "target_id", ref_table, "id"]]
+        user_data["join_tables"] = [[table_name, "target_id", ref_table, "id"]]
 
     return_vals = assemble_live_query_dataframe(
         user_data, datastack_name=datastack_name, args={}
@@ -1801,7 +1803,7 @@ def get_precomputed_properties_and_relationships(datastack_name, table_name):
 
     relationships = []
     for c in df.columns:
-        if c.endswith("_pt_root_id"):
+        if c.endswith("pt_root_id"):
             relationships.append(c)
     unique_values = db.database.get_unique_string_values(table_name)
 
@@ -1848,7 +1850,7 @@ def get_precomputed_properties_and_relationships(datastack_name, table_name):
     else:
         abort(400, "More than 2 geometry columns found for table {}".format(table_name))
 
-    return relationships, properties, list(geometry_prefixes), ann_type
+    return relationships, properties, list(geometry_prefixes), column_names, ann_type
 
 
 bounds_cache = LRUCache(maxsize=128)
@@ -1886,7 +1888,7 @@ def get_precomputed_info(datastack_name, table_name):
     """
 
     vals = get_precomputed_properties_and_relationships(datastack_name, table_name)
-    relationships, properties, geometry_columns, ann_type = vals
+    relationships, properties, geometry_columns, column_names, ann_type = vals
 
     lower_bound, upper_bound = get_precomputed_bounds(datastack_name)
 
@@ -1955,6 +1957,18 @@ def live_query_by_relationship(
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
     table_metadata = db.database.get_table_metadata(table_name)
 
+    vals = get_precomputed_properties_and_relationships(datastack_name, table_name)
+    relationships, properties, geometry_columns, column_names, ann_type = vals
+
+    filter_table = None
+    for table in column_names:
+        for col in column_names[table]:
+            if col == column_name:
+                filter_table = table
+                break
+    if filter_table is None:
+        abort(400, "column_name not found in table {}".format(table_name))
+
     cg_client = chunkedgraph_cache.get_client(pcg_table_name)
     timestamp = cg_client.get_root_timestamps(segid, latest=True)[0]
     user_data = {
@@ -1962,14 +1976,14 @@ def live_query_by_relationship(
         "timestamp": timestamp,
         "suffixes": {table_name: ""},
         "filter_equal_dict": {
-            table_name: {column_name: segid},
+            filter_table: {column_name: segid},
         },
         "desired_resolution": [1, 1, 1],
     }
     if table_metadata["reference_table"]:
         ref_table = table_metadata["reference_table"]
         user_data["suffixes"][ref_table] = "_ref"
-        user_data["joins"] = [[table_name, "target_id", ref_table, "id"]]
+        user_data["join_tables"] = [[table_name, "target_id", ref_table, "id"]]
 
     return_vals = assemble_live_query_dataframe(
         user_data, datastack_name=datastack_name, args={}
@@ -1991,7 +2005,7 @@ def format_df_to_bytes(df, datastack_name, table_name):
         bytes: byte stream of dataframe
     """
     vals = get_precomputed_properties_and_relationships(datastack_name, table_name)
-    relationships, properties, geometry_columns, anntype = vals
+    relationships, properties, geometry_columns, column_names, anntype = vals
     writer = AnnotationWriter(
         anntype, relationships=relationships, properties=properties
     )
@@ -2012,7 +2026,12 @@ def format_df_to_bytes(df, datastack_name, table_name):
             geometry_columns[1] + "_y",
             geometry_columns[1] + "_z",
         ]
-
+    for p in properties:
+        if p.enum_values is not None:
+            df[p.id].replace(
+                {label: val for label, val in zip(p.enum_labels, p.enum_values)},
+                inplace=True,
+            )
     for i, row in df.iterrows():
         kwargs = {p.id: df.loc[i, p.id] for p in properties}
         if row["valid"]:
@@ -2051,8 +2070,8 @@ class LiveTablePrecomputedRelationship(Resource):
         Returns:
             bytes: byte stream of precomputed relationships
         """
-        if not column_name.endswith("_pt_root_id"):
-            abort(400, "column_name must end with _pt_root_id")
+        if not column_name.endswith("pt_root_id"):
+            abort(400, "column_name must end with pt_root_id")
 
         df = live_query_by_relationship(datastack_name, table_name, column_name, segid)
         bytes = format_df_to_bytes(df, datastack_name, table_name)
