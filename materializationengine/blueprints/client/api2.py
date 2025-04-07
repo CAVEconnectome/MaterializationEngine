@@ -1840,7 +1840,6 @@ def get_precomputed_properties_and_relationships(datastack_name, table_name):
             prop = viewer_state.AnnotationPropertySpec(id=c, type=type, description=c)
         properties.append(prop)
 
-    relationships = [c for c in df.columns if c.endswith("_pt_root_id")]
     if len(geometry_prefixes) == 0:
         abort(400, "No geometry columns found for table {}".format(table_name))
     if len(geometry_prefixes) == 1:
