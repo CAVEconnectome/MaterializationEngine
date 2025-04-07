@@ -1891,7 +1891,7 @@ def get_precomputed_properties_and_relationships(datastack_name, table_name):
                 id=c,
                 type="uint32",
                 enum_values=np.arange(0, len(unique_values[c])),
-                enum_labels=unique_values[c],
+                enum_labels=sorted(unique_values[c]),
             )
         else:
             if df[c].dtype == "float64":
