@@ -1845,12 +1845,20 @@ def get_precomputed_properties_and_relationships(datastack_name, table_name):
 
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    past_version, _, _ = get_closest_versions(
+        datastack_name, datetime.datetime.now(tz=pytz.utc)
+    )
+
     # check if this is a reference table
     table_metadata = db.database.get_table_metadata(table_name)
+    # convert timestamp to utc
+    timestamp = past_version.time_stamp
+    if timestamp.tzinfo is None:
+        timestamp = pytz.utc.localize(timestamp)
 
     user_data = {
         "table": table_name,
-        "timestamp": datetime.datetime.now(tz=pytz.utc),
+        "timestamp": timestamp,
         "suffixes": {table_name: ""},
         "desired_resolution": [1, 1, 1],
         "limit": 1,
