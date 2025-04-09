@@ -1331,6 +1331,7 @@ class MatTableSegmentInfoLive(Resource):
         self,
         datastack_name: str,
         table_name: str,
+        version: int = 0,
         target_datastack: str = None,
         target_version: int = None,
     ):
@@ -1922,22 +1923,33 @@ def get_precomputed_info(datastack_name, table_name):
 )
 class LiveTablePrecomputedInfo(Resource):
     method_decorators = [
+        validate_datastack,
         limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
     ]
 
     @client_bp.doc("get_precomputed_info", security="apikey")
-    def get(self, datastack_name: str, table_name: str):
+    def get(
+        self,
+        datastack_name: str,
+        table_name: str,
+        version: int = 0,
+        target_datastack: str = None,
+        target_version: int = None,
+    ):
         """get precomputed info for a table
 
         Args:
             datastack_name (str): datastack name
             table_name (str): table name
-
+            target_datastack (str): target datastack name
+            target_version (int): target version number
+            version (int): version number
         Returns:
             dict: dictionary of precomputed info
         """
+        # validate_table_args([table_name], target_datastack, target_version)
         info = get_precomputed_info(datastack_name, table_name)
 
         return info, 200
