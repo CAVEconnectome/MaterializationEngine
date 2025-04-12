@@ -20,7 +20,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 #   uv sync --frozen --no-default-groups
 
 
-FROM tiangolo/uwsgi-nginx-flask:python3.10
+FROM tiangolo/uwsgi-nginx-flask:python3.12
 COPY --from=builder --chown=nginx:nginx /app/.venv /venv
 ENV UWSGI_INI /app/uwsgi.ini
 RUN mkdir -p /home/nginx/.cloudvolume/secrets \
