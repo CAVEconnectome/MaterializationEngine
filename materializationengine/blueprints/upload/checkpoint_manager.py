@@ -156,17 +156,17 @@ class RedisCheckpointManager:
             "last_processed_chunk" in kwargs
             and kwargs["last_processed_chunk"] is not None
         ):
-            min_corner, max_corner = kwargs["last_processed_chunk"]
+            last_chunk = kwargs["last_processed_chunk"]
             workflow_data.last_processed_chunk = ChunkInfo(
                 min_corner=(
-                    min_corner.tolist()
-                    if isinstance(min_corner, np.ndarray)
-                    else min_corner
+                    last_chunk["min_corner"].tolist()
+                    if isinstance(last_chunk["min_corner"], np.ndarray)
+                    else last_chunk["min_corner"]
                 ),
                 max_corner=(
-                    max_corner.tolist()
-                    if isinstance(max_corner, np.ndarray)
-                    else max_corner
+                    last_chunk["max_corner"].tolist()
+                    if isinstance(last_chunk["max_corner"], np.ndarray)
+                    else last_chunk["max_corner"]
                 ),
                 index=kwargs.get("last_chunk_index", 0),
             )
