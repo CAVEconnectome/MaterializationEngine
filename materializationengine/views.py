@@ -266,7 +266,38 @@ def version_error(datastack_name: str, id: int):
                 mat_version=version.version,
             )
 
+def make_precomputed_annotation_link(datastack_name, table_name, client):
+    seg_layer = client.info.segmentation_source(format_for="neuroglancer")
+    seg_layer.replace("graphene://https://", "graphene://middleauth+https://")
 
+    annotation_url = url_for(
+        "api.Materialization Client2_live_table_precomputed_info",
+        datastack_name=datastack_name,
+        table_name=table_name,
+        _external=True)
+    annotation_source = f"precomputed://middleauth+{annotation_url}"
+    annotation_source = annotation_source[:-5]
+    seg_layer = nglui.statebuilder.SegmentationLayerConfig(
+        source=[seg_layer, seg_info_source], name="seg"
+    )
+    img_layer = nglui.statebuilder.ImageLayerConfig(
+        source=client.info.image_source(), name="img"
+    )
+
+    sb = nglui.statebuilder.StateBuilder([img_layer, seg_layer], client=client)
+    json = sb.render_state(
+        None,
+        return_as="dict",
+        url_prefix="https://spelunker.cave-explorer.org",
+        target_site="mainline",
+    )
+    json['layers'].append({'type': 'annotation','source': annotation_source, 'annotationColor': '#ffffff', 'name': table_name})
+
+    sb=nglui.statebuilder.StateBuilder(base_state=json)
+    
+    url = sb.render_state(url_prefix='https://spelunker.cave-explorer.org', return_as="url", target_site="mainline")
+    return url
+    
 def make_seg_prop_ng_link(datastack_name, table_name, version, client, is_view=False):
     seg_layer = client.info.segmentation_source(format_for="neuroglancer")
     seg_layer.replace("graphene://https://", "graphene://middleauth+https://")
@@ -324,6 +355,53 @@ def version_view(
             .filter(AnalysisVersion.version == target_version)
             .filter(AnalysisVersion.datastack == target_datastack)
             .first()
+    session = sqlalchemy_cache.get(aligned_volume_name)
+
+    anal_version = (
+        session.query(AnalysisVersion)
+        .filter(AnalysisVersion.version == target_version)
+        .filter(AnalysisVersion.datastack == target_datastack)
+        .first()
+    )
+
+    table_query = session.query(AnalysisTable).filter(
+        AnalysisTable.analysisversion == anal_version
+    )
+    tables = table_query.all()
+    schema = AnalysisTableSchema(many=True)
+
+    df = make_df_with_links_to_id(
+        objects=tables,
+        schema=AnalysisTableSchema(many=True),
+        url="views.table_view",
+        col="id",
+        col_value="id",
+        datastack_name=target_datastack,
+    )
+
+    column_order = schema.declared_fields.keys()
+    schema_url = "<a href='{}/schema/views/type/{}/view'>{}</a>"
+    client = caveclient.CAVEclient(
+        target_datastack, server_address=current_app.config["GLOBAL_SERVER_URL"]
+    )
+    df["ng_link"] = df.apply(
+        lambda x: f"<a href='{make_seg_prop_ng_link(target_datastack, x.table_name, target_version, client)}'>seg prop link</a> \
+                    <a href='{make_precomputed_annotation_link(target_datastack, x.table_name, client)}'>annotation link</a>",
+        axis=1)
+    )
+    df["schema"] = df.schema.map(
+        lambda x: schema_url.format(current_app.config["GLOBAL_SERVER_URL"], x, x)
+    )
+    df["table_name"] = df.table_name.map(
+        lambda x: f"<a href='/annotation/views/aligned_volume/{aligned_volume_name}/table/{x}'>{x}</a>"
+    )
+
+    df = df.reindex(columns=list(column_order) + ["ng_link"])
+
+    classes = ["table table-borderless"]
+    with pd.option_context("display.max_colwidth", -1):
+        output_html = df.to_html(
+            escape=False, classes=classes, index=False, justify="left", border=0
         )
 
         table_query = session.query(AnalysisTable).filter(
