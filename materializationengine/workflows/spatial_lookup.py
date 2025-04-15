@@ -23,6 +23,7 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
 )
 from materializationengine.celery_init import celery
 from materializationengine.cloudvolume_gateway import cloudvolume_cache
+from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.index_manager import index_cache
 from materializationengine.shared_tasks import (
@@ -32,17 +33,19 @@ from materializationengine.shared_tasks import (
     update_metadata,
     workflow_complete,
 )
+
 from materializationengine.throttle import throttle_celery
 from materializationengine.utils import (
     create_annotation_model,
     create_segmentation_model,
     get_config_param,
     get_geom_from_wkb,
+    get_query_columns_by_suffix,
 )
 from materializationengine.workflows.chunking import ChunkingStrategy
 from materializationengine.workflows.ingest_new_annotations import (
     create_missing_segmentation_table,
-    get_new_root_ids,
+    get_root_ids,
 )
 
 Base = declarative_base()
@@ -64,8 +67,6 @@ def run_spatial_lookup_workflow(
     table_name: str,
     chunk_scale_factor: int = 1,
     supervoxel_batch_size: int = 50,
-    get_root_ids: bool = True,
-    upload_to_database: bool = True,
     use_staging_database: bool = False,
     resume_from_checkpoint: bool = False,
 ):
@@ -146,8 +147,6 @@ def run_spatial_lookup_workflow(
             database=database,
             chunk_scale_factor=chunk_scale_factor,
             supervoxel_batch_size=supervoxel_batch_size,
-            get_root_ids=get_root_ids,
-            upload_to_database=upload_to_database,
             table_name=table_name,
             mat_info_idx=i,
         )
@@ -219,12 +218,10 @@ def process_table_in_chunks(
     database,
     chunk_scale_factor,
     supervoxel_batch_size,
-    get_root_ids,
-    upload_to_database,
     table_name,
     mat_info_idx,
     chunk_offset=0,
-    batch_size=100,
+    batch_size=200,
     chunking_info=None,
 ):
     """Process a table in chunks, respecting memory constraints and throttling."""
@@ -431,8 +428,6 @@ def process_table_in_chunks(
                     else max_corner
                 ),
                 mat_metadata=mat_metadata,
-                get_root_ids=get_root_ids,
-                upload_to_database=upload_to_database,
                 chunk_info={
                     "chunk_idx": chunk_idx,
                     "total_chunks": total_chunks,
@@ -472,8 +467,6 @@ def process_table_in_chunks(
                 database=database,
                 chunk_scale_factor=chunk_scale_factor,
                 supervoxel_batch_size=supervoxel_batch_size,
-                get_root_ids=get_root_ids,
-                upload_to_database=upload_to_database,
                 table_name=table_name,
                 mat_info_idx=mat_info_idx,
                 chunk_offset=batch_end,
@@ -525,8 +518,6 @@ def process_chunk(
     min_corner,
     max_corner,
     mat_metadata,
-    get_root_ids,
-    upload_to_database,
     chunk_info,
     database,
     supervoxel_batch_size=50,
@@ -581,10 +572,10 @@ def process_chunk(
         svids_count = len(data["id"])
 
         affected_rows = 0
-        if get_root_ids and svids_count > 0:
-            root_id_data = get_new_root_ids(data, mat_metadata)
+        if svids_count > 0:
+            root_id_data = get_root_ids_from_supervoxels(data, mat_metadata)
 
-            if upload_to_database and root_id_data and len(root_id_data) > 0:
+            if root_id_data and len(root_id_data) > 0:
                 affected_rows = insert_segmentation_data(root_id_data, mat_metadata)
                 celery_logger.info(
                     f"Actually inserted/updated {affected_rows} rows in database"
@@ -739,6 +730,128 @@ def point_to_chunk_position(cv, pt, mip=None):
 
     return (pt // cv.graph_chunk_size).astype(np.int32)
 
+def get_root_ids_from_supervoxels(materialization_data: dict, mat_metadata: dict) -> dict:
+    """Get root ids for each supervoxel for multiple point types.
+    
+    Args:
+        materialization_data (dict): Data containing supervoxel IDs to process
+        mat_metadata (dict): Materialization metadata with database info
+        
+    Returns:
+        dict: Complete data with supervoxel IDs and their corresponding root IDs
+    """
+    start_time = time.time()
+    
+    pcg_table_name = mat_metadata.get("pcg_table_name")
+    database = mat_metadata.get("database")
+    
+    try:
+        materialization_time_stamp = datetime.datetime.strptime(
+            mat_metadata.get("materialization_time_stamp"), "%Y-%m-%d %H:%M:%S.%f"
+        )
+    except ValueError:
+        materialization_time_stamp = datetime.datetime.strptime(
+            mat_metadata.get("materialization_time_stamp"), "%Y-%m-%dT%H:%M:%S.%f"
+        )
+    
+    supervoxel_df = pd.DataFrame(materialization_data, dtype=object)
+    
+    drop_col_names = list(
+        supervoxel_df.loc[:, supervoxel_df.columns.str.endswith("position")]
+    )
+    supervoxel_df = supervoxel_df.drop(labels=drop_col_names, axis=1)
+    
+    AnnotationModel = create_annotation_model(mat_metadata, with_crud_columns=True)
+    SegmentationModel = create_segmentation_model(mat_metadata)
+    
+    __, seg_model_cols, __ = get_query_columns_by_suffix(
+        AnnotationModel, SegmentationModel, "root_id"
+    )
+    
+    anno_ids = supervoxel_df["id"].tolist()
+    
+    root_ids_df = supervoxel_df.copy()
+    
+    supervoxel_col_names = [
+        col for col in supervoxel_df.columns if col.endswith("supervoxel_id")
+    ]
+    
+    root_id_col_names = [
+        col.replace("supervoxel_id", "root_id") for col in supervoxel_col_names
+    ]
+    
+    for col in root_id_col_names:
+        if col not in root_ids_df.columns:
+            root_ids_df[col] = 0
+    
+    existing_root_ids = {}
+    with db_manager.session_scope(database) as session:
+        try:
+            results = session.query(*seg_model_cols).filter(
+                SegmentationModel.id.in_(anno_ids)
+            ).all()
+            
+            if results:
+                existing_df = pd.DataFrame(results)
+                for i, row in existing_df.iterrows():
+                    row_id = row.get('id')
+                    if row_id:
+                        existing_root_ids[row_id] = row.to_dict()
+        except Exception as e:
+            celery_logger.warning(f"Error querying existing root IDs: {str(e)}")
+    
+    for idx, row in root_ids_df.iterrows():
+        row_id = row['id']
+        if row_id in existing_root_ids:
+            for root_col in root_id_col_names:
+                existing_value = existing_root_ids[row_id].get(root_col)
+                if existing_value and existing_value > 0:
+                    root_ids_df.at[idx, root_col] = existing_value
+
+    cg_client = chunkedgraph_cache.init_pcg(pcg_table_name)
+
+    for sv_col in supervoxel_col_names:
+        root_col = sv_col.replace("supervoxel_id", "root_id")
+        
+        sv_mask = (root_ids_df[sv_col] > 0) & (
+            (root_ids_df[root_col].isna()) | (root_ids_df[root_col] == 0)
+        )
+        
+        if not sv_mask.any():
+            continue
+            
+        supervoxels_to_lookup = root_ids_df.loc[sv_mask, sv_col]
+        celery_logger.info(
+            f"Looking up {len(supervoxels_to_lookup)} root IDs for {sv_col}"
+        )
+        
+        if not supervoxels_to_lookup.empty:
+            try:
+                root_ids = get_root_ids(
+                    cg_client, supervoxels_to_lookup, materialization_time_stamp
+                )
+                
+                root_ids_df.loc[sv_mask, root_col] = root_ids
+                
+                zero_root_idx = supervoxels_to_lookup.index[root_ids == 0]
+                if len(zero_root_idx) > 0:
+                    zero_sv_ids = supervoxels_to_lookup.loc[zero_root_idx]
+                    celery_logger.warning(
+                        f"Found {len(zero_sv_ids)} supervoxels with no "
+                        f"corresponding root IDs for {sv_col}: {zero_sv_ids.tolist()[:5]}..."
+                    )
+            except Exception as e:
+                celery_logger.error(
+                    f"Error looking up root IDs for {sv_col}: {str(e)}"
+                )
+    
+    total_time = time.time() - start_time
+    celery_logger.info(
+        f"Root ID lookup complete: processed {len(root_ids_df)} rows "
+        f"with {len(supervoxel_col_names)} supervoxel columns in {total_time:.2f}s"
+    )
+    
+    return root_ids_df.to_dict(orient="records")
 
 def get_scatter_points(pts_df, mat_info, batch_size=500):
     """Process supervoxel ID lookups in smaller batches to improve performance."""

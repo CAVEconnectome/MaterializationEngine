@@ -592,8 +592,6 @@ class SpatialSVIDLookupTableResource(Resource):
 
         chunk_scale_factor = args["chunk_scale_factor"]
         supervoxel_batch_size = args["supervoxel_batch_size"]
-        get_root_ids = args["get_root_ids"]
-        upload_to_database = args["upload_to_database"]
         use_staging_database = args["use_staging_database"]
         resume_from_checkpoint = args["resume_from_checkpoint"]
         try:
@@ -602,8 +600,6 @@ class SpatialSVIDLookupTableResource(Resource):
                 table_name=table_name,
                 chunk_scale_factor=chunk_scale_factor,
                 supervoxel_batch_size=supervoxel_batch_size,
-                get_root_ids=get_root_ids,
-                upload_to_database=upload_to_database,
                 use_staging_database=use_staging_database,
                 resume_from_checkpoint=resume_from_checkpoint,
             ).apply_async()
