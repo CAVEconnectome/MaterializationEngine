@@ -140,8 +140,19 @@ class ChunkingStrategy:
 
             min_coords = np.array([min_x, min_y, min_z])
             max_coords = np.array([max_x, max_y, max_z])
-
-            return min_coords, max_coords
+                    
+            chunk_size = self.actual_chunk_size
+            aligned_min = np.floor(min_coords / chunk_size) * chunk_size
+            aligned_max = np.ceil(max_coords / chunk_size) * chunk_size
+            
+            celery_logger.info(
+                f"Bounding box calculation for table {table_name}:\n"
+                f"  Raw bounds: {min_coords} to {max_coords}\n"
+                f"  Aligned bounds: {aligned_min} to {aligned_max}\n"
+                f"  Chunk size: {chunk_size}"
+            )
+                    
+            return aligned_min, aligned_max
 
         except Exception as e:
             celery_logger.error(f"Error querying database: {str(e)}")
@@ -452,27 +463,28 @@ class ChunkingStrategy:
             return grid_skip_generator
         
 
-        generator = self.create_chunk_generator()
+        generator_func = self.create_chunk_generator()
+
         
-        def skip_generator():
-            gen = generator()
+        def skip_and_yield():
+            gen = generator_func()
             skipped = 0
             try:
                 while skipped < start_index:
                     next(gen)
                     skipped += 1
             except StopIteration:
-                # Ran out of chunks to skip
+                celery_logger.warning(
+                    f"skip_to_index: Attempted to skip {start_index} chunks, "
+                    f"but only found {skipped}. No further chunks to yield."
+                )
                 return
-            
-            # Yield all remaining chunks
-            try:
-                while True:
-                    yield next(gen)
-            except StopIteration:
-                return
-        
-        return skip_generator
+
+            for chunk in gen:
+                yield chunk
+
+        return skip_and_yield
+
             
     def to_dict(self):
         """
