@@ -10,11 +10,13 @@ from celery.utils.log import get_task_logger
 from cloudvolume.lib import Vec
 from geoalchemy2 import Geometry
 from sqlalchemy import (
+    case,
     func,
     literal,
     select,
     union_all,
 )
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import DisconnectionError, OperationalError
 from sqlalchemy.ext.declarative import declarative_base
 
@@ -22,8 +24,8 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
     RedisCheckpointManager,
 )
 from materializationengine.celery_init import celery
-from materializationengine.cloudvolume_gateway import cloudvolume_cache
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
+from materializationengine.cloudvolume_gateway import cloudvolume_cache
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.index_manager import index_cache
 from materializationengine.shared_tasks import (
@@ -33,7 +35,6 @@ from materializationengine.shared_tasks import (
     update_metadata,
     workflow_complete,
 )
-
 from materializationengine.throttle import throttle_celery
 from materializationengine.utils import (
     create_annotation_model,
@@ -730,21 +731,24 @@ def point_to_chunk_position(cv, pt, mip=None):
 
     return (pt // cv.graph_chunk_size).astype(np.int32)
 
-def get_root_ids_from_supervoxels(materialization_data: dict, mat_metadata: dict) -> dict:
+
+def get_root_ids_from_supervoxels(
+    materialization_data: dict, mat_metadata: dict
+) -> dict:
     """Get root ids for each supervoxel for multiple point types.
-    
+
     Args:
         materialization_data (dict): Data containing supervoxel IDs to process
         mat_metadata (dict): Materialization metadata with database info
-        
+
     Returns:
         dict: Complete data with supervoxel IDs and their corresponding root IDs
     """
     start_time = time.time()
-    
+
     pcg_table_name = mat_metadata.get("pcg_table_name")
     database = mat_metadata.get("database")
-    
+
     try:
         materialization_time_stamp = datetime.datetime.strptime(
             mat_metadata.get("materialization_time_stamp"), "%Y-%m-%d %H:%M:%S.%f"
@@ -753,55 +757,57 @@ def get_root_ids_from_supervoxels(materialization_data: dict, mat_metadata: dict
         materialization_time_stamp = datetime.datetime.strptime(
             mat_metadata.get("materialization_time_stamp"), "%Y-%m-%dT%H:%M:%S.%f"
         )
-    
+
     supervoxel_df = pd.DataFrame(materialization_data, dtype=object)
-    
+
     drop_col_names = list(
         supervoxel_df.loc[:, supervoxel_df.columns.str.endswith("position")]
     )
     supervoxel_df = supervoxel_df.drop(labels=drop_col_names, axis=1)
-    
+
     AnnotationModel = create_annotation_model(mat_metadata, with_crud_columns=True)
     SegmentationModel = create_segmentation_model(mat_metadata)
-    
+
     __, seg_model_cols, __ = get_query_columns_by_suffix(
         AnnotationModel, SegmentationModel, "root_id"
     )
-    
+
     anno_ids = supervoxel_df["id"].tolist()
-    
+
     root_ids_df = supervoxel_df.copy()
-    
+
     supervoxel_col_names = [
         col for col in supervoxel_df.columns if col.endswith("supervoxel_id")
     ]
-    
+
     root_id_col_names = [
         col.replace("supervoxel_id", "root_id") for col in supervoxel_col_names
     ]
-    
+
     for col in root_id_col_names:
         if col not in root_ids_df.columns:
             root_ids_df[col] = 0
-    
+
     existing_root_ids = {}
     with db_manager.session_scope(database) as session:
         try:
-            results = session.query(*seg_model_cols).filter(
-                SegmentationModel.id.in_(anno_ids)
-            ).all()
-            
+            results = (
+                session.query(*seg_model_cols)
+                .filter(SegmentationModel.id.in_(anno_ids))
+                .all()
+            )
+
             if results:
                 existing_df = pd.DataFrame(results)
                 for i, row in existing_df.iterrows():
-                    row_id = row.get('id')
+                    row_id = row.get("id")
                     if row_id:
                         existing_root_ids[row_id] = row.to_dict()
         except Exception as e:
             celery_logger.warning(f"Error querying existing root IDs: {str(e)}")
-    
+
     for idx, row in root_ids_df.iterrows():
-        row_id = row['id']
+        row_id = row["id"]
         if row_id in existing_root_ids:
             for root_col in root_id_col_names:
                 existing_value = existing_root_ids[row_id].get(root_col)
@@ -812,27 +818,27 @@ def get_root_ids_from_supervoxels(materialization_data: dict, mat_metadata: dict
 
     for sv_col in supervoxel_col_names:
         root_col = sv_col.replace("supervoxel_id", "root_id")
-        
+
         sv_mask = (root_ids_df[sv_col] > 0) & (
             (root_ids_df[root_col].isna()) | (root_ids_df[root_col] == 0)
         )
-        
+
         if not sv_mask.any():
             continue
-            
+
         supervoxels_to_lookup = root_ids_df.loc[sv_mask, sv_col]
         celery_logger.info(
             f"Looking up {len(supervoxels_to_lookup)} root IDs for {sv_col}"
         )
-        
+
         if not supervoxels_to_lookup.empty:
             try:
                 root_ids = get_root_ids(
                     cg_client, supervoxels_to_lookup, materialization_time_stamp
                 )
-                
+
                 root_ids_df.loc[sv_mask, root_col] = root_ids
-                
+
                 zero_root_idx = supervoxels_to_lookup.index[root_ids == 0]
                 if len(zero_root_idx) > 0:
                     zero_sv_ids = supervoxels_to_lookup.loc[zero_root_idx]
@@ -841,17 +847,16 @@ def get_root_ids_from_supervoxels(materialization_data: dict, mat_metadata: dict
                         f"corresponding root IDs for {sv_col}: {zero_sv_ids.tolist()[:5]}..."
                     )
             except Exception as e:
-                celery_logger.error(
-                    f"Error looking up root IDs for {sv_col}: {str(e)}"
-                )
-    
+                celery_logger.error(f"Error looking up root IDs for {sv_col}: {str(e)}")
+
     total_time = time.time() - start_time
     celery_logger.info(
         f"Root ID lookup complete: processed {len(root_ids_df)} rows "
         f"with {len(supervoxel_col_names)} supervoxel columns in {total_time:.2f}s"
     )
-    
+
     return root_ids_df.to_dict(orient="records")
+
 
 def get_scatter_points(pts_df, mat_info, batch_size=500):
     """Process supervoxel ID lookups in smaller batches to improve performance."""
@@ -1029,20 +1034,19 @@ def insert_segmentation_data(
     data: pd.DataFrame,
     mat_metadata: dict,
 ):
-    """Inserts the segmentation data into the database using SQLAlchemy ORM with bulk operations.
+    """Inserts the segmentation data into the database using PostgreSQL's upsert functionality.
 
     Args:
         data (pd.DataFrame): Dataframe containing the segmentation data
         mat_metadata (dict): Materialization info for a given table
 
     Returns:
-        int: Number of rows actually modified in the database
+        int: Number of rows affected in the database
     """
     start_time = time.time()
     database = mat_metadata["database"]
     SegmentationModel = create_segmentation_model(mat_metadata)
 
-    # Process dataframe as before
     seg_columns = SegmentationModel.__table__.columns.keys()
     segmentation_dataframe = pd.DataFrame(columns=seg_columns, dtype=object)
     data_df = pd.DataFrame(data, dtype=object)
@@ -1054,7 +1058,6 @@ def insert_segmentation_data(
     for col in supervoxel_id_cols:
         data_df[col] = data_df[col].apply(convert_array_to_int)
 
-    # find the common columns between the two dataframes
     common_cols = segmentation_dataframe.columns.intersection(data_df.columns)
     df = pd.merge(
         segmentation_dataframe[common_cols], data_df[common_cols], how="right"
@@ -1062,72 +1065,48 @@ def insert_segmentation_data(
     df = df.infer_objects().fillna(0)
     df = df.reindex(columns=segmentation_dataframe.columns, fill_value=0)
 
-    # Convert to dictionary records
     records = df.to_dict(orient="records")
 
+    if not records:
+        celery_logger.info("No records to process")
+        return 0
+
+    table = SegmentationModel.__table__
+
+    update_columns = [col for col in seg_columns if col != "id"]
+
     with db_manager.session_scope(database) as session:
-        # Track actual modifications
-        rows_actually_modified = 0
+        rows_affected = 0
 
-        # Get all existing IDs in one query
-        existing_ids = set(
-            id_tuple[0]
-            for id_tuple in session.query(SegmentationModel.id)
-            .filter(SegmentationModel.id.in_([r["id"] for r in records]))
-            .all()
-        )
+        chunk_size = 1000
+        for i in range(0, len(records), chunk_size):
+            chunk = records[i : i + chunk_size]
 
-        # Split records into new and existing
-        new_records = []
-        records_to_update = []
+            if not chunk:
+                continue
 
-        for record in records:
-            if record["id"] in existing_ids:
-                records_to_update.append(record)
-            else:
-                new_records.append(record)
+            stmt = insert(table).values(chunk)
 
-        # Bulk insert new records
-        if new_records:
-            new_objects = [SegmentationModel(**record) for record in new_records]
-            session.bulk_save_objects(new_objects)
-            rows_actually_modified += len(new_records)
-            celery_logger.info(f"Inserted {len(new_records)} new records")
+            update_dict = {}
+            for col in update_columns:
+                update_dict[col] = case(
+                    [(stmt.excluded[col] > 0, stmt.excluded[col])],
+                    else_=getattr(
+                        table.c, col
+                    ),
+                )
 
-        if records_to_update:
-            id_to_record_map = {record["id"]: record for record in records_to_update}
-            current_records = (
-                session.query(SegmentationModel)
-                .filter(SegmentationModel.id.in_(list(id_to_record_map.keys())))
-                .all()
+            stmt = stmt.on_conflict_do_update(
+                constraint=table.primary_key, set_=update_dict
             )
 
-            update_values = []
-            for db_record in current_records:
-                new_record = id_to_record_map[db_record.id]
-                update_dict = {"id": db_record.id}
+            result = session.execute(stmt)
+            rows_affected += result.rowcount
 
-                has_non_zero_updates = False
-                for column_name in seg_columns:
-                    if column_name == "id":
-                        continue
-                    new_value = new_record.get(column_name, 0)
-                    if new_value != 0:
-                        update_dict[column_name] = new_value
-                        has_non_zero_updates = True
-
-                if has_non_zero_updates:
-                    update_values.append(update_dict)
-
-            if update_values:
-                session.bulk_update_mappings(SegmentationModel, update_values)
-                rows_actually_modified += len(update_values)
-                celery_logger.info(f"Updated {len(update_values)} existing records")
-
-    celery_logger.info(
-        f"Total modifications: {rows_actually_modified} rows in {time.time() - start_time:.2f} seconds"
-    )
-    return rows_actually_modified
+        celery_logger.info(
+            f"Total rows affected: {rows_affected} in {time.time() - start_time:.2f} seconds"
+        )
+        return rows_affected
 
 
 def _safe_pivot_svid_df_to_dict(df: pd.DataFrame) -> dict:
