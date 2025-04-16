@@ -1840,9 +1840,11 @@ def get_precomputed_properties_and_relationships(datastack_name, table_name):
             if df[c].dtype == "float64":
                 type = "float32"
             elif df[c].dtype == "int64":
-                type = "int32"
+                type = "uint32"
             elif df[c].dtype == "int32":
                 type = "int32"
+            elif df[c].dtype == "bool":
+                type = "int8"
             else:
                 continue
             prop = viewer_state.AnnotationPropertySpec(id=c, type=type, description=c)
