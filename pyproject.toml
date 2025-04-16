@@ -41,6 +41,7 @@ dependencies = [
     "dynamicannotationdb>=5.7.2",
     "nglui>=3.2.1",
     "Flask-Limiter[redis]",
+    "cryptography>=44.0.2",
 ]
 authors = [
     { name = "Forrest Collman", email = "forrestc@alleninstitute.org" },
