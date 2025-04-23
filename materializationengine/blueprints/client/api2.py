@@ -66,7 +66,8 @@ from materializationengine.models import MaterializedMetadata
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from materializationengine.utils import check_read_permission
 
-__version__ = "4.36.2"
+
+__version__ = "4.36.6"
 
 
 authorizations = {
@@ -303,8 +304,8 @@ def check_joins(joins):
     for join in joins:
         check_column_for_root_id(join[1])
         check_column_for_root_id(join[3])
-
-
+        
+        
 def execute_materialized_query(
     datastack: str,
     aligned_volume: str,
@@ -366,6 +367,7 @@ def execute_materialized_query(
             return df, column_names, warnings
         else:
             return None, {}, []
+
 
 
 def execute_production_query(

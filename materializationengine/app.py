@@ -81,7 +81,6 @@ def create_app(config_name: str = None):
         'pool_pre_ping': True,
         'pool_recycle': 3600,
     }
-    
 
     db.init_app(app)
     ma.init_app(app)

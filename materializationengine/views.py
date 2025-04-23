@@ -56,7 +56,8 @@ from materializationengine.schemas import (
 )
 from materializationengine.utils import check_read_permission, get_config_param
 
-__version__ = "4.36.2"
+
+__version__ = "4.36.6"
 
 views_bp = Blueprint("views", __name__, url_prefix="/materialize/views")
 
@@ -308,6 +309,7 @@ def make_seg_prop_ng_link(datastack_name, table_name, version, client, is_view=F
     return url_link
 
 
+
 @views_bp.route("/datastack/<datastack_name>/version/<int(signed=True):version>")
 @validate_datastack
 @auth_requires_permission("view", table_arg="target_datastack")
@@ -397,7 +399,7 @@ def version_view(
             view_table=output_view_html,
             version=__version__,
         )
-
+      
 
 @views_bp.route("/datastack/<datastack_name>/table/<int:id>")
 @auth_requires_permission("view", table_arg="datastack_name")
