@@ -25,9 +25,10 @@ gcsfs>=0.8.0
 pyarrow
 flask_cors
 numpy>=1.20
-emannotationschemas>=5.11.0
-dynamicannotationdb>=5.7.2
+emannotationschemas>=5.17.0
+dynamicannotationdb>=5.12.0
 nglui>=3.2.1
 Flask-Limiter[redis]
 Flask-Session
+Werkzeug==3.0.6
 
