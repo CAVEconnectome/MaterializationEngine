@@ -3,6 +3,7 @@
     "aligned_volume": "test_aligned_volume",
     "db_host": "127.0.0.1",
     "datastack": "test_aligned_volume",
+    "database": "test_aligned_volume",
     "annotation_table_name": "test_synapse_table",
     "segmentation_table_name": "test_synapse_table__test_pcg",
     "schema_type": "synapse",

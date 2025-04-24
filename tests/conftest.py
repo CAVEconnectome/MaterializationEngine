@@ -10,11 +10,10 @@ import psycopg2
 import pytest
 from dynamicannotationdb import DynamicAnnotationInterface
 from dynamicannotationdb.models import Base
+
 from materializationengine.app import create_app
 from materializationengine.celery_worker import create_celery
 from materializationengine.database import db_manager
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 test_logger = logging.getLogger(__name__)
 
@@ -41,7 +40,9 @@ def pytest_configure(config):
 def mat_metadata():
     p = pathlib.Path("tests/test_data", "mat_metadata.json")
     mat_dict = json.loads(p.read_text())
-    mat_dict["materialization_time_stamp"] = str(datetime.datetime.utcnow() + datetime.timedelta(days=1))
+    mat_dict["materialization_time_stamp"] = str(
+        datetime.datetime.utcnow() + datetime.timedelta(days=1)
+    )
     return mat_dict
 
 
@@ -71,7 +72,7 @@ def database_uri(mat_metadata):
 @pytest.fixture(scope="session")
 def test_app():
     flask_app = create_app(config_name="testing")
-    test_logger.info(f"Starting test flask app...")
+    test_logger.info("Starting test flask app...")
 
     # Create a test client using the Flask application configured for testing
     with flask_app.test_client() as testing_client:
@@ -82,7 +83,7 @@ def test_app():
 
 @pytest.fixture(scope="session")
 def test_celery_app(test_app):
-    test_logger.info(f"Starting test celery worker...")
+    test_logger.info("Starting test celery worker...")
     celery = create_celery(test_app)
     yield celery
 
@@ -164,7 +165,6 @@ def db_client(aligned_volume_name):
     with db_manager.session_scope(aligned_volume_name) as session:
         engine = db_manager.get_engine(aligned_volume_name)
         yield session, engine
-    
 
 
 @pytest.fixture(scope="session")
@@ -187,7 +187,6 @@ def check_database(sql_uri: str) -> bool:  # Changed return type hint
     except Exception as e:
         test_logger.info(e)
         return False  # Explicitly return False on failure
-        
 
 
 def setup_database(aligned_volume_name, database_uri):
@@ -236,7 +235,9 @@ def insert_test_data(mat_metadata: dict, annotation_data: dict):
 
     anno_client = DynamicAnnotationInterface(database_uri, aligned_volume_name)
 
-    data = anno_client.annotation.insert_annotations(annotation_table_name, synapse_data)
+    data = anno_client.annotation.insert_annotations(
+        annotation_table_name, synapse_data
+    )
     test_logger.info(f"DATA INSERTED: {data}")
     is_created = anno_client.segmentation.create_segmentation_table(
         annotation_table_name, schema_type, pcg_name

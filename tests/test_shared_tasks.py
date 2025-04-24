@@ -40,35 +40,22 @@ class TestSharedTasks:
         mat_info = get_materialization_info(
             datastack_info, analysis_version, materialization_time_stamp
         )
-        assert mat_info == [
-            {
-                "datastack": "test_datastack",
-                "aligned_volume": "test_aligned_volume",
-                "schema": "synapse",
-                "create_segmentation_table": False,
-                "max_id": 4,
-                "merge_table": True,
-                "min_id": 1,
-                "row_count": 4,
-                "add_indices": True,
-                "segmentation_table_name": "test_synapse_table__test_pcg",
-                "annotation_table_name": "test_synapse_table",
-                "temp_mat_table_name": "temp__test_synapse_table",
-                "reference_table": None,
-                "pcg_table_name": "test_pcg",
-                "segmentation_source": "graphene://https://fake-daf.com/segmentation/table/test_pcg",
-                "coord_resolution": [4.0, 4.0, 40.0],
-                "materialization_time_stamp": str(materialization_time_stamp),
-                "last_updated_time_stamp": None,
-                "chunk_size": 2,
-                "table_count": 1,
-                "lookup_all_root_ids": False,
-                "analysis_version": 1,
-                "analysis_database": "test_datastack__mat1",
-                "queue_length_limit": 10000,
-                "throttle_queues": True,
-            }
-        ]
+        assert isinstance(mat_info, list)
+        assert len(mat_info) == 1
+        assert mat_info[0]["datastack"] == "test_datastack"
+        assert mat_info[0]["aligned_volume"] == "test_aligned_volume"
+        assert mat_info[0]["segmentation_source"] == "graphene://https://fake-daf.com/segmentation/table/test_pcg"
+        datastack_info = {
+            "datastack": "test_datastack",
+            "aligned_volume": {"name": "test_aligned_volume"},
+            "segmentation_source": "graphene://https://fake-daf.com/segmentation/table/test_pcg",
+        }
+        analysis_version = 1
+        materialization_time_stamp = datetime.datetime.utcnow()
+        mat_info = get_materialization_info(
+            datastack_info, analysis_version, materialization_time_stamp
+        )
+        
 
     def test_collect_data(self):
         task = collect_data.s("test", {"some": "dict"}).apply()

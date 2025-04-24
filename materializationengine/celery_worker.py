@@ -112,9 +112,11 @@ def setup_periodic_tasks(sender, **kwargs):
         name="Clean up back end results",
     )
 
-    beat_schedules = celery.conf["beat_schedules"]
+    beat_schedules = celery.conf.get("beat_schedules", [])
     celery_logger.info(beat_schedules)
-
+    if not beat_schedules:
+        celery_logger.info("No periodic tasks configured.")
+        return
     try:
         schedules = CeleryBeatSchema(many=True).load(beat_schedules)
     except ValidationError as validation_error:

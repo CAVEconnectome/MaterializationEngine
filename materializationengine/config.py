@@ -147,6 +147,7 @@ class DevConfig(BaseConfig):
     CELERY_BROKER_URL = REDIS_URL
     CELERY_RESULT_BACKEND = REDIS_URL
     USE_SENTINEL = os.environ.get("USE_SENTINEL", False)
+    
 
 
 class TestConfig(BaseConfig):
@@ -159,6 +160,7 @@ class TestConfig(BaseConfig):
     CELERY_BROKER_URL = "memory://"
     CELERY_RESULT_BACKEND = "redis://"
     MATERIALIZATION_ROW_CHUNK_SIZE = 2
+    BEAT_SCHEDULES = []
 
 
 class ProductionConfig(BaseConfig):

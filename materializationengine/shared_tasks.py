@@ -1,19 +1,21 @@
 import datetime
-import os
-from typing import Generator, List
 import time
+from typing import Generator, List
 
 from celery.result import AsyncResult
 from celery.utils.log import get_task_logger
 from dynamicannotationdb.key_utils import build_segmentation_table_name
-from dynamicannotationdb.models import SegmentationMetadata
+from dynamicannotationdb.models import (
+    AnalysisVersion,
+    SegmentationMetadata,
+    VersionErrorTable,
+)
 from sqlalchemy import and_, func, text
 from sqlalchemy.exc import ProgrammingError
-from sqlalchemy.orm.exc import NoResultFound
-from materializationengine.info_client import get_relevant_datastack_info
+
 from materializationengine.celery_init import celery
-from dynamicannotationdb.models import AnalysisVersion, VersionErrorTable
-from materializationengine.database import dynamic_annotation_cache, db_manager
+from materializationengine.database import db_manager, dynamic_annotation_cache
+from materializationengine.schemas import MaterializationInfoSchema
 from materializationengine.utils import (
     create_annotation_model,
     create_segmentation_model,
@@ -113,7 +115,6 @@ def fin(self, *args, **kwargs):
 def workflow_complete(self, workflow_name):
     return f"{workflow_name} completed successfully"
 
-
 def get_materialization_info(
     datastack_info: dict,
     analysis_version: int = None,
@@ -124,7 +125,6 @@ def get_materialization_info(
     skip_row_count: bool = False,
     database: str = None,
 ) -> List[dict]:
-
     """Initialize materialization by an aligned volume name. Iterates through all
     tables in a aligned volume database and gathers metadata for each table. The list
     of tables are passed to workers for materialization.
@@ -132,6 +132,7 @@ def get_materialization_info(
     Args:
         datastack_info (dict): Datastack info
         analysis_version (int, optional): Analysis version to use for frozen materialization. Defaults to None.
+        materialization_time_stamp (datetime, optional): Timestamp for materialization. Defaults to current time.
         skip_table (bool, optional): Triggers row count for skipping tables larger than row_size arg. Defaults to False.
         row_size (int, optional): Row size number to check. Defaults to 1_000_000.
         table_name (str, optional): Table name to materialize. Defaults to None.
@@ -139,7 +140,7 @@ def get_materialization_info(
         database (str, optional): Database name. Defaults to None.
 
     Returns:
-        List[dict]: [description]
+        List[dict]: List of materialization metadata for each table
     """
     celery_logger.info("Collecting materialization metadata")
     aligned_volume_name = datastack_info["aligned_volume"]["name"]
@@ -157,7 +158,10 @@ def get_materialization_info(
     annotation_tables = db.database.get_valid_table_names()
     if table_name is not None:
         annotation_tables = [next(a for a in annotation_tables if a == table_name)]
+    
+    schema = MaterializationInfoSchema()
     metadata = []
+    
     celery_logger.debug(f"Annotation tables: {annotation_tables}")
     for annotation_table in annotation_tables:
         max_id = db.database.get_max_id_value(annotation_table)
@@ -165,8 +169,18 @@ def get_materialization_info(
             max_id = int(max_id)
         except TypeError:
             max_id = None
+        
+        # Initialize table metadata
+        table_metadata = {
+            "max_id": max_id,
+            "datastack": datastack_info["datastack"],
+            "aligned_volume": str(aligned_volume_name),
+            "database": database if database else aligned_volume_name,
+            "annotation_table_name": annotation_table,
+            "materialization_time_stamp": str(materialization_time_stamp),
+        }
+        
         if not skip_row_count:
-
             row_count = db.database.get_table_row_count(
                 annotation_table,
                 filter_valid=True,
@@ -178,19 +192,18 @@ def get_materialization_info(
             except TypeError:
                 min_id = None
                            
-            table_metadata = {
-                "max_id": max_id,
+            table_metadata.update({
                 "min_id": min_id,
                 "row_count": row_count,
-            }
+            })
+            
             if row_count == 0:
                 continue
 
             if row_count >= row_size and skip_table:
                 continue
-        else:
-            table_metadata = {"max_id": max_id}
-
+        
+        # Get table metadata
         md = db.database.get_table_metadata(annotation_table)
         vx = md.get("voxel_resolution_x", None)
         vy = md.get("voxel_resolution_y", None)
@@ -201,23 +214,18 @@ def get_materialization_info(
         voxel_resolution = [vx, vy, vz]
 
         reference_table = md.get("reference_table")
-        schema = db.database.get_table_schema(annotation_table)
+        schema_name = db.database.get_table_schema(annotation_table)
+        
         if max_id:
-            table_metadata.update(
-                {
-                    "annotation_table_name": annotation_table,
-                    "datastack": datastack_info["datastack"],
-                    "aligned_volume": str(aligned_volume_name),
-                    "database": database if database else aligned_volume_name,
-                    "schema": schema,
-                    "add_indices": True,
-                    "coord_resolution": voxel_resolution,
-                    "reference_table": reference_table,
-                    "materialization_time_stamp": str(materialization_time_stamp),
-                    "table_count": len(annotation_tables),
-                }
-            )
-            has_segmentation_table = db.schema.is_segmentation_table_required(schema)
+            table_metadata.update({
+                "schema": schema_name,
+                "add_indices": True,
+                "coord_resolution": voxel_resolution,
+                "reference_table": reference_table,
+                "table_count": len(annotation_tables),
+            })
+            
+            has_segmentation_table = db.schema.is_segmentation_table_required(schema_name)
             if has_segmentation_table:
                 segmentation_table_name = build_segmentation_table_name(
                     annotation_table, pcg_table_name
@@ -226,6 +234,7 @@ def get_materialization_info(
                 segmentation_metadata = db.segmentation.get_segmentation_table_metadata(
                     annotation_table, pcg_table_name
                 )
+                
                 if segmentation_metadata:
                     create_segmentation_table = False
                 else:
@@ -236,39 +245,34 @@ def get_materialization_info(
                     create_segmentation_table = True
 
                 last_updated_time_stamp = segmentation_metadata.get("last_updated")
-
                 last_updated_time_stamp = (
                     str(last_updated_time_stamp) if last_updated_time_stamp else None
                 )
 
-                table_metadata.update(
-                    {
-                        "create_segmentation_table": create_segmentation_table,
-                        "segmentation_table_name": segmentation_table_name,
-                        "temp_mat_table_name": f"temp__{annotation_table}",
-                        "pcg_table_name": pcg_table_name,
-                        "segmentation_source": segmentation_source,
-                        "last_updated_time_stamp": last_updated_time_stamp,
-                        "chunk_size": get_config_param(
-                            "MATERIALIZATION_ROW_CHUNK_SIZE"
-                        ),
-                        "queue_length_limit": get_config_param("QUEUE_LENGTH_LIMIT"),
-                        "throttle_queues": get_config_param("THROTTLE_QUEUES"),
-                        "lookup_all_root_ids": datastack_info.get(
-                            "lookup_all_root_ids", False
-                        ),
-                        "merge_table": get_config_param("MERGE_TABLES"),
-                    }
-                )
+                table_metadata.update({
+                    "create_segmentation_table": create_segmentation_table,
+                    "segmentation_table_name": segmentation_table_name,
+                    "temp_mat_table_name": f"temp__{annotation_table}",
+                    "pcg_table_name": pcg_table_name,
+                    "segmentation_source": segmentation_source,
+                    "last_updated_time_stamp": last_updated_time_stamp,
+                    "chunk_size": get_config_param("MATERIALIZATION_ROW_CHUNK_SIZE"),
+                    "queue_length_limit": get_config_param("QUEUE_LENGTH_LIMIT"),
+                    "throttle_queues": get_config_param("THROTTLE_QUEUES"),
+                    "lookup_all_root_ids": datastack_info.get("lookup_all_root_ids", False),
+                    "merge_table": get_config_param("MERGE_TABLES"),
+                })
+                
             if analysis_version:
-                table_metadata.update(
-                    {
-                        "analysis_version": analysis_version,
-                        "analysis_database": f"{datastack_info['datastack']}__mat{analysis_version}",
-                    }
-                )
+                table_metadata.update({
+                    "analysis_version": analysis_version,
+                    "analysis_database": f"{datastack_info['datastack']}__mat{analysis_version}",
+                })
 
-            metadata.append(table_metadata.copy())
+            # Use the schema to validate and serialize the metadata
+            validated_metadata = schema.load(table_metadata)
+            metadata.append(validated_metadata)
+    
     celery_logger.debug(metadata)
     db.database.cached_session.close()
     celery_logger.info(f"Metadata collected for {len(metadata)} tables")
