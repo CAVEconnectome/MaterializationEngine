@@ -1,0 +1,46 @@
+{% extends "base.html" %} {% block content %}
+<div class="container mt-5">
+  <div class="card">
+    <div class="card-header bg-warning"><h2>Permission Required</h2></div>
+    <div class="card-body">
+      <div class="alert alert-danger">
+        <h4>Insufficient Permissions</h4>
+        <p>
+          You do not have the necessary permissions to access the upload
+          workflow.
+        </p>
+
+        <hr />
+
+        <h5>Required Permissions:</h5>
+        <ul>
+          <li><code>datasets_admin or </code></li>
+          <li><code>groups_admin</code></li>
+        </ul>
+
+        <p class="mb-0">
+          Please contact your administrator to upgrade your account permissions.
+        </p>
+      </div>
+
+      {% if current_user %}
+      <div class="card mt-3">
+        <div class="card-header">Your Current Permissions</div>
+        <div class="card-body">
+          <strong>Logged in as:</strong> {{ current_user.get('email', 'Unknown')
+          }}<br />
+          <strong>Current Permissions:</strong>
+          <ul>
+            {% for perm in current_user.get('permissions', []) %}
+            <li>{{ perm }}</li>
+            {% else %}
+            <li><em>No permissions found</em></li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

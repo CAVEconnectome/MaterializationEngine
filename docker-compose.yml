@@ -1,7 +1,6 @@
-version: '3.2'
 services:
   db:
-    image: postgis/postgis:9.6-2.5
+    image: postgis/postgis:13-3.3
     shm_size: 1g
     env_file:
       - ./dev.env
@@ -49,7 +48,6 @@ services:
     image: 'materialize:tag'
     env_file:
       - ./dev.env
-      - ./.env
     environment:
       - WORKER_NAME=worker.workflow
       - QUEUE_NAME=workflow
@@ -64,7 +62,6 @@ services:
     image: 'materialize:tag'
     env_file:
       - ./dev.env
-      - ./.env
     environment:
       - WORKER_NAME=worker.process
       - QUEUE_NAME=process
@@ -79,7 +76,6 @@ services:
     image: 'materialize:tag'
     env_file:
       - ./dev.env
-      - ./.env
     command: celery --app=run.celery beat --pidfile=/home/nginx/celerybeat.pid
     volumes:
       - ~/.cloudvolume/secrets:/home/nginx/.cloudvolume/secrets:z
@@ -100,7 +96,6 @@ services:
       - .:/app
     env_file:
       - ./dev.env
-      - ./.env
     depends_on:
       - db
       - redis-master

@@ -23,7 +23,6 @@ celery_logger = get_task_logger(__name__)
 
 
 def create_celery(app=None):
-
     celery.conf.broker_url = app.config["CELERY_BROKER_URL"]
     celery.conf.result_backend = app.config["CELERY_RESULT_BACKEND"]
     if app.config.get("USE_SENTINEL", False):
@@ -113,9 +112,11 @@ def setup_periodic_tasks(sender, **kwargs):
         name="Clean up back end results",
     )
 
-    beat_schedules = celery.conf["beat_schedules"]
+    beat_schedules = celery.conf.get("beat_schedules", [])
     celery_logger.info(beat_schedules)
-
+    if not beat_schedules:
+        celery_logger.info("No periodic tasks configured.")
+        return
     try:
         schedules = CeleryBeatSchema(many=True).load(beat_schedules)
     except ValidationError as validation_error:
@@ -207,7 +208,6 @@ def schedule_workflow(task_name: str, datastack_params: Dict[str, Any]) -> Calla
         )
 
     elif task_name == "run_periodic_materialization":
-
         return run_periodic_materialization.s(
             days_to_expire=datastack_params.get("days_to_expire", 2),
             merge_tables=datastack_params.get("merge_tables", False),

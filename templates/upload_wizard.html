@@ -1,0 +1,183 @@
+{% extends "base.html" %} 
+{% block title %}Upload Wizard - Step {{ current_step }}{% endblock %} 
+
+{% block html_head %}
+<script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script src="{{ url_for('static', filename='js/wizardStore.js') }}"></script>
+<script src="{{ url_for('static', filename='js/step1.js') }}"></script>
+<script src="{{ url_for('static', filename='js/step2.js') }}"></script>
+<script src="{{ url_for('static', filename='js/step3.js') }}"></script>
+<script src="{{ url_for('static', filename='js/step4.js') }}"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+<style>
+    .wizard-steps {
+        position: relative;
+        padding: 0 2rem;
+    }
+
+    .wizard-progress {
+        height: 3px;
+        background-color: #e9ecef;
+        position: relative;
+        margin: 2rem 0;
+    }
+
+    .wizard-progress-bar {
+        position: absolute;
+        height: 100%;
+        background-color: #198754;
+        transition: width 0.3s ease;
+    }
+
+    .wizard-step-list {
+        display: flex;
+        justify-content: space-between;
+        position: absolute;
+        width: 100%;
+        top: 50%;
+        transform: translateY(-50%);
+    }
+
+    .wizard-step {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.5rem;
+        width: 120px;
+        margin-top: -2rem;
+    }
+
+    .step-circle {
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        background: white;
+        border: 2px solid #dee2e6;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 500;
+        transition: all 0.2s ease;
+        z-index: 1;
+    }
+
+    .step-circle.active {
+        background: #0d6efd;
+        border-color: #0d6efd;
+        color: white;
+        box-shadow: 0 0 0 4px rgba(13, 110, 253, 0.25);
+    }
+
+    .step-circle.completed {
+        background: #198754;
+        border-color: #198754;
+        color: white;
+    }
+
+    .step-label {
+        font-size: 0.875rem;
+        color: #6c757d;
+        text-align: center;
+        margin-top: 0.5rem;
+        font-weight: 500;
+    }
+
+    .step-label.active {
+        color: #0d6efd;
+    }
+
+    .step-label.completed {
+        color: #198754;
+    }
+</style>
+{% endblock %} 
+
+{% block content %}
+<div class="wizard-container" x-data>
+    <!-- Step Indicator -->
+    <div class="wizard-steps">
+        <div class="wizard-progress">
+            <div class="wizard-progress-bar" 
+                 :style="`width: ${(($store.wizard.state.currentStep - 1) / ($store.wizard.state.totalSteps - 1)) * 100}%`">
+            </div>
+            <div class="wizard-step-list">
+                <template x-for="step in $store.wizard.state.totalSteps" :key="step">
+                    <div class="wizard-step">
+                        <div class="step-circle"
+                             :class="{
+                                 'active': $store.wizard.state.currentStep === step,
+                                 'completed': $store.wizard.state.stepStatus[step].completed
+                             }">
+                            <template x-if="$store.wizard.state.stepStatus[step].completed">
+                                <i class="fas fa-check"></i>
+                            </template>
+                            <template x-if="!$store.wizard.state.stepStatus[step].completed">
+                                <span x-text="step"></span>
+                            </template>
+                        </div>
+                        <div class="step-label"
+                             :class="{
+                                 'active': $store.wizard.state.currentStep === step,
+                                 'completed': $store.wizard.state.stepStatus[step].completed
+                             }">
+                            <span x-text="getStepLabel(step)"></span>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        {% include step_template %}
+    </div>
+
+    <div class="card-footer py-3" x-data="{ navState: $store.wizard.getNavigationState() }">
+        <div class="d-flex justify-content-between align-items-center px-4">
+            <!-- Back Button -->
+            <div class="nav-button-left">
+                <button class="btn btn-outline-secondary"
+                        x-show="navState.back.visible"
+                        :disabled="navState.back.disabled"
+                        @click="$store.wizard.prev()">
+                    <i class="fas fa-arrow-left me-2"></i>
+                    Back
+                </button>
+            </div>
+
+            <div class="nav-button-right d-flex gap-2">
+                <button class="btn btn-outline-warning"
+                        :disabled="navState.reset.disabled"
+                        :class="{ 'opacity-50': navState.reset.disabled }"
+                        @click="$store.wizard.handleResetAction()">
+                    <i class="fas fa-undo me-1"></i>
+                    Reset
+                </button>
+
+                <button class="btn btn-primary px-4"
+                        :disabled="!$store.wizard.getCurrentStepStore().isValid()"
+                        :class="{ 'opacity-50': !$store.wizard.getCurrentStepStore().isValid() }"
+                        @click="$store.wizard.handleNextAction()">
+                    <span x-text="$store.wizard.state.currentStep === $store.wizard.state.totalSteps ? 'Finish' : 'Next'"></span>
+                    <template x-if="$store.wizard.state.currentStep !== $store.wizard.state.totalSteps">
+                        <i class="fas fa-arrow-right ms-2"></i>
+                    </template>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    function getStepLabel(step) {
+        const labels = {
+            1: 'Upload File',
+            2: 'Map Columns',
+            3: 'Metadata',
+            4: 'Process'
+        };
+        return labels[step] || `Step ${step}`;
+    }
+</script>
+{% endblock %}

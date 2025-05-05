@@ -4,7 +4,7 @@ from cloudfiles import compression
 from io import BytesIO
 
 from materializationengine.info_client import get_datastack_info
-from materializationengine.database import sqlalchemy_cache
+from materializationengine.database import db_manager
 from dynamicannotationdb.models import AnalysisVersion
 
 
@@ -63,21 +63,23 @@ def update_notice_text_warnings(ann_md, warnings, table_name):
     return warnings
 
 
+
 def get_latest_version(datastack_name):
     aligned_volume_name = get_datastack_info(datastack_name)["aligned_volume"]["name"]
-    session = sqlalchemy_cache.get(aligned_volume_name)
-    # query the database for the latest valid version
-    response = (
-        session.query(AnalysisVersion)
-        .filter(AnalysisVersion.datastack == datastack_name)
-        .filter(AnalysisVersion.valid)
-        .order_by(AnalysisVersion.time_stamp.desc())
-        .first()
-    )
-    if response is None:
-        return None
-    else:
-        return response.version
+    with db_manager.session_scope(aligned_volume_name) as session:
+
+        # query the database for the latest valid version
+        response = (
+            session.query(AnalysisVersion)
+            .filter(AnalysisVersion.datastack == datastack_name)
+            .filter(AnalysisVersion.valid)
+            .order_by(AnalysisVersion.time_stamp.desc())
+            .first()
+        )
+        if response is None:
+            return None
+        else:
+            return response.version
 
 
 def create_query_response(

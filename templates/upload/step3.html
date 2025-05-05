@@ -1,0 +1,119 @@
+<div class="card-header">
+    <h2>Step 3: Annotation Table Metadata</h2>
+</div>
+    <div class="row justify-content-center">
+            <!-- General Error Display -->
+            <div x-show="$store.metadata.state.validationErrors.general" class="alert alert-danger"
+                x-text="$store.metadata.state.validationErrors.general" x-cloak></div>
+
+            <form class="needs-validation" @submit.prevent>
+                <!-- Datastack Name -->
+                <div class="form-group mb-3">
+                    <label class="form-label">Datastack Name *</label>
+                    <input type="text" class="form-control"
+                        :class="{ 'is-invalid': $store.metadata.state.validationErrors.datastack_name }"
+                        x-model="$store.metadata.state.datastack_name">
+                    <div class="invalid-feedback" x-text="$store.metadata.state.validationErrors.datastack_name">
+                    </div>
+
+                    <!-- Table Name -->
+                    <div class="form-group mb-3">
+                        <label class="form-label">Table Name *</label>
+                        <input type="text" class="form-control"
+                            :class="{ 'is-invalid': $store.metadata.state.validationErrors.table_name }"
+                            x-model="$store.metadata.state.table_name">
+                        <div class="invalid-feedback" x-text="$store.metadata.state.validationErrors.table_name">
+                        </div>
+                    </div>
+
+                    <!-- Description -->
+                    <div class="form-group mb-3">
+                        <label class="form-label">Description *</label>
+                        <textarea class="form-control"
+                            :class="{ 'is-invalid': $store.metadata.state.validationErrors.description }"
+                            x-model="$store.metadata.state.description" rows="3"></textarea>
+                        <div class="invalid-feedback" x-text="$store.metadata.state.validationErrors.description">
+                        </div>
+                    </div>
+
+                    <!-- Notice Text -->
+                    <div class="form-group mb-3">
+                        <label class="form-label">Notice Text</label>
+                        <textarea class="form-control" x-model="$store.metadata.state.notice_text" rows="2"></textarea>
+                    </div>
+
+                    <!-- Reference Table -->
+                    <div class="form-group mb-3" x-show="$store.metadata.state.isReferenceSchema" x-cloak>
+                        <label class="form-label">Reference Table *</label>
+                        <input type="text" class="form-control"
+                            :class="{ 'is-invalid': $store.metadata.state.validationErrors.reference_table }"
+                            x-model="$store.metadata.state.reference_table">
+                        <div class="invalid-feedback" x-text="$store.metadata.state.validationErrors.reference_table">
+                        </div>
+                    </div>
+
+                    <!-- Flat Segmentation Source -->
+                    <div class="form-group mb-3">
+                        <label class="form-label">Flat Segmentation Source</label>
+                        <input type="text" class="form-control"
+                            x-model="$store.metadata.state.flat_segmentation_source">
+                    </div>
+
+                    <!-- Voxel Resolution -->
+                    <div class="row mb-3">
+                        <label class="form-label">Voxel Resolution (nm)*</label>
+                        <div class="col">
+                            <div class="input-group">
+                                <input type="number" class="form-control"
+                                    :class="{ 'is-invalid': $store.metadata.state.validationErrors.voxel_resolution_nm_x }"
+                                    x-model="$store.metadata.state.voxel_resolution_nm_x" step="0.01">
+                                <span class="input-group-text">X</span>
+                                <div class="invalid-feedback"
+                                    x-text="$store.metadata.state.validationErrors.voxel_resolution_nm_x"></div>
+                            </div>
+                        </div>
+                        <div class="col">
+                            <div class="input-group">
+                                <input type="number" class="form-control"
+                                    :class="{ 'is-invalid': $store.metadata.state.validationErrors.voxel_resolution_nm_y }"
+                                    x-model="$store.metadata.state.voxel_resolution_nm_y" step="0.01">
+                                <span class="input-group-text">Y</span>
+                                <div class="invalid-feedback"
+                                    x-text="$store.metadata.state.validationErrors.voxel_resolution_nm_y"></div>
+                            </div>
+                        </div>
+                        <div class="col">
+                            <div class="input-group">
+                                <input type="number" class="form-control"
+                                    :class="{ 'is-invalid': $store.metadata.state.validationErrors.voxel_resolution_nm_z }"
+                                    x-model="$store.metadata.state.voxel_resolution_nm_z" step="0.01">
+                                <span class="input-group-text">Z</span>
+                                <div class="invalid-feedback"
+                                    x-text="$store.metadata.state.validationErrors.voxel_resolution_nm_z"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Permissions -->
+                    <div class="row mb-3">
+                        <div class="col">
+                            <label class="form-label">Write Permission *</label>
+                            <select class="form-select" x-model="$store.metadata.state.write_permission">
+                                <option value="PRIVATE">Private</option>
+                                <option value="GROUP">Group</option>
+                                <option value="PUBLIC">Public</option>
+                            </select>
+                        </div>
+                        <div class="col">
+                            <label class="form-label">Read Permission *</label>
+                            <select class="form-select" x-model="$store.metadata.state.read_permission">
+                                <option value="PRIVATE">Private</option>
+                                <option value="GROUP">Group</option>
+                                <option value="PUBLIC">Public</option>
+                            </select>
+                        </div>
+                    </div>
+            </form>
+        </div>
+    </div>
+</div>

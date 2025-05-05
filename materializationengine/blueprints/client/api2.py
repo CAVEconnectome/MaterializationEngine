@@ -1,27 +1,39 @@
+import datetime
 import json
-import pytz
-from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
-
-from cachetools import TTLCache, cached, LRUCache
-from cachetools.keys import hashkey
 from functools import wraps
-from flask import Response, abort, request, current_app, g
+from typing import List
+
+import nglui
+import numpy as np
+import pandas as pd
+import pytz
+import werkzeug
+from cachetools import LRUCache, TTLCache, cached
+from cachetools.keys import hashkey
+from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
+from emannotationschemas.schemas.base import PostGISField, SegmentationField
+from flask import Response, abort, current_app, g, request
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
+from geoalchemy2.types import Geometry
+from marshmallow import fields as mm_fields
 from middle_auth_client import (
     auth_requires_permission,
 )
-import pandas as pd
-import numpy as np
-from marshmallow import fields as mm_fields
-from emannotationschemas.schemas.base import SegmentationField, PostGISField
-import datetime
-from typing import List
-import werkzeug
-from sqlalchemy.sql.sqltypes import String, Integer, Float, DateTime, Boolean, Numeric
+from sqlalchemy.sql.sqltypes import Boolean, DateTime, Float, Integer, Numeric, String
 
-from geoalchemy2.types import Geometry
-import nglui
+from materializationengine.blueprints.client.common import (
+    generate_complex_query_dataframe,
+    generate_simple_query_dataframe,
+    get_analysis_version_and_table,
+    get_analysis_version_and_tables,
+    handle_complex_query,
+    handle_simple_query,
+    validate_table_args,
+)
+from materializationengine.blueprints.client.common import (
+    unhandled_exception as common_unhandled_exception,
+)
 from materializationengine.blueprints.client.datastack import validate_datastack
 from materializationengine.blueprints.client.new_query import (
     remap_query,
@@ -29,40 +41,31 @@ from materializationengine.blueprints.client.new_query import (
     update_rootids,
 )
 from materializationengine.blueprints.client.query_manager import QueryManager
-from materializationengine.blueprints.client.utils import (
-    create_query_response,
-    collect_crud_columns,
-    get_latest_version,
-)
 from materializationengine.blueprints.client.schemas import (
+    AnalysisViewSchema,
     ComplexQuerySchema,
     SimpleQuerySchema,
     V2QuerySchema,
-    AnalysisViewSchema,
 )
-from materializationengine.utils import check_read_permission
-from materializationengine.models import MaterializedMetadata
+from materializationengine.blueprints.client.utils import (
+    after_request,
+    collect_crud_columns,
+    create_query_response,
+    get_latest_version,
+    update_notice_text_warnings,
+)
 from materializationengine.blueprints.reset_auth import reset_auth
-from materializationengine.blueprints.client.common import (
-    handle_complex_query,
-    generate_complex_query_dataframe,
-    generate_simple_query_dataframe,
-    handle_simple_query,
-    validate_table_args,
-    get_analysis_version_and_table,
-    get_analysis_version_and_tables,
-    unhandled_exception as common_unhandled_exception,
-)
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
-from materializationengine.limiter import limit_by_category
 from materializationengine.database import (
     dynamic_annotation_cache,
-    sqlalchemy_cache,
+    db_manager
 )
 from materializationengine.info_client import get_aligned_volumes, get_datastack_info
+from materializationengine.limiter import limit_by_category
+from materializationengine.models import MaterializedMetadata
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
-from materializationengine.blueprints.client.utils import update_notice_text_warnings
-from materializationengine.blueprints.client.utils import after_request
+from materializationengine.utils import check_read_permission
+
 
 __version__ = "4.36.6"
 
@@ -261,31 +264,29 @@ def check_aligned_volume(aligned_volume):
 def get_closest_versions(datastack_name: str, timestamp: datetime.datetime):
     avn, _ = get_relevant_datastack_info(datastack_name)
 
-    # get session object
-    session = sqlalchemy_cache.get(avn)
-
-    # query analysis versions to get a valid version which is
-    # the closest to the timestamp while still being older
-    # than the timestamp
-    past_version = (
-        session.query(AnalysisVersion)
-        .filter(AnalysisVersion.datastack == datastack_name)
-        .filter(AnalysisVersion.valid == True)
-        .filter(AnalysisVersion.time_stamp < timestamp)
-        .order_by(AnalysisVersion.time_stamp.desc())
-        .first()
-    )
-    # query analysis versions to get a valid version which is
-    # the closest to the timestamp while still being newer
-    # than the timestamp
-    future_version = (
-        session.query(AnalysisVersion)
-        .filter(AnalysisVersion.datastack == datastack_name)
-        .filter(AnalysisVersion.valid == True)
-        .filter(AnalysisVersion.time_stamp > timestamp)
-        .order_by(AnalysisVersion.time_stamp.asc())
-        .first()
-    )
+    with db_manager.session_scope(avn) as session:
+        # query analysis versions to get a valid version which is
+        # the closest to the timestamp while still being older
+        # than the timestamp
+        past_version = (
+            session.query(AnalysisVersion)
+            .filter(AnalysisVersion.datastack == datastack_name)
+            .filter(AnalysisVersion.valid == True)
+            .filter(AnalysisVersion.time_stamp < timestamp)
+            .order_by(AnalysisVersion.time_stamp.desc())
+            .first()
+        )
+        # query analysis versions to get a valid version which is
+        # the closest to the timestamp while still being newer
+        # than the timestamp
+        future_version = (
+            session.query(AnalysisVersion)
+            .filter(AnalysisVersion.datastack == datastack_name)
+            .filter(AnalysisVersion.valid == True)
+            .filter(AnalysisVersion.time_stamp > timestamp)
+            .order_by(AnalysisVersion.time_stamp.asc())
+            .first()
+        )
     return past_version, future_version, avn
 
 
@@ -303,8 +304,8 @@ def check_joins(joins):
     for join in joins:
         check_column_for_root_id(join[1])
         check_column_for_root_id(join[3])
-
-
+        
+        
 def execute_materialized_query(
     datastack: str,
     aligned_volume: str,
@@ -330,42 +331,43 @@ def execute_materialized_query(
         if necessary to disambiguate.
     """
     mat_db_name = f"{datastack}__mat{mat_version}"
-    session = sqlalchemy_cache.get(mat_db_name)
-    mat_row_count = (
-        session.query(MaterializedMetadata.row_count)
-        .filter(MaterializedMetadata.table_name == user_data["table"])
-        .scalar()
-    )
-    if random_sample:
-        if random_sample >= mat_row_count:
-            random_sample = None
-        else:
-            random_sample = (100.0 * random_sample) / mat_row_count
+    with db_manager.session_scope(mat_db_name) as session:    
+        mat_row_count = (
+            session.query(MaterializedMetadata.row_count)
+            .filter(MaterializedMetadata.table_name == user_data["table"])
+            .scalar()
+        )
+        if random_sample:
+            if random_sample >= mat_row_count:
+                random_sample = None
+            else:
+                random_sample = (100.0 * random_sample) / mat_row_count
 
-    if mat_row_count:
-        # setup a query manager
-        qm = QueryManager(
-            mat_db_name,
-            segmentation_source=pcg_table_name,
-            meta_db_name=aligned_volume,
-            split_mode=split_mode,
-            random_sample=random_sample,
-        )
-        qm.configure_query(user_data)
-        qm.apply_filter({user_data["table"]: {"valid": True}}, qm.apply_equal_filter)
-        # return the result
-        df, column_names = qm.execute_query(
-            desired_resolution=user_data["desired_resolution"]
-        )
-        df, warnings = update_rootids(df, user_data["timestamp"], query_map, cg_client)
-        if len(df) >= user_data["limit"]:
-            warnings.append(
-                f"result has {len(df)} entries, which is equal or more \
-than limit of {user_data['limit']} there may be more results which are not shown"
+        if mat_row_count:
+            # setup a query manager
+            qm = QueryManager(
+                mat_db_name,
+                segmentation_source=pcg_table_name,
+                meta_db_name=aligned_volume,
+                split_mode=split_mode,
+                random_sample=random_sample,
             )
-        return df, column_names, warnings
-    else:
-        return None, {}, []
+            qm.configure_query(user_data)
+            qm.apply_filter({user_data["table"]: {"valid": True}}, qm.apply_equal_filter)
+            # return the result
+            df, column_names = qm.execute_query(
+                desired_resolution=user_data["desired_resolution"]
+            )
+            df, warnings = update_rootids(df, user_data["timestamp"], query_map, cg_client)
+            if len(df) >= user_data["limit"]:
+                warnings.append(
+                    f"result has {len(df)} entries, which is equal or more \
+    than limit of {user_data['limit']} there may be more results which are not shown"
+                )
+            return df, column_names, warnings
+        else:
+            return None, {}, []
+
 
 
 def execute_production_query(
@@ -587,16 +589,15 @@ class DatastackVersions(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        session = sqlalchemy_cache.get(aligned_volume_name)
+        with db_manager.session_scope(aligned_volume_name) as session:
+            response = session.query(AnalysisVersion).filter(
+                AnalysisVersion.datastack == datastack_name
+            )
+            args = metadata_parser.parse_args()
+            if not args.get("expired"):
+                response = response.filter(AnalysisVersion.valid == True)
 
-        response = session.query(AnalysisVersion).filter(
-            AnalysisVersion.datastack == datastack_name
-        )
-        args = metadata_parser.parse_args()
-        if not args.get("expired"):
-            response = response.filter(AnalysisVersion.valid == True)
-
-        response = response.all()
+            response = response.all()
 
         versions = [av.version for av in response]
         return versions, 200
@@ -626,16 +627,15 @@ class DatastackVersion(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        session = sqlalchemy_cache.get(aligned_volume_name)
-
-        response = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.datastack == datastack_name)
-            .filter(AnalysisVersion.version == version)
-            .first()
-        )
-        if response is None:
-            return "No version found", 404
+        with db_manager.session_scope(aligned_volume_name) as session:
+            response = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.datastack == datastack_name)
+                .filter(AnalysisVersion.version == version)
+                .first()
+            )
+            if response is None:
+                return "No version found", 404
         schema = AnalysisVersionSchema()
         return schema.dump(response), 200
 
@@ -680,13 +680,12 @@ class FrozenTableCount(Resource):
         # if the database is a split database get a split model
         # and if its not get a flat model
 
-        session = sqlalchemy_cache.get(db_name)
-
-        mat_row_count = (
-            session.query(MaterializedMetadata.row_count)
-            .filter(MaterializedMetadata.table_name == table_name)
-            .scalar()
-        )
+        with db_manager.session_scope(aligned_volume_name) as session:
+            mat_row_count = (
+                session.query(MaterializedMetadata.row_count)
+                .filter(MaterializedMetadata.table_name == table_name)
+                .scalar()
+            )
 
         return mat_row_count, 200
 
@@ -722,15 +721,15 @@ class DatastackMetadata(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        session = sqlalchemy_cache.get(aligned_volume_name)
-        response = session.query(AnalysisVersion).filter(
-            AnalysisVersion.datastack == datastack_name
-        )
-        args = metadata_parser.parse_args()
-        if not args.get("expired"):
-            response = response.filter(AnalysisVersion.valid == True)
+        with db_manager.session_scope(aligned_volume_name) as session:
+            response = session.query(AnalysisVersion).filter(
+                AnalysisVersion.datastack == datastack_name
+            )
+            args = metadata_parser.parse_args()
+            if not args.get("expired"):
+                response = response.filter(AnalysisVersion.valid == True)
 
-        response = response.all()
+            response = response.all()
 
         if response is None:
             return "No valid versions found", 404
@@ -762,22 +761,21 @@ class FrozenTableVersions(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        session = sqlalchemy_cache.get(aligned_volume_name)
-
-        av = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.version == version)
-            .filter(AnalysisVersion.datastack == datastack_name)
-            .first()
-        )
-        if av is None:
-            return None, 404
-        response = (
-            session.query(AnalysisTable)
-            .filter(AnalysisTable.analysisversion_id == av.id)
-            .filter(AnalysisTable.valid == True)
-            .all()
-        )
+        with db_manager.session_scope(aligned_volume_name) as session:
+            av = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.version == version)
+                .filter(AnalysisVersion.datastack == datastack_name)
+                .first()
+            )
+            if av is None:
+                return None, 404
+            response = (
+                session.query(AnalysisTable)
+                .filter(AnalysisTable.analysisversion_id == av.id)
+                .filter(AnalysisTable.valid == True)
+                .all()
+            )
 
         if response is None:
             return None, 404
@@ -817,10 +815,10 @@ class FrozenTablesMetadata(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             target_datastack
         )
-        session = sqlalchemy_cache.get(aligned_volume_name)
-        analysis_version, analysis_tables = get_analysis_version_and_tables(
-            target_datastack, target_version, session
-        )
+        with db_manager.session_scope(aligned_volume_name) as session:    
+            analysis_version, analysis_tables = get_analysis_version_and_tables(
+                target_datastack, target_version, session
+            )
 
         schema = AnalysisTableSchema()
         tables = schema.dump(analysis_tables, many=True)
@@ -876,10 +874,11 @@ class FrozenTableMetadata(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             target_datastack
         )
-        session = sqlalchemy_cache.get(aligned_volume_name)
-        analysis_version, analysis_table = get_analysis_version_and_table(
-            target_datastack, table_name, target_version, session
-        )
+        with db_manager.session_scope(aligned_volume_name) as session:
+        
+            analysis_version, analysis_table = get_analysis_version_and_table(
+                target_datastack, table_name, target_version, session
+            )
 
         schema = AnalysisTableSchema()
         tables = schema.dump(analysis_table)
@@ -1247,14 +1246,13 @@ class MatTableSegmentInfo(Resource):
 
         # if the database is a split database get a split model
         # and if its not get a flat model
+        with db_manager.session_scope(db_name) as session:
 
-        session = sqlalchemy_cache.get(db_name)
-
-        mat_row_count = (
-            session.query(MaterializedMetadata.row_count)
-            .filter(MaterializedMetadata.table_name == table_name)
-            .scalar()
-        )
+            mat_row_count = (
+                session.query(MaterializedMetadata.row_count)
+                .filter(MaterializedMetadata.table_name == table_name)
+                .scalar()
+            )
         if mat_row_count > current_app.config["QUERY_LIMIT_SIZE"]:
             return "Table too large to return info", 400
         else:
@@ -1554,26 +1552,26 @@ def assemble_live_query_dataframe(user_data, datastack_name, args):
     # map public version datastacks to their private versions
     if chosen_version.parent_version is not None:
         target_datastack = chosen_version.datastack
-        session = sqlalchemy_cache.get(aligned_vol)
-        target_version = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.id == chosen_version.parent_version)
-            .one()
-        )
-        datastack_name = target_version.datastack
+        with db_manager.session_scope(aligned_vol) as session:
+            target_version = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.id == chosen_version.parent_version)
+                .one()
+            )
+            datastack_name = target_version.datastack
 
-        # query the AnalysisVersion with the oldest timestamp
-        newest_version = (
-            session.query(AnalysisVersion)
-            .filter(AnalysisVersion.datastack == target_datastack)
-            .order_by(AnalysisVersion.time_stamp.desc())
-            .first()
-        )
+            # query the AnalysisVersion with the oldest timestamp
+            newest_version = (
+                session.query(AnalysisVersion)
+                .filter(AnalysisVersion.datastack == target_datastack)
+                .order_by(AnalysisVersion.time_stamp.desc())
+                .first()
+            )
 
-        # if the users timestamp is newer than the newest version
-        # then we set the users timestamp to the newest version
-        if user_data["timestamp"] > pytz.utc.localize(newest_version.time_stamp):
-            user_data["timestamp"] = pytz.utc.localize(newest_version.time_stamp)
+            # if the users timestamp is newer than the newest version
+            # then we set the users timestamp to the newest version
+            if user_data["timestamp"] > pytz.utc.localize(newest_version.time_stamp):
+                user_data["timestamp"] = pytz.utc.localize(newest_version.time_stamp)
 
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     cg_client = chunkedgraph_cache.get_client(pcg_table_name)
