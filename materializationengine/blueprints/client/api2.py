@@ -67,7 +67,7 @@ from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSc
 from materializationengine.utils import check_read_permission
 
 
-__version__ = "4.36.6"
+__version__ = "5.0.0"
 
 
 authorizations = {
