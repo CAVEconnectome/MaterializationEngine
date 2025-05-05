@@ -180,7 +180,7 @@ def generate_presigned_url():
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(filename)
     origin = request.headers.get("Origin") or current_app.config.get(
-        "ALLOWED_ORIGIN", "http://localhost:5000"
+        "LOCAL_SERVER_URL", "http://localhost:5000"
     )
 
     try:
