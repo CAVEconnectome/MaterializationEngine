@@ -983,7 +983,7 @@ def select_all_points_in_bbox(
         union_all: sqlalchemy statement that creates the union of all points
                    for all geometry columns in the bounding box
     """
-    db = dynamic_annotation_cache.get_db(mat_info["aligned_volume"])
+    db = dynamic_annotation_cache.get_db(mat_info["database"])
     table_name = mat_info["annotation_table_name"]
     schema = db.database.get_table_schema(table_name)
     mat_info["schema"] = schema
