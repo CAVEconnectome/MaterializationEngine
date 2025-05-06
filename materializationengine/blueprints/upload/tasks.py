@@ -63,7 +63,7 @@ def process_and_upload(
     """Chain CSV processing tasks"""
     job_id = f"csv_processing_{datetime.now(timezone.utc)}"
     materialization_time_stamp = datetime.utcnow()
-    chunk_scale_factor = current_app.config.get("CHUNK_SCALE_FACTOR")
+    chunk_scale_factor = current_app.config.get("CHUNK_SCALE_FACTOR", 2)
     use_staging_database = current_app.config.get("USE_STAGING_DATABASE")
     sql_instance_name = current_app.config.get("SQL_INSTANCE_NAME")
     supervoxel_batch_size = current_app.config.get("SUPERVOXEL_BATCH_SIZE", 50)
