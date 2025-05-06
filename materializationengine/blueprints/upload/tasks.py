@@ -197,9 +197,15 @@ def upload_to_database(
         notice_text = file_metadata["metadata"].get("notice_text")
 
         staging_database = current_app.config.get("STAGING_DATABASE_NAME")
+        google_app_creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 
         if not sql_instance_name:
             error_msg = "SQL_INSTANCE_NAME is not configured or is None."
+            celery_logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        if not google_app_creds:
+            error_msg = "GOOGLE_APPLICATION_CREDENTIALS environment variable is not set."
             celery_logger.error(error_msg)
             raise ValueError(error_msg)
 
@@ -240,6 +246,55 @@ def upload_to_database(
 
         # create table in staging database and drop indices
         index_cache.drop_table_indices(table_name, db_client.database.engine)
+
+        # Activate gcloud service account
+        activate_command = [
+            "gcloud",
+            "auth",
+            "activate-service-account",
+            "--key-file",
+            google_app_creds,
+        ]
+        try:
+            celery_logger.info("Activating service account")
+            activate_process = subprocess.run(
+                activate_command,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            celery_logger.info(f"Service account activation stdout: {activate_process.stdout}")
+            if activate_process.stderr:
+                celery_logger.warning(f"Service account activation stderr: {activate_process.stderr}")
+        except subprocess.CalledProcessError as e:
+            error_msg = f"Failed to activate service account: {e}, stderr: {e.stderr}"
+            celery_logger.error(error_msg)
+            if job_id:
+                update_job_status(
+                    job_id,
+                    {
+                        "status": "error",
+                        "phase": "Service Account Activation",
+                        "progress": 0,
+                        "error": e.stderr or str(e),
+                    },
+                )
+            raise
+        except subprocess.TimeoutExpired as e:
+            error_msg = f"Service account activation timed out: {e}"
+            celery_logger.error(error_msg)
+            if job_id:
+                update_job_status(
+                    job_id,
+                    {
+                        "status": "error",
+                        "phase": "Service Account Activation",
+                        "progress": 0,
+                        "error": "Service account activation timed out",
+                    },
+                )
+            raise
 
         # TODO move to deployment scripts
         # get sql service account email
