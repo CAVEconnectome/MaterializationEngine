@@ -20,7 +20,7 @@ from flask_accepts import accepts
 from flask_restx import Namespace, Resource, fields, inputs, reqparse
 from google.cloud import storage
 from google.api_core import exceptions as google_exceptions
-from middle_auth_client import auth_requires_admin, auth_requires_permission
+from middle_auth_client import auth_requires_admin, auth_requires_permission, auth_required
 from redis import StrictRedis
 
 from materializationengine.blueprints.reset_auth import reset_auth
@@ -270,7 +270,7 @@ def get_schema_types_endpoint():
 
 
 @upload_bp.route("/api/get-schema-model", methods=["GET"])
-@auth_requires_permission("edit", table_arg="datastack_name")
+@auth_required
 def get_schema_model():
     """Endpoint to get schema model for a specific schema type"""
     try:
@@ -321,7 +321,7 @@ def get_schema_model():
 
 
 @upload_bp.route("/api/save-mapping", methods=["POST"])
-@auth_requires_permission("edit", table_arg="datastack_name")
+@auth_required
 def save_mapping():
     """Save the column mapping and ignored columns configuration"""
     try:
@@ -409,7 +409,7 @@ def validate_metadata(metadata: Dict[str, Any]) -> tuple[bool, str]:
 
 
 @upload_bp.route("/api/save-metadata", methods=["POST"])
-@auth_requires_permission("edit", table_arg="datastack_name")
+@auth_required
 def save_metadata():
     """Save the annotation table metadata"""
     try:
@@ -478,7 +478,7 @@ def save_metadata():
 
 
 @upload_bp.route("/api/aligned_volumes", methods=["GET"])
-@auth_requires_permission("edit", table_arg="datastack_name")
+@auth_required
 def get_aligned_volumes():
     """Get list of available aligned volumes (databases)"""
     try:
@@ -505,7 +505,7 @@ def get_aligned_volumes():
 
 
 @upload_bp.route("/api/aligned_volumes/<aligned_volume>/versions", methods=["GET"])
-@auth_requires_permission("edit", table_arg="datastack_name")
+@auth_required
 def get_materialized_versions(aligned_volume):
     """Get available materialized versions for an aligned volume"""
     try:
@@ -552,7 +552,7 @@ def get_materialized_versions(aligned_volume):
 
 
 @upload_bp.route("/api/process/start", methods=["POST"])
-@auth_requires_permission("edit", table_arg="datastack_name")
+@auth_required
 def start_csv_processing():
     """Start CSV processing job"""
     r = request.get_json()
@@ -586,7 +586,7 @@ def start_csv_processing():
 
 
 @upload_bp.route("/api/process/status/<job_id>", methods=["GET"])
-@auth_requires_permission("edit", table_arg="datastack_name")
+@auth_required
 def check_processing_status(job_id):
     """Get processing job status"""
     try:
@@ -601,7 +601,7 @@ def check_processing_status(job_id):
 
 
 @upload_bp.route("/api/process/cancel/<job_id>", methods=["POST"])
-@auth_requires_permission("edit", table_arg="datastack_name")
+@auth_required
 def cancel_processing_job(job_id):
     """Cancel processing job"""
     try:
