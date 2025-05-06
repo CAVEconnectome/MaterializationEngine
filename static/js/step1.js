@@ -15,6 +15,7 @@ document.addEventListener("alpine:init", () => {
     paused: false,
     savedState: null,
     previewRows: [],
+    selectedDatastack: "", 
     speedStats: {
       startTime: null,
       lastUpdateTime: null,
@@ -29,6 +30,13 @@ document.addEventListener("alpine:init", () => {
         this.filename = state.filename;
         this.status = state.status;
         this.previewRows = state.previewRows;
+        this.selectedDatastack = state.selectedDatastack || "";
+        if (this.selectedDatastack) {
+          const datastackSelect = document.getElementById('datastackSelect');
+          if (datastackSelect) {
+            datastackSelect.value = this.selectedDatastack;
+          }
+        }
       }
     },
 
@@ -52,6 +60,7 @@ document.addEventListener("alpine:init", () => {
       this.paused = false;
       this.savedState = null;
       this.previewRows = [];
+      this.selectedDatastack = "";
       this.speedStats = {
         startTime: null,
         lastUpdateTime: null,
@@ -72,6 +81,7 @@ document.addEventListener("alpine:init", () => {
         filename: this.filename,
         status: this.status,
         previewRows: this.previewRows,
+        selectedDatastack: this.selectedDatastack,
       };
       localStorage.setItem("uploadStore", JSON.stringify(stateToSave));
     },
@@ -130,6 +140,9 @@ document.addEventListener("alpine:init", () => {
       this.paused = false;
       this.savedState = null;
       this.previewRows = []; 
+      
+      const datastackSelect = document.getElementById('datastackSelect');
+      this.selectedDatastack = datastackSelect ? datastackSelect.value : "";
 
       this.previewCSV(file); 
 
@@ -137,6 +150,7 @@ document.addEventListener("alpine:init", () => {
       .then(() => {
           if (this.uploadUrl) {
               this.status = "ready";
+              this.saveState();
               console.log("Ready to upload.");
           } else {
               console.log("Preparation failed, cannot proceed to upload.");
@@ -196,6 +210,7 @@ document.addEventListener("alpine:init", () => {
       
       const datastackSelect = document.getElementById('datastackSelect');
       const datastackName = datastackSelect ? datastackSelect.value : null;
+      this.selectedDatastack = datastackName;
 
       if (!datastackName) {
            const errMsg = "Datastack must be selected before preparing upload.";
@@ -494,10 +509,11 @@ document.addEventListener("alpine:init", () => {
     canStartUpload() {
       const datastackSelect = document.getElementById('datastackSelect');
       const datastackSelected = datastackSelect && datastackSelect.value;
+      this.selectedDatastack = datastackSelected ? datastackSelect.value : "";
 
       return (
         this.file &&
-        datastackSelected &&
+        this.selectedDatastack &&
         this.status === "ready" && 
         this.uploadUrl &&
         !this.error

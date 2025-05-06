@@ -19,6 +19,7 @@ from flask import (
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, fields, inputs, reqparse
 from google.cloud import storage
+from google.api_core import exceptions as google_exceptions
 from middle_auth_client import auth_requires_admin, auth_requires_permission
 from redis import StrictRedis
 
@@ -161,7 +162,7 @@ def index():
 @auth_requires_admin
 def wizard_step(step_number):
 
-    total_steps = 5
+    total_steps = 4
 
     if step_number < 1 or step_number > total_steps:
         return redirect(url_for("upload.wizard_step", step_number=1))
@@ -181,6 +182,7 @@ def wizard_step(step_number):
     return render_template(
         "upload_wizard.html",
         current_step=step_number,
+        version=__version__,
         total_steps=total_steps,
         step_template=step_template_path,
         datastacks=datastacks,
@@ -233,6 +235,14 @@ def generate_presigned_url(datastack_name: str):
         )
 
         return jsonify({"resumableUrl": resumable_url, "origin": origin})
+    except google_exceptions.Forbidden as e:
+        current_app.logger.error(f"GCS Forbidden error generating presigned URL: {str(e)}")
+        detailed_message = (
+            "Permission denied by Google Cloud Storage. "
+            "Please ensure the application's service account has the 'Storage Object Creator' role "
+            f"on the bucket '{bucket_name}'. Original error: {str(e)}"
+        )
+        return jsonify({"status": "error", "message": detailed_message}), 403
     except Exception as e:
         current_app.logger.error(f"Error generating presigned URL: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -572,7 +582,7 @@ def start_csv_processing():
         file_path, file_metadata, datastack_info
     ).apply_async()
 
-    return jsonify({"status": "start", "jobId": result.id})
+    return jsonify({"status": "start", "task_id": result.id})
 
 
 @upload_bp.route("/api/process/status/<job_id>", methods=["GET"])

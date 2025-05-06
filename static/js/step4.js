@@ -72,6 +72,16 @@ document.addEventListener("alpine:init", () => {
               metadata,
             }),
           });
+
+          if (!response.ok) {
+            let errorText = await response.text();
+            try {
+              const errorJson = JSON.parse(errorText);
+              errorText = errorJson.message || errorJson.error || JSON.stringify(errorJson);
+            } catch (e) {
+            }
+            throw new Error(`Server error: ${response.status} ${response.statusText}. ${errorText}`);
+          }
   
           const data = await response.json();
           this.state.processingStatus = data.status;

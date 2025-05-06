@@ -3,6 +3,7 @@ import os
 import subprocess
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+import shlex
 
 import pandas as pd
 from celery import chain
@@ -65,7 +66,7 @@ def process_and_upload(
     chunk_scale_factor = current_app.config.get("CHUNK_SCALE_FACTOR")
     use_staging_database = current_app.config.get("USE_STAGING_DATABASE")
     sql_instance_name = current_app.config.get("SQL_INSTANCE_NAME")
-
+    supervoxel_batch_size = current_app.config.get("SUPERVOXEL_BATCH_SIZE", 50)
     table_name = file_metadata["metadata"]["table_name"]
     schema_type = file_metadata["metadata"]["schema_type"]
     reference_table = file_metadata["metadata"].get("reference_table")
@@ -80,7 +81,7 @@ def process_and_upload(
             reference_table=reference_table,
             ignored_columns=ignored_columns,
         ),
-        upload_to_database.si(
+        upload_to_database.s(
             sql_instance_name=sql_instance_name,
             file_metadata=file_metadata,
             datastack_info=datastack_info,
@@ -89,10 +90,9 @@ def process_and_upload(
             datastack_info,
             table_name=table_name,
             chunk_scale_factor=chunk_scale_factor,
-            get_root_ids=True,
+            supervoxel_batch_size=supervoxel_batch_size,
             upload_to_database=True,
             use_staging_database=use_staging_database,
-            materialization_time_stamp=materialization_time_stamp,
         ),
         transfer_to_production.si(
             datastack_info=datastack_info,
@@ -170,12 +170,14 @@ def process_csv(
         raise
 
 
-@celery.task(name="process:upload_to_db")
+@celery.task(name="process:upload_to_db", bind=True)
 def upload_to_database(
+    self,
     process_result: Dict[str, Any],
     sql_instance_name: str,
     file_metadata: Dict[str, Any],
     datastack_info: str,
+    job_id: str = None,
 ) -> Dict[str, Any]:
     """Upload processed CSV to database"""
     try:
@@ -195,7 +197,27 @@ def upload_to_database(
         notice_text = file_metadata["metadata"].get("notice_text")
 
         staging_database = current_app.config.get("STAGING_DATABASE_NAME")
-        bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
+
+        if not sql_instance_name:
+            error_msg = "SQL_INSTANCE_NAME is not configured or is None."
+            celery_logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        if not staging_database:
+            error_msg = "STAGING_DATABASE_NAME is not configured or is None."
+            celery_logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        if not table_name:
+            error_msg = "Table name is missing or None in file_metadata."
+            celery_logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        output_path = process_result.get("output_path")
+        if not output_path:
+            error_msg = "Output path from CSV processing is missing or None."
+            celery_logger.error(error_msg)
+            raise ValueError(error_msg)
 
         db_client = dynamic_annotation_cache.get_db(staging_database)
         try:
@@ -255,23 +277,54 @@ def upload_to_database(
             "import",
             "csv",
             sql_instance_name,
-            f"gs://{process_result['output_path']}",
+            f"gs://{output_path}",
             "--database",
             staging_database,
             "--table",
             table_name,
             "--user",
             "postgres",
+            "--quiet",
         ]
         try:
+            celery_logger.info(f"Running command: {shlex.join(load_command)}")
 
-            # auth_process = subprocess.run(auth_command, check=True, capture_output=True, text=True)
-            db_process = subprocess.run(
-                load_command, check=True, capture_output=True, text=True
+            result = subprocess.run(
+                load_command,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=1200,
             )
+            celery_logger.info(f"Subprocess output: {result.stdout}")
+            if result.stderr:
+                celery_logger.warning(f"Subprocess stderr: {result.stderr}")
         except subprocess.CalledProcessError as e:
-            celery_logger.error(f"Database upload failed: {e}, db_process: {e.stderr}")
-            raise e
+            celery_logger.error(f"Database upload failed: {e}, stderr: {e.stderr}")
+            if job_id:
+                update_job_status(
+                    job_id,
+                    {
+                        "status": "error",
+                        "phase": "Uploading to Database",
+                        "progress": 0,
+                        "error": e.stderr or str(e),
+                    },
+                )
+            raise
+        except subprocess.TimeoutExpired as e:
+            celery_logger.error(f"Subprocess timed out: {e}")
+            if job_id:
+                update_job_status(
+                    job_id,
+                    {
+                        "status": "error",
+                        "phase": "Uploading to Database",
+                        "progress": 0,
+                        "error": "Subprocess timed out",
+                    },
+                )
+            raise
 
         schema_model = db_client.schema.create_annotation_model(table_name, schema)
 
@@ -298,6 +351,7 @@ def transfer_to_production(
     table_name: str,
     transfer_segmentation: bool = True,
     materialization_time_stamp: datetime = datetime.utcnow(),
+    job_id: str = None,
 ):
     """Transfer tables from staging schema to production database.
 
@@ -482,6 +536,7 @@ def transfer_table_using_pg_dump(
     rebuild_indices: bool = True,
     engine=None,
     model_creator=None,
+    job_id: str = None,
 ) -> int:
     """
     Transfer a table using pg_dump and psql.
@@ -539,24 +594,48 @@ def transfer_table_using_pg_dump(
 
     celery_logger.info(f"Transferring data for {table_name} using pg_dump/psql")
     try:
+        celery_logger.info(f"Running pg_dump command: {shlex.join(pg_dump_cmd)}")
+        celery_logger.info(f"Running psql command: {shlex.join(psql_cmd)}")
+
         with subprocess.Popen(
-            pg_dump_cmd, stdout=subprocess.PIPE, env=pg_env
+            pg_dump_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=pg_env
         ) as dump_proc:
             result = subprocess.run(
                 psql_cmd,
                 stdin=dump_proc.stdout,
+                capture_output=True,
+                text=True,
+                timeout=1200,
                 env=pg_env,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
             )
-            celery_logger.info(f"psql output: {result.stdout.decode()}")
+            celery_logger.info(f"psql output: {result.stdout}")
             if result.stderr:
-                celery_logger.warning(f"psql stderr: {result.stderr.decode()}")
+                celery_logger.warning(f"psql stderr: {result.stderr}")
     except subprocess.CalledProcessError as e:
         celery_logger.error(f"pg_dump/psql error: {e}")
-        if e.stderr:
-            celery_logger.error(f"Error details: {e.stderr.decode()}")
+        if job_id:
+            update_job_status(
+                job_id,
+                {
+                    "status": "error",
+                    "phase": "Transferring to Production",
+                    "progress": 0,
+                    "error": e.stderr or str(e),
+                },
+            )
+        raise
+    except subprocess.TimeoutExpired as e:
+        celery_logger.error(f"Subprocess timed out: {e}")
+        if job_id:
+            update_job_status(
+                job_id,
+                {
+                    "status": "error",
+                    "phase": "Transferring to Production",
+                    "progress": 0,
+                    "error": "Subprocess timed out",
+                },
+            )
         raise
 
     with engine.connect() as conn:

@@ -37,6 +37,16 @@ document.addEventListener("alpine:init", () => {
         });
         this.state.validationErrors = {};
       }
+
+      if (!this.state.datastack_name) {
+        const uploadStoreState = localStorage.getItem("uploadStore");
+        if (uploadStoreState) {
+          const { selectedDatastack } = JSON.parse(uploadStoreState);
+          if (selectedDatastack) {
+            this.state.datastack_name = selectedDatastack;
+          }
+        }
+      }
     },
 
     saveState() {
