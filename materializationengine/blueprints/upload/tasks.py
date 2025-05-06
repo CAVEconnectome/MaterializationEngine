@@ -87,16 +87,16 @@ def process_and_upload(
             datastack_info=datastack_info,
         ),
         run_spatial_lookup_workflow.si(
-            datastack_info,
+            datastack_info=datastack_info,
             table_name=table_name,
             chunk_scale_factor=chunk_scale_factor,
             supervoxel_batch_size=supervoxel_batch_size,
-            upload_to_database=True,
-            use_staging_database=use_staging_database,
+            use_staging_database=True,
         ),
         transfer_to_production.si(
             datastack_info=datastack_info,
             table_name=table_name,
+            transfer_segmentation=True,
             materialization_time_stamp=str(materialization_time_stamp),
         ),
     )
