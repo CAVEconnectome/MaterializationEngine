@@ -34,7 +34,7 @@ from materializationengine.blueprints.upload.storage import (
     StorageService,
 )
 from materializationengine.blueprints.upload.tasks import (
-    cancel_processing,
+    cancel_processing_job,
     get_job_status,
     process_and_upload,
 )
@@ -602,10 +602,10 @@ def check_processing_status(job_id):
 
 @upload_bp.route("/api/process/cancel/<job_id>", methods=["POST"])
 @auth_required
-def cancel_processing_job(job_id):
+def cancel_job(job_id):
     """Cancel processing job"""
     try:
-        result = cancel_processing.delay(job_id)
+        result = cancel_processing_job.delay(job_id)
         status = result.get(timeout=10)
 
         return jsonify(

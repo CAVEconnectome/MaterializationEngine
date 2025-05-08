@@ -61,8 +61,11 @@ def process_and_upload(
     **kwargs,
 ) -> Dict[str, Any]:
     """Chain CSV processing tasks"""
-    job_id = f"csv_processing_{datetime.now(timezone.utc)}"
+
+    main_job_id = self.request.id
+
     materialization_time_stamp = datetime.utcnow()
+
     chunk_scale_factor = current_app.config.get("CHUNK_SCALE_FACTOR", 2)
     use_staging_database = current_app.config.get("USE_STAGING_DATABASE")
     sql_instance_name = current_app.config.get("SQL_INSTANCE_NAME")
@@ -75,9 +78,10 @@ def process_and_upload(
 
     workflow = chain(
         process_csv.si(
-            file_path,
-            schema_type,
-            column_mapping,
+            file_path=file_path,
+            schema_type=schema_type,
+            column_mapping=column_mapping,
+            job_id_for_status=main_job_id,
             reference_table=reference_table,
             ignored_columns=ignored_columns,
         ),
@@ -102,21 +106,26 @@ def process_and_upload(
     )
 
     result = workflow.apply_async()
-    return {"job_id": result.id}
+    update_job_status(
+        main_job_id, {"phase": "Workflow Chain Initialized", "chain_id": result.id}
+    )
+    return {"status": "workflow_initiated", "chain_root_id": result.id}
 
 
 @celery.task(name="process:get_status")
 def get_chain_status(job_id: str) -> Dict[str, Any]:
-    """Get status of processing chain"""
-    result = AsyncResult(job_id)
-    if result.ready():
-        # get status of the job
-        status = get_job_status(job_id)
-        return {
-            "status": "completed" if result.successful() else "failed",
-            "result": result.get() if result.successful() else str(result.result),
-        }
-    return {"status": "processing", "state": result.state}
+    """Get status of the overall processing job from Redis."""
+
+    status = get_job_status(job_id) 
+    if status:
+        return status
+    else:
+        main_task_result = AsyncResult(job_id)
+        if main_task_result.state == 'PENDING':
+            return {"status": "pending", "phase": "Job Queued", "progress": 0, "message": "Job is queued and waiting to start."}
+        elif main_task_result.state == 'FAILURE':
+             return {"status": "error", "phase": "Job Initialization", "error": str(main_task_result.result), "progress": 0}
+        return {"status": "not_found", "message": "Job status not found or job ID is invalid."}
 
 
 @celery.task(name="process:process_csv", bind=True)
@@ -125,12 +134,25 @@ def process_csv(
     file_path: str,
     schema_type: str,
     column_mapping: Dict[str, str],
+    job_id_for_status: str,
     reference_table: str = None,
     ignored_columns: List[str] = None,
     chunk_size: int = 10000,
 ) -> Dict[str, Any]:
     """Process CSV file in chunks using GCSCsvProcessor"""
     try:
+        update_job_status(
+            job_id_for_status,
+            {
+                "status": "processing",
+                "phase": "Processing CSV Data",
+                "progress": 0,
+                "processed_rows": 0,
+                "total_rows": "Calculating...",
+                "current_chunk_num": 0,
+                "total_chunks": "Calculating...",
+            },
+        )
         schema_processor = SchemaProcessor(
             schema_type,
             reference_table,
@@ -154,19 +176,54 @@ def process_csv(
         def print_progress(progress):
             celery_logger.info(f"Upload formatted progress: {progress:.2f}%")
 
+        def progress_callback(progress_details: Dict[str, Any]):
+            celery_logger.info(
+                f"CSV Processing Progress (Job: {job_id_for_status}): "
+                f"{progress_details['progress']:.2f}%, "
+                f"Rows: {progress_details['processed_rows']}/{progress_details['total_rows']}, "
+                f"Chunk: {progress_details['current_chunk_num']}/{progress_details['total_chunks']}"
+            )
+            update_job_status(
+                job_id_for_status,
+                {
+                    "status": "processing",
+                    "phase": "Processing CSV Data",
+                    "progress": progress_details["progress"],
+                    "processed_rows": progress_details["processed_rows"],
+                    "total_rows": progress_details["total_rows"],
+                    "current_chunk_num": progress_details["current_chunk_num"],
+                    "total_chunks": progress_details["total_chunks"],
+                },
+            )
+
         gcs_processor.process_csv_in_chunks(
             source_blob_name,
             destination_blob_name,
             transform_chunk,
-            chunk_upload_callback=print_progress,
+            chunk_upload_callback=progress_callback,
         )
 
         return {
-            "status": "completed",
+            "status": "completed_csv_processing",
             "output_path": f"{bucket_name}/{destination_blob_name}",
+            "job_id_for_status": job_id_for_status,
         }
     except Exception as e:
-        celery_logger.error(f"Error processing CSV: {str(e)}")
+        celery_logger.error(
+            f"Error processing CSV for job {job_id_for_status}: {str(e)}", exc_info=True
+        )
+        try:
+            update_job_status(
+                job_id_for_status,
+                {
+                    "status": "error",
+                    "phase": "Processing CSV Data",
+                    "error": f"CSV processing failed: {str(e)}",
+                    "progress": 0,
+                },
+            )
+        except Exception as update_err:
+            celery_logger.error(f"Failed to update job status with error: {update_err}")
         raise
 
 
@@ -180,6 +237,13 @@ def upload_to_database(
     job_id: str = None,
 ) -> Dict[str, Any]:
     """Upload processed CSV to database"""
+
+    job_id_for_status = process_result.get("job_id_for_status")
+    output_path = process_result.get("output_path")
+
+    processed_rows_from_csv = process_result.get("processed_rows", 0)
+    total_rows_from_csv = process_result.get("total_rows", "N/A")
+
     try:
         table_name = file_metadata["metadata"]["table_name"]
         schema = file_metadata["metadata"]["schema_type"]
@@ -205,7 +269,9 @@ def upload_to_database(
             raise ValueError(error_msg)
 
         if not google_app_creds:
-            error_msg = "GOOGLE_APPLICATION_CREDENTIALS environment variable is not set."
+            error_msg = (
+                "GOOGLE_APPLICATION_CREDENTIALS environment variable is not set."
+            )
             celery_logger.error(error_msg)
             raise ValueError(error_msg)
 
@@ -225,7 +291,18 @@ def upload_to_database(
             celery_logger.error(error_msg)
             raise ValueError(error_msg)
 
+        update_job_status(
+            job_id_for_status,
+            {
+                "status": "processing",
+                "phase": "Uploading to Database: Initializing",
+                "progress": 5,
+                "processed_rows": processed_rows_from_csv,
+                "total_rows": total_rows_from_csv,
+            },
+        )
         db_client = dynamic_annotation_cache.get_db(staging_database)
+
         try:
             db_client.annotation.create_table(
                 table_name=table_name,
@@ -244,6 +321,11 @@ def upload_to_database(
         except Exception as e:
             celery_logger.error(f"Error creating table: {str(e)}")
 
+        update_job_status(
+            job_id_for_status,
+            {"phase": "Uploading to Database: Dropping Indices", "progress": 10},
+        )
+
         # create table in staging database and drop indices
         index_cache.drop_table_indices(table_name, db_client.database.engine)
 
@@ -257,6 +339,11 @@ def upload_to_database(
         ]
         try:
             celery_logger.info("Activating service account")
+            update_job_status(
+                job_id_for_status,
+                {"phase": "Uploading to Database: Setting up transfer", "progress": 15},
+            )
+
             activate_process = subprocess.run(
                 activate_command,
                 check=True,
@@ -264,9 +351,13 @@ def upload_to_database(
                 text=True,
                 timeout=60,
             )
-            celery_logger.info(f"Service account activation stdout: {activate_process.stdout}")
+            celery_logger.info(
+                f"Service account activation stdout: {activate_process.stdout}"
+            )
             if activate_process.stderr:
-                celery_logger.warning(f"Service account activation stderr: {activate_process.stderr}")
+                celery_logger.warning(
+                    f"Service account activation stderr: {activate_process.stderr}"
+                )
         except subprocess.CalledProcessError as e:
             error_msg = f"Failed to activate service account: {e}, stderr: {e.stderr}"
             celery_logger.error(error_msg)
@@ -294,6 +385,15 @@ def upload_to_database(
                         "error": "Service account activation timed out",
                     },
                 )
+            update_job_status(
+                job_id_for_status,
+                {
+                    "status": "error",
+                    "phase": "Service Account Activation",
+                    "error": "Service account activation timed out",
+                },
+            )
+
             raise
 
         # TODO move to deployment scripts
@@ -343,6 +443,13 @@ def upload_to_database(
         ]
         try:
             celery_logger.info(f"Running command: {shlex.join(load_command)}")
+            update_job_status(
+                job_id_for_status,
+                {
+                    "phase": "Uploading to Database: Importing CSV via gcloud",
+                    "progress": 30,
+                },
+            )
 
             result = subprocess.run(
                 load_command,
@@ -366,37 +473,63 @@ def upload_to_database(
                         "error": e.stderr or str(e),
                     },
                 )
+            update_job_status(
+                job_id_for_status,
+                {
+                    "status": "error",
+                    "phase": "Uploading to Database (gcloud import)",
+                    "error": e.stderr or str(e),
+                },
+            )
+
             raise
         except subprocess.TimeoutExpired as e:
             celery_logger.error(f"Subprocess timed out: {e}")
-            if job_id:
-                update_job_status(
-                    job_id,
-                    {
-                        "status": "error",
-                        "phase": "Uploading to Database",
-                        "progress": 0,
-                        "error": "Subprocess timed out",
-                    },
-                )
+            update_job_status(
+                job_id_for_status,
+                {
+                    "status": "error",
+                    "phase": "Uploading to Database (gcloud import)",
+                    "error": "gcloud sql import timed out",
+                },
+            )
+
             raise
+        update_job_status(job_id_for_status, {"phase": "Uploading to Database: Rebuilding Indices", "progress": 80})
 
         schema_model = db_client.schema.create_annotation_model(table_name, schema)
 
         anno_indices = index_cache.add_indices_sql_commands(
             table_name, schema_model, db_client.database.engine
         )
-        for index in anno_indices:
-            celery_logger.info(f"Adding index: {index}")
-            result = add_index(staging_database, index)
-            celery_logger.info(f"Index added: {result}")
+        for i, index_sql in enumerate(anno_indices):
+            celery_logger.info(f"Adding index ({i+1}/{len(anno_indices)}): {index_sql}")
+            current_progress = 80 + int((i / len(anno_indices)) * 20) if len(anno_indices) > 0 else 80
+            update_job_status(job_id_for_status, {"phase": f"Uploading to Database: Adding Index {i+1}", "progress": current_progress })
+            add_index(staging_database, index_sql) 
+            celery_logger.info(f"Index {i+1} added/command submitted.")
+        
+        update_job_status(job_id_for_status, {
+            "status": "processing", 
+            "phase": "Database Upload Complete, awaiting next step",
+            "progress": 100,
+        })
 
         return {
-            "status": "completed",
+            "status_task": "completed_db_upload",
+            "job_id_for_status": job_id_for_status,
+            "table_name": table_name,
         }
     except Exception as e:
-        celery_logger.error(f"Database upload failed: {str(e)}")
+        celery_logger.error(f"Database upload failed for job {job_id_for_status}: {str(e)}", exc_info=True)
+        if job_id_for_status: 
+            update_job_status(job_id_for_status, {
+                "status": "error",
+                "phase": "Uploading to Database",
+                "error": f"DB upload unexpected error: {str(e)}",
+            })
         raise
+
 
 
 @celery.task(name="process:transfer_to_production", bind=True)
@@ -709,14 +842,19 @@ def transfer_table_using_pg_dump(
 
 
 @celery.task(name="process:cancel_processing")
-def cancel_processing(job_id: str) -> Dict[str, Any]:
-    """Cancel processing job"""
+def cancel_processing_job(job_id: str) -> Dict[str, Any]:
+    """Cancel processing job associated with main_job_id."""
     try:
-        status = {"status": "cancelled", "phase": "Cancelled", "progress": 0}
-        celery.control.revoke(job_id, terminate=True)
+    
+        celery.control.revoke(job_id, terminate=True, signal='SIGUSR1') 
 
-        update_job_status(job_id, status)
-        return status
+        status_update = {"status": "cancelled", "phase": "Job Cancelled by User", "progress": 0, "error": "User initiated cancellation."}
+        update_job_status(job_id, status_update) # Update Redis status
+        
+
+        return status_update
     except Exception as e:
-        celery_logger.error(f"Error cancelling job: {str(e)}")
-        raise
+        celery_logger.error(f"Error cancelling job {job_id}: {str(e)}")
+        update_job_status(job_id, {"status": "error", "phase": "Cancellation Failed", "error": str(e)})
+        raise 
+

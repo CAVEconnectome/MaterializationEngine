@@ -89,11 +89,13 @@ document.addEventListener("alpine:init", () => {
     saveProgress() {
       this.savedState = {
         uploaded: this.progress.uploaded,
-        currentChunk: this.progress.currentChunk,
+        currentChunk: this.progress.currentChunk, 
         percentage: this.progress.percentage,
         total: this.progress.total,
       };
+      console.log("Progress saved:", this.savedState);
     },
+
 
     clearAllStates() {
       localStorage.removeItem("uploadStore");
@@ -315,70 +317,50 @@ document.addEventListener("alpine:init", () => {
           this.status = "error";
           return;
       }
-      if (this.status === 'uploading') {
-          console.warn("Upload already in progress.");
-          return;
-      }
+      if (this.status === 'uploading' && !this.paused) { 
+        console.warn("Upload already in progress.");
+        return;
+    }
+    this.aborted = false;
+    
 
-      const CHUNK_SIZE = 5 * 1024 * 1024;
-      const totalChunks = Math.ceil(this.file.size / CHUNK_SIZE);
+    this.status = "uploading";
+    this.error = null; 
 
-      if (this.status === "paused" && this.savedState) {
+    if (this.paused && this.savedState) { 
+        console.log("Resuming upload. Restoring progress from:", this.savedState);
         Object.assign(this.progress, this.savedState);
-      } else {
-        this.progress = {
-          uploaded: 0,
-          currentChunk: 0,
-          percentage: 0,
-          total: this.file.size,
-        };
-        this.speedStats.startTime = Date.now();
-        this.speedStats.lastUpdateTime = Date.now();
-        this.speedStats.lastUploadedBytes = 0;
-      }
-
-      console.log("Upload starting from:", {
-        chunk: this.progress.currentChunk,
-        bytes: this.progress.uploaded,
-        percentage: this.progress.percentage,
-      });
-
-      let startChunk = this.progress.currentChunk;
-      let uploadedBytes = this.progress.uploaded;
-
-      console.log("Upload starting from:", {
-        chunk: startChunk,
-        bytes: uploadedBytes,
-        percentage: this.progress.percentage,
-      });
-
-      this.aborted = false;
-      this.paused = false;
-      this.status = "uploading";
-      this.error = null; 
-
-      if (this.status !== "paused" || !this.savedState) {
-        this.speedStats.startTime = Date.now();
-        this.speedStats.lastUpdateTime = Date.now();
-        this.speedStats.lastUploadedBytes = 0;
+        this.paused = false; 
+    } else {
+        console.log("Starting new upload or continuing unpaused upload.");
         this.progress = {
             uploaded: 0,
             currentChunk: 0,
             percentage: 0,
             total: this.file.size,
         };
-    } else {
-        Object.assign(this.progress, this.savedState);
-        console.log("Resuming upload state:", this.progress);
+        this.speedStats.startTime = Date.now();
+        this.speedStats.lastUpdateTime = Date.now();
+        this.speedStats.lastUploadedBytes = 0;
     }
+    this.savedState = null;
+
+    const CHUNK_SIZE = 5 * 1024 * 1024;
+
+    console.log("Upload starting/resuming from:", {
+      chunk: this.progress.currentChunk,
+      bytes: this.progress.uploaded,
+      percentage: this.progress.percentage,
+    });
 
     try {
-      for (let i = this.progress.currentChunk; i < Math.ceil(this.file.size / (5 * 1024 * 1024)); i++) { // Use CHUNK_SIZE constant if defined elsewhere
+      for (let i = this.progress.currentChunk; i < Math.ceil(this.file.size / CHUNK_SIZE); i++) {
         if (this.paused || this.aborted) {
           console.log(`Upload loop interrupted. Paused: ${this.paused}, Aborted: ${this.aborted}`);
-          if (this.paused) {
+          if (this.paused) { 
               this.saveProgress();
-              console.log("Upload paused at:", this.savedState);
+              this.status = "paused"; 
+              console.log("Upload paused at (inside loop):", this.savedState);
           }
           return;
         }
@@ -389,23 +371,25 @@ document.addEventListener("alpine:init", () => {
 
         await this.uploadChunk(chunk, start, end);
 
-        // Ensure progress update happens correctly
         const uploadedInChunk = end - start;
         this.progress.uploaded += uploadedInChunk;
-        this.progress.currentChunk = i + 1; // Next chunk to upload is i+1
-        this.progress.percentage = Math.min(100, Math.round( // Cap at 100
+        this.progress.currentChunk = i + 1; 
+        this.progress.percentage = Math.min(100, Math.round(
           (this.progress.uploaded / this.file.size) * 100
         ));
 
         this.updateUploadSpeed();
       }
 
-      // If loop completes without interruption
       if (!this.aborted && !this.paused) {
+        if (this.progress.uploaded < this.file.size) {
+          this.progress.uploaded = this.file.size;
+          this.progress.percentage = 100;
+        }
         this.status = "completed";
-        this.savedState = null; 
+        this.progress.currentChunk = Math.ceil(this.file.size / CHUNK_SIZE); 
         console.log("Upload completed successfully.");
-        this.saveState();
+        this.saveState(); 
       }
     } catch (error) {
       console.error("Upload error:", error);
@@ -462,8 +446,8 @@ document.addEventListener("alpine:init", () => {
     pause() {
       if (this.status === "uploading") {
         this.paused = true;
-        this.status = "paused";
-        this.saveProgress();
+        // this.status = "paused";
+        // this.saveProgress();
         console.log("Upload paused at:", this.savedState);
       }
     },
@@ -473,15 +457,16 @@ document.addEventListener("alpine:init", () => {
         console.error("Cannot resume: Upload not paused.");
         return;
       }
-       if (!this.savedState) {
-        console.error("Cannot resume: No saved state found.");
-        this.status = 'error';
-        this.error = 'Cannot resume upload, state lost.';
+       if (!this.savedState) { 
+        console.error("Cannot resume: No saved state found. Resetting.");
+        this.error = 'Cannot resume upload, state lost. Please try uploading again.';
+        this.status = 'error'; 
+        this.reset();
         return;
       }
 
-      console.log("Resuming from:", this.savedState);
-      this.paused = false; 
+      console.log("Resume requested. Current saved state:", this.savedState);
+     
       await this.startUpload();
     },
 
