@@ -123,9 +123,11 @@ def setup_periodic_tasks(sender, **kwargs):
         celery_logger.error(f"Configuration validation failed: {validation_error}")
         raise ConfigurationError("Invalid configuration") from validation_error
 
+    min_databases = sender.conf.get("MIN_DATABASES")
+    celery_logger.info(f"MIN_DATABASES: {min_databases}")
     for schedule in schedules:
         try:
-            task = configure_task(schedule)
+            task = configure_task(schedule, min_databases)
             sender.add_periodic_task(
                 create_crontab(schedule),
                 task,
@@ -138,14 +140,14 @@ def setup_periodic_tasks(sender, **kwargs):
             )
 
 
-def configure_task(schedule: Dict[str, Any]) -> Callable:
+def configure_task(schedule: Dict[str, Any], min_databases: int = None) -> Callable:
     task_name = schedule["task"]
     datastack_params = schedule.get("datastack_params", {})
 
     if is_old_materialization_configuration(task_name):
         return schedule_legacy_workflow(task_name)
     else:
-        return schedule_workflow(task_name, datastack_params)
+        return schedule_workflow(task_name, datastack_params, min_databases)
 
 
 def is_old_materialization_configuration(task_name: str) -> bool:
@@ -185,7 +187,11 @@ def schedule_legacy_workflow(task_name: str) -> Callable:
     )
 
 
-def schedule_workflow(task_name: str, datastack_params: Dict[str, Any]) -> Callable:
+def schedule_workflow(
+    task_name: str,
+    datastack_params: Dict[str, Any],
+    min_databases: int = None,
+) -> Callable:
     from materializationengine.workflows.periodic_database_removal import (
         remove_expired_databases,
     )
@@ -197,8 +203,16 @@ def schedule_workflow(task_name: str, datastack_params: Dict[str, Any]) -> Calla
     )
 
     if task_name == "remove_expired_databases":
+        default_threshold_for_task = 5
+        if min_databases is not None:
+            default_threshold_for_task = min_databases
+
+        delete_threshold = datastack_params.get(
+            "delete_threshold", default_threshold_for_task
+        )
+
         return remove_expired_databases.s(
-            delete_threshold=datastack_params.get("delete_threshold", 5),
+            delete_threshold=delete_threshold,
             datastack=datastack_params.get("datastack"),
         )
 
