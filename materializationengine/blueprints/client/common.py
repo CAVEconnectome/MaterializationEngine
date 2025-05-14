@@ -1,5 +1,6 @@
 from dynamicannotationdb.models import AnalysisVersion, AnalysisTable
 from cachetools import LRUCache, cached
+from cachetools.keys import hashkey
 from flask import abort, current_app
 from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.blueprints.client.utils import (
@@ -15,8 +16,9 @@ from materializationengine.info_client import (
 )
 import numpy as np
 import textwrap
-from flask import g, request, jsonify
+from flask import g, request
 import traceback
+from materializationengine.schemas import AnalysisVersionSchema, AnalysisTableSchema
 
 
 def unhandled_exception(e):
@@ -46,114 +48,151 @@ def unhandled_exception(e):
 
 
 @cached(cache=LRUCache(maxsize=64))
-def get_analysis_version(datastack_name: str, version: int, Session):
-    """query database for the analysis version
+def get_analysis_version(datastack_name: str, version: int, aligned_volume_name: str) -> dict | None:
+    """Query database for the analysis version.
 
     Args:
         datastack_name (str): datastack name
-        version (int): integer
-        Session ([type]): sqlalchemy session
+        version (int): integer version number
+        aligned_volume_name (str): The name of the aligned volume to scope the database session.
 
     Returns:
-        AnalysisVersion: instances of AnalysisVersion
+        dict | None: Dictionary representation of AnalysisVersion or None if not found.
     """
-
-    analysis_version = (
-        Session.query(AnalysisVersion)
-        .filter(AnalysisVersion.datastack == datastack_name)
-        .filter(AnalysisVersion.version == version)
-        .first()
-    )
-    if analysis_version is None:
-        abort(404, f"Version {version} not found in datastack {datastack_name}")
-    return analysis_version
+    with db_manager.session_scope(aligned_volume_name) as session:
+        analysis_version_orm = (
+            session.query(AnalysisVersion)
+            .filter(AnalysisVersion.datastack == datastack_name)
+            .filter(AnalysisVersion.version == version)
+            .first()
+        )
+        if analysis_version_orm is None:
+            return None
+        return AnalysisVersionSchema().dump(analysis_version_orm)
 
 
 @cached(cache=LRUCache(maxsize=64))
-def get_analysis_version_and_tables(datastack_name: str, version: int, Session):
-    """query database for the analysis version and table name
+def get_analysis_tables_by_version_id(analysis_version_id: int, aligned_volume_name: str) -> list[dict]:
+    """Query database for all AnalysisTables associated with an AnalysisVersion ID.
+    """
+    with db_manager.session_scope(aligned_volume_name) as session:
+        analysis_tables_orm = (
+            session.query(AnalysisTable)
+            .filter(AnalysisTable.analysisversion_id == analysis_version_id)
+            .all()
+        )
+        if not analysis_tables_orm:
+            return []
+        return AnalysisTableSchema(many=True).dump(analysis_tables_orm)
+
+
+@cached(cache=LRUCache(maxsize=64))
+def get_analysis_table_by_version_id_and_name(analysis_version_id: int, table_name: str, aligned_volume_name: str) -> dict | None:
+    """Query database for a specific AnalysisTable by AnalysisVersion ID and table_name.
+    """
+    with db_manager.session_scope(aligned_volume_name) as session:
+        analysis_table_orm = (
+            session.query(AnalysisTable)
+            .filter(AnalysisTable.analysisversion_id == analysis_version_id)
+            .filter(AnalysisTable.table_name == table_name)
+            .first()
+        )
+        if analysis_table_orm is None:
+            return None
+        return AnalysisTableSchema().dump(analysis_table_orm)
+
+
+def get_analysis_version_and_tables(datastack_name: str, version: int, aligned_volume_name: str) -> tuple[dict | None, list[dict] | None]:
+    """Query database for the analysis version and its associated tables.
 
     Args:
-        datastack_name (str): datastack name
-        version (int): integer
-        Session ([type]): sqlalchemy session
+        datastack_name (str): Datastack name.
+        version (int): Integer version number.
+        aligned_volume_name (str): The name of the aligned volume to scope database sessions for helpers.
 
     Returns:
-        AnalysisVersion, List[AnalysisTable]: tuple of instances of AnalysisVersion and AnalysisTable
+        tuple[dict | None, list[dict] | None]: A tuple containing the AnalysisVersion dictionary
+        and a list of AnalysisTable dictionaries. Returns (None, None) if version is not found.
     """
-
-    analysis_version = get_analysis_version(
-        datastack_name=datastack_name, version=version, Session=Session
+    analysis_version_dict = get_analysis_version(
+        datastack_name=datastack_name, version=version, aligned_volume_name=aligned_volume_name
     )
-    if analysis_version is None:
-        return None, None
-    analysis_tables = (
-        Session.query(AnalysisTable)
-        .filter(AnalysisTable.analysisversion_id == analysis_version.id)
-        .all()
+
+    if analysis_version_dict is None:
+        return None, None 
+
+    analysis_tables_list_dict = get_analysis_tables_by_version_id(
+        analysis_version_id=analysis_version_dict['id'], aligned_volume_name=aligned_volume_name
     )
-    if analysis_version is None:
-        return analysis_version, None
-    return analysis_version, analysis_tables
+    
+    return analysis_version_dict, analysis_tables_list_dict
 
 
-@cached(cache=LRUCache(maxsize=64))
 def get_analysis_version_and_table(
-    datastack_name: str, table_name: str, version: int, Session
-):
-    """query database for the analysis version and table name
+    datastack_name: str, table_name: str, version: int, aligned_volume_name: str
+) -> tuple[dict | None, dict | None]:
+    """Query database for the analysis version and a specific table name.
 
     Args:
-        datastack_name (str): datastack name
-        table_name (str): table name
-        version (int): integer
-        Session ([type]): sqlalchemy session
+        datastack_name (str): Datastack name.
+        table_name (str): Table name.
+        version (int): Integer version number.
+        aligned_volume_name (str): The name of the aligned volume to scope database sessions for helpers.
 
     Returns:
-        AnalysisVersion, AnalysisTable: tuple of instances of AnalysisVersion and AnalysisTable
+        tuple[dict | None, dict | None]: A tuple containing the AnalysisVersion dictionary
+        and the AnalysisTable dictionary. Returns (None, None) if version or table is not found.
     """
+    analysis_version_dict = get_analysis_version(
+        datastack_name=datastack_name, version=version, aligned_volume_name=aligned_volume_name
+    )
 
-    analysis_version = get_analysis_version(
-        datastack_name=datastack_name, version=version, Session=Session
-    )
-    if analysis_version is None:
+    if analysis_version_dict is None:
         return None, None
-    analysis_table = (
-        Session.query(AnalysisTable)
-        .filter(AnalysisTable.analysisversion_id == analysis_version.id)
-        .filter(AnalysisTable.table_name == table_name)
-        .first()
+
+    analysis_table_dict = get_analysis_table_by_version_id_and_name(
+        analysis_version_id=analysis_version_dict['id'], 
+        table_name=table_name, 
+        aligned_volume_name=aligned_volume_name
     )
-    if analysis_version is None:
-        return analysis_version, None
-    return analysis_version, analysis_table
+    
+    if analysis_table_dict is None:
+        return analysis_version_dict, None
+
+    return analysis_version_dict, analysis_table_dict
 
 
 @cached(cache=LRUCache(maxsize=32))
-def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
+def get_flat_model(datastack_name: str, table_name: str, version: int):
     """get a flat model for a frozen table
 
     Args:
         datastack_name (str): datastack name
         table_name (str): table name
         version (int): version of table
-        Session (Sqlalchemy session): session to connect to database
 
     Returns:
         sqlalchemy.Model: model of table
     """
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
-    analysis_version, analysis_table = get_analysis_version_and_table(
-        datastack_name, table_name, version, Session
+    aligned_volume_name, _ = get_relevant_datastack_info(datastack_name)
+    
+    analysis_version_dict, analysis_table_dict = get_analysis_version_and_table(
+        datastack_name, table_name, version, aligned_volume_name
     )
-    if analysis_table is None:
+
+    if analysis_version_dict is None: 
+        
+        abort(404, f"Version {version} not found in datastack {datastack_name}")
+
+    if analysis_table_dict is None:
         abort(
             404,
             "Cannot find table {} in datastack {} at version {}".format(
                 table_name, datastack_name, version
             ),
         )
-    if not analysis_version.valid:
+
+    if not analysis_version_dict.get("valid", False):
         abort(410, "This materialization version is not available")
 
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
@@ -163,25 +202,39 @@ def get_flat_model(datastack_name: str, table_name: str, version: int, Session):
         table_metadata = {"reference_table": reference_table}
     else:
         table_metadata = None
+    
+    schema_type = analysis_table_dict.get("schema")
+    if schema_type is None:
+        abort(500, f"Schema not found for table {table_name} in version {version}")
+
     return db.schema.create_flat_model(
         table_name=table_name,
-        schema_type=analysis_table.schema,
+        schema_type=schema_type,
         table_metadata=table_metadata,
     )
 
 
-def validate_table_args(tables, datastack_name, version):
-    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
-    with db_manager.session_scope(aligned_volume_name) as session:
-        for table in tables:
-            analysis_version, analysis_table = get_analysis_version_and_table(
-                datastack_name, table, version, session
+def validate_table_args(tables: list[str], datastack_name: str, version: int):
+    """Validates if the given tables exist for the specified datastack and version."""
+    aligned_volume_name, _ = get_relevant_datastack_info(datastack_name)
+    
+    
+    for table_name in tables:
+    
+        analysis_version_dict, analysis_table_dict = get_analysis_version_and_table(
+            datastack_name, table_name, version, aligned_volume_name
+        )
+        
+        if analysis_version_dict is None:
+             abort(
+                404,
+                f"Analysis version {version} not found for datastack {datastack_name}",
             )
-            if not (analysis_table and analysis_version):
-                abort(
-                    404,
-                    f"analysis table {table} not found for version {version} in datastack {datastack_name}",
-                )
+        if analysis_table_dict is None:
+            abort(
+                404,
+                f"Analysis table '{table_name}' not found for version {version} in datastack {datastack_name}",
+            )
 
 
 def generate_simple_query_dataframe(
@@ -201,11 +254,12 @@ def generate_simple_query_dataframe(
 
     ann_md = db.database.get_table_metadata(table_name)
 
-    
-    with db_manager.session_scope(aligned_volume_name) as session:
-        analysis_version, analysis_table = get_analysis_version_and_table(
-            datastack_name, table_name, version, session
-        )
+    analysis_version_dict, analysis_table_dict = get_analysis_version_and_table(
+        datastack_name, table_name, version, aligned_volume_name
+    )
+
+    if analysis_version_dict is None or analysis_table_dict is None:
+        abort(404, f"Version or table metadata not found for {datastack_name} v{version} table {table_name}.")
 
     max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
 
@@ -247,7 +301,7 @@ def generate_simple_query_dataframe(
         mat_db_name,
         segmentation_source=pcg_table_name,
         meta_db_name=aligned_volume_name,
-        split_mode=not analysis_version.is_merged,
+        split_mode=not analysis_version_dict["is_merged"],
         limit=limit,
         offset=data.get("offset", 0),
         get_count=get_count,
@@ -342,10 +396,10 @@ def generate_complex_query_dataframe(
 
     db_name = f"{datastack_name}__mat{version}"
 
-    with db_manager.session_scope(aligned_volume_name) as session:
-        analysis_version = get_analysis_version(datastack_name, version, session)
-    if analysis_version is None:
-        abort(404, f"Analysis version {version} not found")
+    analysis_version_dict = get_analysis_version(datastack_name, version, aligned_volume_name)
+    
+    if analysis_version_dict is None:
+        abort(404, f"Analysis version {version} not found for datastack {datastack_name}")
 
     max_limit = current_app.config.get("QUERY_LIMIT_SIZE", 200000)
 
@@ -391,7 +445,7 @@ def generate_complex_query_dataframe(
         db_name,
         segmentation_source=pcg_table_name,
         meta_db_name=aligned_volume_name,
-        split_mode=not analysis_version.is_merged,
+        split_mode=not analysis_version_dict["is_merged"],
         suffixes=suffixes,
         limit=limit,
         offset=data.get("offset", 0),

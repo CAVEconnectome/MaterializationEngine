@@ -192,10 +192,12 @@ class DatastackMetadata(Resource):
                 .filter(AnalysisVersion.valid == True)
                 .all()
             )
-        if response is None:
-            return "No valid versions found", 404
-        schema = AnalysisVersionSchema()
-        return schema.dump(response, many=True), 200
+            if not response:
+                return "No valid versions found", 404
+            
+            schema = AnalysisVersionSchema()
+            result = schema.dump(response, many=True)
+        return result, 200
 
 
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/tables")
@@ -257,16 +259,21 @@ class FrozenTableMetadata(Resource):
             dict: dictionary of table metadata
         """
         validate_table_args([table_name], datastack_name, version)
-        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+        aligned_volume_name, _ = get_relevant_datastack_info(
             datastack_name
         )
-        with db_manager.session_scope(aligned_volume_name) as session:
-            analysis_version, analysis_table = get_analysis_version_and_table(
-                datastack_name, table_name, version, session
-            )
+        
+        analysis_version_dict, analysis_table_dict = get_analysis_version_and_table(
+            datastack_name, table_name, version, aligned_volume_name
+        )
 
-            schema = AnalysisTableSchema()
-            tables = schema.dump(analysis_table)
+        if analysis_version_dict is None:
+            abort(404, f"Version {version} not found for datastack {datastack_name}")
+        
+        if analysis_table_dict is None:
+            abort(404, f"Table '{table_name}' not found for version {version} in datastack {datastack_name}")
+
+        tables_dict = analysis_table_dict
 
         db = dynamic_annotation_cache.get_db(aligned_volume_name)
         ann_md = db.database.get_table_metadata(table_name)
@@ -276,8 +283,8 @@ class FrozenTableMetadata(Resource):
         warnings = update_notice_text_warnings(ann_md, [], table_name)
         headers = add_warnings_to_headers({}, warnings)
 
-        tables.update(ann_md)
-        return tables, 200, headers
+        tables_dict.update(ann_md)
+        return tables_dict, 200, headers
 
 
 @client_bp.route(
