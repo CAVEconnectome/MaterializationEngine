@@ -1,0 +1,281 @@
+{% extends 'base.html' %}
+
+{% block title %}Spatial Workflow Details - {{ workflow_name }}{% endblock %}
+
+{% block html_head %}
+    <style>
+        .chunk-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(20px, 1fr));
+            gap: 2px;
+            margin-bottom: 10px;
+        }
+        .chunk-cell {
+            width: 20px;
+            height: 20px;
+            border: 1px solid #ccc;
+            text-align: center;
+            line-height: 20px;
+            font-size: 10px;
+            cursor: default;
+            display: inline-block;
+            vertical-align: middle;
+        }
+        .chunk-PENDING { background-color: #e0e0e0; color: #555;}
+        .chunk-PROCESSING { background-color: #64b5f6; color: white;}
+        .chunk-COMPLETED { background-color: #81c784; color: white;}
+        .chunk-FAILED_RETRYABLE { background-color: #ffb74d; color: white;}
+        .chunk-FAILED_PERMANENT { background-color: #e57373; color: white;}
+        .chunk-UNKNOWN { background-color: #bdbdbd; color: white; }
+
+        .status-summary-table th, .status-summary-table td {
+            padding: 0.25rem 0.5rem;
+        }
+        .error-details-pre {
+            white-space: pre-wrap;
+            white-space: -moz-pre-wrap;
+            white-space: -pre-wrap;
+            white-space: -o-pre-wrap;
+            word-wrap: break-word;
+            max-height: 300px;
+            overflow-y: auto;
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            padding: 10px;
+        }
+        #chunkMinimapCanvas {
+            border:1px solid #ccc;
+            cursor: default; 
+        }
+        #minimapHoverInfo {
+            font-size: 0.8em;
+            height: 20px; 
+            margin-top: 5px;
+            color: #555;
+        }
+        #minimapFiltersContainer .form-check-label {
+            font-size: 0.9em;
+        }
+        #minimapFiltersContainer .chunk-cell { 
+            width: 12px;
+            height: 12px;
+            border: 1px solid #aaa;
+            margin-right: 4px;
+        }
+    </style>
+{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2>Spatial Workflow Details</h2>
+        <button id="refreshDetailsButton" class="btn btn-sm btn-primary">
+            <i class="fas fa-sync-alt me-1"></i> Refresh
+        </button>
+    </div>
+    
+    <p>
+        <strong>Datastack:</strong> <span id="datastackName">{{ datastack_name }}</span><br>
+        <strong>Workflow Name:</strong> <span id="workflowName">{{ workflow_name }}</span><br>
+        <strong>Target Database:</strong> <span id="targetDatabase">{{ database_name if database_name else 'Default' }}</span>
+        <span id="useStagingDbInfo" style="display:none;">(Using Staging: <span id="useStagingDbValue">{{ use_staging_database|tojson|safe }}</span>)</span>
+    </p>
+
+    <div id="loadingIndicatorDetails" class="text-center my-5">
+        <div class="spinner-border text-primary" role="status">
+            <span class="visually-hidden">Loading details...</span>
+        </div>
+        <p class="mt-2">Loading workflow details...</p>
+    </div>
+
+    <div id="errorStateDetails" class="alert alert-danger" style="display: none;">
+        <strong>Error:</strong> <span id="errorStateMessageDetails"></span>
+    </div>
+
+    <div id="workflowDetailsContainer" style="display: none;">
+        <h4>Workflow Summary</h4>
+        <table class="table table-sm table-bordered status-summary-table">
+            <tbody>
+                <tr><th scope="row">Overall Status</th><td id="overallStatus">N/A</td></tr>
+                <tr><th scope="row">Current Phase</th><td id="currentPhase">N/A</td></tr> 
+                <tr><th scope="row">Progress</th><td id="overallProgress">N/A</td></tr>
+                <tr><th scope="row">Total Chunks</th><td id="totalChunks">N/A</td></tr>
+                <tr><th scope="row">Completed Chunks</th><td id="completedChunks">N/A</td></tr>
+                <tr><th scope="row">Rows Processed</th><td id="rowsProcessed">N/A</td></tr>
+                <tr><th scope="row">Processing Rate</th><td id="processingRate">N/A</td></tr>
+                <tr><th scope="row">Estimated Completion</th><td id="estimatedCompletion">N/A</td></tr>
+                <tr><th scope="row">Last Error</th><td id="lastErrorDetails">N/A</td></tr>
+                <tr><th scope="row">Started</th><td id="startTime">N/A</td></tr>
+                <tr><th scope="row">Last Updated</th><td id="updatedTime">N/A</td></tr>
+            </tbody>
+        </table>
+
+        <h4>Chunk Status Counts</h4>
+        <table class="table table-sm table-bordered status-summary-table">
+            <tbody id="chunkStatusCountsBody">
+                </tbody>
+        </table>
+        
+        <h4>Chunk Visualization (<span id="displayedChunkCountViz">0</span> / <span id="totalChunkCountViz">0</span> total)</h4>
+        <div class="mt-2">
+            <p class="text-muted mb-1"><small>Hover for chunk details. Click failed/error chunk for details (if applicable). Grid visualization is for workflows up to <span id="maxChunksForGrid">N/A</span> chunks. Minimap is shown for larger workflows.</small></p>
+            <p id="tooManyChunksMessage" class="text-warning mb-2" style="display: none;"><small>
+                Full chunk grid visualization is disabled due to the large number of chunks. A minimap is shown below. See inspectors for specific chunk lists.
+            </small></p>
+        </div>
+
+        <div id="chunkMinimapContainer" style="display: none; margin-bottom: 20px;">
+            <div class="d-flex justify-content-center">
+                <canvas id="chunkMinimapCanvas"></canvas> 
+            </div>
+            <div id="minimapHoverInfo" class="text-center">Hover over minimap for chunk details...</div>
+            <div class="d-flex justify-content-center align-items-center mt-2 mb-3">
+                <button id="minimapZoomOutButton" class="btn btn-sm btn-outline-secondary me-2" title="Zoom Out">
+                    <i class="fas fa-search-minus"></i>
+                </button>
+                <button id="minimapZoomInButton" class="btn btn-sm btn-outline-secondary" title="Zoom In">
+                    <i class="fas fa-search-plus"></i>
+                </button>
+            </div>
+
+            <div id="minimapFiltersContainer" class="mb-3 p-2 border rounded bg-light" style="display: none;"> 
+                <h6 class="mb-2">Filter Minimap by Status:</h6>
+                <div class="d-flex flex-wrap justify-content-start">
+                    <div class="form-check form-check-inline me-3">
+                        <input class="form-check-input" type="checkbox" id="filterPENDING" value="PENDING" checked>
+                        <label class="form-check-label" for="filterPENDING">
+                            <span class="chunk-cell chunk-PENDING"></span> Pending
+                        </label>
+                    </div>
+                    <div class="form-check form-check-inline me-3">
+                        <input class="form-check-input" type="checkbox" id="filterPROCESSING" value="PROCESSING" checked>
+                        <label class="form-check-label" for="filterPROCESSING">
+                            <span class="chunk-cell chunk-PROCESSING"></span> Processing
+                        </label>
+                    </div>
+                    <div class="form-check form-check-inline me-3">
+                        <input class="form-check-input" type="checkbox" id="filterPROCESSING_SUBTASKS" value="PROCESSING_SUBTASKS" checked>
+                        <label class="form-check-label" for="filterPROCESSING_SUBTASKS">
+                            <span class="chunk-cell chunk-PROCESSING_SUBTASKS"></span> Sub-tasks
+                        </label>
+                    </div>
+                    <div class="form-check form-check-inline me-3">
+                        <input class="form-check-input" type="checkbox" id="filterCOMPLETED" value="COMPLETED" checked>
+                        <label class="form-check-label" for="filterCOMPLETED">
+                            <span class="chunk-cell chunk-COMPLETED"></span> Completed
+                        </label>
+                    </div>
+                    <div class="form-check form-check-inline me-3">
+                        <input class="form-check-input" type="checkbox" id="filterFAILED_RETRYABLE" value="FAILED_RETRYABLE" checked>
+                        <label class="form-check-label" for="filterFAILED_RETRYABLE">
+                            <span class="chunk-cell chunk-FAILED_RETRYABLE"></span> Failed (Retry)
+                        </label>
+                    </div>
+                    <div class="form-check form-check-inline me-3">
+                        <input class="form-check-input" type="checkbox" id="filterFAILED_PERMANENT" value="FAILED_PERMANENT" checked>
+                        <label class="form-check-label" for="filterFAILED_PERMANENT">
+                            <span class="chunk-cell chunk-FAILED_PERMANENT"></span> Failed (Perm)
+                        </label>
+                    </div>
+                    <div class="form-check form-check-inline me-3">
+                        <input class="form-check-input" type="checkbox" id="filterERROR" value="ERROR" checked>
+                        <label class="form-check-label" for="filterERROR">
+                            <span class="chunk-cell chunk-ERROR"></span> Error
+                        </label>
+                    </div>
+                    <div class="form-check form-check-inline">
+                        <input class="form-check-input" type="checkbox" id="filterUNKNOWN" value="UNKNOWN" checked>
+                        <label class="form-check-label" for="filterUNKNOWN">
+                            <span class="chunk-cell chunk-UNKNOWN"></span> Unknown
+                        </label>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="chunkGridContainer" class="chunk-grid" style="display: grid;">
+            </div>
+        
+        <p class="mt-1 text-muted">
+            <small>Displaying <strong id="displayedChunkCountText">0</strong> of <strong id="totalChunkCountText">0</strong> total chunks in the visualization above.</small>
+        </p>
+        
+        <div id="failedChunksInspector" class="mt-3" style="display: none;">
+            <h5><i class="fas fa-exclamation-triangle text-danger me-2"></i>Failed Chunk Inspector</h5>
+            <p id="noFailedChunksMessage" class="text-muted" style="display: none;">No failed chunks found to inspect.</p>
+            <div id="failedChunksListContainer" class="list-group"> 
+                </div>
+        </div>
+    </div> </div> <div class="modal fade" id="chunkErrorModal" tabindex="-1" aria-labelledby="chunkErrorModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="chunkErrorModalLabel">Chunk Error Details</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p><strong>Chunk Index:</strong> <span id="modalChunkIndex"></span></p>
+        <p><strong>Status:</strong> <span id="modalChunkStatus"></span></p>
+        <p><strong>Attempt Count:</strong> <span id="modalAttemptCount"></span></p>
+        <p><strong>Error Type:</strong> <span id="modalErrorType"></span></p>
+        <p><strong>Error Message:</strong></p>
+        <pre id="modalErrorMessage" class="error-details-pre"></pre>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script id="initial-data-json" type="application/json">
+    {{ {'datastackName': datastack_name, 'workflowName': workflow_name, 'databaseName': database_name, 'useStagingDatabase': use_staging_database}|tojson|safe }}
+</script>
+<script src="{{ url_for('static', filename='js/spatial_workflow_details.js') }}"></script>
+<script>
+    let initialData = {}; 
+
+    
+    try {
+        const initialDataElement = document.getElementById('initial-data-json');
+        if (initialDataElement && initialDataElement.textContent) {
+            initialData = JSON.parse(initialDataElement.textContent);
+        } else {
+            console.error("Initial data script tag not found or is empty!");
+            initialData = { datastackName: null, workflowName: null, databaseName: null, useStagingDatabase: null }; 
+        }
+    } catch (e) {
+        console.error("Error parsing initial data JSON:", e);
+        initialData = { datastackName: null, workflowName: null, databaseName: null, useStagingDatabase: null }; 
+    }
+
+    
+    document.addEventListener('DOMContentLoaded', () => {
+        const useStagingDbInfoEl = document.getElementById('useStagingDbInfo');
+        
+    
+        if (initialData && (initialData.useStagingDatabase === true || initialData.useStagingDatabase === false)) {
+            if (useStagingDbInfoEl) useStagingDbInfoEl.style.display = 'inline';
+        } else if (useStagingDbInfoEl) {
+            useStagingDbInfoEl.style.display = 'none';
+        }
+        
+        if (initialData && initialData.datastackName && initialData.workflowName) {
+            initSpatialWorkflowDetailsPage(initialData);
+        } else {
+            console.error("Cannot initialize details page: core initialData properties (datastackName or workflowName) are missing.");
+            const errorDiv = document.getElementById('errorStateDetails');
+            const errorMessageSpan = document.getElementById('errorStateMessageDetails');
+            const loadingIndicator = document.getElementById("loadingIndicatorDetails");
+            const wfDetailsContainer = document.getElementById("workflowDetailsContainer");
+
+            if(errorDiv && errorMessageSpan) {
+                errorMessageSpan.textContent = "Could not load essential page data. Datastack or Workflow name is missing. Please check the URL or try again.";
+                errorDiv.style.display = 'block';
+            }
+            if (loadingIndicator) loadingIndicator.style.display = "none";
+            if (wfDetailsContainer) wfDetailsContainer.style.display = "none";
+        }
+    });
+</script>
+{% endblock %}

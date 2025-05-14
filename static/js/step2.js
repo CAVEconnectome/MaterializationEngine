@@ -15,6 +15,10 @@ document.addEventListener("alpine:init", () => {
     },
 
     init() {
+      if (!window.location.pathname.endsWith("/materialize/upload/step2")) {
+        console.log("[SchemaStore] Not on step2 page, skipping init(). Path:", window.location.pathname);
+        return;
+      }
       this.loadInitialState();
       this.loadSchemas();
       this.loadCsvColumns();

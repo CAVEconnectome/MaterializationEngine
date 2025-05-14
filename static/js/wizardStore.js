@@ -13,22 +13,24 @@ document.addEventListener("alpine:init", () => {
     },
 
     init() {
-      this.loadState();
-
-      if (!this.state.registeredSteps) {
-        this.state.registeredSteps = {};
-      }
-
-      this.registerStep(1, "upload");
-      this.registerStep(2, "schema");
-      this.registerStep(3, "metadata");
-      this.registerStep(4, "processor");
-
       const currentPath = window.location.pathname;
-      const urlStep = parseInt(currentPath.match(/step(\d+)/)?.[1]);
+      if (currentPath.includes("/materialize/upload/step")) {
+        this.loadState();
 
-      if (urlStep && urlStep !== this.state.currentStep) {
-        window.location.href = `/materialize/upload/step${this.state.currentStep}`;
+        if (!this.state.registeredSteps) {
+          this.state.registeredSteps = {};
+        }
+
+        this.registerStep(1, "upload");
+        this.registerStep(2, "schema");
+        this.registerStep(3, "metadata");
+        this.registerStep(4, "processor");
+
+        const urlStep = parseInt(currentPath.match(/step(\d+)/)?.[1]);
+
+        if (urlStep && urlStep !== this.state.currentStep) {
+          window.location.href = `/materialize/upload/step${this.state.currentStep}`;
+        }
       }
     },
 
@@ -151,8 +153,26 @@ document.addEventListener("alpine:init", () => {
         3: { completed: false, valid: false },
         4: { completed: false, valid: false },
       };
+      localStorage.removeItem("currentStep");
+      localStorage.removeItem("wizardState");
+
+      const stepStoreNames = Object.values(this.state.registeredSteps || {});
+
+      stepStoreNames.forEach(storeName => {
+        const store = Alpine.store(storeName);
+        if (store && typeof store.reset === 'function') {
+          store.reset();
+        } else {
+          console.warn(`Store ${storeName} not found or has no reset method. Attempting direct localStorage removal.`);
+          localStorage.removeItem(storeName);
+          if (storeName === "upload") localStorage.removeItem("uploadStore");
+          if (storeName === "schema") localStorage.removeItem("schemaStore");
+          if (storeName === "metadata") localStorage.removeItem("metadataStore");
+          if (storeName === "processor") localStorage.removeItem("processorStore");
+        }
+      });
+
       this.saveState();
-      window.location.href = '/materialize/upload/step1';
     },
   });
 });

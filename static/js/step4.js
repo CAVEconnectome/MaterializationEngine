@@ -173,8 +173,11 @@ document.addEventListener("alpine:init", () => {
         this.state.status = "processing";
         this.state.phase =
           "Workflow initiated, awaiting first status update...";
-        this.startPolling();
         this.saveState();
+
+        Alpine.store("wizard").resetState(); 
+        window.location.href = "/materialize/upload/running-uploads";
+
       } catch (error) {
         console.error("Error starting processing:", error);
         this.state.error = error.message;

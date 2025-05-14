@@ -99,31 +99,6 @@ document.addEventListener("alpine:init", () => {
 
     clearAllStates() {
       localStorage.removeItem("uploadStore");
-      localStorage.removeItem("schemaStore");
-      localStorage.removeItem("metadataStore");
-      localStorage.removeItem("processorStore");
-      localStorage.removeItem("wizardState");
-      localStorage.removeItem("currentStep");
-
-      const schemaStore = Alpine.store("schema");
-      if (schemaStore) {
-        schemaStore.reset();
-      }
-
-      const metadataStore = Alpine.store("metadata");
-      if (metadataStore) {
-        metadataStore.reset();
-      }
-
-      const processorStore = Alpine.store("processor");
-      if (processorStore) {
-        processorStore.reset();
-      }
-
-      const wizardStore = Alpine.store("wizard");
-      if (wizardStore) {
-        wizardStore.resetState();
-      }
     },
 
     handleFileSelect(event) {
@@ -388,7 +363,6 @@ document.addEventListener("alpine:init", () => {
         }
         this.status = "completed";
         this.progress.currentChunk = Math.ceil(this.file.size / CHUNK_SIZE); 
-        console.log("Upload completed successfully.");
         this.saveState(); 
       }
     } catch (error) {
