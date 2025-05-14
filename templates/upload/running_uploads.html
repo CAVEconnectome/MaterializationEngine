@@ -1,6 +1,8 @@
-{% extends 'base.html' %}
+{% extends 'base.html' %} 
 
-{% block title %}Running Uploads - Materialization Engine{% endblock %}
+{% block title %}
+Running Uploads - MaterializationEngine
+{% endblock %}
 
 {% block styles %}
 
@@ -21,23 +23,23 @@
     transition: width 0.6s ease;
   }
   .status-processing {
-    border-left: 5px solid #007bff; 
+    border-left: 5px solid #007bff;
   }
   .status-completed {
-    border-left: 5px solid #28a745; 
+    border-left: 5px solid #28a745;
   }
   .status-error {
-    border-left: 5px solid #dc3545; 
+    border-left: 5px solid #dc3545;
   }
   .status-cancelled {
     border-left: 5px solid #ffc107;
   }
   .status-pending,
   .status-preparing {
-    border-left: 5px solid #17a2b8; 
+    border-left: 5px solid #17a2b8;
   }
   .status-idle {
-    border-left: 5px solid #6c757d; 
+    border-left: 5px solid #6c757d;
   }
   .details-toggle {
     cursor: pointer;
@@ -52,9 +54,7 @@
     border-radius: 4px;
   }
 </style>
-{% endblock %}
-
-{% block content %}
+{% endblock %} {% block content %}
 <div class="container mt-5">
   <div
     class="d-flex justify-content-between align-items-center border-bottom pb-3 mb-4"
@@ -65,105 +65,165 @@
     </button>
   </div>
 
-  <div id="loadingIndicator" class="text-center my-5" style="display: none;">
+  <div id="loadingIndicator" class="text-center my-5" style="display: none">
     <div class="spinner-border text-primary" role="status">
       <span class="visually-hidden">Loading jobs...</span>
     </div>
     <p class="mt-2">Loading jobs...</p>
   </div>
 
-  <div id="emptyState" class="text-center my-5" style="display: none;">
+  <div id="emptyState" class="text-center my-5" style="display: none">
     <i class="fas fa-folder-open fa-3x text-muted mb-3"></i>
     <h4>No Upload Jobs Found</h4>
     <p class="text-muted">
       You haven't started any uploads yet, or there are no jobs you have
       permission to view.
     </p>
-    <a href="{{ url_for('upload.wizard_step', step_number=1) }}" class="btn btn-primary mt-2">
+    <a
+      href="{{ url_for('upload.wizard_step', step_number=1) }}"
+      class="btn btn-primary mt-2"
+    >
       <i class="fas fa-plus me-1"></i> Start a New Upload
     </a>
   </div>
 
-  <div id="errorState" class="alert alert-danger" style="display: none;">
+  <div id="errorState" class="alert alert-danger" style="display: none">
     <h5 class="alert-heading">Error Loading Jobs</h5>
     <p id="errorStateMessage"></p>
   </div>
 
-  <div id="jobsContainer" class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">
-  </div>
+  <div
+    id="jobsContainer"
+    class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4"
+  ></div>
 
   <template id="jobCardTemplate">
     <div class="col">
-      <div class="card job-card h-100"> 
-        <div class="card-header job-card-header job-filename"></div>-->
+      <div class="card job-card h-100">
+        <div class="card-header job-card-header job-filename"></div>
+        -->
         <div class="card-body">
-          <p class="card-text mb-1"><strong>Datastack:</strong> <span class="job-datastack-name">N/A</span></p>
-          <p class="card-text mb-1"><strong>Status:</strong> <span class="fw-bold job-status-text">N/A</span></p>
-          <p class="card-text mb-2"><strong>Phase:</strong> <small class="job-phase-text">N/A</small></p>
-          
-          <div class="mb-2 job-progress-bar-container" style="display: none;">
-            <div class="progress" style="height: 20px;">
-              <div class="progress-bar progress-bar-striped progress-bar-animated job-progress-bar" role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+          <p class="card-text mb-1">
+            <strong>Datastack:</strong>
+            <span class="job-datastack-name">N/A</span>
+          </p>
+          <p class="card-text mb-1">
+            <strong>Status:</strong>
+            <span class="fw-bold job-status-text">N/A</span>
+          </p>
+          <p class="card-text mb-2">
+            <strong>Phase:</strong> <small class="job-phase-text">N/A</small>
+          </p>
+
+          <div class="mb-2 job-progress-bar-container" style="display: none">
+            <div class="progress" style="height: 20px">
+              <div
+                class="progress-bar progress-bar-striped progress-bar-animated job-progress-bar"
+                role="progressbar"
+                style="width: 0%"
+                aria-valuenow="0"
+                aria-valuemin="0"
+                aria-valuemax="100"
+              >
                 <span class="job-progress-text">0%</span>
               </div>
             </div>
-            <div class="small text-muted mt-1 job-progress-rows" style="display: none;"></div> 
+            <div
+              class="small text-muted mt-1 job-progress-rows"
+              style="display: none"
+            ></div>
           </div>
 
-          <div class="alert alert-danger p-2 mt-2 job-error-details-container" style="display: none;">
-            <strong>Error:</strong> <pre class="job-error-details-text"></pre>
+          <div
+            class="alert alert-danger p-2 mt-2 job-error-details-container"
+            style="display: none"
+          >
+            <strong>Error:</strong>
+            <pre class="job-error-details-text"></pre>
           </div>
-          <div class="alert alert-info p-2 mt-2 job-message-container" style="display: none;">
+          <div
+            class="alert alert-info p-2 mt-2 job-message-container"
+            style="display: none"
+          >
             <small class="job-message-text"></small>
           </div>
-          <p class="card-text text-muted mb-0"><small>Last Updated: <span class="job-last-updated-text">N/A</span></small></p>
+          <p class="card-text text-muted mb-0">
+            <small
+              >Last Updated:
+              <span class="job-last-updated-text">N/A</span></small
+            >
+          </p>
         </div>
         <div class="card-footer bg-light border-top-0">
-          <div class="d-flex justify-content-end job-footer-actions"> 
-            <button class="btn btn-sm btn-warning job-cancel-button" style="display: none;">
-            </button>
+          <div class="d-flex justify-content-end job-footer-actions">
+            <button
+              class="btn btn-sm btn-warning job-cancel-button"
+              style="display: none"
+            ></button>
           </div>
         </div>
       </div>
     </div>
   </template>
 
-  <div class="modal fade" id="cancelConfirmModal" tabindex="-1" aria-labelledby="cancelConfirmModalLabel" aria-hidden="true">
+  <div
+    class="modal fade"
+    id="cancelConfirmModal"
+    tabindex="-1"
+    aria-labelledby="cancelConfirmModalLabel"
+    aria-hidden="true"
+  >
     <div class="modal-dialog">
       <div class="modal-content">
         <div class="modal-header">
-          <h5 class="modal-title" id="cancelConfirmModalLabel">Confirm Cancellation</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          <h5 class="modal-title" id="cancelConfirmModalLabel">
+            Confirm Cancellation
+          </h5>
+          <button
+            type="button"
+            class="btn-close"
+            data-bs-dismiss="modal"
+            aria-label="Close"
+          ></button>
         </div>
         <div class="modal-body">
           Are you sure you want to cancel this upload job?
-          <p class="text-muted small mt-1">Job ID: <span id="jobIdToCancelSpan"></span></p>
+          <p class="text-muted small mt-1">
+            Job ID: <span id="jobIdToCancelSpan"></span>
+          </p>
         </div>
         <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-          <button type="button" class="btn btn-danger" id="executeCancelButton">Confirm Cancel</button>
+          <button
+            type="button"
+            class="btn btn-secondary"
+            data-bs-dismiss="modal"
+          >
+            Close
+          </button>
+          <button type="button" class="btn btn-danger" id="executeCancelButton">
+            Confirm Cancel
+          </button>
         </div>
       </div>
     </div>
   </div>
-
 </div>
-{% endblock %}
-
-{% block scripts %}
+{% endblock %} {% block scripts %}
 <script src="{{ url_for('static', filename='js/running_uploads.js') }}"></script>
 <script>
-    var cancelModalElement = document.getElementById('cancelConfirmModal');
-    var cancelModal = cancelModalElement ? new bootstrap.Modal(cancelModalElement) : null;
-    
-    const executeCancelBtn = document.getElementById('executeCancelButton');
-    if(executeCancelBtn) {
-        executeCancelBtn.addEventListener('click', function() {
-            if(window.executeCancelJob) {
-                 window.executeCancelJob();
-            }
-            if(cancelModal) cancelModal.hide();
-        });
-    }
+  var cancelModalElement = document.getElementById("cancelConfirmModal");
+  var cancelModal = cancelModalElement
+    ? new bootstrap.Modal(cancelModalElement)
+    : null;
+
+  const executeCancelBtn = document.getElementById("executeCancelButton");
+  if (executeCancelBtn) {
+    executeCancelBtn.addEventListener("click", function () {
+      if (window.executeCancelJob) {
+        window.executeCancelJob();
+      }
+      if (cancelModal) cancelModal.hide();
+    });
+  }
 </script>
-{% endblock %} 
+{% endblock %}
