@@ -2,6 +2,8 @@ import datetime
 import functools
 import os
 from typing import Any, Dict
+import json
+from dataclasses import asdict
 
 from dynamicannotationdb.models import AnalysisVersion
 from dynamicannotationdb.schema import DynamicSchemaClient
@@ -16,16 +18,24 @@ from flask import (
     request,
     url_for,
 )
-from flask_accepts import accepts
-from flask_restx import Namespace, Resource, fields, inputs, reqparse
+from flask_restx import Namespace, Resource, inputs, reqparse
 from google.cloud import storage
 from google.api_core import exceptions as google_exceptions
-from middle_auth_client import auth_requires_admin, auth_requires_permission, auth_required
+from middle_auth_client import (
+    auth_requires_admin,
+    auth_requires_permission,
+    auth_required,
+)
 from redis import StrictRedis
 
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.blueprints.upload.checkpoint_manager import (
     RedisCheckpointManager,
+    CHUNK_STATUS_PENDING,
+    CHUNK_STATUS_PROCESSING,
+    CHUNK_STATUS_COMPLETED,
+    CHUNK_STATUS_FAILED_RETRYABLE,
+    CHUNK_STATUS_FAILED_PERMANENT,
 )
 from materializationengine.blueprints.upload.schema_helper import get_schema_types
 from materializationengine.blueprints.upload.schemas import UploadRequestSchema
@@ -169,7 +179,10 @@ def wizard_step(step_number):
 
     try:
         datastacks = get_datastacks()
-        datastacks.sort()
+        if datastacks:
+            datastacks.sort()
+        else:
+            datastacks = []
     except Exception as e:
         current_app.logger.error(
             f"Failed to get datastacks for wizard step {step_number}: {e}",
@@ -205,6 +218,74 @@ def permission_warning():
     )
 
 
+def _has_datastack_permission(
+    auth_user_info: dict, permission_level: str, datastack_name: str
+) -> bool:
+    """
+    Checks if the user has a specific permission level for a given datastack.
+    Relies on g.auth_user['permissions'] containing strings like '{datastack_name}_{permission_level}'.
+    """
+    if not auth_user_info or not datastack_name or not permission_level:
+        return False
+
+    permissions = auth_user_info.get("permissions", [])
+
+    required_permission = f"{datastack_name.lower()}_{permission_level.lower()}"
+
+    if required_permission in permissions:
+        return True
+
+    return False
+
+
+@upload_bp.route("/running-uploads")
+@reset_auth
+@auth_required
+def running_uploads_page():
+    """Render the running uploads page"""
+    viewable_datastacks = []
+    if not is_auth_disabled() and g.get("auth_user"):
+        try:
+            all_datastacks = get_datastacks() or []
+            for ds in all_datastacks:
+                if _has_datastack_permission(g.auth_user, "view", ds):
+                    viewable_datastacks.append(ds)
+            if viewable_datastacks:
+                viewable_datastacks.sort()
+        except Exception as e:
+            current_app.logger.error(
+                f"Error fetching viewable datastacks for running uploads page: {e}"
+            )
+
+    return render_template(
+        "upload/running_uploads.html",
+        version=__version__,
+        current_user=g.get("auth_user", {}),
+        viewable_datastacks=viewable_datastacks,
+    )
+
+
+@upload_bp.route(
+    "/spatial-lookup/details/<string:datastack_name>/<string:workflow_name>"
+)
+@reset_auth
+@auth_requires_permission("view", table_arg="datastack_name")
+def spatial_lookup_workflow_details_page(datastack_name: str, workflow_name: str):
+    """Render the spatial lookup workflow details page."""
+    database_name = request.args.get("database_name")
+    use_staging_database = request.args.get("use_staging_database", type=inputs.boolean)
+
+    return render_template(
+        "upload/spatial_workflow_details.html",
+        version=__version__,
+        current_user=g.get("auth_user", {}),
+        datastack_name=datastack_name,
+        workflow_name=workflow_name,
+        database_name=database_name,
+        use_staging_database=use_staging_database,
+    )
+
+
 def create_storage_service():
     config = StorageConfig(
         allowed_origin=current_app.config.get("ALLOWED_ORIGIN"),
@@ -236,7 +317,9 @@ def generate_presigned_url(datastack_name: str):
 
         return jsonify({"resumableUrl": resumable_url, "origin": origin})
     except google_exceptions.Forbidden as e:
-        current_app.logger.error(f"GCS Forbidden error generating presigned URL: {str(e)}")
+        current_app.logger.error(
+            f"GCS Forbidden error generating presigned URL: {str(e)}"
+        )
         detailed_message = (
             "Permission denied by Google Cloud Storage. "
             "Please ensure the application's service account has the 'Storage Object Creator' role "
@@ -564,7 +647,6 @@ def start_csv_processing():
     file_path = f"gs://{bucket_name}/{file_metadata.get('filename')}"
 
     sql_instance_name = current_app.config.get("SQLALCHEMY_DATABASE_URI")
-    bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
     database_name = current_app.config.get("STAGING_DATABASE_NAME")
     datastack_name = file_metadata["metadata"]["datastack_name"]
     datastack_info = get_datastack_info(datastack_name)
@@ -578,8 +660,8 @@ def start_csv_processing():
             500,
         )
 
-    result = process_and_upload.si(
-        file_path, file_metadata, datastack_info
+    result = process_and_upload.s(
+        file_path, file_metadata, datastack_info, user_id=user_id
     ).apply_async()
 
     return jsonify({"status": "start", "task_id": result.id})
@@ -589,15 +671,112 @@ def start_csv_processing():
 @auth_required
 def check_processing_status(job_id):
     """Get processing job status"""
+    status = get_job_status(job_id)
+    if not status:
+        return jsonify({"status": "error", "message": "Job not found"}), 404
+
+    if _check_authorization(status):
+        return jsonify({"status": "error", "message": "Forbidden"}), 403
+
+    _set_item_type(status)
+
+    if status.get("active_workflow_part") == "spatial_lookup":
+        _handle_spatial_lookup(status, job_id)
+
+    return jsonify(status)
+
+
+def _check_authorization(status):
+    """Check if user has permission to access this job"""
+    if is_auth_disabled() or not g.get("auth_user"):
+        return False
+
+    user_id = str(g.auth_user["id"])
+    job_user_id = status.get("user_id")
+
+    if job_user_id == user_id:
+        return False
+
+    datastack_name = status.get("datastack_name")
+    return not datastack_name or not _has_datastack_permission(
+        g.auth_user, "view", datastack_name
+    )
+
+
+def _set_item_type(status):
+    """Set the item_type based on workflow state"""
+    if status.get("active_workflow_part") == "transfer":
+        status["item_type"] = "steps"
+    elif status.get("status") == "completed":
+        status["item_type"] = "done"
+    else:
+        status["item_type"] = "rows"
+
+
+def _handle_spatial_lookup(status, job_id):
+    """Process spatial lookup workflow details"""
+    status["item_type"] = "chunks"
+
+    spatial_config = status.get("spatial_lookup_config")
+    if not spatial_config:
+        status["phase"] = "Spatial Lookup: Configuration not found"
+        return
+
+    table_name = spatial_config.get("table_name")
+    db_name = spatial_config.get("database_name")
+
+    if not table_name or not db_name:
+        status["phase"] = "Spatial Lookup: Configuration missing"
+        return
+
     try:
-        status = get_job_status(job_id)
-        if not status:
-            return jsonify({"status": "error", "message": "Job not found"}), 404
+        spatial_data = _get_spatial_data(db_name, table_name)
+        if not spatial_data:
+            status["phase"] = "Spatial Lookup: Awaiting status data..."
+            return
 
-        return jsonify(status)
-
+        _update_status_with_spatial_data(status, spatial_data)
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        current_app.logger.error(
+            f"Error fetching spatial lookup status for job {job_id}: {e}"
+        )
+        status["phase"] = "Spatial Lookup: Error fetching details"
+
+
+def _get_spatial_data(db_name, table_name):
+    """Retrieve spatial data from checkpoint manager"""
+    checkpoint_manager = RedisCheckpointManager(db_name)
+    return checkpoint_manager.get_workflow_data(table_name)
+
+
+def _update_status_with_spatial_data(status, spatial_data):
+    """Update status object with spatial data details"""
+    status["phase"] = f"Spatial Lookup: {spatial_data.status}"
+    status["progress"] = round(spatial_data.progress, 2)
+    status["total_rows"] = spatial_data.total_chunks
+    status["processed_rows"] = spatial_data.completed_chunks
+
+    status["spatial_lookup_details"] = {
+        "total_chunks": spatial_data.total_chunks,
+        "completed_chunks": spatial_data.completed_chunks,
+        "rows_processed_in_spatial": spatial_data.rows_processed,
+        "processing_rate_spatial": spatial_data.processing_rate,
+        "estimated_completion_spatial": spatial_data.estimated_completion,
+        "chunking_strategy": spatial_data.chunking_strategy,
+        "used_chunk_size": spatial_data.used_chunk_size,
+    }
+
+    if spatial_data.status and spatial_data.status.lower() in ["failed", "error"]:
+        status["status"] = "error"
+        status["error"] = spatial_data.last_error or "Spatial lookup failed."
+    elif (
+        spatial_data.status
+        and spatial_data.status.lower()
+        == get_config_param("CHUNK_STATUS_COMPLETED", "completed").lower()
+    ):
+        if status.get("status") not in ["error", "completed"]:
+            status["status"] = "processing"
+            status["phase"] = "Spatial Lookup: Completed, awaiting transfer"
 
 
 @upload_bp.route("/api/process/cancel/<job_id>", methods=["POST"])
@@ -605,6 +784,30 @@ def check_processing_status(job_id):
 def cancel_job(job_id):
     """Cancel processing job"""
     try:
+        if not is_auth_disabled() and g.get("auth_user"):
+            status = get_job_status(job_id)
+            if not status:
+                return jsonify({"status": "error", "message": "Job not found"}), 404
+            user_id = str(g.auth_user["id"])
+            job_user_id = status.get("user_id")
+            datastack_name = status.get("datastack_name")
+
+            can_cancel = False
+            if job_user_id == user_id:
+                can_cancel = True
+            elif datastack_name and _has_datastack_permission(
+                g.auth_user, "admin", datastack_name
+            ):
+                can_cancel = True
+
+            if not can_cancel:
+                return (
+                    jsonify(
+                        {"status": "error", "message": "Forbidden to cancel this job"}
+                    ),
+                    403,
+                )
+
         result = cancel_processing_job.delay(job_id)
         status = result.get(timeout=10)
 
@@ -614,6 +817,59 @@ def cancel_job(job_id):
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@upload_bp.route("/api/process/user-jobs", methods=["GET"])
+@auth_required
+def get_user_jobs():
+    """Get all job statuses for the current user, filtered by permissions."""
+    if not g.get("auth_user") and not is_auth_disabled():
+        return jsonify({"status": "error", "message": "Authentication required"}), 401
+
+    user_jobs = []
+    try:
+        user_id = str(g.auth_user["id"]) if g.get("auth_user") else None
+        job_keys = REDIS_CLIENT.scan_iter("csv_processing:*")
+
+        for job_key in job_keys:
+            job_data_raw = REDIS_CLIENT.get(job_key)
+            if job_data_raw:
+                try:
+                    job_data = json.loads(job_data_raw.decode("utf-8"))
+                    job_data["job_id"] = job_key.decode("utf-8").split(":", 1)[1]
+
+                    if is_auth_disabled():
+                        user_jobs.append(job_data)
+                        continue
+
+                    job_user_id = job_data.get("user_id")
+                    datastack_name = job_data.get("datastack_name")
+
+                    if job_user_id == user_id:
+                        user_jobs.append(job_data)
+                    elif datastack_name and _has_datastack_permission(
+                        g.auth_user, "view", datastack_name
+                    ):
+                        user_jobs.append(job_data)
+
+                except json.JSONDecodeError as e:
+                    current_app.logger.error(
+                        f"Error decoding JSON for job key {job_key}: {e}"
+                    )
+                except Exception as e:
+                    current_app.logger.error(f"Error processing job key {job_key}: {e}")
+
+        user_jobs.sort(key=lambda x: x.get("last_updated", ""), reverse=True)
+
+        return jsonify({"status": "success", "jobs": user_jobs})
+    except Exception as e:
+        current_app.logger.error(f"Error fetching user jobs: {str(e)}")
+        return (
+            jsonify(
+                {"status": "error", "message": f"Failed to get user jobs: {str(e)}"}
+            ),
+            500,
+        )
 
 
 @spatial_lookup_bp.expect(spatial_svid_parser)
@@ -760,7 +1016,7 @@ class ActiveSpatialLookups(Resource):
     @auth_requires_permission("edit", table_arg="datastack_name")
     @spatial_lookup_bp.doc("get_active_spatial_lookups", security="apikey")
     def get(self, datastack_name: str):
-        """Get a list of all active spatial lookup workflows."""
+        """Get a list of all active spatial lookup workflows for a specific datastack."""
         try:
             if datastack_name not in current_app.config["DATASTACKS"]:
                 abort(
@@ -772,51 +1028,311 @@ class ActiveSpatialLookups(Resource):
             aligned_volume_name = datastack_info["aligned_volume"]["name"]
 
             args = spatial_lookup_status.parse_args()
-            use_staging_database = args["use_staging_database"]
+            use_staging_database = args.get("use_staging_database", False)
 
+            target_db_for_datastack = None
             if use_staging_database:
-                staging_database = get_config_param("STAGING_DATABASE_NAME")
-                database = request.args.get("database", staging_database)
+                target_db_for_datastack = get_config_param("STAGING_DATABASE_NAME")
             else:
-                database = aligned_volume_name
-            checkpoint_manager = RedisCheckpointManager(database)
-            # This already returns a list of dictionaries5
+                target_db_for_datastack = aligned_volume_name
+
+            if not target_db_for_datastack:
+                return {
+                    "status": "error",
+                    "message": "Could not determine database for datastack.",
+                }, 500
+
+            checkpoint_manager = RedisCheckpointManager(target_db_for_datastack)
             workflows = checkpoint_manager.get_active_workflows()
 
-            for workflow in workflows:
-                # Process each workflow to add calculated fields
+            for wf in workflows:
+                wf["datastack_name"] = datastack_name
+                wf["database_name"] = target_db_for_datastack
                 if (
-                    workflow.get("completed_chunks")
-                    and workflow.get("total_chunks")
-                    and workflow["total_chunks"] > 0
+                    wf.get("completed_chunks")
+                    and wf.get("total_chunks")
+                    and wf["total_chunks"] > 0
                 ):
-                    workflow["progress_percentage"] = round(
-                        (workflow["completed_chunks"] / workflow["total_chunks"]) * 100,
+                    wf["progress_percentage"] = round(
+                        (wf["completed_chunks"] / wf["total_chunks"]) * 100,
                         2,
                     )
-
-                if workflow.get("start_time") and workflow.get("status") not in [
+                if wf.get("start_time") and wf.get("status") not in [
                     "completed",
                     "failed",
                 ]:
                     try:
-                        start_time = datetime.datetime.fromisoformat(
-                            workflow["start_time"]
-                        )
+                        start_time = datetime.datetime.fromisoformat(wf["start_time"])
                         now = datetime.datetime.now(datetime.timezone.utc)
                         elapsed_seconds = (now - start_time).total_seconds()
 
                         hours, remainder = divmod(elapsed_seconds, 3600)
                         minutes, seconds = divmod(remainder, 60)
-                        workflow["elapsed_time_formatted"] = (
+                        wf["elapsed_time_formatted"] = (
                             f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
                         )
-                        workflow["elapsed_time_seconds"] = elapsed_seconds
+                        wf["elapsed_time_seconds"] = elapsed_seconds
                     except Exception as e:
-                        current_app.logger.debug(f"Error calculating elapsed time: {e}")
+                        current_app.logger.debug(
+                            f"Error calculating elapsed time for workflow {wf.get('table_name')}: {e}"
+                        )
 
-            return {"workflows": workflows}
+            return {"status": "success", "workflows": workflows}
 
         except Exception as e:
-            current_app.logger.error(f"Error getting active spatial lookups: {str(e)}")
+            current_app.logger.error(
+                f"Error getting active spatial lookups for {datastack_name}: {str(e)}"
+            )
             return {"status": "error", "message": str(e)}, 500
+
+
+@spatial_lookup_bp.route("/all-active-direct")
+class AllActiveDirectSpatialLookups(Resource):
+    @reset_auth
+    @auth_required
+    @spatial_lookup_bp.doc("get_all_active_direct_spatial_lookups", security="apikey")
+    def get(self):
+        """Get a list of all active directly-run spatial lookup workflows from all relevant databases."""
+        all_workflows = []
+        processed_db_workflow_pairs = set()
+
+        try:
+            configured_datastacks = current_app.config.get("DATASTACKS", [])
+            for datastack_name_iter in configured_datastacks:
+                staging_db_name = get_config_param("STAGING_DATABASE_NAME")
+                if staging_db_name:
+                    try:
+                        checkpoint_manager_staging = RedisCheckpointManager(
+                            staging_db_name
+                        )
+                        staging_workflows = (
+                            checkpoint_manager_staging.get_active_workflows()
+                        )
+                        for wf in staging_workflows:
+
+                            wf["database_name"] = staging_db_name
+                            wf["datastack_name"] = datastack_name_iter
+
+                            pair = (staging_db_name, wf.get("table_name"))
+                            if pair not in processed_db_workflow_pairs:
+                                all_workflows.append(wf)
+                                processed_db_workflow_pairs.add(pair)
+                    except Exception as e_staging:
+                        current_app.logger.error(
+                            f"Error fetching workflows from staging DB {staging_db_name}: {str(e_staging)}"
+                        )
+
+                try:
+                    ds_info = get_datastack_info(datastack_name_iter)
+                    prod_db_name = ds_info["aligned_volume"]["name"]
+                    if prod_db_name and prod_db_name != staging_db_name:
+                        checkpoint_manager_prod = RedisCheckpointManager(prod_db_name)
+                        prod_workflows = checkpoint_manager_prod.get_active_workflows()
+                        for wf in prod_workflows:
+                            wf["datastack_name"] = datastack_name_iter
+                            wf["database_name"] = prod_db_name
+                            pair = (prod_db_name, wf.get("table_name"))
+                            if pair not in processed_db_workflow_pairs:
+                                all_workflows.append(wf)
+                                processed_db_workflow_pairs.add(pair)
+                except Exception as e_prod:
+                    current_app.logger.error(
+                        f"Error fetching workflows from production DB for datastack {datastack_name_iter}: {str(e_prod)}"
+                    )
+
+            for wf in all_workflows:
+                if (
+                    wf.get("completed_chunks") is not None
+                    and wf.get("total_chunks") is not None
+                    and wf["total_chunks"] > 0
+                ):
+                    wf["progress_percentage"] = round(
+                        (wf["completed_chunks"] / wf["total_chunks"]) * 100,
+                        2,
+                    )
+                else:
+                    wf["progress_percentage"] = 0
+
+                if wf.get("start_time") and wf.get("status") not in [
+                    "completed",
+                    "failed",
+                    "ERROR",
+                ]:
+                    try:
+                        start_time = datetime.datetime.fromisoformat(wf["start_time"])
+                        now = datetime.datetime.now(datetime.timezone.utc)
+                        elapsed_seconds = (now - start_time).total_seconds()
+                        hours, remainder = divmod(elapsed_seconds, 3600)
+                        minutes, seconds = divmod(remainder, 60)
+                        wf["elapsed_time_formatted"] = (
+                            f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
+                        )
+                        wf["elapsed_time_seconds"] = elapsed_seconds
+                    except Exception as e_time:
+                        current_app.logger.debug(
+                            f"Error calculating elapsed time for workflow {wf.get('table_name')} in DB {wf.get('database_name')}: {e_time}"
+                        )
+                        wf["elapsed_time_formatted"] = "Error"
+
+            return {"status": "success", "workflows": all_workflows}
+
+        except Exception as e:
+            current_app.logger.error(
+                f"Error getting all active direct spatial lookups: {str(e)}",
+                exc_info=True,
+            )
+            return {"status": "error", "message": str(e)}, 500
+
+
+@spatial_lookup_bp.route(
+    "/workflow-details/datastack/<string:datastack_name>/workflow/<string:workflow_name>"
+)
+@spatial_lookup_bp.doc("get_spatial_lookup_workflow_details", security="apikey")
+class SpatialLookupWorkflowDetails(Resource):
+    @reset_auth
+    @auth_requires_permission("view", table_arg="datastack_name")
+    def get(self, datastack_name: str, workflow_name: str):
+        """Get detailed status and chunk information for a spatial lookup workflow."""
+        try:
+            if datastack_name not in current_app.config["DATASTACKS"]:
+                abort(
+                    404,
+                    f"Datastack {datastack_name} not configured for materialization.",
+                )
+
+            database_name_arg = request.args.get("database_name")
+            use_staging_db_arg = request.args.get(
+                "use_staging_database", type=inputs.boolean
+            )
+
+            target_database = None
+            if database_name_arg:
+                target_database = database_name_arg
+            elif use_staging_db_arg is True:
+                target_database = get_config_param("STAGING_DATABASE_NAME")
+            elif use_staging_db_arg is False:
+                datastack_info = get_datastack_info(datastack_name)
+                target_database = datastack_info["aligned_volume"]["name"]
+            else:
+                target_database = get_config_param("STAGING_DATABASE_NAME")
+
+            if not target_database:
+                abort(400, "Could not determine the target database for the workflow.")
+
+            checkpoint_manager = RedisCheckpointManager(target_database)
+
+            workflow_data = checkpoint_manager.get_workflow_data(workflow_name)
+            if not workflow_data:
+                return {
+                    "status": "error",
+                    "message": f"No workflow data found for workflow '{workflow_name}' in database '{target_database}'.",
+                }, 404
+
+            all_chunk_statuses_raw = (
+                checkpoint_manager.get_all_chunk_statuses(workflow_name) or {}
+            )
+            all_failed_details_raw = (
+                checkpoint_manager.get_all_failed_chunk_details(workflow_name) or {}
+            )
+
+            chunks_details = []
+            status_counts = {
+                CHUNK_STATUS_PENDING: 0,
+                CHUNK_STATUS_PROCESSING: 0,
+                CHUNK_STATUS_COMPLETED: 0,
+                CHUNK_STATUS_FAILED_RETRYABLE: 0,
+                CHUNK_STATUS_FAILED_PERMANENT: 0,
+                "UNKNOWN": 0,
+            }
+
+            total_chunks_from_workflow = (
+                workflow_data.total_chunks
+                if workflow_data.total_chunks is not None
+                else 0
+            )
+
+            if total_chunks_from_workflow > 0:
+                for i in range(total_chunks_from_workflow):
+                    chunk_idx_str = str(i)
+                    status = all_chunk_statuses_raw.get(
+                        chunk_idx_str, CHUNK_STATUS_PENDING
+                    )
+
+                    detail = {"chunk_index": i, "status": status}
+
+                    if status in [
+                        CHUNK_STATUS_FAILED_RETRYABLE,
+                        CHUNK_STATUS_FAILED_PERMANENT,
+                    ]:
+                        failed_info = all_failed_details_raw.get(chunk_idx_str, {})
+                        detail["error_message"] = failed_info.get(
+                            "error_message", "N/A"
+                        )
+                        detail["error_type"] = failed_info.get("error_type", "N/A")
+                        detail["attempt_count"] = failed_info.get("attempt_count", 0)
+
+                    chunks_details.append(detail)
+                    status_counts[status] = status_counts.get(status, 0) + 1
+
+            defined_statuses = [
+                CHUNK_STATUS_PENDING,
+                CHUNK_STATUS_PROCESSING,
+                CHUNK_STATUS_COMPLETED,
+                CHUNK_STATUS_FAILED_RETRYABLE,
+                CHUNK_STATUS_FAILED_PERMANENT,
+            ]
+            for ds in defined_statuses:
+                if ds not in status_counts:
+                    status_counts[ds] = 0
+
+            if total_chunks_from_workflow > 0:
+                explicitly_statused_chunks = sum(
+                    count
+                    for st, count in status_counts.items()
+                    if st != CHUNK_STATUS_PENDING and st != "UNKNOWN"
+                )
+                calculated_pending = (
+                    total_chunks_from_workflow - explicitly_statused_chunks
+                )
+                status_counts[CHUNK_STATUS_PENDING] = max(0, calculated_pending)
+                current_total_from_counts = sum(status_counts.values())
+                if (
+                    current_total_from_counts > total_chunks_from_workflow
+                    and status_counts.get("UNKNOWN", 0) > 0
+                ):
+                    status_counts["UNKNOWN"] = max(
+                        0,
+                        status_counts["UNKNOWN"]
+                        - (current_total_from_counts - total_chunks_from_workflow),
+                    )
+
+            workflow_summary_dict = asdict(workflow_data)
+            workflow_summary_dict["progress"] = workflow_data.progress
+
+            return {
+                "status": "success",
+                "datastack_name": datastack_name,
+                "workflow_name": workflow_name,
+                "target_database": target_database,
+                "workflow_summary": workflow_summary_dict,
+                "status_counts": status_counts,
+                "chunks": chunks_details,
+            }
+
+        except Exception as e:
+            current_app.logger.error(
+                f"Error getting spatial lookup workflow details for {workflow_name}: {str(e)}",
+                exc_info=True,
+            )
+            return {"status": "error", "message": str(e)}, 500
+
+
+@upload_bp.route("/active-spatial-workflows")
+@auth_required
+def active_spatial_workflows_page():
+    """Render the page for active directly-run spatial workflows."""
+    return render_template(
+        "upload/active_spatial_workflows.html",
+        version=__version__,
+        current_user=g.get("auth_user", {}),
+    )
