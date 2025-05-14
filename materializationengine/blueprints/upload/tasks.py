@@ -41,6 +41,13 @@ REDIS_CLIENT = Redis(
 def update_job_status(job_id: str, status: Dict[str, Any]) -> None:
     """Update job status in Redis"""
     status["last_updated"] = datetime.now(timezone.utc).isoformat()
+    existing_status = get_job_status(job_id)
+    if existing_status:
+        if "user_id" in existing_status and "user_id" not in status:
+            status["user_id"] = existing_status["user_id"]
+        if "datastack_name" in existing_status and "datastack_name" not in status:
+            status["datastack_name"] = existing_status["datastack_name"]
+            
     REDIS_CLIENT.set(
         f"csv_processing:{job_id}", json.dumps(status), ex=3600  # Expires in 1 hour
     )
@@ -58,16 +65,18 @@ def process_and_upload(
     file_path: str,
     file_metadata: dict,
     datastack_info: dict,
+    use_staging_database: bool = True,
     **kwargs,
 ) -> Dict[str, Any]:
     """Chain CSV processing tasks"""
 
     main_job_id = self.request.id
+    user_id = kwargs.get("user_id", "unknown")
+    datastack_name = datastack_info.get("name", "unknown")
 
     materialization_time_stamp = datetime.utcnow()
 
     chunk_scale_factor = current_app.config.get("CHUNK_SCALE_FACTOR", 2)
-    use_staging_database = current_app.config.get("USE_STAGING_DATABASE")
     sql_instance_name = current_app.config.get("SQL_INSTANCE_NAME")
     supervoxel_batch_size = current_app.config.get("SUPERVOXEL_BATCH_SIZE", 50)
     table_name = file_metadata["metadata"]["table_name"]
@@ -102,12 +111,18 @@ def process_and_upload(
             table_name=table_name,
             transfer_segmentation=True,
             materialization_time_stamp=str(materialization_time_stamp),
+            job_id_for_status=main_job_id
         ),
     )
 
     result = workflow.apply_async()
     update_job_status(
-        main_job_id, {"phase": "Workflow Chain Initialized", "chain_id": result.id}
+        main_job_id, {
+            "phase": "Workflow Chain Initialized", 
+            "chain_id": result.id,
+            "user_id": user_id,
+            "datastack_name": datastack_name
+            }
     )
     return {"status": "workflow_initiated", "chain_root_id": result.id}
 
@@ -243,6 +258,8 @@ def upload_to_database(
 
     processed_rows_from_csv = process_result.get("processed_rows", 0)
     total_rows_from_csv = process_result.get("total_rows", "N/A")
+    datastack_name_from_info = datastack_info.get("name", "unknown_datastack")
+    staging_database_name = current_app.config.get("STAGING_DATABASE_NAME")
 
     try:
         table_name = file_metadata["metadata"]["table_name"]
@@ -515,10 +532,28 @@ def upload_to_database(
             "progress": 100,
         })
 
+        spatial_lookup_config = {
+            "table_name": table_name,
+            "datastack_name": datastack_name_from_info,
+            "database_name": staging_database_name,
+        }
+        update_job_status(
+            job_id_for_status,
+            {
+                "status": "processing",
+                "phase": "Preparing Spatial Lookup",
+                "progress": 0,
+                "active_workflow_part": "spatial_lookup",
+                "total_rows": total_rows_from_csv,
+                "processed_rows": processed_rows_from_csv
+            },
+        )
+
         return {
             "status_task": "completed_db_upload",
             "job_id_for_status": job_id_for_status,
             "table_name": table_name,
+            "datastack_info": datastack_info
         }
     except Exception as e:
         celery_logger.error(f"Database upload failed for job {job_id_for_status}: {str(e)}", exc_info=True)
@@ -531,15 +566,15 @@ def upload_to_database(
         raise
 
 
-
 @celery.task(name="process:transfer_to_production", bind=True)
 def transfer_to_production(
     self,
+    spatial_lookup_result: Dict[str, Any],
     datastack_info: dict,
     table_name: str,
     transfer_segmentation: bool = True,
     materialization_time_stamp: datetime = datetime.utcnow(),
-    job_id: str = None,
+    job_id_for_status: str = None,
 ):
     """Transfer tables from staging schema to production database.
 
@@ -547,13 +582,26 @@ def transfer_to_production(
     Optimizes transfer by dropping indexes before transfer and rebuilding them afterward.
 
     Args:
+        spatial_lookup_result (dict): Result from the spatial lookup task.
         datastack_info (dict): Information about the datastack
         table_name (str): Name of the annotation table to transfer
         transfer_segmentation (bool): Whether to also transfer corresponding segmentation table
-
+        materialization_time_stamp (datetime): Timestamp for materialization
+        job_id_for_status (str): The main job ID for status updates.
     Returns:
         dict: Result information including success status
     """
+    if job_id_for_status:
+        update_job_status(
+            job_id_for_status,
+            {
+                "status": "processing",
+                "phase": "Transferring to Production",
+                "progress": 0,
+                "active_workflow_part": "transfer",
+            },
+        )
+
     try:
         staging_schema = get_config_param("STAGING_DATABASE_NAME")
         production_schema = datastack_info["aligned_volume"]["name"]
@@ -622,6 +670,7 @@ def transfer_to_production(
             model_creator=lambda: production_db.schema.create_annotation_model(
                 table_name, schema_type
             ),
+            job_id=job_id_for_status
         )
 
         # Handle segmentation table if needed
@@ -668,6 +717,7 @@ def transfer_to_production(
                     rebuild_indices=True,
                     engine=engine,
                     model_creator=lambda: create_segmentation_model(mat_metadata),
+                    job_id=job_id_for_status
                 )
 
                 segmentation_results = {
@@ -675,6 +725,18 @@ def transfer_to_production(
                     "success": True,
                     "rows": seg_row_count,
                 }
+
+        if job_id_for_status:
+            update_job_status(
+                job_id_for_status,
+                {
+                    "status": "completed",
+                    "phase": "Workflow Completed",
+                    "progress": 100,
+                    "message": "All steps completed successfully.",
+                    "active_workflow_part": "done",
+                },
+            )
 
         return {
             "status": "success",
@@ -690,6 +752,16 @@ def transfer_to_production(
 
     except Exception as e:
         celery_logger.error(f"Error transferring tables: {str(e)}")
+        if job_id_for_status:
+            update_job_status(
+                job_id_for_status,
+                {
+                    "status": "error",
+                    "phase": "Transferring to Production",
+                    "error": f"Transfer failed: {str(e)}",
+                    "active_workflow_part": "transfer",
+                },
+            )
         return {"status": "error", "error": str(e)}
 
 
