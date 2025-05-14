@@ -3,10 +3,7 @@
 {% block title %}Running Uploads - Materialization Engine{% endblock %}
 
 {% block styles %}
-<link
-  rel="stylesheet"
-  href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css"
-/>
+
 <style>
   .job-card {
     margin-bottom: 1.5rem;
@@ -24,23 +21,23 @@
     transition: width 0.6s ease;
   }
   .status-processing {
-    border-left: 5px solid #007bff; /* Blue for processing */
+    border-left: 5px solid #007bff; 
   }
   .status-completed {
-    border-left: 5px solid #28a745; /* Green for completed */
+    border-left: 5px solid #28a745; 
   }
   .status-error {
-    border-left: 5px solid #dc3545; /* Red for error */
+    border-left: 5px solid #dc3545; 
   }
   .status-cancelled {
-    border-left: 5px solid #ffc107; /* Yellow for cancelled */
+    border-left: 5px solid #ffc107;
   }
   .status-pending,
   .status-preparing {
-    border-left: 5px solid #17a2b8; /* Teal for pending/preparing */
+    border-left: 5px solid #17a2b8; 
   }
   .status-idle {
-    border-left: 5px solid #6c757d; /* Grey for idle */
+    border-left: 5px solid #6c757d; 
   }
   .details-toggle {
     cursor: pointer;
@@ -93,13 +90,12 @@
   </div>
 
   <div id="jobsContainer" class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">
-    <!-- Job cards will be rendered here by JavaScript -->
   </div>
 
   <template id="jobCardTemplate">
     <div class="col">
-      <div class="card job-card h-100"> <!-- status- class will be added by JS -->
-        <div class="card-header job-card-header job-filename"></div> <!-- Filename or Job ID -->
+      <div class="card job-card h-100"> 
+        <div class="card-header job-card-header job-filename"></div>-->
         <div class="card-body">
           <p class="card-text mb-1"><strong>Datastack:</strong> <span class="job-datastack-name">N/A</span></p>
           <p class="card-text mb-1"><strong>Status:</strong> <span class="fw-bold job-status-text">N/A</span></p>
@@ -111,7 +107,7 @@
                 <span class="job-progress-text">0%</span>
               </div>
             </div>
-            <div class="small text-muted mt-1 job-progress-rows" style="display: none;"></div> <!-- Rows/Chunks info -->
+            <div class="small text-muted mt-1 job-progress-rows" style="display: none;"></div> 
           </div>
 
           <div class="alert alert-danger p-2 mt-2 job-error-details-container" style="display: none;">
@@ -123,18 +119,15 @@
           <p class="card-text text-muted mb-0"><small>Last Updated: <span class="job-last-updated-text">N/A</span></small></p>
         </div>
         <div class="card-footer bg-light border-top-0">
-          <div class="d-flex justify-content-end job-footer-actions"> <!-- Added class for easier targeting -->
+          <div class="d-flex justify-content-end job-footer-actions"> 
             <button class="btn btn-sm btn-warning job-cancel-button" style="display: none;">
-              <!-- Icon and text set by JS -->
             </button>
-            <!-- Spatial details button will be added here by JS if needed -->
           </div>
         </div>
       </div>
     </div>
   </template>
 
-  <!-- Confirmation Modal for Cancellation (standard Bootstrap, no Alpine needed here if JS handles it) -->
   <div class="modal fade" id="cancelConfirmModal" tabindex="-1" aria-labelledby="cancelConfirmModalLabel" aria-hidden="true">
     <div class="modal-dialog">
       <div class="modal-content">
@@ -163,23 +156,14 @@
     var cancelModalElement = document.getElementById('cancelConfirmModal');
     var cancelModal = cancelModalElement ? new bootstrap.Modal(cancelModalElement) : null;
     
-    // Make confirmCancelJob globally accessible if it's not already (it is in the new running_uploads.js)
-    // window.confirmCancelJob = function(jobId) { ... } is in running_uploads.js
-
-    // Attach listener for the modal's confirm button
     const executeCancelBtn = document.getElementById('executeCancelButton');
     if(executeCancelBtn) {
         executeCancelBtn.addEventListener('click', function() {
             if(window.executeCancelJob) {
-                 window.executeCancelJob(); // Assumes executeCancelJob is made global or handled within confirmCancelJob
+                 window.executeCancelJob();
             }
             if(cancelModal) cancelModal.hide();
         });
     }
-    // Update the span with job ID when confirmCancelJob is called by running_uploads.js
-    // This part is now better handled within running_uploads.js by directly using runningJobsData.jobToCancel
-    // or by passing it to a function that shows the modal.
-    // For simplicity with plain JS, confirmCancelJob in running_uploads.js now uses built-in confirm.
-    // If we revert to Bootstrap modal, this script block here or running_uploads.js needs to manage showing it and setting the job ID.
 </script>
 {% endblock %} 
