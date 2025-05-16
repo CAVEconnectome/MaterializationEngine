@@ -25,7 +25,7 @@ from materializationengine.workflows.ingest_new_annotations import (
     create_missing_segmentation_table,
     create_segmentation_model,
 )
-from materializationengine.workflows.spatial_lookup import run_spatial_lookup_workflow
+from materializationengine.workflows.spatial_lookup import run_spatial_lookup_workflow, monitor_spatial_workflow_completion
 
 celery_logger = get_task_logger(__name__)
 
@@ -47,7 +47,7 @@ def update_job_status(job_id: str, status: Dict[str, Any]) -> None:
             status["user_id"] = existing_status["user_id"]
         if "datastack_name" in existing_status and "datastack_name" not in status:
             status["datastack_name"] = existing_status["datastack_name"]
-            
+
     REDIS_CLIENT.set(
         f"csv_processing:{job_id}", json.dumps(status), ex=3600  # Expires in 1 hour
     )
@@ -70,9 +70,8 @@ def process_and_upload(
 ) -> Dict[str, Any]:
     """Chain CSV processing tasks"""
 
-    main_job_id = self.request.id
     user_id = kwargs.get("user_id", "unknown")
-    datastack_name = datastack_info.get("name", "unknown")
+    datastack_name = datastack_info.get("datastack", "unknown")
 
     materialization_time_stamp = datetime.utcnow()
 
@@ -84,6 +83,7 @@ def process_and_upload(
     reference_table = file_metadata["metadata"].get("reference_table")
     column_mapping = file_metadata["column_mapping"]
     ignored_columns = file_metadata.get("ignored_columns")
+    main_job_id = f"{datastack_name}_{table_name}_{materialization_time_stamp.strftime('%Y%m%d_%H%M%S')}"
 
     workflow = chain(
         process_csv.si(
@@ -98,6 +98,7 @@ def process_and_upload(
             sql_instance_name=sql_instance_name,
             file_metadata=file_metadata,
             datastack_info=datastack_info,
+            job_id=main_job_id,
         ),
         run_spatial_lookup_workflow.si(
             datastack_info=datastack_info,
@@ -106,23 +107,26 @@ def process_and_upload(
             supervoxel_batch_size=supervoxel_batch_size,
             use_staging_database=True,
         ),
-        transfer_to_production.si(
+        monitor_spatial_workflow_completion.s(
             datastack_info=datastack_info,
-            table_name=table_name,
-            transfer_segmentation=True,
+            table_name_for_transfer=table_name,
             materialization_time_stamp=str(materialization_time_stamp),
-            job_id_for_status=main_job_id
+            job_id_for_status=main_job_id,
+        ),
+        transfer_to_production.s(
+            transfer_segmentation=True,
         ),
     )
 
     result = workflow.apply_async()
     update_job_status(
-        main_job_id, {
-            "phase": "Workflow Chain Initialized", 
+        main_job_id,
+        {
+            "phase": "Workflow Chain Initialized",
             "chain_id": result.id,
             "user_id": user_id,
-            "datastack_name": datastack_name
-            }
+            "datastack_name": datastack_name,
+        },
     )
     return {"status": "workflow_initiated", "chain_root_id": result.id}
 
@@ -131,16 +135,29 @@ def process_and_upload(
 def get_chain_status(job_id: str) -> Dict[str, Any]:
     """Get status of the overall processing job from Redis."""
 
-    status = get_job_status(job_id) 
+    status = get_job_status(job_id)
     if status:
         return status
     else:
         main_task_result = AsyncResult(job_id)
-        if main_task_result.state == 'PENDING':
-            return {"status": "pending", "phase": "Job Queued", "progress": 0, "message": "Job is queued and waiting to start."}
-        elif main_task_result.state == 'FAILURE':
-             return {"status": "error", "phase": "Job Initialization", "error": str(main_task_result.result), "progress": 0}
-        return {"status": "not_found", "message": "Job status not found or job ID is invalid."}
+        if main_task_result.state == "PENDING":
+            return {
+                "status": "pending",
+                "phase": "Job Queued",
+                "progress": 0,
+                "message": "Job is queued and waiting to start.",
+            }
+        elif main_task_result.state == "FAILURE":
+            return {
+                "status": "error",
+                "phase": "Job Initialization",
+                "error": str(main_task_result.result),
+                "progress": 0,
+            }
+        return {
+            "status": "not_found",
+            "message": "Job status not found or job ID is invalid.",
+        }
 
 
 @celery.task(name="process:process_csv", bind=True)
@@ -258,7 +275,7 @@ def upload_to_database(
 
     processed_rows_from_csv = process_result.get("processed_rows", 0)
     total_rows_from_csv = process_result.get("total_rows", "N/A")
-    datastack_name_from_info = datastack_info.get("name", "unknown_datastack")
+    datastack_name_from_info = datastack_info.get("datastack", "unknown_datastack")
     staging_database_name = current_app.config.get("STAGING_DATABASE_NAME")
 
     try:
@@ -512,7 +529,10 @@ def upload_to_database(
             )
 
             raise
-        update_job_status(job_id_for_status, {"phase": "Uploading to Database: Rebuilding Indices", "progress": 80})
+        update_job_status(
+            job_id_for_status,
+            {"phase": "Uploading to Database: Rebuilding Indices", "progress": 80},
+        )
 
         schema_model = db_client.schema.create_annotation_model(table_name, schema)
 
@@ -521,16 +541,27 @@ def upload_to_database(
         )
         for i, index_sql in enumerate(anno_indices):
             celery_logger.info(f"Adding index ({i+1}/{len(anno_indices)}): {index_sql}")
-            current_progress = 80 + int((i / len(anno_indices)) * 20) if len(anno_indices) > 0 else 80
-            update_job_status(job_id_for_status, {"phase": f"Uploading to Database: Adding Index {i+1}", "progress": current_progress })
-            add_index(staging_database, index_sql) 
+            current_progress = (
+                80 + int((i / len(anno_indices)) * 20) if len(anno_indices) > 0 else 80
+            )
+            update_job_status(
+                job_id_for_status,
+                {
+                    "phase": f"Uploading to Database: Adding Index {i+1}",
+                    "progress": current_progress,
+                },
+            )
+            add_index(staging_database, index_sql)
             celery_logger.info(f"Index {i+1} added/command submitted.")
-        
-        update_job_status(job_id_for_status, {
-            "status": "processing", 
-            "phase": "Database Upload Complete, awaiting next step",
-            "progress": 100,
-        })
+
+        update_job_status(
+            job_id_for_status,
+            {
+                "status": "processing",
+                "phase": "Database Upload Complete, awaiting next step",
+                "progress": 100,
+            },
+        )
 
         spatial_lookup_config = {
             "table_name": table_name,
@@ -545,7 +576,7 @@ def upload_to_database(
                 "progress": 0,
                 "active_workflow_part": "spatial_lookup",
                 "total_rows": total_rows_from_csv,
-                "processed_rows": processed_rows_from_csv
+                "processed_rows": processed_rows_from_csv,
             },
         )
 
@@ -553,217 +584,202 @@ def upload_to_database(
             "status_task": "completed_db_upload",
             "job_id_for_status": job_id_for_status,
             "table_name": table_name,
-            "datastack_info": datastack_info
+            "datastack_info": datastack_info,
         }
     except Exception as e:
-        celery_logger.error(f"Database upload failed for job {job_id_for_status}: {str(e)}", exc_info=True)
-        if job_id_for_status: 
-            update_job_status(job_id_for_status, {
-                "status": "error",
-                "phase": "Uploading to Database",
-                "error": f"DB upload unexpected error: {str(e)}",
-            })
-        raise
-
-
-@celery.task(name="process:transfer_to_production", bind=True)
-def transfer_to_production(
-    self,
-    spatial_lookup_result: Dict[str, Any],
-    datastack_info: dict,
-    table_name: str,
-    transfer_segmentation: bool = True,
-    materialization_time_stamp: datetime = datetime.utcnow(),
-    job_id_for_status: str = None,
-):
-    """Transfer tables from staging schema to production database.
-
-    Uses pg_dump and psql for efficient data transfer.
-    Optimizes transfer by dropping indexes before transfer and rebuilding them afterward.
-
-    Args:
-        spatial_lookup_result (dict): Result from the spatial lookup task.
-        datastack_info (dict): Information about the datastack
-        table_name (str): Name of the annotation table to transfer
-        transfer_segmentation (bool): Whether to also transfer corresponding segmentation table
-        materialization_time_stamp (datetime): Timestamp for materialization
-        job_id_for_status (str): The main job ID for status updates.
-    Returns:
-        dict: Result information including success status
-    """
-    if job_id_for_status:
-        update_job_status(
-            job_id_for_status,
-            {
-                "status": "processing",
-                "phase": "Transferring to Production",
-                "progress": 0,
-                "active_workflow_part": "transfer",
-            },
+        celery_logger.error(
+            f"Database upload failed for job {job_id_for_status}: {str(e)}",
+            exc_info=True,
         )
-
-    try:
-        staging_schema = get_config_param("STAGING_DATABASE_NAME")
-        production_schema = datastack_info["aligned_volume"]["name"]
-        pcg_table_name = datastack_info["segmentation_source"].split("/")[-1]
-
-        celery_logger.info(
-            f"Transferring {table_name} from schema {staging_schema} to schema {production_schema}"
-        )
-
-        staging_db = dynamic_annotation_cache.get_db(staging_schema)
-        production_db = dynamic_annotation_cache.get_db(production_schema)
-
-        table_metadata = staging_db.database.get_table_metadata(table_name)
-        schema_type = table_metadata.get("schema_type")
-
-        if not schema_type:
-            raise ValueError(f"Could not determine schema type for table {table_name}")
-
-        needs_segmentation = staging_db.schema.is_segmentation_table_required(
-            schema_type
-        )
-
-        # Create the annotation table in the production schema if it doesn't exist
-        table_exists = False
-        try:
-            production_db.database.get_table_metadata(table_name)
-            table_exists = True
-            celery_logger.info(
-                f"Table {table_name} already exists in production schema"
-            )
-        except Exception:
-            table_exists = False
-
-        if not table_exists:
-            celery_logger.info(f"Creating table {table_name} in production schema")
-            production_db.annotation.create_table(
-                table_name=table_name,
-                schema_type=schema_type,
-                description=table_metadata.get("description", ""),
-                user_id=table_metadata.get("user_id", ""),
-                voxel_resolution_x=table_metadata.get("voxel_resolution_x", 1),
-                voxel_resolution_y=table_metadata.get("voxel_resolution_y", 1),
-                voxel_resolution_z=table_metadata.get("voxel_resolution_z", 1),
-                table_metadata=table_metadata.get("table_metadata"),
-                flat_segmentation_source=table_metadata.get("flat_segmentation_source"),
-                write_permission=table_metadata.get("write_permission", "PRIVATE"),
-                read_permission=table_metadata.get("read_permission", "PRIVATE"),
-                notice_text=table_metadata.get("notice_text"),
-            )
-
-        # Get database connection info from engine
-        engine = db_manager.get_engine(production_schema)
-        db_url = engine.url
-        db_info = get_db_connection_info(db_url)
-
-        # Transfer annotation table
-        celery_logger.info(f"Transferring annotation table {table_name}")
-        row_count = transfer_table_using_pg_dump(
-            table_name=table_name,
-            source_db=staging_schema,
-            target_db=production_schema,
-            db_info=db_info,
-            drop_indices=True,
-            rebuild_indices=True,
-            engine=engine,
-            model_creator=lambda: production_db.schema.create_annotation_model(
-                table_name, schema_type
-            ),
-            job_id=job_id_for_status
-        )
-
-        # Handle segmentation table if needed
-        segmentation_results = None
-        if transfer_segmentation and needs_segmentation:
-            segmentation_table_name = build_segmentation_table_name(
-                table_name, pcg_table_name
-            )
-
-            # Check if segmentation table exists in staging
-            segmentation_exists = False
-            try:
-                staging_db.database.get_table_metadata(segmentation_table_name)
-                segmentation_exists = True
-            except Exception:
-                segmentation_exists = False
-
-            if segmentation_exists:
-                celery_logger.info(
-                    f"Transferring segmentation table {segmentation_table_name}"
-                )
-
-                # Create mat_metadata for segmentation table
-                mat_metadata = {
-                    "annotation_table_name": table_name,
-                    "segmentation_table_name": segmentation_table_name,
-                    "schema": schema_type,
-                    "database": production_schema,
-                    "aligned_volume": production_schema,
-                    "pcg_table_name": datastack_info.get(
-                        "segmentation_source", ""
-                    ).split("/")[-1],
-                    "last_updated": materialization_time_stamp,
-                }
-
-                create_missing_segmentation_table(mat_metadata)
-
-                seg_row_count = transfer_table_using_pg_dump(
-                    table_name=segmentation_table_name,
-                    source_db=staging_schema,
-                    target_db=production_schema,
-                    db_info=db_info,
-                    drop_indices=True,
-                    rebuild_indices=True,
-                    engine=engine,
-                    model_creator=lambda: create_segmentation_model(mat_metadata),
-                    job_id=job_id_for_status
-                )
-
-                segmentation_results = {
-                    "name": segmentation_table_name,
-                    "success": True,
-                    "rows": seg_row_count,
-                }
-
-        if job_id_for_status:
-            update_job_status(
-                job_id_for_status,
-                {
-                    "status": "completed",
-                    "phase": "Workflow Completed",
-                    "progress": 100,
-                    "message": "All steps completed successfully.",
-                    "active_workflow_part": "done",
-                },
-            )
-
-        return {
-            "status": "success",
-            "tables_transferred": {
-                "annotation_table": {
-                    "name": table_name,
-                    "success": True,
-                    "rows": row_count,
-                },
-                "segmentation_table": segmentation_results,
-            },
-        }
-
-    except Exception as e:
-        celery_logger.error(f"Error transferring tables: {str(e)}")
         if job_id_for_status:
             update_job_status(
                 job_id_for_status,
                 {
                     "status": "error",
-                    "phase": "Transferring to Production",
-                    "error": f"Transfer failed: {str(e)}",
-                    "active_workflow_part": "transfer",
+                    "phase": "Uploading to Database",
+                    "error": f"DB upload unexpected error: {str(e)}",
                 },
             )
-        return {"status": "error", "error": str(e)}
+        raise
 
+
+@celery.task(name="process:transfer_to_production", bind=True, ack_late=True)
+def transfer_to_production(
+    self,
+    monitor_result: dict,
+    transfer_segmentation: bool = True,
+):
+    """
+    Transfer tables from staging schema to production database after spatial lookup.
+    Uses pg_dump and psql for efficient data transfer.
+    Optimizes transfer by dropping indexes before transfer and rebuilding them afterward.
+    """
+    try:
+        datastack_info = monitor_result["datastack_info"]
+        table_name_to_transfer = monitor_result["table_name"]
+        materialization_time_stamp_str = monitor_result["materialization_time_stamp"]
+        spatial_workflow_status = monitor_result.get("spatial_workflow_final_status", "UNKNOWN")
+       
+        try:
+            materialization_time_stamp_dt = datetime.fromisoformat(materialization_time_stamp_str)
+        except ValueError:
+            materialization_time_stamp_dt = datetime.strptime(materialization_time_stamp_str, '%Y-%m-%d %H:%M:%S.%f')
+          
+
+        celery_logger.info(
+            f"Executing transfer_to_production for table: '{table_name_to_transfer}'. "
+            f"Spatial workflow final status: '{spatial_workflow_status}'."
+        )
+        if "workflow_details" in monitor_result: 
+            celery_logger.info(f"Spatial workflow details: {monitor_result['workflow_details']}")
+
+        staging_schema_name = get_config_param("STAGING_DATABASE_NAME")
+        production_schema_name = datastack_info["aligned_volume"]["name"]
+        pcg_table_name = datastack_info["segmentation_source"].split("/")[-1]
+
+        celery_logger.info(
+            f"Transferring table '{table_name_to_transfer}' from staging schema '{staging_schema_name}' "
+            f"to production schema '{production_schema_name}'"
+        )
+
+        staging_db_client = dynamic_annotation_cache.get_db(staging_schema_name) 
+        production_db_client = dynamic_annotation_cache.get_db(production_schema_name) 
+
+        table_metadata_from_staging = staging_db_client.database.get_table_metadata(table_name_to_transfer)
+        schema_type = table_metadata_from_staging.get("schema_type")
+
+        if not schema_type:
+            raise ValueError(f"Could not determine schema type for table '{table_name_to_transfer}' in staging schema '{staging_schema_name}'")
+
+        needs_segmentation_table = staging_db_client.schema.is_segmentation_table_required(schema_type)
+
+        production_table_exists = False
+        try:
+            production_db_client.database.get_table_metadata(table_name_to_transfer)
+            production_table_exists = True
+            celery_logger.info(
+                f"Annotation table '{table_name_to_transfer}' already exists in production schema '{production_schema_name}'."
+            )
+        except Exception: 
+            production_table_exists = False
+            celery_logger.info(
+                f"Annotation table '{table_name_to_transfer}' does not exist in production schema '{production_schema_name}'. Will create."
+            )
+
+        if not production_table_exists:
+            celery_logger.info(f"Creating annotation table '{table_name_to_transfer}' in production schema '{production_schema_name}'")
+            production_db_client.annotation.create_table(
+                table_name=table_name_to_transfer,
+                schema_type=schema_type,
+                description=table_metadata_from_staging.get("description", ""),
+                user_id=table_metadata_from_staging.get("user_id", ""),
+                voxel_resolution_x=table_metadata_from_staging.get("voxel_resolution_x", 1.0),
+                voxel_resolution_y=table_metadata_from_staging.get("voxel_resolution_y", 1.0),
+                voxel_resolution_z=table_metadata_from_staging.get("voxel_resolution_z", 1.0),
+                table_metadata=table_metadata_from_staging.get("table_metadata"),
+                flat_segmentation_source=table_metadata_from_staging.get("flat_segmentation_source"),
+                write_permission=table_metadata_from_staging.get("write_permission", "PRIVATE"),
+                read_permission=table_metadata_from_staging.get("read_permission", "PRIVATE"),  
+                notice_text=table_metadata_from_staging.get("notice_text"),
+            )
+
+        
+        production_engine = db_manager.get_engine(production_schema_name)
+        db_url_obj = production_engine.url 
+        
+   
+        db_connection_info_for_cli = get_db_connection_info(db_url_obj)
+
+
+        celery_logger.info(f"Transferring data for annotation table '{table_name_to_transfer}'")
+        annotation_rows_transferred = transfer_table_using_pg_dump(
+            table_name=table_name_to_transfer,
+            source_db=staging_schema_name,   
+            target_db=production_schema_name,  
+            db_info=db_connection_info_for_cli, 
+            drop_indices=True,
+            rebuild_indices=True,
+            engine=production_engine,
+            model_creator=lambda: production_db_client.schema.create_annotation_model(
+                table_name_to_transfer, schema_type
+            ),
+            job_id=monitor_result.get("job_id_for_status"),
+        )
+
+        segmentation_transfer_results = None
+        if transfer_segmentation and needs_segmentation_table:
+            segmentation_table_name = build_segmentation_table_name(
+                table_name_to_transfer, pcg_table_name
+            )
+            celery_logger.info(f"Segmentation table processing for: '{segmentation_table_name}'")
+
+            staging_segmentation_exists = False
+            try:
+                staging_db_client.database.get_table_metadata(segmentation_table_name)
+                staging_segmentation_exists = True
+            except Exception: 
+                celery_logger.info(f"Segmentation table '{segmentation_table_name}' not found in staging schema '{staging_schema_name}'. Skipping transfer for it.")
+
+            if staging_segmentation_exists:
+                celery_logger.info(f"Preparing to transfer segmentation table '{segmentation_table_name}'")
+                
+                mat_metadata_for_segmentation_table = {
+                    "annotation_table_name": table_name_to_transfer,
+                    "segmentation_table_name": segmentation_table_name,
+                    "schema_type": schema_type,
+                    "database": production_schema_name, 
+                    "aligned_volume": production_schema_name, 
+                    "pcg_table_name": pcg_table_name,
+                    "last_updated": materialization_time_stamp_dt, 
+                    "voxel_resolution_x": table_metadata_from_staging.get("voxel_resolution_x", 1.0),
+                    "voxel_resolution_y": table_metadata_from_staging.get("voxel_resolution_y", 1.0),
+                    "voxel_resolution_z": table_metadata_from_staging.get("voxel_resolution_z", 1.0),
+                }
+
+ 
+                create_missing_segmentation_table(mat_metadata_for_segmentation_table, db_client=production_db_client)
+                
+                celery_logger.info(f"Transferring data for segmentation table '{segmentation_table_name}'")
+                segmentation_rows_transferred = transfer_table_using_pg_dump(
+                    table_name=segmentation_table_name,
+                    source_db=staging_schema_name,
+                    target_db=production_schema_name,
+                    db_info=db_connection_info_for_cli,
+                    drop_indices=True,
+                    rebuild_indices=True,
+                    engine=production_engine,
+                    model_creator=lambda: create_segmentation_model(mat_metadata_for_segmentation_table),
+                )
+                segmentation_transfer_results = {
+                    "name": segmentation_table_name,
+                    "success": True,
+                    "rows_transferred": segmentation_rows_transferred,
+                }
+            else:
+                 segmentation_transfer_results = {
+                    "name": segmentation_table_name,
+                    "success": False,
+                    "message": "Not found in staging",
+                    "rows_transferred": 0,
+                }
+
+
+        return {
+            "status": "success",
+            "message": f"Transfer completed for table '{table_name_to_transfer}'.",
+            "tables_transferred": {
+                "annotation_table": {
+                    "name": table_name_to_transfer,
+                    "success": True,
+                    "rows_transferred": annotation_rows_transferred,
+                },
+                "segmentation_table": segmentation_transfer_results,
+            },
+        }
+
+    except Exception as e:
+        celery_logger.error(f"Error during transfer_to_production for table '{monitor_result.get('table_name', 'UNKNOWN')}': {str(e)}", exc_info=True)
+        raise
 
 def get_db_connection_info(db_url):
     """Extract connection information from SQLAlchemy URL object."""
@@ -917,16 +933,21 @@ def transfer_table_using_pg_dump(
 def cancel_processing_job(job_id: str) -> Dict[str, Any]:
     """Cancel processing job associated with main_job_id."""
     try:
-    
-        celery.control.revoke(job_id, terminate=True, signal='SIGUSR1') 
 
-        status_update = {"status": "cancelled", "phase": "Job Cancelled by User", "progress": 0, "error": "User initiated cancellation."}
-        update_job_status(job_id, status_update) # Update Redis status
-        
+        celery.control.revoke(job_id, terminate=True, signal="SIGUSR1")
+
+        status_update = {
+            "status": "cancelled",
+            "phase": "Job Cancelled by User",
+            "progress": 0,
+            "error": "User initiated cancellation.",
+        }
+        update_job_status(job_id, status_update)  # Update Redis status
 
         return status_update
     except Exception as e:
         celery_logger.error(f"Error cancelling job {job_id}: {str(e)}")
-        update_job_status(job_id, {"status": "error", "phase": "Cancellation Failed", "error": str(e)})
-        raise 
-
+        update_job_status(
+            job_id, {"status": "error", "phase": "Cancellation Failed", "error": str(e)}
+        )
+        raise
