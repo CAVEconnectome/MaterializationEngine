@@ -11,29 +11,46 @@ document.addEventListener("alpine:init", () => {
       validationErrors: [],
       mappingSaved: false,
       useMergedPositions: false,
-      hasPositionFields: false
+      hasPositionFields: false,
     },
 
     init() {
-      if (!window.location.pathname.endsWith("/materialize/upload/step2")) {
-        console.log("[SchemaStore] Not on step2 page, skipping init(). Path:", window.location.pathname);
-        return;
-      }
       this.loadInitialState();
-      this.loadSchemas();
-      this.loadCsvColumns();
+
+      if (window.location.pathname.endsWith("/materialize/upload/step2")) {
+        console.log(
+          "[SchemaStore] On step2 page, performing full init. Path:",
+          window.location.pathname
+        );
+        this.loadSchemas();
+        this.loadCsvColumns();
+      } else {
+        console.log(
+          "[SchemaStore] Not on step2 page, only loaded initial state. Path:",
+          window.location.pathname
+        );
+      }
     },
 
     loadInitialState() {
       const savedState = localStorage.getItem("schemaStore");
       if (savedState) {
-        const state = JSON.parse(savedState);
-        Object.keys(state).forEach(key => {
-          if (key !== "validationErrors") {
-            this.state[key] = state[key];
-          }
-        });
-        this.state.validationErrors = [];
+        try {
+          const state = JSON.parse(savedState);
+          Object.keys(state).forEach((key) => {
+            if (key !== "validationErrors" && this.state.hasOwnProperty(key)) {
+              this.state[key] = state[key];
+            }
+          });
+          this.state.validationErrors = Array.isArray(
+            this.state.validationErrors
+          )
+            ? this.state.validationErrors
+            : [];
+        } catch (e) {
+          console.error("Error loading schemaStore from localStorage:", e);
+          this.state.validationErrors = [];
+        }
       }
     },
 
@@ -45,7 +62,9 @@ document.addEventListener("alpine:init", () => {
 
     async loadSchemas() {
       try {
-        const response = await fetch("/materialize/upload/api/get-schema-types");
+        const response = await fetch(
+          "/materialize/upload/api/get-schema-types"
+        );
         const data = await response.json();
         if (data.status === "success") {
           this.state.schemas = data.schemas || [];
@@ -82,9 +101,9 @@ document.addEventListener("alpine:init", () => {
         if (data.status === "success" && data.model) {
           this.state.selectedSchema = schemaName;
           this.state.schemaModel = data.model;
-          
+
           this.state.hasPositionFields = Object.values(data.model.fields).some(
-            field => field.type.toLowerCase().includes('geometry')
+            (field) => field.type.toLowerCase().includes("geometry")
           );
           this.updateDisplayFields();
           this.updateIgnoredColumns();
@@ -96,31 +115,30 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
-
     updateDisplayFields() {
       const fields = [];
       const modelFields = Object.entries(this.state.schemaModel?.fields || {});
 
       modelFields.forEach(([fieldName, field]) => {
-        const isGeometry = field.type.toLowerCase().includes('geometry');
+        const isGeometry = field.type.toLowerCase().includes("geometry");
 
         if (isGeometry) {
           if (this.state.useMergedPositions) {
             // Single field for merged positions
             fields.push({
               name: fieldName,
-              type: 'POSITION (X,Y,Z)',
+              type: "POSITION (X,Y,Z)",
               isGeometry: true,
-              required: field.required
+              required: field.required,
             });
           } else {
             // Split into x, y, z components
-            ['x', 'y', 'z'].forEach(coord => {
+            ["x", "y", "z"].forEach((coord) => {
               fields.push({
                 name: `${fieldName}_${coord}`,
-                type: 'POSITION',
+                type: "POSITION",
                 isGeometry: true,
-                required: field.required
+                required: field.required,
               });
             });
           }
@@ -129,7 +147,7 @@ document.addEventListener("alpine:init", () => {
             name: fieldName,
             type: field.type,
             isGeometry: false,
-            required: field.required
+            required: field.required,
           });
         }
       });
@@ -142,7 +160,7 @@ document.addEventListener("alpine:init", () => {
       const currentMapping = { ...this.state.columnMapping };
       this.updateDisplayFields();
       const newMapping = {};
-      this.state.displayFields.forEach(field => {
+      this.state.displayFields.forEach((field) => {
         newMapping[field.name] = currentMapping[field.name] || "";
       });
       this.state.columnMapping = newMapping;
@@ -157,29 +175,32 @@ document.addEventListener("alpine:init", () => {
     },
 
     updateIgnoredColumns() {
-      const mappedColumns = Object.values(this.state.columnMapping).filter(Boolean);
+      const mappedColumns = Object.values(this.state.columnMapping).filter(
+        Boolean
+      );
       this.state.ignoredColumns = this.state.csvColumns.filter(
-        col => !mappedColumns.includes(col)
+        (col) => !mappedColumns.includes(col)
       );
       this.saveState();
     },
 
-
     validateMapping() {
       const errors = [];
-      
+
       if (!this.state.selectedSchema) {
         errors.push("Please select a schema type");
         this.state.validationErrors = errors;
         return false;
       }
 
-      const unmappedRequiredFields = this.state.displayFields.filter(field => {
-        return field.name !== 'id' && !this.state.columnMapping[field.name];
-      });
+      const unmappedRequiredFields = this.state.displayFields.filter(
+        (field) => {
+          return field.name !== "id" && !this.state.columnMapping[field.name];
+        }
+      );
 
       if (unmappedRequiredFields.length > 0) {
-        unmappedRequiredFields.forEach(field => {
+        unmappedRequiredFields.forEach((field) => {
           errors.push(`Required field not mapped: ${field.name}`);
         });
       }
@@ -199,7 +220,7 @@ document.addEventListener("alpine:init", () => {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             columnMapping: this.state.columnMapping,
-            ignoredColumns: this.state.ignoredColumns
+            ignoredColumns: this.state.ignoredColumns,
           }),
         });
 
@@ -217,7 +238,9 @@ document.addEventListener("alpine:init", () => {
 
     getUnmappedColumns() {
       const mappedColumns = Object.values(this.state.columnMapping);
-      return this.state.csvColumns.filter(col => !mappedColumns.includes(col));
+      return this.state.csvColumns.filter(
+        (col) => !mappedColumns.includes(col)
+      );
     },
 
     resetSchemaSelection() {
@@ -252,10 +275,10 @@ document.addEventListener("alpine:init", () => {
         displayFields: [],
         schemaModel: null,
         validationErrors: [],
-        mappingSaved: false
+        mappingSaved: false,
       };
       localStorage.removeItem("schemaStore");
       this.init();
-    }
+    },
   });
 });
