@@ -263,6 +263,8 @@ def check_aligned_volume(aligned_volume):
 
 def get_closest_versions(datastack_name: str, timestamp: datetime.datetime):
     avn, _ = get_relevant_datastack_info(datastack_name)
+    analysis_version_schema = AnalysisVersionSchema() # Instantiate the schema
+
 
     with db_manager.session_scope(avn) as session:
         # query analysis versions to get a valid version which is
@@ -276,6 +278,12 @@ def get_closest_versions(datastack_name: str, timestamp: datetime.datetime):
             .order_by(AnalysisVersion.time_stamp.desc())
             .first()
         )
+
+        if past_version:
+            past_v_data = analysis_version_schema.dump(past_version)
+        else:
+            past_v_data = None
+
         # query analysis versions to get a valid version which is
         # the closest to the timestamp while still being newer
         # than the timestamp
@@ -287,7 +295,12 @@ def get_closest_versions(datastack_name: str, timestamp: datetime.datetime):
             .order_by(AnalysisVersion.time_stamp.asc())
             .first()
         )
-    return past_version, future_version, avn
+
+        if future_version:
+            future_v_data = analysis_version_schema.dump(future_version)
+        else:
+            future_v_data = None
+    return past_v_data, future_v_data, avn
 
 
 def check_column_for_root_id(col):
@@ -816,19 +829,18 @@ class FrozenTablesMetadata(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             target_datastack
         )
-        with db_manager.session_scope(aligned_volume_name) as session:    
-            analysis_version, analysis_tables = get_analysis_version_and_tables(
-                target_datastack, target_version, session
-            )
-            if not analysis_tables:
-                
-                return [], 404
+ 
+        analysis_version, analysis_tables = get_analysis_version_and_tables(
+            target_datastack, target_version, aligned_volume_name
+        )
+        if not analysis_tables:
             
-            schema = AnalysisTableSchema()
-            tables = schema.dump(analysis_tables, many=True)
+            return [], 404
+        
 
         db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        for table in tables:
+        for table in analysis_tables:
+
             table_name = table["table_name"]
             ann_md = db.database.get_table_metadata(table_name)
             # the get_table_metadata function joins on the segmentationmetadata which
@@ -842,7 +854,7 @@ class FrozenTablesMetadata(Resource):
             ann_md.pop("deleted")
             table.update(ann_md)
 
-        return tables, 200
+        return analysis_tables, 200
 
 
 @client_bp.route(
@@ -878,16 +890,14 @@ class FrozenTableMetadata(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             target_datastack
         )
-        with db_manager.session_scope(aligned_volume_name) as session:
-        
-            analysis_version, analysis_table = get_analysis_version_and_table(
-                target_datastack, table_name, target_version, session
-            )
-            if not analysis_table:
-                return f"No table named '{table_name}' found for version '{target_version}' in datastack '{target_datastack}'", 404
+    
+        analysis_version, analysis_table = get_analysis_version_and_table(
+            target_datastack, table_name, target_version, aligned_volume_name
+        )
+        if not analysis_table:
+            return f"No table named '{table_name}' found for version '{target_version}' in datastack '{target_datastack}'", 404
 
-            schema = AnalysisTableSchema()
-            tables_dump = schema.dump(analysis_table)
+ 
 
         db = dynamic_annotation_cache.get_db(aligned_volume_name)
         ann_md = db.database.get_table_metadata(table_name)
@@ -905,8 +915,8 @@ class FrozenTableMetadata(Resource):
             ann_md["table_name"] = ann_table
         ann_md.pop("id")
         ann_md.pop("deleted")
-        tables_dump.update(ann_md)
-        return tables_dump, 200
+        analysis_table.update(ann_md)
+        return analysis_table, 200
 
 
 @client_bp.expect(query_parser)
@@ -1552,12 +1562,15 @@ def assemble_live_query_dataframe(user_data, datastack_name, args):
         chosen_version = past_ver
     else:
         chosen_version = future_ver
+    print(chosen_version)
 
-    loc_cv_time_stamp = chosen_version.time_stamp
-    loc_cv_parent_version_id = chosen_version.parent_version
-    loc_cv_datastack_name = chosen_version.datastack 
-    loc_cv_version_number = chosen_version.version
-    loc_cv_is_merged = chosen_version.is_merged
+    loc_cv_time_stamp = chosen_version["time_stamp"]
+    loc_cv_parent_version_id = chosen_version.get("parent_version")
+    loc_cv_datastack_name = chosen_version["datastack"]
+    loc_cv_version_number = chosen_version["version"]
+    loc_cv_is_merged = chosen_version["is_merged"]
+    if isinstance(loc_cv_time_stamp, str):
+        loc_cv_time_stamp = datetime.datetime.fromisoformat(loc_cv_time_stamp)
 
     chosen_timestamp_utc = pytz.utc.localize(loc_cv_time_stamp)
     

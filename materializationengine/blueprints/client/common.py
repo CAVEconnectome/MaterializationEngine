@@ -24,7 +24,7 @@ from materializationengine.schemas import AnalysisVersionSchema, AnalysisTableSc
 def unhandled_exception(e):
     status_code = 500
     user_ip = str(request.remote_addr)
-    tb = traceback.format_exception(etype=type(e), value=e, tb=e.__traceback__)
+    tb = traceback.format_exception(e, value=e, tb=e.__traceback__)
 
     current_app.logger.error(
         {
@@ -117,7 +117,6 @@ def get_analysis_version_and_tables(datastack_name: str, version: int, aligned_v
     analysis_version_dict = get_analysis_version(
         datastack_name=datastack_name, version=version, aligned_volume_name=aligned_volume_name
     )
-
     if analysis_version_dict is None:
         return None, None 
 
