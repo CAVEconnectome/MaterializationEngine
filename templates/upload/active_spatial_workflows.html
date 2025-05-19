@@ -1,0 +1,135 @@
+{% extends 'base.html' %}
+
+{% block title %}Active Spatial Workflows - Materialization Engine{% endblock %}
+
+{% block styles %}
+
+<style>
+  .workflow-card {
+    margin-bottom: 1.5rem;
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+    transition: transform 0.2s ease-in-out;
+  }
+  .workflow-card:hover {
+    transform: translateY(-3px);
+  }
+  .workflow-card-header {
+    background-color: #f8f9fa;
+    font-weight: bold;
+  }
+  .progress-bar {
+    transition: width 0.6s ease;
+  }
+  .status-processing {
+    border-left: 5px solid #007bff; 
+  }
+  .status-completed {
+    border-left: 5px solid #28a745; 
+  }
+  .status-failed, .status-error { 
+    border-left: 5px solid #dc3545; 
+  }
+  .status-pending,
+  .status-initializing,
+  .status-resuming,
+  .status-processing_chunks {
+    border-left: 5px solid #17a2b8; 
+  }
+  .status-idle { 
+    border-left: 5px solid #6c757d; 
+  }
+  .details-toggle {
+    cursor: pointer;
+  }
+  .error-details pre {
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 200px;
+    overflow-y: auto;
+    background-color: #f1f1f1;
+    padding: 10px;
+    border-radius: 4px;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container mt-5">
+  <div
+    class="d-flex justify-content-between align-items-center border-bottom pb-3 mb-4"
+  >
+    <h2><i class="fas fa-cogs me-2"></i>Active Spatial Workflows</h2>
+    <button class="btn btn-sm btn-outline-secondary" id="refreshWorkflowsButton">
+      <i class="fas fa-sync-alt me-1"></i> Refresh Workflows
+    </button>
+  </div>
+
+  <div id="loadingIndicator" class="text-center my-5" style="display: none;">
+    <div class="spinner-border text-primary" role="status">
+      <span class="visually-hidden">Loading workflows...</span>
+    </div>
+    <p class="mt-2">Loading workflows...</p>
+  </div>
+
+  <div id="emptyState" class="text-center my-5" style="display: none;">
+    <i class="fas fa-folder-open fa-3x text-muted mb-3"></i>
+    <h4>No Active Spatial Workflows Found</h4>
+    <p class="text-muted">
+      There are currently no directly-run spatial workflows active.
+    </p>
+  </div>
+
+  <div id="errorState" class="alert alert-danger" style="display: none;">
+    <h5 class="alert-heading">Error Loading Workflows</h5>
+    <p id="errorStateMessage"></p>
+  </div>
+
+  <div id="workflowsContainer" class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">
+  </div>
+
+  <template id="workflowCardTemplate">
+    <div class="col">
+      <div class="card workflow-card h-100">
+        <div class="card-header workflow-card-header"></div>
+        <div class="card-body">
+          <p class="card-text mb-1"><strong>Datastack:</strong> <span class="workflow-datastack-name">N/A</span></p>
+          <p class="card-text mb-1"><strong>Database:</strong> <span class="workflow-database-name">N/A</span></p>
+          <p class="card-text mb-1"><strong>Status:</strong> <span class="fw-bold workflow-status-text">N/A</span></p>
+          
+          <div class="workflow-progress-section">
+            <div class="mb-2 workflow-progress-bar-container" style="display: none;">
+              <div class="progress" style="height: 20px;">
+                <div class="progress-bar progress-bar-striped progress-bar-animated workflow-progress-bar" role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+                  <span class="workflow-progress-text">0%</span>
+                </div>
+              </div>
+              <div class="small text-muted mt-1 workflow-progress-chunks">
+              </div>
+            </div>
+            <p class="small text-muted workflow-no-chunk-info" style="display: none;">Chunk information not available or N/A.</p>
+          </div>
+
+          <div class="alert alert-warning p-2 mt-2 workflow-error-details-container" style="display: none;">
+            <strong>Last Error:</strong> <pre class="workflow-error-details-text"></pre>
+          </div>
+          <p class="card-text text-muted mb-1"><small>Started: <span class="workflow-start-time">N/A</span></small></p>
+          <p class="card-text text-muted mb-0"><small>Last Updated: <span class="workflow-last-updated">N/A</span></small></p>
+        </div>
+        <div class="card-footer bg-light border-top-0">
+          <div class="d-flex justify-content-end">
+            <a href="#" target="_blank" class="btn btn-sm btn-info workflow-details-button">
+              <i class="fas fa-search-location me-1"></i> View Details
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/active_spatial_workflows.js') }}"></script>
+{% endblock %}
+

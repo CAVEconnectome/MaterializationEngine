@@ -15,6 +15,7 @@ document.addEventListener("alpine:init", () => {
     paused: false,
     savedState: null,
     previewRows: [],
+    selectedDatastack: "", 
     speedStats: {
       startTime: null,
       lastUpdateTime: null,
@@ -29,6 +30,13 @@ document.addEventListener("alpine:init", () => {
         this.filename = state.filename;
         this.status = state.status;
         this.previewRows = state.previewRows;
+        this.selectedDatastack = state.selectedDatastack || "";
+        if (this.selectedDatastack) {
+          const datastackSelect = document.getElementById('datastackSelect');
+          if (datastackSelect) {
+            datastackSelect.value = this.selectedDatastack;
+          }
+        }
       }
     },
 
@@ -52,12 +60,17 @@ document.addEventListener("alpine:init", () => {
       this.paused = false;
       this.savedState = null;
       this.previewRows = [];
+      this.selectedDatastack = "";
       this.speedStats = {
         startTime: null,
         lastUpdateTime: null,
         lastUploadedBytes: 0,
         uploadSpeed: 0,
       };
+      const datastackSelect = document.getElementById('datastackSelect');
+      if (datastackSelect) {
+          datastackSelect.value = "";
+      }
       this.clearAllStates();
 
       return this.isValid();
@@ -68,6 +81,7 @@ document.addEventListener("alpine:init", () => {
         filename: this.filename,
         status: this.status,
         previewRows: this.previewRows,
+        selectedDatastack: this.selectedDatastack,
       };
       localStorage.setItem("uploadStore", JSON.stringify(stateToSave));
     },
@@ -75,39 +89,16 @@ document.addEventListener("alpine:init", () => {
     saveProgress() {
       this.savedState = {
         uploaded: this.progress.uploaded,
-        currentChunk: this.progress.currentChunk,
+        currentChunk: this.progress.currentChunk, 
         percentage: this.progress.percentage,
         total: this.progress.total,
       };
+      console.log("Progress saved:", this.savedState);
     },
+
 
     clearAllStates() {
       localStorage.removeItem("uploadStore");
-      localStorage.removeItem("schemaStore");
-      localStorage.removeItem("metadataStore");
-      localStorage.removeItem("processorStore");
-      localStorage.removeItem("wizardState");
-      localStorage.removeItem("currentStep");
-
-      const schemaStore = Alpine.store("schema");
-      if (schemaStore) {
-        schemaStore.reset();
-      }
-
-      const metadataStore = Alpine.store("metadata");
-      if (metadataStore) {
-        metadataStore.reset();
-      }
-
-      const processorStore = Alpine.store("processor");
-      if (processorStore) {
-        processorStore.reset();
-      }
-
-      const wizardStore = Alpine.store("wizard");
-      if (wizardStore) {
-        wizardStore.resetState();
-      }
     },
 
     handleFileSelect(event) {
@@ -118,12 +109,33 @@ document.addEventListener("alpine:init", () => {
 
       this.file = file;
       this.filename = file.name;
-      this.status = "ready";
-      this.progress.total = file.size;
-
+      this.status = "preparing";
+      this.progress = { percentage: 0, uploaded: 0, total: file.size, currentChunk: 0 };
       this.error = null;
-      this.previewCSV(file);
-      this.prepareUpload();
+      this.uploadUrl = null;
+      this.aborted = false;
+      this.paused = false;
+      this.savedState = null;
+      this.previewRows = []; 
+      
+      const datastackSelect = document.getElementById('datastackSelect');
+      this.selectedDatastack = datastackSelect ? datastackSelect.value : "";
+
+      this.previewCSV(file); 
+
+      this.prepareUpload()
+      .then(() => {
+          if (this.uploadUrl) {
+              this.status = "ready";
+              this.saveState();
+              console.log("Ready to upload.");
+          } else {
+              console.log("Preparation failed, cannot proceed to upload.");
+          }
+      })
+      .catch(err => {
+          console.error("Error during upload preparation:", err);
+      });
     },
 
     previewCSV(file) {
@@ -168,23 +180,59 @@ document.addEventListener("alpine:init", () => {
     },
 
     async prepareUpload() {
-      try {
-        const response = await fetch(
-          "/materialize/upload/generate-presigned-url",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              filename: this.filename,
-              contentType: this.file.type,
-              fileSize: this.file.size,
-            }),
-          }
-        );
+      this.status = "preparing";
+      this.error = null;
+      this.uploadUrl = null;
 
-        if (!response.ok) throw new Error("Failed to get upload URL");
+      
+      const datastackSelect = document.getElementById('datastackSelect');
+      const datastackName = datastackSelect ? datastackSelect.value : null;
+      this.selectedDatastack = datastackName;
+
+      if (!datastackName) {
+           const errMsg = "Datastack must be selected before preparing upload.";
+           console.error(errMsg);
+           this.error = errMsg;
+           this.status = "error"; 
+           return; 
+      }
+      
+      if (!this.file) {
+          const errMsg = "No file selected for upload preparation.";
+          console.error(errMsg);
+          this.error = errMsg;
+          this.status = "error";
+          return;
+      }
+
+      const apiUrl = `/materialize/upload/generate-presigned-url/${encodeURIComponent(datastackName)}`;
+      console.log("Requesting presigned URL from:", apiUrl);
+
+      try {
+        const response = await fetch(apiUrl, { 
+          method: "POST",
+          headers: {
+              "Content-Type": "application/json",
+              "X-Requested-With": "XMLHttpRequest"
+          },
+          body: JSON.stringify({
+            filename: this.filename, 
+            contentType: this.file.type || 'application/octet-stream',
+            fileSize: this.file.size, 
+          }),
+          credentials: 'same-origin' 
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`Failed response (${response.status}):`, errorText);
+            throw new Error(`Failed to get upload URL (${response.status})`);
+        }
 
         const data = await response.json();
+        if (!data.resumableUrl) {
+            throw new Error("Server response missing 'resumableUrl'.");
+        }
         this.uploadUrl = data.resumableUrl;
         console.log("Presigned URL received:", this.uploadUrl);
       } catch (error) {
@@ -227,75 +275,102 @@ document.addEventListener("alpine:init", () => {
     },
 
     async startUpload() {
-      if (!this.file || !this.uploadUrl) return;
+      const datastackSelect = document.getElementById('datastackSelect');
+      if (!datastackSelect || !datastackSelect.value) {
+          this.error = "Please select a datastack before uploading.";
+          this.status = "error";
+          return;
+      }
 
-      const CHUNK_SIZE = 5 * 1024 * 1024;
-      const totalChunks = Math.ceil(this.file.size / CHUNK_SIZE);
+      if (!this.file) {
+          this.error = "No file selected.";
+          this.status = "error";
+          return;
+      }
+      if (!this.uploadUrl) {
+          this.error = "Upload URL not ready. Please re-select the file.";
+          this.status = "error";
+          return;
+      }
+      if (this.status === 'uploading' && !this.paused) { 
+        console.warn("Upload already in progress.");
+        return;
+    }
+    this.aborted = false;
+    
 
-      if (this.status === "paused" && this.savedState) {
+    this.status = "uploading";
+    this.error = null; 
+
+    if (this.paused && this.savedState) { 
+        console.log("Resuming upload. Restoring progress from:", this.savedState);
         Object.assign(this.progress, this.savedState);
-      } else {
+        this.paused = false; 
+    } else {
+        console.log("Starting new upload or continuing unpaused upload.");
         this.progress = {
-          uploaded: 0,
-          currentChunk: 0,
-          percentage: 0,
-          total: this.file.size,
+            uploaded: 0,
+            currentChunk: 0,
+            percentage: 0,
+            total: this.file.size,
         };
         this.speedStats.startTime = Date.now();
         this.speedStats.lastUpdateTime = Date.now();
         this.speedStats.lastUploadedBytes = 0;
-      }
+    }
+    this.savedState = null;
 
-      console.log("Upload starting from:", {
-        chunk: this.progress.currentChunk,
-        bytes: this.progress.uploaded,
-        percentage: this.progress.percentage,
-      });
+    const CHUNK_SIZE = 5 * 1024 * 1024;
 
-      let startChunk = this.progress.currentChunk;
-      let uploadedBytes = this.progress.uploaded;
+    console.log("Upload starting/resuming from:", {
+      chunk: this.progress.currentChunk,
+      bytes: this.progress.uploaded,
+      percentage: this.progress.percentage,
+    });
 
-      console.log("Upload starting from:", {
-        chunk: startChunk,
-        bytes: uploadedBytes,
-        percentage: this.progress.percentage,
-      });
-
-      this.aborted = false;
-      this.paused = false;
-      this.status = "uploading";
-
-      try {
-        for (let i = this.progress.currentChunk; i < totalChunks; i++) {
-          if (this.paused || this.aborted) {
-            return;
+    try {
+      for (let i = this.progress.currentChunk; i < Math.ceil(this.file.size / CHUNK_SIZE); i++) {
+        if (this.paused || this.aborted) {
+          console.log(`Upload loop interrupted. Paused: ${this.paused}, Aborted: ${this.aborted}`);
+          if (this.paused) { 
+              this.saveProgress();
+              this.status = "paused"; 
+              console.log("Upload paused at (inside loop):", this.savedState);
           }
-
-          const start = i * CHUNK_SIZE;
-          const end = Math.min(start + CHUNK_SIZE, this.file.size);
-          const chunk = this.file.slice(start, end);
-
-          await this.uploadChunk(chunk, start, end);
-
-          this.progress.uploaded += end - start;
-          this.progress.currentChunk = i;
-          this.progress.percentage = Math.round(
-            (this.progress.uploaded / this.file.size) * 100
-          );
-
-          this.updateUploadSpeed();
+          return;
         }
 
-        if (!this.aborted && !this.paused) {
-          this.status = "completed";
-          this.savedState = null;
-        }
-      } catch (error) {
-        console.error("Upload error:", error);
-        this.error = error.message;
-        this.status = "error";
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, this.file.size);
+        const chunk = this.file.slice(start, end);
+
+        await this.uploadChunk(chunk, start, end);
+
+        const uploadedInChunk = end - start;
+        this.progress.uploaded += uploadedInChunk;
+        this.progress.currentChunk = i + 1; 
+        this.progress.percentage = Math.min(100, Math.round(
+          (this.progress.uploaded / this.file.size) * 100
+        ));
+
+        this.updateUploadSpeed();
       }
-    },
+
+      if (!this.aborted && !this.paused) {
+        if (this.progress.uploaded < this.file.size) {
+          this.progress.uploaded = this.file.size;
+          this.progress.percentage = 100;
+        }
+        this.status = "completed";
+        this.progress.currentChunk = Math.ceil(this.file.size / CHUNK_SIZE); 
+        this.saveState(); 
+      }
+    } catch (error) {
+      console.error("Upload error:", error);
+      this.error = error.message;
+      this.status = "error";
+    }
+  },
 
     updateUploadSpeed() {
       const now = Date.now();
@@ -345,19 +420,27 @@ document.addEventListener("alpine:init", () => {
     pause() {
       if (this.status === "uploading") {
         this.paused = true;
-        this.status = "paused";
-        this.saveProgress();
+        // this.status = "paused";
+        // this.saveProgress();
         console.log("Upload paused at:", this.savedState);
       }
     },
 
     async resume() {
-      if (this.status !== "paused" || !this.savedState) {
-        console.error("Invalid resume state");
+      if (this.status !== "paused") {
+        console.error("Cannot resume: Upload not paused.");
+        return;
+      }
+       if (!this.savedState) { 
+        console.error("Cannot resume: No saved state found. Resetting.");
+        this.error = 'Cannot resume upload, state lost. Please try uploading again.';
+        this.status = 'error'; 
+        this.reset();
         return;
       }
 
-      console.log("Resuming from:", this.savedState);
+      console.log("Resume requested. Current saved state:", this.savedState);
+     
       await this.startUpload();
     },
 
@@ -383,8 +466,16 @@ document.addEventListener("alpine:init", () => {
     },
 
     canStartUpload() {
+      const datastackSelect = document.getElementById('datastackSelect');
+      const datastackSelected = datastackSelect && datastackSelect.value;
+      this.selectedDatastack = datastackSelected ? datastackSelect.value : "";
+
       return (
-        this.file && this.status === "ready" && this.uploadUrl && !this.error
+        this.file &&
+        this.selectedDatastack &&
+        this.status === "ready" && 
+        this.uploadUrl &&
+        !this.error
       );
     },
   });
