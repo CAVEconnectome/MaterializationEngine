@@ -29,7 +29,6 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
     CHUNK_STATUS_ERROR,
     RedisCheckpointManager,
 )
-from materializationengine.blueprints.upload.tasks import update_job_status
 from materializationengine.celery_init import celery
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.cloudvolume_gateway import cloudvolume_cache
@@ -207,117 +206,6 @@ def run_spatial_lookup_workflow(
         "message": f"Spatial lookup workflow for '{table_name}' has been started/resumed.",
     }
 
-
-@celery.task(
-    name="process:monitor_spatial_workflow_completion", bind=True, max_retries=None
-)
-def monitor_spatial_workflow_completion(
-    self,
-    spatial_launch_result: Dict[str, Any],
-    datastack_info: dict,
-    table_name_for_transfer: str,
-    materialization_time_stamp: str,
-    job_id_for_status: str,
-):
-    """
-    Monitors the spatial workflow's completion status using RedisCheckpointManager.
-    """
-    workflow_to_monitor = spatial_launch_result.get("workflow_name")
-    db_for_monitor = spatial_launch_result.get("database_name")
-
-    if spatial_launch_result.get("status") == "completed_no_data_found":
-        celery_logger.info(
-            f"Spatial workflow for '{workflow_to_monitor}' was a no-op (completed_no_data_found). Proceeding to transfer."
-        )
-        return {
-            "datastack_info": datastack_info,
-            "table_name": table_name_for_transfer,
-            "materialization_time_stamp": materialization_time_stamp,
-            "spatial_workflow_final_status": "skipped_no_data",
-            "job_id_for_status": job_id_for_status,
-        }
-
-    if not workflow_to_monitor or not db_for_monitor:
-        error_msg = f"monitor_spatial_workflow_completion: Missing workflow_name or database_name in spatial_launch_result: {spatial_launch_result}"
-        celery_logger.error(error_msg)
-        raise ValueError(error_msg)
-
-    log_prefix = f"[Monitor WF:'{workflow_to_monitor}', DB:'{db_for_monitor}']"
-    celery_logger.info(
-        f"{log_prefix} Checking overall completion status of spatial workflow."
-    )
-
-    try:
-        checkpoint_manager = RedisCheckpointManager(db_for_monitor)
-        workflow_data = checkpoint_manager.get_workflow_data(workflow_to_monitor)
-    except Exception as e:
-        celery_logger.error(
-            f"{log_prefix} Error initializing RedisCheckpointManager or getting workflow data: {e}. Retrying...",
-            exc_info=True,
-        )
-        raise self.retry(exc=e, countdown=60)
-
-    if not workflow_data:
-        celery_logger.warning(
-            f"{log_prefix} No workflow data found in Redis for '{workflow_to_monitor}' yet. Retrying in 60s."
-        )
-        raise self.retry(countdown=60)
-
-    current_workflow_status = workflow_data.status
-    celery_logger.info(
-        f"{log_prefix} Current overall workflow status from Redis: '{current_workflow_status}'"
-    )
-
-    if current_workflow_status == CHUNK_STATUS_COMPLETED:
-        celery_logger.info(
-            f"{log_prefix} Workflow '{workflow_to_monitor}' is '{CHUNK_STATUS_COMPLETED}'. Proceeding to transfer."
-        )
-        update_job_status(
-            job_id_for_status,
-            {
-                "status": "processing",
-                "phase": "Spatial Lookup Complete, Preparing Transfer",
-                "progress": 0,
-                "active_workflow_part": "transfer",
-            },
-        )
-        return {
-            "datastack_info": datastack_info,
-            "table_name": table_name_for_transfer,
-            "materialization_time_stamp": materialization_time_stamp,
-            "spatial_workflow_final_status": CHUNK_STATUS_COMPLETED,
-            "workflow_details": {
-                "name": workflow_to_monitor,
-                "completed_chunks": workflow_data.completed_chunks,
-                "total_chunks": workflow_data.total_chunks,
-                "rows_processed": workflow_data.rows_processed,
-                "start_time": workflow_data.start_time,
-                "updated_at": workflow_data.updated_at,
-            },
-            "job_id_for_status": job_id_for_status,
-        }
-    elif current_workflow_status in {CHUNK_STATUS_ERROR, "failed"}:
-        err_msg = (
-            f"Spatial workflow '{workflow_to_monitor}' has terminally FAILED with status "
-            f"'{current_workflow_status}'. Last Error recorded: {workflow_data.last_error}"
-        )
-        celery_logger.error(f"{log_prefix} {err_msg}")
-        update_job_status(
-            job_id_for_status,
-            {
-                "status": "error",
-                "phase": f"Spatial Lookup Failed ({workflow_to_monitor})",
-                "error": f"Spatial workflow failed: {workflow_data.last_error or 'Unknown spatial error'}",
-            },
-        )
-        raise Exception(err_msg)
-    else:
-
-        celery_logger.info(
-            f"{log_prefix} Workflow '{workflow_to_monitor}' status is '{current_workflow_status}'. "
-            f"Not yet complete. Retrying in 60 seconds."
-        )
-        raise self.retry(countdown=60)
 
 
 @celery.task(name="workflow:update_workflow_status")
