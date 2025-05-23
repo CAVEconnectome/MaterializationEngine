@@ -41,7 +41,12 @@ class SchemaProcessor:
         self.schema = get_schema(schema_type)
         self.schema_name = schema_type
         self.is_reference = issubclass(self.schema, ReferenceAnnotation)
-        self.column_mapping = column_mapping or {}
+        raw_column_mapping = column_mapping or {}
+        self.column_mapping = {
+            schema_col: csv_col
+            for schema_col, csv_col in raw_column_mapping.items()
+            if csv_col and csv_col.strip()
+        }
         self.reverse_mapping = {v: k for k, v in self.column_mapping.items()}
         self.ignored_columns = set(ignored_columns or [])
         self.generate_ids = "id" not in self.column_mapping
@@ -136,8 +141,9 @@ class SchemaProcessor:
 
         if self.is_reference:
             required_columns.append(self._get_mapped_column("target_id"))
-
+        
         missing_columns = set(required_columns) - set(df.columns)
+        
         if missing_columns:
             raise ValueError(f"Missing required columns: {missing_columns}")
 

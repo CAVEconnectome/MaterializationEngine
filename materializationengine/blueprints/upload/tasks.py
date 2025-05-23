@@ -299,7 +299,13 @@ def upload_to_database(
         flat_segmentation_source = file_metadata["metadata"].get(
             "flat_segmentation_source"
         )
-        table_metadata = file_metadata["metadata"].get("table_metadata")
+        if file_metadata["metadata"].get("is_reference_schema"):
+            target_table = file_metadata["metadata"].get(
+                "reference_table"
+            )
+            table_metadata = {"reference_table": target_table}
+        else:
+            table_metadata = None
         notice_text = file_metadata["metadata"].get("notice_text")
 
         staging_database = current_app.config.get("STAGING_DATABASE_NAME")
