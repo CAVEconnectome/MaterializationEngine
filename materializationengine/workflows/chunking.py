@@ -249,7 +249,9 @@ class ChunkingStrategy:
             data_chunking_info = self._create_data_specific_chunks()
 
             if data_chunking_info:
-                self._chunk_generator, self.total_chunks = data_chunking_info
+                data_specific_bounds, chunk_count = data_chunking_info
+                self.data_chunk_bounds_list = data_specific_bounds
+                self.total_chunks = chunk_count
                 self.strategy_name = "data_chunks"
                 celery_logger.info(
                     f"Using data-specific chunking with {self.total_chunks} chunks of size {self.actual_chunk_size}"
