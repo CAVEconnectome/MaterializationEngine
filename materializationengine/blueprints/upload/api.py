@@ -48,7 +48,7 @@ from materializationengine.blueprints.upload.tasks import (
     get_job_status,
     process_and_upload,
 )
-from materializationengine.database import db_manager
+from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.info_client import get_datastack_info, get_datastacks
 from materializationengine.utils import get_config_param
 from materializationengine import __version__
@@ -290,7 +290,7 @@ def create_storage_service():
     config = StorageConfig(
         allowed_origin=current_app.config.get("ALLOWED_ORIGIN"),
     )
-    bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
+    bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_NAME")
     return StorageService(bucket_name, logger=current_app.logger)
 
 
@@ -300,7 +300,7 @@ def generate_presigned_url(datastack_name: str):
     data = request.json
     filename = data["filename"]
     content_type = data["contentType"]
-    bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
+    bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_NAME")
     storage_client = storage.Client()
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(filename)
@@ -350,6 +350,33 @@ def get_schema_types_endpoint():
     except Exception as e:
         current_app.logger.error(f"Error getting schema types: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@upload_bp.route("/api/datastack/<string:datastack_name>/valid-annotation-tables", methods=["GET"])
+@auth_required
+def get_valid_annotation_tables(datastack_name: str):
+    """Get list of valid annotation tables for a given datastack."""
+    try:
+        datastack_info = get_datastack_info(datastack_name)
+        if not datastack_info:
+            return jsonify({"status": "error", "message": "Datastack not found"}), 404
+
+        aligned_volume_name = datastack_info["aligned_volume"]["name"]
+        
+      
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        
+      
+        table_names = db.database.get_valid_table_names()
+      
+        return jsonify({"status": "success", "table_names": table_names})
+
+    except Exception as e:
+        current_app.logger.error(f"Error getting valid annotation tables for {datastack_name}: {str(e)}")
+        return (
+            jsonify({"status": "error", "message": f"Failed to get valid annotation tables: {str(e)}"}),
+            500,
+        )
 
 
 @upload_bp.route("/api/get-schema-model", methods=["GET"])
@@ -642,7 +669,7 @@ def start_csv_processing():
     schema = UploadRequestSchema()
     file_metadata = schema.load(r)
 
-    bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
+    bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_NAME")
 
     file_path = f"gs://{bucket_name}/{file_metadata.get('filename')}"
 
@@ -816,6 +843,66 @@ def cancel_job(job_id):
         )
 
     except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@upload_bp.route("/api/process/dismiss/<job_id>", methods=["DELETE"])
+@auth_required
+def dismiss_job(job_id):
+    """Dismiss/delete a completed, failed, or cancelled job"""
+    try:
+        status = get_job_status(job_id)
+        if not status:
+            return jsonify({"status": "error", "message": "Job not found"}), 404
+
+        if not is_auth_disabled() and g.get("auth_user"):
+            user_id = str(g.auth_user["id"])
+            job_user_id = status.get("user_id")
+            datastack_name = status.get("datastack_name")
+
+            can_dismiss = False
+            if job_user_id == user_id:
+                can_dismiss = True
+            elif datastack_name and _has_datastack_permission(
+                g.auth_user, "admin", datastack_name
+            ):
+                can_dismiss = True
+
+            if not can_dismiss:
+                return (
+                    jsonify(
+                        {"status": "error", "message": "Forbidden to dismiss this job"}
+                    ),
+                    403,
+                )
+
+        job_status = status.get("status", "").lower()
+        if job_status in ["processing", "pending", "preparing"]:
+            return (
+                jsonify(
+                    {
+                        "status": "error", 
+                        "message": "Cannot dismiss active jobs. Cancel the job first."
+                    }
+                ),
+                400,
+            )
+
+        job_key = f"csv_processing:{job_id}"
+        deleted = REDIS_CLIENT.delete(job_key)
+        
+        if deleted:
+            current_app.logger.info(f"Job {job_id} dismissed by user {user_id if g.get('auth_user') else 'unknown'}")
+            return jsonify(
+                {"status": "success", "message": "Job dismissed successfully"}
+            )
+        else:
+            return jsonify(
+                {"status": "error", "message": "Job not found or already dismissed"}
+            ), 404
+
+    except Exception as e:
+        current_app.logger.error(f"Error dismissing job {job_id}: {str(e)}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
