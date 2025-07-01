@@ -13,7 +13,7 @@ WORKDIR /app
 COPY uv.lock pyproject.toml ./
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-  uv sync --frozen --no-install-project --no-default-groups
+  UV_VENV_ARGS="--system-site-packages" uv sync --frozen --no-install-project --no-default-groups
 
 # COPY . ./
 # RUN --mount=type=cache,target=/root/.cache/uv \
