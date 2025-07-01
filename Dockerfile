@@ -31,7 +31,7 @@ RUN mkdir -p /home/nginx/.cloudvolume/secrets \
 # RUN pip install -r requirements.txt
 # Install gcloud SDK as root and set permissions
 # Install gcloud SDK as root
-COPY . /app
+
 COPY override/timeout.conf /etc/nginx/conf.d/timeout.conf
 COPY gracefully_shutdown_celery.sh /home/nginx
 RUN chmod +x /home/nginx/gracefully_shutdown_celery.sh
@@ -42,3 +42,4 @@ USER nginx
 RUN curl -sSL https://sdk.cloud.google.com | bash
 ENV PATH /venv/bin:/home/nginx/google-cloud-sdk/bin:/root/google-cloud-sdk/bin:$PATH
 USER root
+COPY . /app
