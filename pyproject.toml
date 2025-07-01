@@ -7,7 +7,7 @@ name = "materializationengine"
 version = "4.36.6"
 description = "Combines DynamicAnnotationDB and PyChunkedGraph"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = "==3.12.*"
 dependencies = [
     "caveclient>=7.7.0",
     "cloud-volume>=8.5.4",
