@@ -26,10 +26,6 @@ ENV UWSGI_INI /app/uwsgi.ini
 ENV PATH="/venv/bin:$PATH"
 ENV PYTHONHOME="/venv"
 ENV PYTHONNOUSERSITE=1
-# Symlink python3 and python to venv's python
-RUN ln -sf /venv/bin/python3 /usr/local/bin/python3 && \
-    ln -sf /venv/bin/python /usr/local/bin/python
-RUN ln -sf /venv/bin/pip /usr/local/bin/pip
 
 RUN mkdir -p /home/nginx/.cloudvolume/secrets \
   && chown -R nginx /home/nginx \
