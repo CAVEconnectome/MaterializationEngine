@@ -355,6 +355,7 @@ def version_view(
             .filter(AnalysisVersion.version == target_version)
             .filter(AnalysisVersion.datastack == target_datastack)
             .first()
+        )
     session = sqlalchemy_cache.get(aligned_volume_name)
 
     anal_version = (
@@ -388,7 +389,7 @@ def version_view(
         lambda x: f"<a href='{make_seg_prop_ng_link(target_datastack, x.table_name, target_version, client)}'>seg prop link</a> \
                     <a href='{make_precomputed_annotation_link(target_datastack, x.table_name, client)}'>annotation link</a>",
         axis=1)
-    )
+    
     df["schema"] = df.schema.map(
         lambda x: schema_url.format(current_app.config["GLOBAL_SERVER_URL"], x, x)
     )
