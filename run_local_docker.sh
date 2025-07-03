@@ -1,1 +1,0 @@
-docker run --platform linux/amd64 
