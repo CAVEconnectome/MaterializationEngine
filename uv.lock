@@ -757,9 +757,10 @@ sdist = { url = "https://files.pythonhosted.org/packages/38/93/d302f50b27a267b73
 
 [[package]]
 name = "emannotationschemas"
-version = "5.11.0"
+version = "5.19.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "flask-cors" },
     { name = "geoalchemy2" },
     { name = "jsonschema" },
     { name = "marshmallow" },
@@ -768,10 +769,7 @@ dependencies = [
     { name = "shapely" },
     { name = "sqlalchemy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/45/c7/99feefb70285bffa2960ce8622489f01cb756294578260329a457216709f/emannotationschemas-5.11.0.tar.gz", hash = "sha256:97c9abbae7a77a1221b38756659043d0e92c70f08924395cb456fc17c7200798", size = 35470, upload-time = "2024-03-06T16:03:01.809Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e1/6e/e9a771ef0d72c3d25a0cd4fe54530af88942996bd67fa144b279ce396b48/emannotationschemas-5.11.0-py3-none-any.whl", hash = "sha256:717c85fdd03f20cff4ca7bbb390388792b4f5bf35e015231052ea4666170f739", size = 50309, upload-time = "2024-03-06T16:02:59.383Z" },
-]
+sdist = { url = "https://files.pythonhosted.org/packages/ef/8a/c85b0dab2d66b899db4aced9ca8c072e7a6b15f41b2bb59ec173d47142d3/emannotationschemas-5.19.0.tar.gz", hash = "sha256:fc91bc63b609f54982ed55805f2e6d103053f14c0c55a04411e61520c40b3627", size = 38020, upload-time = "2025-07-01T15:53:20.128Z" }
 
 [[package]]
 name = "executing"
@@ -853,15 +851,15 @@ wheels = [
 
 [[package]]
 name = "flask-cors"
-version = "6.0.1"
+version = "3.0.10"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "flask" },
-    { name = "werkzeug" },
+    { name = "six" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/76/37/bcfa6c7d5eec777c4c7cf45ce6b27631cebe5230caf88d85eadd63edd37a/flask_cors-6.0.1.tar.gz", hash = "sha256:d81bcb31f07b0985be7f48406247e9243aced229b7747219160a0559edd678db", size = 13463, upload-time = "2025-06-11T01:32:08.518Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/cf/25/e3b2553d22ed542be807739556c69621ad2ab276ae8d5d2560f4ed20f652/Flask-Cors-3.0.10.tar.gz", hash = "sha256:b60839393f3b84a0f3746f6cdca56c1ad7426aa738b70d6c61375857823181de", size = 30867, upload-time = "2021-01-06T00:25:42.749Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/17/f8/01bf35a3afd734345528f98d0353f2a978a476528ad4d7e78b70c4d149dd/flask_cors-6.0.1-py3-none-any.whl", hash = "sha256:c7b2cbfb1a31aa0d2e5341eea03a6805349f7a61647daee1a15c46bbe981494c", size = 13244, upload-time = "2025-06-11T01:32:07.352Z" },
+    { url = "https://files.pythonhosted.org/packages/db/84/901e700de86604b1c4ef4b57110d4e947c218b9997adf5d38fa7da493bce/Flask_Cors-3.0.10-py2.py3-none-any.whl", hash = "sha256:74efc975af1194fc7891ff5cd85b0f7478be4f7f59fe158102e91abb72bb4438", size = 14067, upload-time = "2021-01-06T00:25:41.464Z" },
 ]
 
 [[package]]
@@ -1622,7 +1620,7 @@ requires-dist = [
     { name = "cloud-volume", specifier = ">=8.5.4" },
     { name = "cryptography", specifier = ">=44.0.2" },
     { name = "dynamicannotationdb", specifier = ">=5.7.2" },
-    { name = "emannotationschemas", specifier = ">=5.11.0" },
+    { name = "emannotationschemas", specifier = ">=5.19.0" },
     { name = "flask", specifier = ">=2.0.2,<3.0" },
     { name = "flask-accepts" },
     { name = "flask-admin" },
