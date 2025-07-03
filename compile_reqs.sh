@@ -1,1 +1,0 @@
-docker run --platform linux/amd64 -v ${PWD}:/app tiangolo/uwsgi-nginx-flask:python3.12 /bin/bash -c "pip install --upgrade pip && pip install pip-tools && pip-compile -v -r requirements.in"

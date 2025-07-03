@@ -57,8 +57,10 @@ classifiers = [
 dev = [
     "pytest",
     "pytest-cov",
+    "pytest-env",
     "ipykernel",
     "bump-my-version",
+    "docker"
  ]
 docs = [
     "mkdocs",

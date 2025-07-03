@@ -278,7 +278,7 @@ def make_precomputed_annotation_link(datastack_name, table_name, client):
     annotation_source = f"precomputed://middleauth+{annotation_url}"
     annotation_source = annotation_source[:-5]
     seg_layer = nglui.statebuilder.SegmentationLayerConfig(
-        source=[seg_layer, seg_info_source], name="seg"
+        source=seg_layer, name="seg"
     )
     img_layer = nglui.statebuilder.ImageLayerConfig(
         source=client.info.image_source(), name="img"
@@ -356,19 +356,18 @@ def version_view(
             .filter(AnalysisVersion.datastack == target_datastack)
             .first()
         )
-    session = sqlalchemy_cache.get(aligned_volume_name)
 
-    anal_version = (
-        session.query(AnalysisVersion)
-        .filter(AnalysisVersion.version == target_version)
-        .filter(AnalysisVersion.datastack == target_datastack)
-        .first()
-    )
+        anal_version = (
+            session.query(AnalysisVersion)
+            .filter(AnalysisVersion.version == target_version)
+            .filter(AnalysisVersion.datastack == target_datastack)
+            .first()
+        )
 
-    table_query = session.query(AnalysisTable).filter(
-        AnalysisTable.analysisversion == anal_version
-    )
-    tables = table_query.all()
+        table_query = session.query(AnalysisTable).filter(
+            AnalysisTable.analysisversion == anal_version
+        )
+        tables = table_query.all()
     schema = AnalysisTableSchema(many=True)
 
     df = make_df_with_links_to_id(
