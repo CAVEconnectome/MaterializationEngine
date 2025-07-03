@@ -1,17 +1,21 @@
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
+FROM tiangolo/uwsgi-nginx-flask:python3.12 AS builder
 RUN apt-get update && apt-get install -y gcc
-
+RUN pip install uv
 # Enable bytecode compilation
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
 ENV UV_PYTHON_DOWNLOADS=0
-
+USER nginx
+RUN curl -sSL https://sdk.cloud.google.com | bash
+ENV PATH /app/.venv/bin:/home/nginx/google-cloud-sdk/bin:/root/google-cloud-sdk/bin:$PATH
+USER root
 # Install the project's dependencies using the lockfile and settings
 WORKDIR /app
 
 # Copy only the necessary files for dependency installation
 COPY uv.lock pyproject.toml ./
 
+ENV UV_PROJECT_ENVIRONMENT="/usr/local/"
 RUN --mount=type=cache,target=/root/.cache/uv \
   UV_VENV_ARGS="--system-site-packages" uv sync --frozen --no-install-project --no-default-groups
 
@@ -19,12 +23,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # RUN --mount=type=cache,target=/root/.cache/uv \
 #   uv sync --frozen --no-default-groups
 
-
-FROM tiangolo/uwsgi-nginx-flask:python3.12
-COPY --from=builder --chown=nginx:nginx /app/.venv /venv
 ENV UWSGI_INI /app/uwsgi.ini
-ENV PATH="/venv/bin:$PATH"
-ENV PYTHONHOME="/venv"
+ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONNOUSERSITE=1
 
 RUN mkdir -p /home/nginx/.cloudvolume/secrets \
@@ -42,8 +42,5 @@ RUN chmod +x /home/nginx/gracefully_shutdown_celery.sh
 RUN mkdir -p /home/nginx/tmp/shutdown 
 RUN chmod +x /entrypoint.sh
 WORKDIR /app
-USER nginx
-RUN curl -sSL https://sdk.cloud.google.com | bash
-ENV PATH /venv/bin:/home/nginx/google-cloud-sdk/bin:/root/google-cloud-sdk/bin:$PATH
-USER root
+
 COPY . /app
