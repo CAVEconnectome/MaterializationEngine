@@ -108,7 +108,7 @@ def create_annotation_model(
 def get_config_param(config_param: str, default: Any = None):
     try:
         return current_app.config[config_param]
-    except Exception:
+    except (KeyError, LookupError):
         return os.environ.get(config_param, default)
 
 
