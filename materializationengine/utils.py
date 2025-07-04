@@ -4,7 +4,7 @@ from geoalchemy2.shape import to_shape
 from flask import current_app, abort, g
 from middle_auth_client.decorators import users_share_common_group
 from celery.utils.log import get_task_logger
-
+from typing import Any
 celery_logger = get_task_logger(__name__)
 
 
