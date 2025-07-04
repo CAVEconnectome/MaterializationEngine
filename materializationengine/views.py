@@ -368,16 +368,16 @@ def version_view(
             AnalysisTable.analysisversion == anal_version
         )
         tables = table_query.all()
-    schema = AnalysisTableSchema(many=True)
+        schema = AnalysisTableSchema(many=True)
 
-    df = make_df_with_links_to_id(
-        objects=tables,
-        schema=AnalysisTableSchema(many=True),
-        url="views.table_view",
-        col="id",
-        col_value="id",
-        datastack_name=target_datastack,
-    )
+        df = make_df_with_links_to_id(
+            objects=tables,
+            schema=AnalysisTableSchema(many=True),
+            url="views.table_view",
+            col="id",
+            col_value="id",
+            datastack_name=target_datastack,
+        )
 
     column_order = schema.declared_fields.keys()
     schema_url = "<a href='{}/schema/views/type/{}/view'>{}</a>"
@@ -399,26 +399,26 @@ def version_view(
     df = df.reindex(columns=list(column_order) + ["ng_link"])
 
     classes = ["table table-borderless"]
-    with pd.option_context("display.max_colwidth", -1):
+    with pd.option_context("display.max_colwidth", None):
         output_html = df.to_html(
             escape=False, classes=classes, index=False, justify="left", border=0
         )
+        with db_manager.session_scope(aligned_volume_name) as session:
+            table_query = session.query(AnalysisTable).filter(
+                AnalysisTable.analysisversion == analysis_version
+            )
+            tables = table_query.all()
+        
+            schema = AnalysisTableSchema(many=True)
 
-        table_query = session.query(AnalysisTable).filter(
-            AnalysisTable.analysisversion == analysis_version
-        )
-        tables = table_query.all()
-    
-        schema = AnalysisTableSchema(many=True)
-
-        df = make_df_with_links_to_id(
-            objects=tables,
-            schema=AnalysisTableSchema(many=True),
-            url="views.table_view",
-            col="id",
-            col_value="id",
-            datastack_name=target_datastack,
-        )
+            df = make_df_with_links_to_id(
+                objects=tables,
+                schema=AnalysisTableSchema(many=True),
+                url="views.table_view",
+                col="id",
+                col_value="id",
+                datastack_name=target_datastack,
+            )
 
         column_order = schema.declared_fields.keys()
         schema_url = "<a href='{}/schema/views/type/{}/view'>{}</a>"
@@ -426,9 +426,9 @@ def version_view(
             datastack_name, server_address=current_app.config["GLOBAL_SERVER_URL"]
         )
         df["ng_link"] = df.apply(
-            lambda x: f"<a href='{make_seg_prop_ng_link(target_datastack, x.table_name, target_version, client)}'>seg prop link</a>",
-            axis=1,
-        )
+            lambda x: f"<a href='{make_seg_prop_ng_link(target_datastack, x.table_name, target_version, client)}'>seg prop link</a> \
+                        <a href='{make_precomputed_annotation_link(target_datastack, x.table_name, client)}'>annotation link</a>",
+            axis=1)
         df["schema"] = df.schema.map(
             lambda x: schema_url.format(current_app.config["GLOBAL_SERVER_URL"], x, x)
         )
@@ -459,6 +459,7 @@ def version_view(
         if len(views_df) > 0:
             views_df["ng_link"] = views_df.apply(
                 lambda x: f"<a href='{make_seg_prop_ng_link(target_datastack, x.table_name, target_version, client, is_view=True)}'>seg prop link</a>",
+                
                 axis=1,
             )
             classes = ["table table-borderless"]

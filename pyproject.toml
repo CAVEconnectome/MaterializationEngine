@@ -60,7 +60,8 @@ dev = [
     "pytest-env",
     "ipykernel",
     "bump-my-version",
-    "docker"
+    "docker",
+    "pyOpenSSL",
  ]
 docs = [
     "mkdocs",
