@@ -4,7 +4,7 @@ from geoalchemy2.shape import to_shape
 from flask import current_app, abort, g
 from middle_auth_client.decorators import users_share_common_group
 from celery.utils.log import get_task_logger
-
+from typing import Any
 celery_logger = get_task_logger(__name__)
 
 
@@ -105,11 +105,11 @@ def create_annotation_model(
     return AnnotationModel
 
 
-def get_config_param(config_param: str):
+def get_config_param(config_param: str, default: Any = None):
     try:
         return current_app.config[config_param]
-    except Exception:
-        return os.environ[config_param]
+    except (KeyError, LookupError, RuntimeError):
+        return os.environ.get(config_param, default)
 
 
 def check_write_permission(db, table_name):

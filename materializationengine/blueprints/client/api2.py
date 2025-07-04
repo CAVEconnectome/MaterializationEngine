@@ -1852,8 +1852,13 @@ def get_precomputed_properties_and_relationships(datastack_name, table_name):
 
     # check if this is a reference table
     table_metadata = db.database.get_table_metadata(table_name)
-    # convert timestamp to utc
-    timestamp = past_version.time_stamp
+    # convert timestamp string to timestamp object
+    # with UTC timezone
+    if isinstance(past_version['time_stamp'], str):
+        past_version['time_stamp'] = datetime.datetime.fromisoformat(
+            past_version['time_stamp']
+        )
+    timestamp = past_version['time_stamp']
     if timestamp.tzinfo is None:
         timestamp = pytz.utc.localize(timestamp)
 
