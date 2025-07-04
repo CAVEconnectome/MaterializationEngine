@@ -105,11 +105,11 @@ def create_annotation_model(
     return AnnotationModel
 
 
-def get_config_param(config_param: str):
+def get_config_param(config_param: str, default: any = None):
     try:
         return current_app.config[config_param]
     except Exception:
-        return os.environ[config_param]
+        return os.environ.get(config_param, default)
 
 
 def check_write_permission(db, table_name):
