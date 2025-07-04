@@ -325,9 +325,7 @@ def make_seg_prop_ng_link(datastack_name, table_name, version, client, is_view=F
             _external=True,
         )
 
-    seg_info_source = f"precomputed://{auth_prefix}{seginfo_url}".format(
-        seginfo_url=seginfo_url
-    )
+    seg_info_source = f"precomputed://{auth_prefix}{seginfo_url}"
     # strip off the /info
     seg_info_source = seg_info_source[:-5]
 
