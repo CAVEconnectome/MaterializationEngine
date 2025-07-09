@@ -1635,7 +1635,7 @@ requires-dist = [
     { name = "gevent" },
     { name = "jsonschema" },
     { name = "marshmallow-sqlalchemy" },
-    { name = "middle-auth-client", git = "https://github.com/CAVEconnectome/middle_auth_client.git?rev=cj-auth_requires_dataset_admin" },
+    { name = "middle-auth-client", git = "https://github.com/CAVEconnectome/middle_auth_client.git?rev=dec44410f3ab21c29366aad19a1a229c39fc9ce9" },
     { name = "multiwrapper" },
     { name = "nglui", specifier = ">=3.2.1,<4" },
     { name = "numpy", specifier = ">=1.20" },
@@ -1715,7 +1715,7 @@ wheels = [
 [[package]]
 name = "middle-auth-client"
 version = "3.18.1"
-source = { git = "https://github.com/CAVEconnectome/middle_auth_client.git?rev=cj-auth_requires_dataset_admin#c9f00cf8c53da0688855bbacf8f316c62ae04b82" }
+source = { git = "https://github.com/CAVEconnectome/middle_auth_client.git?rev=dec44410f3ab21c29366aad19a1a229c39fc9ce9#dec44410f3ab21c29366aad19a1a229c39fc9ce9" }
 dependencies = [
     { name = "cachetools" },
     { name = "flask" },

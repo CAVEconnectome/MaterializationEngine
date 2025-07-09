@@ -21,7 +21,7 @@ dependencies = [
     "jsonschema",
     "multiwrapper",
     "requests>=2.26.0",
-    "middle-auth-client @ git+https://github.com/CAVEconnectome/middle_auth_client.git@cj-auth_requires_dataset_admin",
+    "middle-auth-client @ git+https://github.com/CAVEconnectome/middle_auth_client.git@dec44410f3ab21c29366aad19a1a229c39fc9ce9",
     "marshmallow-sqlalchemy",
     "flask-marshmallow==0.14.0",
     "Flask-Admin",
