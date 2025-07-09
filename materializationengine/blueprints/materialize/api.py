@@ -412,7 +412,7 @@ response_model = mat_bp.model(
 )
 class DumpTableToBucketAsCSV(Resource):
     @reset_auth
-    @auth_requires_dataset_admin(table_arg=datastack_name)
+    @auth_requires_dataset_admin(table_arg="datastack_name")
     @mat_bp.doc("Take table or view and dump it to a bucket as csv", security="apikey")
     @mat_bp.response(200, "Success", response_model)
     @mat_bp.response(500, "Internal Server Error", response_model)
