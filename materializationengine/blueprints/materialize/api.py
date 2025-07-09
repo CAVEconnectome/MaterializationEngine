@@ -6,7 +6,7 @@ from flask import abort, current_app, request, jsonify
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse, fields
 from materializationengine.blueprints.client.utils import get_latest_version
-from materializationengine.blueprints.reset_auth import reset_auth
+from materializationengine.blueprints.reset_auth import reset_auth, auth_requires_dataset_admin
 from materializationengine.database import (
     dynamic_annotation_cache,
     db_manager,
@@ -412,7 +412,7 @@ response_model = mat_bp.model(
 )
 class DumpTableToBucketAsCSV(Resource):
     @reset_auth
-    @auth_requires_admin
+    @auth_requires_dataset_admin
     @mat_bp.doc("Take table or view and dump it to a bucket as csv", security="apikey")
     @mat_bp.response(200, "Success", response_model)
     @mat_bp.response(500, "Internal Server Error", response_model)
