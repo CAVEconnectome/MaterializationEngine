@@ -6,7 +6,7 @@ from flask import abort, current_app, request, jsonify
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse, fields
 from materializationengine.blueprints.client.utils import get_latest_version
-from materializationengine.blueprints.reset_auth import reset_auth, auth_requires_dataset_admin
+from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import (
     dynamic_annotation_cache,
     db_manager,
@@ -19,7 +19,7 @@ from materializationengine.info_client import (
 from dynamicannotationdb.models import AnalysisVersion
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from materializationengine.blueprints.materialize.schemas import BadRootsSchema
-from middle_auth_client import auth_requires_admin, auth_requires_permission
+from middle_auth_client import auth_requires_admin, auth_requires_permission, auth_requires_dataset_admin
 from sqlalchemy import MetaData, Table
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoSuchTableError
