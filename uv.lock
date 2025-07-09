@@ -1635,7 +1635,7 @@ requires-dist = [
     { name = "gevent" },
     { name = "jsonschema" },
     { name = "marshmallow-sqlalchemy" },
-    { name = "middle-auth-client", specifier = ">=3.11.0" },
+    { name = "middle-auth-client", git = "https://github.com/CAVEconnectome/middle_auth_client.git?rev=cj-auth_requires_dataset_admin" },
     { name = "multiwrapper" },
     { name = "nglui", specifier = ">=3.2.1,<4" },
     { name = "numpy", specifier = ">=1.20" },
@@ -1715,16 +1715,12 @@ wheels = [
 [[package]]
 name = "middle-auth-client"
 version = "3.18.1"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/CAVEconnectome/middle_auth_client.git?rev=cj-auth_requires_dataset_admin#c9f00cf8c53da0688855bbacf8f316c62ae04b82" }
 dependencies = [
     { name = "cachetools" },
     { name = "flask" },
     { name = "furl" },
     { name = "requests" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/85/f6/e67ab64c0d3bf85baab6489c1abeb7094eee75f468c052571d5abf2c9ff0/middle_auth_client-3.18.1.tar.gz", hash = "sha256:bf27f997e64256e9fe446badbb1740ee2b38c57753ad49ffb449b372631266fd", size = 7318, upload-time = "2024-04-08T17:21:20.061Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2e/84/66207f5b8e2b68864231012eab1ccff2d355ec30f348030fce582d98db20/middle_auth_client-3.18.1-py3-none-any.whl", hash = "sha256:bc7c337ee49e0f461c68a8024c5b6fdee87fbd08b1dd03e0884a9ca00b7c8663", size = 7706, upload-time = "2024-04-08T17:21:18.114Z" },
 ]
 
 [[package]]

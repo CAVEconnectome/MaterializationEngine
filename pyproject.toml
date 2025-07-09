@@ -21,7 +21,7 @@ dependencies = [
     "jsonschema",
     "multiwrapper",
     "requests>=2.26.0",
-    "middle-auth-client>=3.11.0",
+    "middle-auth-client @ git+https://github.com/CAVEconnectome/middle_auth_client.git@cj-auth_requires_dataset_admin",
     "marshmallow-sqlalchemy",
     "flask-marshmallow==0.14.0",
     "Flask-Admin",
@@ -52,6 +52,9 @@ authors = [
 classifiers = [
     "License :: OSI Approved :: MIT License",
 ]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [dependency-groups]
 dev = [
