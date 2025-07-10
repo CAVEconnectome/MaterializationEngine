@@ -1635,7 +1635,7 @@ requires-dist = [
     { name = "gevent" },
     { name = "jsonschema" },
     { name = "marshmallow-sqlalchemy" },
-    { name = "middle-auth-client", specifier = ">=3.11.0" },
+    { name = "middle-auth-client", specifier = ">=3.19.0" },
     { name = "multiwrapper" },
     { name = "nglui", specifier = ">=3.2.1,<4" },
     { name = "numpy", specifier = ">=1.20" },
@@ -1714,7 +1714,7 @@ wheels = [
 
 [[package]]
 name = "middle-auth-client"
-version = "3.18.1"
+version = "3.19.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cachetools" },
@@ -1722,9 +1722,9 @@ dependencies = [
     { name = "furl" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/85/f6/e67ab64c0d3bf85baab6489c1abeb7094eee75f468c052571d5abf2c9ff0/middle_auth_client-3.18.1.tar.gz", hash = "sha256:bf27f997e64256e9fe446badbb1740ee2b38c57753ad49ffb449b372631266fd", size = 7318, upload-time = "2024-04-08T17:21:20.061Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/eb/86/ea8d315361daef80e0c6700ff3b6c58aaba987282a640402e19c6442207a/middle_auth_client-3.19.0.tar.gz", hash = "sha256:f43d51e4a680ccd9542f305e042c3992d35420cf45333b5987455c36831fa839", size = 8039, upload-time = "2025-07-09T16:52:30.096Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2e/84/66207f5b8e2b68864231012eab1ccff2d355ec30f348030fce582d98db20/middle_auth_client-3.18.1-py3-none-any.whl", hash = "sha256:bc7c337ee49e0f461c68a8024c5b6fdee87fbd08b1dd03e0884a9ca00b7c8663", size = 7706, upload-time = "2024-04-08T17:21:18.114Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/40/4c3570ad1811cb8c8c3d5de9a022904add531f5010a948af08b00a11fa11/middle_auth_client-3.19.0-py3-none-any.whl", hash = "sha256:f16f17df5789e3a329a3ee6cc8614882564aff046b542b2963648b100febde65", size = 8162, upload-time = "2025-07-09T16:52:29.332Z" },
 ]
 
 [[package]]
