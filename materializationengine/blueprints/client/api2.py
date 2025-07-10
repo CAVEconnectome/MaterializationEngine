@@ -1765,6 +1765,7 @@ class LiveTableQuery(Resource):
             "filter_regex_dict":{
                 "table_name":{
                     "column_name": "regex"
+                }
             }
         }
         Returns:
@@ -2131,6 +2132,175 @@ def format_df_to_bytes(df, datastack_name, table_name):
     bytes = writer._encode_multiple_annotations(writer.annotations)
 
     return bytes
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/table/"
+)
+class LiveTablesAvailable(Resource):
+    method_decorators = [
+        validate_datastack,
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    @client_bp.doc("get_live_tables", security="apikey")
+    def get(self, datastack_name: str, version: int =-1, target_datastack: str = None, target_version: int =None, **args):
+        """get live tables for a datastack
+
+        Args:
+            datastack_name (str): datastack name
+
+        Returns:
+            HTML directory listing of available tables
+        """
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+        with db_manager.session_scope(aligned_volume_name) as session:
+            version = session.query(AnalysisVersion).filter(
+                    AnalysisVersion.datastack == target_datastack
+                ).order_by(
+                    AnalysisVersion.time_stamp.desc()
+                ).first()
+            if version is not None:
+                tables = session.query(AnalysisTable).filter(
+                    AnalysisTable.analysisversion_id == version.id,
+                    AnalysisTable.valid == True
+                ).all()
+                tables = [table.table_name for table in tables]
+        
+        # Generate HTML directory listing
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Index of /datastack/{datastack_name}/table/</title>
+    <style>
+        body {{ font-family: monospace; margin: 40px; }}
+        h1 {{ font-size: 18px; margin-bottom: 20px; }}
+        a {{ text-decoration: none; color: #0066cc; }}
+        a:hover {{ text-decoration: underline; }}
+        .file {{ display: block; padding: 2px 0; }}
+        .parent {{ font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <h1>Index of /datastack/{datastack_name}/table/</h1>
+    <a href="../" class="file parent">[Parent Directory]</a>
+"""
+        
+        # Add each table as a directory entry
+        for table in sorted(tables):
+            html_content += f'    <a href="{table}/precomputed/" class="file">{table}/</a>\n'
+        
+        html_content += """</body>
+</html>"""
+        
+        return Response(html_content, mimetype='text/html')
+
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/<string:column_name>/<int:segid>"
+)
+class LiveTablesAvailable(Resource):
+    method_decorators = [
+        validate_datastack,
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    @client_bp.doc("get_live_tables", security="apikey")
+    def get(self, datastack_name: str, version=0, target_datastack: str = None, target_version: int = None, **args):
+        """get live tables for a datastack
+
+        Args:
+            datastack_name (str): datastack name
+
+        Returns:
+            HTML directory listing of available tables
+        """
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        tables = db.database._get_existing_table_names(
+            filter_valid=args.get("filter_valid", True)
+        )
+        
+        # Generate HTML directory listing
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Index of /datastack/{datastack_name}/table/</title>
+    <style>
+        body {{ font-family: monospace; margin: 40px; }}
+        h1 {{ font-size: 18px; margin-bottom: 20px; }}
+        a {{ text-decoration: none; color: #0066cc; }}
+        a:hover {{ text-decoration: underline; }}
+        .file {{ display: block; padding: 2px 0; }}
+        .parent {{ font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <h1>Index of /datastack/{datastack_name}/table/</h1>
+    <a href="../" class="file parent">[Parent Directory]</a>
+"""
+        
+        # Add each table as a directory entry
+        for table in sorted(tables):
+            html_content += f'    <a href="{table}/" class="file">{table}/</a>\n'
+        
+        html_content += """</body>
+</html>"""
+        
+        return Response(html_content, mimetype='text/html')
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/"
+)
+class LiveTablesAvailable(Resource):
+    method_decorators = [
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    @client_bp.doc("get_info_listing", security="apikey")
+    def get(self, datastack_name: str, table_name: str):
+        """get info listing
+
+        Args:
+            datastack_name (str): datastack name
+            table_name (str): table name
+
+        Returns:
+            HTML directory pointing to info file
+        """
+        
+        # Generate HTML directory listing
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Index of /datastack/{datastack_name}/table/</title>
+    <style>
+        body {{ font-family: monospace; margin: 40px; }}
+        h1 {{ font-size: 18px; margin-bottom: 20px; }}
+        a {{ text-decoration: none; color: #0066cc; }}
+        a:hover {{ text-decoration: underline; }}
+        .file {{ display: block; padding: 2px 0; }}
+        .parent {{ font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <h1>Index of /datastack/{datastack_name}/table/{table_name}/precomputed/</h1>
+    <a href="../" class="file parent">[Parent Directory]</a>
+"""
+        
+        # Add each table as a directory entry
+        html_content += f'    <a href="info" class="file">info/</a>\n'
+        
+        html_content += """</body>
+</html>"""
+        
+        return Response(html_content, mimetype='text/html')
 
 
 @client_bp.route(
@@ -2562,11 +2732,12 @@ class ViewQuery(Resource):
                 }
             },
             "filter_spatial_dict": {
-                "tablename": {
-                "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+                "tablename":{
+                    "column_name":[[min_x,min_y,minz], [max_x_max_y_max_z]]
+                }
             },
             "filter_regex_dict": {
-                "tablename": {
+                "tablename":{
                     "column_name": "regex"
                 }
             }
