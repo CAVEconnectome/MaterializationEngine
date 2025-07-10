@@ -2171,7 +2171,7 @@ class LiveTablePrecomputedRelationship(Resource):
                     AnalysisVersion.datastack == datastack_name,
                     AnalysisVersion.version == version,
                 ).one_or_none()
-                timestamp = analysis_version.time_stamp.astimezone(datetime.UTC) if analysis_version else None
+                timestamp = analysis_version.time_stamp.astimezone(datetime.timezone.utc) if analysis_version else None
         else:
             timestamp = None
         df = live_query_by_relationship(datastack_name, table_name, column_name, segid, timestamp)
