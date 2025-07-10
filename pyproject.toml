@@ -21,7 +21,7 @@ dependencies = [
     "jsonschema",
     "multiwrapper",
     "requests>=2.26.0",
-    "middle-auth-client>=3.9.0",
+    "middle-auth-client>=3.19.0",
     "marshmallow-sqlalchemy",
     "flask-marshmallow==0.14.0",
     "Flask-Admin",
@@ -52,9 +52,6 @@ authors = [
 classifiers = [
     "License :: OSI Approved :: MIT License",
 ]
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [dependency-groups]
 dev = [
