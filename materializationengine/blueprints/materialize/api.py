@@ -425,6 +425,7 @@ class DumpTableToBucketAsCSV(Resource):
             table_name (str): name of table or view to dump
         """
         mat_db_name = f"{datastack_name}__mat{version}"
+        # get the segmentation table name of the table_name
 
         # TODO: add validation of parameters
         sql_instance_name = current_app.config.get("SQL_INSTANCE_NAME", None)

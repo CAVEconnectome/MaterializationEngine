@@ -1056,13 +1056,11 @@ def process_fields(df, fields, column_names, tags, bool_tags, numerical):
                 continue
             # check that this column is not all nulls
             tags.append(col)
-            print(f"tag col: {col}")
         elif isinstance(field, mm_fields.Boolean):
             if df[col].isnull().all():
                 continue
             df[col] = df[col].astype(bool)
             bool_tags.append(col)
-            print(f"bool tag col: {col}")
         elif isinstance(field, PostGISField):
             # if all the values are NaNs skip this column
             if df[col + "_x"].isnull().all():
@@ -1070,12 +1068,10 @@ def process_fields(df, fields, column_names, tags, bool_tags, numerical):
             numerical.append(col + "_x")
             numerical.append(col + "_y")
             numerical.append(col + "_z")
-            print(f"numerical cols: {col}_(x,y,z)")
         elif isinstance(field, mm_fields.Number):
             if df[col].isnull().all():
                 continue
             numerical.append(col)
-            print(f"numerical col: {col}")
 
 
 def process_view_columns(df, model, column_names, tags, bool_tags, numerical):
@@ -1095,13 +1091,11 @@ def process_view_columns(df, model, column_names, tags, bool_tags, numerical):
                 continue
             # check that this column is not all nulls
             tags.append(col)
-            print(f"tag col: {col}")
         elif isinstance(table_column.type, Boolean):
             if df[col].isnull().all():
                 continue
             df[col] = df[col].astype(bool)
             bool_tags.append(col)
-            print(f"bool tag col: {col}")
         elif isinstance(table_column.type, PostGISField):
             # if all the values are NaNs skip this column
             if df[col + "_x"].isnull().all():
@@ -1109,12 +1103,11 @@ def process_view_columns(df, model, column_names, tags, bool_tags, numerical):
             numerical.append(col + "_x")
             numerical.append(col + "_y")
             numerical.append(col + "_z")
-            print(f"numerical cols: {col}_(x,y,z)")
         elif isinstance(table_column.type, (Numeric, Integer, Float)):
             if df[col].isnull().all():
                 continue
             numerical.append(col)
-            print(f"numerical col: {col}")
+
 
 
 def preprocess_dataframe(df, table_name, aligned_volume_name, column_names):
@@ -1584,7 +1577,6 @@ def assemble_live_query_dataframe(user_data, datastack_name, args):
         chosen_version = past_ver
     else:
         chosen_version = future_ver
-    print(chosen_version)
 
     loc_cv_time_stamp = chosen_version["time_stamp"]
     loc_cv_parent_version_id = chosen_version.get("parent_version")
@@ -2030,6 +2022,7 @@ def live_query_by_relationship(
     table_name: str,
     column_name: str,
     segid: int,
+    timestamp: datetime.datetime = None,
 ):
     """get precomputed relationships for a table
 
@@ -2038,6 +2031,9 @@ def live_query_by_relationship(
         table_name (str): table name
         column_name (str): column name
         segid (int): segment id
+        timestamp (datetime.datetime, optional): timestamp to use for the query.
+         Defaults to None in which case will use the latest timestamp of root_id
+
 
     Returns:
         pd.DataFrame: dataframe of precomputed relationships
@@ -2057,9 +2053,9 @@ def live_query_by_relationship(
                 break
     if filter_table is None:
         abort(400, "column_name not found in table {}".format(table_name))
-
-    cg_client = chunkedgraph_cache.get_client(pcg_table_name)
-    timestamp = cg_client.get_root_timestamps(segid, latest=True)[0]
+    if timestamp is None:
+        cg_client = chunkedgraph_cache.get_client(pcg_table_name)
+        timestamp = cg_client.get_root_timestamps(segid, latest=True)[0]
     user_data = {
         "table": table_name,
         "timestamp": timestamp,
@@ -2142,12 +2138,13 @@ def format_df_to_bytes(df, datastack_name, table_name):
 )
 class LiveTablePrecomputedRelationship(Resource):
     method_decorators = [
+        validate_datastack,
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
     ]
 
     @client_bp.doc("get_precomputed_relationships", security="apikey")
-    def get(self, datastack_name: str, table_name: str, column_name: str, segid: int):
+    def get(self, datastack_name: str, table_name: str, column_name: str, segid: int, version: int = 0, target_datastack: str = None, target_version: int = None):
         """get precomputed relationships for a table
 
         Args:
@@ -2155,14 +2152,29 @@ class LiveTablePrecomputedRelationship(Resource):
             table_name (str): table name
             column_name (str): column name
             segid (int): segment id
+            version (int): version number (ignored)
+            target_datastack (str): target datastack name (ignored)
+            target_version (int): target version number (ignored)
 
         Returns:
             bytes: byte stream of precomputed relationships
         """
         if not column_name.endswith("pt_root_id"):
             abort(400, "column_name must end with pt_root_id")
-
-        df = live_query_by_relationship(datastack_name, table_name, column_name, segid)
+        
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            target_datastack
+        )
+        if version is not None:
+            with db_manager.session_scope(aligned_volume_name) as session:
+                analysis_version = session.query(AnalysisVersion).filter(
+                    AnalysisVersion.datastack == datastack_name,
+                    AnalysisVersion.version == version,
+                ).one_or_none()
+                timestamp = analysis_version.time_stamp.astimezone(datetime.timezone.utc) if analysis_version else None
+        else:
+            timestamp = None
+        df = live_query_by_relationship(datastack_name, table_name, column_name, segid, timestamp)
         bytes = format_df_to_bytes(df, datastack_name, table_name)
 
         # format a flask response with bytes as raw bytes conent
@@ -2440,7 +2452,6 @@ class MatViewSegmentInfo(Resource):
 
         if version == -1:
             version = get_latest_version(datastack_name)
-            print(f"using version {version}")
         mat_db_name = f"{datastack_name}__mat{version}"
         if version == 0:
             mat_db_name = f"{aligned_volume_name}"

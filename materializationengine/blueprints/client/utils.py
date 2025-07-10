@@ -49,7 +49,6 @@ def after_request(response):
 def add_warnings_to_headers(headers, warnings):
     if len(warnings) > 0:
         warnings = [w.replace("\n", " ") for w in warnings]
-        print(warnings)
         headers["Warning"] = warnings
     return headers
 
