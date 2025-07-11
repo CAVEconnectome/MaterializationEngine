@@ -247,11 +247,26 @@ class AnnotationWriter:
         f.write(self._encode_multiple_annotations(annotations))
 
     def _serialize_annotation(self, f, annotation: Annotation):
-        f.write(annotation.encoded)
+        f.write(self._encode_single_annotation(annotation))
+      
+    def _encode_single_annotation(self, annotation: Annotation):
+        """
+        This function creates a binary string from a single annotation.
+
+        Parameters:
+            annotation (Annotation): The annotation object to encode.
+
+        Returns:
+            bytes: Binary string representation of the annotation.
+        """
+        binary_components = []
+        binary_components.append(annotation.encoded)
         for related_ids in annotation.relationships:
-            f.write(struct.pack("<I", len(related_ids)))
+            binary_components.append(struct.pack("<I", len(related_ids)))
             for related_id in related_ids:
-                f.write(struct.pack("<Q", related_id))
+                binary_components.append(struct.pack("<Q", related_id))
+
+        return b"".join(binary_components)
 
     def _encode_multiple_annotations(self, annotations: list[Annotation]):
         """
