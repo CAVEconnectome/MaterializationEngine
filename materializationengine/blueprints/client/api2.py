@@ -2020,7 +2020,7 @@ class LiveTablePrecomputedInfo(Resource):
 def query_by_id(
     datastack_name: str,
     table_name: str,
-    id: int,
+    annotation_id: int,
     timestamp: datetime.datetime = None,
 ):
     """get precomputed annotation by id
@@ -2028,7 +2028,7 @@ def query_by_id(
     Args:
         datastack_name (str): datastack name
         table_name (str): table name
-        id (int): annotation id
+        annotation_id (int): annotation id
         timestamp (datetime.datetime, optional): timestamp to use for the query.
          Defaults to None in which case will use the latest timestamp of root_id
 
@@ -2048,7 +2048,7 @@ def query_by_id(
         "timestamp": timestamp,
         "suffixes": {table_name: ""},
         "filter_equal_dict": {
-            table_name: {"id": id},
+            table_name: {"id": annotation_id},
         },
         "desired_resolution": [1, 1, 1],
     }
