@@ -1765,6 +1765,7 @@ class LiveTableQuery(Resource):
             "filter_regex_dict":{
                 "table_name":{
                     "column_name": "regex"
+                }
             }
         }
         Returns:
@@ -2016,6 +2017,53 @@ class LiveTablePrecomputedInfo(Resource):
 
         return info, 200
 
+def query_by_id(
+    datastack_name: str,
+    table_name: str,
+    annotation_id: int,
+    timestamp: datetime.datetime = None,
+):
+    """get precomputed annotation by id
+
+    Args:
+        datastack_name (str): datastack name
+        table_name (str): table name
+        annotation_id (int): annotation id
+        timestamp (datetime.datetime, optional): timestamp to use for the query.
+         Defaults to None in which case will use the latest timestamp of root_id
+
+    Returns:
+        pd.DataFrame: dataframe of precomputed properties
+    """
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+    db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    table_metadata = db.database.get_table_metadata(table_name)
+
+    vals = get_precomputed_properties_and_relationships(datastack_name, table_name)
+    relationships, properties, geometry_columns, column_names, ann_type = vals
+
+    timestamp = datetime.datetime.now(tz=pytz.utc) if timestamp is None else timestamp
+    user_data = {
+        "table": table_name,
+        "timestamp": timestamp,
+        "suffixes": {table_name: ""},
+        "filter_equal_dict": {
+            table_name: {"id": annotation_id},
+        },
+        "desired_resolution": [1, 1, 1],
+    }
+    
+    if table_metadata["reference_table"]:
+        ref_table = table_metadata["reference_table"]
+        user_data["suffixes"][ref_table] = "_ref"
+        user_data["join_tables"] = [[table_name, "target_id", ref_table, "id"]]
+
+    return_vals = assemble_live_query_dataframe(
+        user_data, datastack_name=datastack_name, args={}
+    )
+    df, column_names, mat_warnings, prod_warnings, remap_warnings = return_vals
+
+    return df
 
 def live_query_by_relationship(
     datastack_name: str,
@@ -2078,7 +2126,7 @@ def live_query_by_relationship(
     return df
 
 
-def format_df_to_bytes(df, datastack_name, table_name):
+def format_df_to_bytes(df, datastack_name, table_name, encode_single=False):
     """format the dataframe to bytes
 
     Args:
@@ -2119,6 +2167,11 @@ def format_df_to_bytes(df, datastack_name, table_name):
             )
     for i, row in df.iterrows():
         kwargs = {p.id: df.loc[i, p.id] for p in properties}
+        if encode_single:
+            # update kwargs with relationships
+            for r in relationships:
+                if r in df.columns:
+                    kwargs[r] = df.loc[i, r]
         if row["valid"]:
             if anntype == "point":
                 point = df.loc[i, point_cols].tolist()
@@ -2127,11 +2180,184 @@ def format_df_to_bytes(df, datastack_name, table_name):
                 point_a = df.loc[i, pointa_cols].tolist()
                 point_b = df.loc[i, pointb_cols].tolist()
                 writer.add_line(point_a, point_b, id=df.loc[i, "id"], **kwargs)
+    if encode_single:
+        output_bytes = writer._encode_single_annotation(writer.annotations[0])
+    else:
+        output_bytes = writer._encode_multiple_annotations(writer.annotations)
 
-    bytes = writer._encode_multiple_annotations(writer.annotations)
+    return output_bytes
 
-    return bytes
+@client_bp.route(
+    "/datastack/<string:datastack_name>/table/"
+)
+class LiveTablesAvailable(Resource):
+    method_decorators = [
+        validate_datastack,
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
 
+    @client_bp.doc("get_live_tables", security="apikey")
+    def get(self, datastack_name: str, version: int =-1, target_datastack: str = None, target_version: int =None, **args):
+        """get live tables for a datastack
+
+        Args:
+            datastack_name (str): datastack name
+
+        Returns:
+            HTML directory listing of available tables
+        """
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+        with db_manager.session_scope(aligned_volume_name) as session:
+            version = session.query(AnalysisVersion).filter(
+                    AnalysisVersion.datastack == target_datastack
+                ).order_by(
+                    AnalysisVersion.time_stamp.desc()
+                ).first()
+            if version is not None:
+                tables = session.query(AnalysisTable).filter(
+                    AnalysisTable.analysisversion_id == version.id,
+                    AnalysisTable.valid == True
+                ).all()
+                tables = [table.table_name for table in tables]
+        
+        # Generate HTML directory listing
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Index of /datastack/{datastack_name}/table/</title>
+    <style>
+        body {{ font-family: monospace; margin: 40px; }}
+        h1 {{ font-size: 18px; margin-bottom: 20px; }}
+        a {{ text-decoration: none; color: #0066cc; }}
+        a:hover {{ text-decoration: underline; }}
+        .file {{ display: block; padding: 2px 0; }}
+        .parent {{ font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <h1>Index of /datastack/{datastack_name}/table/</h1>
+    <a href="../" class="file parent">[Parent Directory]</a>
+"""
+        
+        # Add each table as a directory entry
+        for table in sorted(tables):
+            html_content += f'    <a href="{table}/precomputed/" class="file">{table}/</a>\n'
+        
+        html_content += """</body>
+</html>"""
+        
+        return Response(html_content, mimetype='text/html')
+
+
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/"
+)
+class LiveTablesAvailable(Resource):
+    method_decorators = [
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    @client_bp.doc("get_info_listing", security="apikey")
+    def get(self, datastack_name: str, table_name: str):
+        """get info listing
+
+        Args:
+            datastack_name (str): datastack name
+            table_name (str): table name
+
+        Returns:
+            HTML directory pointing to info file
+        """
+        
+        # Generate HTML directory listing
+        html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Index of /datastack/{datastack_name}/table/</title>
+    <style>
+        body {{ font-family: monospace; margin: 40px; }}
+        h1 {{ font-size: 18px; margin-bottom: 20px; }}
+        a {{ text-decoration: none; color: #0066cc; }}
+        a:hover {{ text-decoration: underline; }}
+        .file {{ display: block; padding: 2px 0; }}
+        .parent {{ font-weight: bold; }}
+    </style>
+</head>
+<body>
+    <h1>Index of /datastack/{datastack_name}/table/{table_name}/precomputed/</h1>
+    <a href="../" class="file parent">[Parent Directory]</a>
+"""
+        
+        # Add each table as a directory entry
+        html_content += f'    <a href="info" class="file">info/</a>\n'
+        html_content += f'    <a href="by_id" class="file">by_id/</a>\n'
+        html_content += f'    <a href="spatial" class="file">spatial/</a>\n'
+        html_content += """</body>
+</html>"""
+        
+        return Response(html_content, mimetype='text/html')
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/by_id/<int:id>"
+)
+class LiveTablePrecomputedById(Resource):
+    method_decorators = [
+        validate_datastack,
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    @client_bp.doc("get_precomputed_by_id", security="apikey")
+    def get(self, datastack_name: str, table_name: str, id: int, version: int = 0, target_datastack: str = None, target_version: int = None):
+        """get precomputed by_id for a table
+
+        Args:
+            datastack_name (str): datastack name
+            table_name (str): table name
+            id (int): annotation id
+            version (int): version number (ignored)
+            target_datastack (str): target datastack name (ignored)
+            target_version (int): target version number (ignored)
+
+        Returns:
+            bytes: byte stream of precomputed by_id
+        """
+  
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            target_datastack
+        )
+        if version is not None:
+            with db_manager.session_scope(aligned_volume_name) as session:
+                analysis_version = session.query(AnalysisVersion).filter(
+                    AnalysisVersion.datastack == datastack_name,
+                    AnalysisVersion.version == version,
+                ).one_or_none()
+                timestamp = analysis_version.time_stamp.astimezone(datetime.timezone.utc) if analysis_version else None
+        else:
+            timestamp = None
+        
+        df = query_by_id(datastack_name, table_name, id, timestamp)
+
+        bytes = format_df_to_bytes(df, datastack_name, table_name, encode_single=True)
+
+        response= Response(bytes, mimetype='application/octet-stream')
+        response.headers["Content-Disposition"] = (
+            f"attachment; filename={datastack_name}_{table_name}_{id}.bin"
+        )
+        headers = {
+            "access-control-allow-credentials": "true",
+            "access-control-expose-headers": "Cache-Control, Content-Disposition, Content-Encoding, Content-Length, Content-Type, Date, ETag, Server, Vary, X-Content-Type-Options, X-Frame-Options, X-Powered-By, X-XSS-Protection",
+            "content-disposition": "attachment",
+            "Content-Type": "application/octet-stream",
+            "Content-Name": f"{datastack_name}_{table_name}_{id}.bin",
+        }
+        response.headers.update(headers)
+        return response
 
 @client_bp.route(
     "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/<string:column_name>/<int:segid>"
@@ -2562,11 +2788,12 @@ class ViewQuery(Resource):
                 }
             },
             "filter_spatial_dict": {
-                "tablename": {
-                "column_name": [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+                "tablename":{
+                    "column_name":[[min_x,min_y,min_z], [max_x,max_y,max_z]]
+                }
             },
             "filter_regex_dict": {
-                "tablename": {
+                "tablename":{
                     "column_name": "regex"
                 }
             }
