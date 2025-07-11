@@ -2181,11 +2181,11 @@ def format_df_to_bytes(df, datastack_name, table_name, encode_single=False):
                 point_b = df.loc[i, pointb_cols].tolist()
                 writer.add_line(point_a, point_b, id=df.loc[i, "id"], **kwargs)
     if encode_single:
-        bytes = writer._encode_single_annotation(writer.annotations[0])
+        output_bytes = writer._encode_single_annotation(writer.annotations[0])
     else:
-        bytes = writer._encode_multiple_annotations(writer.annotations)
+        output_bytes = writer._encode_multiple_annotations(writer.annotations)
 
-    return bytes
+    return output_bytes
 
 @client_bp.route(
     "/datastack/<string:datastack_name>/table/"
