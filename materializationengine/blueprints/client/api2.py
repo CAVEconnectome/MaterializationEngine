@@ -2789,7 +2789,7 @@ class ViewQuery(Resource):
             },
             "filter_spatial_dict": {
                 "tablename":{
-                    "column_name":[[min_x,min_y,minz], [max_x_max_y_max_z]]
+                    "column_name":[[min_x,min_y,min_z], [max_x,max_y,max_z]]
                 }
             },
             "filter_regex_dict": {
