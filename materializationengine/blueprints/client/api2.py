@@ -2296,7 +2296,7 @@ class LiveTablesAvailable(Resource):
         # Add each table as a directory entry
         html_content += f'    <a href="info" class="file">info/</a>\n'
         html_content += f'    <a href="by_id" class="file">by_id/</a>\n'
-        html_content += f'    <a href="info" class="file">spatial/</a>\n'
+        html_content += f'    <a href="spatial" class="file">spatial/</a>\n'
         html_content += """</body>
 </html>"""
         
