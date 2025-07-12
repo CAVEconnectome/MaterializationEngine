@@ -183,7 +183,7 @@ def ingest_new_annotations(
         if not lookup_root_ids:
             df = pd.DataFrame(supervoxel_data, dtype=object)
             drop_col_names = list(df.loc[:, df.columns.str.endswith("position")])
-            df = df.drop(drop_col_names, 1)
+            df = df.drop(drop_col_names, axis=1)
             segmentation_data = df.to_dict(orient="records")
         else:
             segmentation_data = get_new_root_ids(supervoxel_data, mat_metadata)
