@@ -378,26 +378,64 @@ def execute_materialized_query(
                 random_sample = (100.0 * random_sample) / mat_row_count
 
         if mat_row_count:
+            # Decide between TABLESAMPLE and hash-based sampling based on sample size
+            hash_config = user_data.get("hash_sampling_config")
+            use_hash_sampling = False
+            use_random_sample = random_sample
+            
+            if hash_config and hash_config.get("enabled"):
+                # Use QUERY_LIMIT_SIZE from Flask config instead of parameter
+                max_points = current_app.config.get("PRECOMPUTED_OVERVIEW_MAX_SIZE", 50000)
+                
+                # Get configurable threshold for switching from TABLESAMPLE to hash sampling
+                hash_sampling_threshold = current_app.config.get("HASH_SAMPLING_THRESHOLD_PERCENT", 5.0)
+                
+                # Calculate what percentage of the table we need to sample
+                sample_percentage = (max_points * 100.0) / mat_row_count if mat_row_count > 0 else 100.0
+                
+                if sample_percentage >= 100.0:  # Table is small enough - show all points
+                    # No sampling needed, table has fewer rows than QUERY_LIMIT_SIZE
+                    use_hash_sampling = False
+                    use_random_sample = None
+                elif sample_percentage < hash_sampling_threshold:  # Less than threshold - use TABLESAMPLE
+                    # Calculate percentage needed (with some buffer to account for randomness)
+                    use_random_sample = sample_percentage
+                    use_hash_sampling = False
+                else:  # Threshold to 100% of table - use hash-based sampling
+                    use_hash_sampling = True
+                    use_random_sample = None  # Don't use TABLESAMPLE when using hash sampling
+            
             # setup a query manager
             qm = QueryManager(
                 mat_db_name,
                 segmentation_source=pcg_table_name,
                 meta_db_name=aligned_volume,
                 split_mode=split_mode,
-                random_sample=random_sample,
+                random_sample=use_random_sample,
             )
             qm.configure_query(user_data)
             qm.apply_filter({user_data["table"]: {"valid": True}}, qm.apply_equal_filter)
+            
+            # Apply hash-based sampling if determined above
+            if use_hash_sampling:
+                qm.add_hash_spatial_sampling(
+                    table_name=hash_config["table_name"],
+                    spatial_column=hash_config["spatial_column"], 
+                    max_points=max_points,  # Use the max_points from QUERY_LIMIT_SIZE
+                    total_row_count=mat_row_count
+                )
+            
             # return the result
             df, column_names = qm.execute_query(
                 desired_resolution=user_data["desired_resolution"]
             )
             df, warnings = update_rootids(df, user_data["timestamp"], query_map, cg_client)
-            if len(df) >= user_data["limit"]:
-                warnings.append(
-                    f"result has {len(df)} entries, which is equal or more \
-    than limit of {user_data['limit']} there may be more results which are not shown"
-                )
+            if "limit" in user_data:
+                if len(df) >= user_data["limit"]:
+                    warnings.append(
+                        f"result has {len(df)} entries, which is equal or more \
+        than limit of {user_data['limit']} there may be more results which are not shown"
+                    )
             return df, column_names, warnings
         else:
             return None, {}, []
@@ -1549,10 +1587,10 @@ class TableUniqueStringValues(Resource):
 
 
 def assemble_live_query_dataframe(user_data, datastack_name, args):
-    user_data["limit"] = min(
-        current_app.config["QUERY_LIMIT_SIZE"],
-        user_data.get("limit", current_app.config["QUERY_LIMIT_SIZE"]),
-    )
+    # user_data["limit"] = min(
+    #     current_app.config["QUERY_LIMIT_SIZE"],
+    #     user_data.get("limit", current_app.config["QUERY_LIMIT_SIZE"]),
+    # )
     past_ver, future_ver, aligned_vol = get_closest_versions(
         datastack_name, user_data["timestamp"]
     )
@@ -1842,6 +1880,13 @@ def get_precomputed_properties_and_relationships(datastack_name, table_name):
     past_version, _, _ = get_closest_versions(
         datastack_name, datetime.datetime.now(tz=pytz.utc)
     )
+    mat_db_name = f"{datastack_name}__mat{past_version['version']}"
+    with db_manager.session_scope(mat_db_name) as session:    
+        mat_row_count = (
+            session.query(MaterializedMetadata.row_count)
+            .filter(MaterializedMetadata.table_name == table_name)
+            .scalar()
+        )
 
     # check if this is a reference table
     table_metadata = db.database.get_table_metadata(table_name)
@@ -1921,7 +1966,7 @@ def get_precomputed_properties_and_relationships(datastack_name, table_name):
     else:
         abort(400, "More than 2 geometry columns found for table {}".format(table_name))
 
-    return relationships, properties, list(geometry_prefixes), column_names, ann_type
+    return relationships, properties, list(geometry_prefixes), column_names, ann_type, mat_row_count
 
 
 bounds_cache = LRUCache(maxsize=128)
@@ -1946,7 +1991,7 @@ def get_precomputed_bounds(datastack_name):
     upper_bound = bbox.maxpt.tolist()
     return lower_bound, upper_bound
 
-
+@cached(LRUCache(maxsize=128))
 def get_precomputed_info(datastack_name, table_name):
     """Get precomputed properties from the database.
 
@@ -1957,11 +2002,34 @@ def get_precomputed_info(datastack_name, table_name):
     Returns:
         dict: the info file for the precomputed table.
     """
+   
 
     vals = get_precomputed_properties_and_relationships(datastack_name, table_name)
-    relationships, properties, geometry_columns, column_names, ann_type = vals
+    relationships, properties, geometry_columns, column_names, ann_type, mat_row_count = vals
 
     lower_bound, upper_bound = get_precomputed_bounds(datastack_name)
+    total_size = np.array(upper_bound) - np.array(lower_bound)
+    spatial_keys = [
+        {"key":"spatial_overview",
+        "grid_shape": [1, 1, 1],
+        "chunk_size": total_size.tolist(),
+        "limit": 10000
+    }
+    ]
+    if mat_row_count> current_app.config.get("PRECOMPUTED_OVERVIEW_MAX_SIZE", 50000):
+        chunk_size = np.array(current_app.config.get("PRECOMPUTED_CHUNK_SIZE", [15000, 15000, 2000]))
+        grid_shape = np.ceil(total_size / chunk_size).astype(int).tolist()
+        # make the chunk size so it fits precisely into the total size
+        chunk_size = (total_size / grid_shape).astype(int).tolist()
+
+        spatial_keys.append(
+            {
+                "key":"spatial_high_res",
+                "grid_shape": grid_shape,
+                "chunk_size": chunk_size,
+                "limit": 10000
+            }
+        )
 
     metadata = {
         "@type": "neuroglancer_annotations_v1",
@@ -1976,7 +2044,7 @@ def get_precomputed_info(datastack_name, table_name):
         "properties": [p.to_json() for p in properties],
         "relationships": [{"id": r, "key": f"{r}"} for r in relationships],
         "by_id": {"key": "by_id"},
-        "spatial": [],
+        "spatial": spatial_keys
     }
     return metadata
 
@@ -2017,6 +2085,113 @@ class LiveTablePrecomputedInfo(Resource):
 
         return info, 200
 
+def query_spatial_no_filter(
+    datastack_name: str,
+    table_name: str,
+    lower_bound: np.array,
+    upper_bound: np.array,
+    timestamp: datetime.datetime = None,
+    sampling: bool = True
+):
+    """get precomputed annotation by id
+
+    Args:
+        datastack_name (str): datastack name
+        table_name (str): table name
+        lower_bound (np.array, optional): lower bound of the bounding box.
+        upper_bound (np.array, optional): upper bound of the bounding box.
+         Defaults to None in which case will use the bounds of the datastack.
+         units should be in nanometers
+        timestamp (datetime.datetime, optional): timestamp to use for the query.
+         Defaults to None in which case will use the latest timestamp of root_id
+
+    Returns:
+        pd.DataFrame: dataframe of precomputed properties with grid-based spatial sampling
+         applied to limit results to QUERY_LIMIT_SIZE for better performance
+    """
+    aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
+    db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    table_metadata = db.database.get_table_metadata(table_name)
+    
+
+    vals = get_precomputed_properties_and_relationships(datastack_name, table_name)
+    relationships, properties, d, column_names, ann_type, mat_row_count = vals
+
+    timestamp = datetime.datetime.now(tz=pytz.utc) if timestamp is None else timestamp
+    
+    spatial_column = None
+    spatial_table = None
+    vox_res = None
+    
+    table_schema = db.schema.get_flattened_schema(table_metadata["schema_type"])
+    table_fields = table_schema._declared_fields
+    for field_name, field in table_fields.items():
+        if isinstance(field, PostGISField):
+            spatial_column = field_name
+            spatial_table = table_name
+            vox_res = np.array(
+                    [
+                        table_metadata["voxel_resolution_x"],
+                        table_metadata["voxel_resolution_y"],
+                        table_metadata["voxel_resolution_z"],
+                    ])
+        
+    user_data = {
+        "table": table_name,
+        "timestamp": timestamp,
+        "suffixes": {table_name: ""},
+        "desired_resolution": [1, 1, 1],
+    }
+    
+    if table_metadata["reference_table"]:
+        ref_table = table_metadata["reference_table"]
+        user_data["suffixes"][ref_table] = "_ref"
+        user_data["join_tables"] = [[table_name, "target_id", ref_table, "id"]]
+        # find the spatial column in the reference table
+        if (spatial_column is  None):
+            # get the reference table schema
+            ref_metadata = db.database.get_table_metadata(ref_table)
+            ref_schema = db.schema.get_flattened_schema(ref_metadata["schema_type"])
+            ref_fields = ref_schema._declared_fields
+            
+            for field_name, field in ref_fields.items():
+                if isinstance(field, PostGISField):
+                    spatial_column = field_name
+                    spatial_table = ref_table
+                    vox_res = np.array(
+                    [
+                        ref_metadata["voxel_resolution_x"],
+                        ref_metadata["voxel_resolution_y"],
+                        ref_metadata["voxel_resolution_z"],
+                    ])
+                    break
+            
+    if (spatial_column is None):
+        abort(400, f"No spatial column found for table {table_name}")
+    
+    if lower_bound is not None:
+        lower_bound = (np.array(lower_bound) / vox_res).astype(int)
+        upper_bound = (np.array(upper_bound) / vox_res).astype(int)
+        user_data["filter_spatial_dict"] = {
+            spatial_table: {
+                spatial_column: [lower_bound.tolist(), upper_bound.tolist()]
+            }
+        }
+    
+    # Add hash sampling configuration if we have spatial info
+    if spatial_column and spatial_table and sampling:
+        user_data["hash_sampling_config"] = {
+            "enabled": True,
+            "table_name": spatial_table,
+            "spatial_column": spatial_column,
+        }
+    
+    return_vals = assemble_live_query_dataframe(
+        user_data, datastack_name=datastack_name, args={})
+    df, column_names, mat_warnings, prod_warnings, remap_warnings = return_vals
+
+    return df
+
 def query_by_id(
     datastack_name: str,
     table_name: str,
@@ -2040,7 +2215,7 @@ def query_by_id(
     table_metadata = db.database.get_table_metadata(table_name)
 
     vals = get_precomputed_properties_and_relationships(datastack_name, table_name)
-    relationships, properties, geometry_columns, column_names, ann_type = vals
+    relationships, properties, geometry_columns, column_names, ann_type, mat_row_count = vals
 
     timestamp = datetime.datetime.now(tz=pytz.utc) if timestamp is None else timestamp
     user_data = {
@@ -2089,9 +2264,9 @@ def live_query_by_relationship(
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
     table_metadata = db.database.get_table_metadata(table_name)
-
+ 
     vals = get_precomputed_properties_and_relationships(datastack_name, table_name)
-    relationships, properties, geometry_columns, column_names, ann_type = vals
+    relationships, properties, geometry_columns, column_names, ann_type, mat_row_count = vals
 
     filter_table = None
     for table in column_names:
@@ -2138,7 +2313,7 @@ def format_df_to_bytes(df, datastack_name, table_name, encode_single=False):
         bytes: byte stream of dataframe
     """
     vals = get_precomputed_properties_and_relationships(datastack_name, table_name)
-    relationships, properties, geometry_columns, column_names, anntype = vals
+    relationships, properties, geometry_columns, column_names, anntype, mat_row_count = vals
     writer = AnnotationWriter(
         anntype, relationships=relationships, properties=properties
     )
@@ -2301,6 +2476,150 @@ class LiveTablesAvailable(Resource):
 </html>"""
         
         return Response(html_content, mimetype='text/html')
+
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/spatial_high_res/<int:x_bin>_<int:y_bin>_<int:z_bin>"
+)
+class LiveTableSpatialOverview(Resource):
+    method_decorators = [
+        validate_datastack,
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    @client_bp.doc("get_precomputed high resolution spatial cutout", security="apikey")
+    def get(self, datastack_name: str, table_name: str,  x_bin:int, y_bin:int, z_bin:int, version: int = 0, target_datastack: str = None, target_version: int = None):
+        """get precomputed high resolution spatial cutout for a table
+
+        Args:
+            datastack_name (str): datastack name
+            table_name (str): table name
+            x_bin (int): x bin size for spatial cutout
+            y_bin (int): y bin size for spatial cutout
+            z_bin (int): z bin size for spatial cutout
+            version (int): version number (ignored)
+            target_datastack (str): target datastack name (ignored)
+            target_version (int): target version number (ignored)
+
+        Query Parameters:
+            None - grid-based spatial sampling is automatically applied using 
+            QUERY_LIMIT_SIZE from Flask config to ensure good performance
+
+        Returns:
+            bytes: byte stream of precomputed spatial overview with representative sampling
+        """
+        precomputed_info = get_precomputed_info(datastack_name, table_name)
+
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            target_datastack
+        )
+        if version is not None:
+            with db_manager.session_scope(aligned_volume_name) as session:
+                analysis_version = session.query(AnalysisVersion).filter(
+                    AnalysisVersion.datastack == datastack_name,
+                    AnalysisVersion.version == version,
+                ).one_or_none()
+                timestamp = analysis_version.time_stamp.astimezone(datetime.timezone.utc) if analysis_version else None
+        else:
+            timestamp = None
+        
+        # get the info for this spatial index from the precomputed info
+        spatial_keys = precomputed_info.get("spatial", [])
+        spatial_key = None
+        for spatial_index in spatial_keys:
+            if spatial_index["key"]=="spatial_high_res":
+                spatial_key = spatial_index
+                break
+        lower_bound, upper_bound = get_precomputed_bounds(datastack_name)
+
+        chunk_size = np.array(spatial_key["chunk_size"])
+        # get the lower and upper bounds of this grid
+        lower_bound = np.array(lower_bound) + np.array(
+            [x_bin * chunk_size[0], y_bin * chunk_size[1], z_bin * chunk_size[2]]
+        )
+        upper_bound = lower_bound + chunk_size
+
+        df = query_spatial_no_filter(datastack_name, table_name, lower_bound, upper_bound, timestamp, sampling=False)
+
+        bytes = format_df_to_bytes(df, datastack_name, table_name)
+
+        response= Response(bytes, mimetype='application/octet-stream')
+        response.headers["Content-Disposition"] = (
+            f"attachment; filename={datastack_name}_{table_name}_spatial_overview.bin"
+        )
+        headers = {
+            "access-control-allow-credentials": "true",
+            "access-control-expose-headers": "Cache-Control, Content-Disposition, Content-Encoding, Content-Length, Content-Type, Date, ETag, Server, Vary, X-Content-Type-Options, X-Frame-Options, X-Powered-By, X-XSS-Protection",
+            "content-disposition": "attachment",
+            "Content-Type": "application/octet-stream",
+            "Content-Name": f"{datastack_name}_{table_name}_spatial_overview.bin",
+        }
+        response.headers.update(headers)
+        return response
+
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/spatial_overview/0_0_0"
+)
+class LiveTableSpatialOverview(Resource):
+    method_decorators = [
+        validate_datastack,
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    @client_bp.doc("get_precomputed_overview", security="apikey")
+    def get(self, datastack_name: str, table_name: str,  version: int = 0, target_datastack: str = None, target_version: int = None):
+        """get precomputed spatial overview for a table
+
+        Args:
+            datastack_name (str): datastack name
+            table_name (str): table name
+            version (int): version number (ignored)
+            target_datastack (str): target datastack name (ignored)
+            target_version (int): target version number (ignored)
+
+        Query Parameters:
+            None - grid-based spatial sampling is automatically applied using 
+            QUERY_LIMIT_SIZE from Flask config to ensure good performance
+
+        Returns:
+            bytes: byte stream of precomputed spatial overview with representative sampling
+        """
+  
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            target_datastack
+        )
+        if version is not None:
+            with db_manager.session_scope(aligned_volume_name) as session:
+                analysis_version = session.query(AnalysisVersion).filter(
+                    AnalysisVersion.datastack == datastack_name,
+                    AnalysisVersion.version == version,
+                ).one_or_none()
+                timestamp = analysis_version.time_stamp.astimezone(datetime.timezone.utc) if analysis_version else None
+        else:
+            timestamp = None
+        
+        lower_bound, upper_bound = get_precomputed_bounds(datastack_name)
+        
+        df = query_spatial_no_filter(datastack_name, table_name, None, None, timestamp)
+
+        bytes = format_df_to_bytes(df, datastack_name, table_name)
+
+        response= Response(bytes, mimetype='application/octet-stream')
+        response.headers["Content-Disposition"] = (
+            f"attachment; filename={datastack_name}_{table_name}_spatial_overview.bin"
+        )
+        headers = {
+            "access-control-allow-credentials": "true",
+            "access-control-expose-headers": "Cache-Control, Content-Disposition, Content-Encoding, Content-Length, Content-Type, Date, ETag, Server, Vary, X-Content-Type-Options, X-Frame-Options, X-Powered-By, X-XSS-Protection",
+            "content-disposition": "attachment",
+            "Content-Type": "application/octet-stream",
+            "Content-Name": f"{datastack_name}_{table_name}_spatial_overview.bin",
+        }
+        response.headers.update(headers)
+        return response
 
 @client_bp.route(
     "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/by_id/<int:id>"

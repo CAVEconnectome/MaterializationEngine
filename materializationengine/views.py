@@ -294,7 +294,12 @@ def make_precomputed_annotation_link(datastack_name, table_name, client):
         url_prefix="https://spelunker.cave-explorer.org",
         target_site="mainline",
     )
-    json['layers'].append({'type': 'annotation','source': annotation_source, 'annotationColor': '#ffffff', 'name': table_name})
+    json['layers'].append({
+        'type': 'annotation',
+        'source': annotation_source,
+        'annotationColor': '#ffffff',
+        'name': table_name
+        })
 
     sb=nglui.statebuilder.StateBuilder(base_state=json)
     
