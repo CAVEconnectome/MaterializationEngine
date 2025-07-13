@@ -2017,7 +2017,7 @@ def get_precomputed_info(datastack_name, table_name):
     }
     ]
     if mat_row_count> current_app.config.get("PRECOMPUTED_OVERVIEW_MAX_SIZE", 50000):
-        chunk_size = np.array([15000,15000,2000])
+        chunk_size = np.array(current_app.config.get("PRECOMPUTED_CHUNK_SIZE", [15000, 15000, 2000]))
         grid_shape = np.ceil(total_size / chunk_size).astype(int).tolist()
         # make the chunk size so it fits precisely into the total size
         chunk_size = (total_size / grid_shape).astype(int).tolist()
