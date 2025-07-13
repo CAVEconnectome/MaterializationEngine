@@ -1991,7 +1991,7 @@ def get_precomputed_bounds(datastack_name):
     upper_bound = bbox.maxpt.tolist()
     return lower_bound, upper_bound
 
-
+@cached(LRUCache(maxsize=128))
 def get_precomputed_info(datastack_name, table_name):
     """Get precomputed properties from the database.
 
@@ -2016,20 +2016,20 @@ def get_precomputed_info(datastack_name, table_name):
         "limit": 10000
     }
     ]
-    # if mat_row_count> 10000:
-    #     chunk_size = np.array([5000,5000, 5000])
-    #     grid_shape = np.ceil(total_size / chunk_size).astype(int).tolist()
-    #     # make the chunk size so it fits precisely into the total size
-    #     chunk_size = (total_size / grid_shape).astype(int).tolist()
+    if mat_row_count> current_app.config.get("PRECOMPUTED_OVERVIEW_MAX_SIZE", 50000):
+        chunk_size = np.array([15000,15000,2000])
+        grid_shape = np.ceil(total_size / chunk_size).astype(int).tolist()
+        # make the chunk size so it fits precisely into the total size
+        chunk_size = (total_size / grid_shape).astype(int).tolist()
 
-    #     spatial_keys.append(
-    #         {
-    #             "key":"spatial_high_res",
-    #             "grid_shape": grid_shape,
-    #             "chunk_size": chunk_size,
-    #             "limit": 10000
-    #         }
-    #     )
+        spatial_keys.append(
+            {
+                "key":"spatial_high_res",
+                "grid_shape": grid_shape,
+                "chunk_size": chunk_size,
+                "limit": 10000
+            }
+        )
 
     metadata = {
         "@type": "neuroglancer_annotations_v1",
@@ -2091,6 +2091,7 @@ def query_spatial_no_filter(
     lower_bound: np.array,
     upper_bound: np.array,
     timestamp: datetime.datetime = None,
+    sampling: bool = True
 ):
     """get precomputed annotation by id
 
@@ -2178,7 +2179,7 @@ def query_spatial_no_filter(
         }
     
     # Add hash sampling configuration if we have spatial info
-    if spatial_column and spatial_table:
+    if spatial_column and spatial_table and sampling:
         user_data["hash_sampling_config"] = {
             "enabled": True,
             "table_name": spatial_table,
@@ -2475,6 +2476,87 @@ class LiveTablesAvailable(Resource):
 </html>"""
         
         return Response(html_content, mimetype='text/html')
+
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/spatial_high_res/<int:x_bin>_<int:y_bin>_<int:z_bin>"
+)
+class LiveTableSpatialOverview(Resource):
+    method_decorators = [
+        validate_datastack,
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    @client_bp.doc("get_precomputed high resolution spatial cutout", security="apikey")
+    def get(self, datastack_name: str, table_name: str,  x_bin:int, y_bin:int, z_bin:int, version: int = 0, target_datastack: str = None, target_version: int = None):
+        """get precomputed high resolution spatial cutout for a table
+
+        Args:
+            datastack_name (str): datastack name
+            table_name (str): table name
+            x_bin (int): x bin size for spatial cutout
+            y_bin (int): y bin size for spatial cutout
+            z_bin (int): z bin size for spatial cutout
+            version (int): version number (ignored)
+            target_datastack (str): target datastack name (ignored)
+            target_version (int): target version number (ignored)
+
+        Query Parameters:
+            None - grid-based spatial sampling is automatically applied using 
+            QUERY_LIMIT_SIZE from Flask config to ensure good performance
+
+        Returns:
+            bytes: byte stream of precomputed spatial overview with representative sampling
+        """
+        precomputed_info = get_precomputed_info(datastack_name, table_name)
+
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            target_datastack
+        )
+        if version is not None:
+            with db_manager.session_scope(aligned_volume_name) as session:
+                analysis_version = session.query(AnalysisVersion).filter(
+                    AnalysisVersion.datastack == datastack_name,
+                    AnalysisVersion.version == version,
+                ).one_or_none()
+                timestamp = analysis_version.time_stamp.astimezone(datetime.timezone.utc) if analysis_version else None
+        else:
+            timestamp = None
+        
+        # get the info for this spatial index from the precomputed info
+        spatial_keys = precomputed_info.get("spatial", [])
+        spatial_key = None
+        for spatial_index in spatial_keys:
+            if spatial_index["key"]=="spatial_high_res":
+                spatial_key = spatial_index
+                break
+        lower_bound, upper_bound = get_precomputed_bounds(datastack_name)
+
+        chunk_size = np.array(spatial_key["chunk_size"])
+        # get the lower and upper bounds of this grid
+        lower_bound = np.array(lower_bound) + np.array(
+            [x_bin * chunk_size[0], y_bin * chunk_size[1], z_bin * chunk_size[2]]
+        )
+        upper_bound = lower_bound + chunk_size
+
+        df = query_spatial_no_filter(datastack_name, table_name, lower_bound, upper_bound, timestamp, sampling=False)
+
+        bytes = format_df_to_bytes(df, datastack_name, table_name)
+
+        response= Response(bytes, mimetype='application/octet-stream')
+        response.headers["Content-Disposition"] = (
+            f"attachment; filename={datastack_name}_{table_name}_spatial_overview.bin"
+        )
+        headers = {
+            "access-control-allow-credentials": "true",
+            "access-control-expose-headers": "Cache-Control, Content-Disposition, Content-Encoding, Content-Length, Content-Type, Date, ETag, Server, Vary, X-Content-Type-Options, X-Frame-Options, X-Powered-By, X-XSS-Protection",
+            "content-disposition": "attachment",
+            "Content-Type": "application/octet-stream",
+            "Content-Name": f"{datastack_name}_{table_name}_spatial_overview.bin",
+        }
+        response.headers.update(headers)
+        return response
 
 
 @client_bp.route(

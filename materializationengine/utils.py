@@ -5,6 +5,7 @@ from flask import current_app, abort, g
 from middle_auth_client.decorators import users_share_common_group
 from celery.utils.log import get_task_logger
 from typing import Any
+from cachetools import TTLCache, cached, LRUCache
 celery_logger = get_task_logger(__name__)
 
 
@@ -111,7 +112,7 @@ def get_config_param(config_param: str, default: Any = None):
     except (KeyError, LookupError, RuntimeError):
         return os.environ.get(config_param, default)
 
-
+@cached(cache=TTLCache(maxsize=100, ttl=600))
 def check_write_permission(db, table_name):
     metadata = db.database.get_table_metadata(table_name)
     if metadata["user_id"] != str(g.auth_user["id"]):
@@ -125,7 +126,7 @@ def check_write_permission(db, table_name):
                 abort(401, "Unauthorized: The table can only be written to by owner")
     return metadata
 
-
+@cached(cache=TTLCache(maxsize=100, ttl=600))
 def check_read_permission(db, table_name):
     metadata = db.database.get_table_metadata(table_name)
     if metadata["read_permission"] == "GROUP":
