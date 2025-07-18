@@ -371,11 +371,26 @@ def execute_materialized_query(
             .filter(MaterializedMetadata.table_name == user_data["table"])
             .scalar()
         )
-        if random_sample:
-            if random_sample >= mat_row_count:
+        # Validate random_sample to prevent TABLESAMPLE errors
+        if random_sample is not None:
+            if not np.isfinite(random_sample) or random_sample <= 0:
+                print(f"WARNING: Invalid random_sample: {random_sample}, setting to None")
+                random_sample = None
+            elif mat_row_count <= 0:
+                print(f"WARNING: Invalid mat_row_count: {mat_row_count}, setting random_sample to None")
+                random_sample = None
+            elif random_sample >= mat_row_count:
                 random_sample = None
             else:
-                random_sample = (100.0 * random_sample) / mat_row_count
+                percentage = (100.0 * random_sample) / mat_row_count
+                if not np.isfinite(percentage) or percentage <= 0:
+                    print(f"WARNING: Invalid percentage calculation: {percentage}, setting random_sample to None")
+                    random_sample = None
+                elif percentage > 100.0:
+                    print(f"WARNING: Percentage > 100%: {percentage}, setting random_sample to None")
+                    random_sample = None
+                else:
+                    random_sample = percentage
 
         if mat_row_count:
             # Decide between TABLESAMPLE and hash-based sampling based on sample size
@@ -389,9 +404,22 @@ def execute_materialized_query(
                 
                 # Get configurable threshold for switching from TABLESAMPLE to hash sampling
                 hash_sampling_threshold = current_app.config.get("HASH_SAMPLING_THRESHOLD_PERCENT", 5.0)
+                volume_fraction = hash_config.get("volume_fraction", 1.0)
                 
+                # Validate volume_fraction to prevent invalid calculations
+                if not np.isfinite(volume_fraction) or volume_fraction <= 0:
+                    print(f"WARNING: Invalid volume_fraction in hash_config: {volume_fraction}, using 1.0")
+                    volume_fraction = 1.0
+                elif volume_fraction > 1.0:
+                    print(f"WARNING: volume_fraction > 1.0 in hash_config: {volume_fraction}, capping at 1.0")
+                    volume_fraction = 1.0
+                    
                 # Calculate what percentage of the table we need to sample
-                sample_percentage = (max_points * 100.0) / mat_row_count if mat_row_count > 0 else 100.0
+                if mat_row_count > 0 and volume_fraction > 0:
+                    sample_percentage = (max_points * 100.0) / (mat_row_count * volume_fraction)
+                else:
+                    print(f"WARNING: Invalid values for percentage calculation: mat_row_count={mat_row_count}, volume_fraction={volume_fraction}")
+                    sample_percentage = 100.0  # Fallback to no sampling
                 
                 if sample_percentage >= 100.0:  # Table is small enough - show all points
                     # No sampling needed, table has fewer rows than QUERY_LIMIT_SIZE
@@ -400,7 +428,17 @@ def execute_materialized_query(
                 elif sample_percentage < hash_sampling_threshold:  # Less than threshold - use TABLESAMPLE
                     # Calculate percentage needed (with some buffer to account for randomness)
                     use_random_sample = sample_percentage
-                    use_hash_sampling = False
+                    # Validate that use_random_sample is valid for TABLESAMPLE
+                    if not np.isfinite(use_random_sample) or use_random_sample <= 0:
+                        print(f"WARNING: Invalid use_random_sample: {use_random_sample}, switching to hash sampling")
+                        use_hash_sampling = True
+                        use_random_sample = None
+                    elif use_random_sample > 100.0:
+                        print(f"WARNING: use_random_sample > 100%: {use_random_sample}, capping at 100%")
+                        use_random_sample = 100.0
+                        use_hash_sampling = False
+                    else:
+                        use_hash_sampling = False
                 else:  # Threshold to 100% of table - use hash-based sampling
                     use_hash_sampling = True
                     use_random_sample = None  # Don't use TABLESAMPLE when using hash sampling
@@ -1984,14 +2022,168 @@ def get_precomputed_bounds(datastack_name):
         dict: the bounds for the precomputed table.
     """
     ds_info = get_datastack_info(datastack_name)
-    img_source = ds_info["aligned_volume"]["image_source"]
+    img_source = ds_info["segmentation_source"]
     cv = cloudvolume.CloudVolume(img_source, use_https=True)
     bbox = cv.bounds * cv.resolution
     lower_bound = bbox.minpt.tolist()
     upper_bound = bbox.maxpt.tolist()
     return lower_bound, upper_bound
 
-@cached(LRUCache(maxsize=128))
+def _cache_key_spatial_levels(total_size, annotation_count, target_limit=10000):
+    """Create a hashable cache key for spatial index level calculation."""
+    return (tuple(total_size.tolist()), annotation_count, target_limit)
+
+@cached(LRUCache(maxsize=128), key=_cache_key_spatial_levels)
+def calculate_spatial_index_levels(total_size, annotation_count, target_limit=10000):
+    """
+    Calculate the number of spatial index levels needed based on uniform distribution assumption.
+    
+    Uses isotropic chunking following Neuroglancer spec: each successive level applies
+    all subdivisions that improve isotropy compared to the original state. This can
+    result in multiple dimensions being subdivided simultaneously per level.
+    
+    Always adds a final 'spatial_high_res' level with approximately 15000x15000x2000 
+    chunk sizes for high-resolution queries.
+    
+    Args:
+        total_size: numpy array of [width, height, depth] of the bounding box
+        annotation_count: total number of annotations
+        target_limit: maximum annotations per grid cell at finest level
+    
+    Returns:
+        list: List of spatial index level configurations, including final spatial_high_res level
+    """
+    if annotation_count <= target_limit:
+        # If we have few enough annotations, use overview + high-res levels
+        levels = [{
+            "key": "spatial_overview",
+            "grid_shape": [1, 1, 1],
+            "chunk_size": total_size.tolist(),
+            "limit": target_limit
+        }]
+        
+        # Still add the high-resolution level
+        target_chunk_size = np.array([15000, 15000, 2000], dtype=float)
+        high_res_grid_shape = np.maximum([1, 1, 1], np.ceil(total_size / target_chunk_size).astype(int))
+        high_res_chunk_size = total_size / high_res_grid_shape
+        
+        levels.append({
+            "key": "spatial_high_res",
+            "grid_shape": high_res_grid_shape.tolist(),
+            "chunk_size": high_res_chunk_size.astype(int).tolist(),
+            "limit": target_limit
+        })
+        
+        return levels
+    
+    levels = []
+    current_grid_shape = np.array([1, 1, 1], dtype=int)
+    level = 0
+    
+    while True:
+        # Calculate chunk size for current grid shape
+        current_chunk_size = total_size / current_grid_shape
+        
+        # Calculate total number of grid cells at this level
+        total_cells = np.prod(current_grid_shape)
+        
+        # Estimate annotations per cell (assuming uniform distribution)
+        annotations_per_cell = annotation_count / total_cells
+        
+        # Add this level
+        level_key = "spatial_overview" if level == 0 else f"spatial_level_{level}"
+        levels.append({
+            "key": level_key,
+            "grid_shape": current_grid_shape.tolist(),
+            "chunk_size": current_chunk_size.astype(int).tolist(),
+            "limit": target_limit
+        })
+        
+        # Check if we're fine enough - if average annotations per cell is acceptable
+        if annotations_per_cell <= target_limit:
+            break
+            
+        # For more isotropic chunking, subdivide the largest dimensions
+        # that don't make isotropy significantly worse
+        next_grid_shape = current_grid_shape.copy()
+        
+        def calculate_isotropy_metric(chunk_size):
+            """Calculate isotropy metric - lower is more isotropic."""
+            return np.max(chunk_size) / np.min(chunk_size)
+        
+        original_isotropy = calculate_isotropy_metric(current_chunk_size)
+        
+        made_change = False
+        # Test subdividing the dimensions with the largest chunk sizes
+        # but only if it doesn't make isotropy much worse
+        dim_order = np.argsort(current_chunk_size)[::-1]  # Largest first
+        
+        for dim in dim_order:
+            # Test doubling the grid in this dimension (halving chunk size)
+            test_grid_shape = next_grid_shape.copy()
+            test_grid_shape[dim] *= 2
+            test_chunk_size = total_size / test_grid_shape
+            test_isotropy = calculate_isotropy_metric(test_chunk_size)
+            
+            # Subdivide if it improves isotropy or doesn't make it much worse
+            # Also prioritize subdividing large dimensions to avoid very elongated chunks
+            max_chunk = np.max(current_chunk_size)
+            
+            # Determine if we should subdivide this dimension
+            should_subdivide = False
+            
+            # Case 1: Dimension is large and isotropy doesn't get too bad
+            if (current_chunk_size[dim] >= max_chunk * 0.8 and  # Dimension is large
+                test_isotropy <= original_isotropy * 1.5):      # Isotropy doesn't get too bad
+                should_subdivide = True
+            
+            # Case 2: Fallback for isotropic volumes - if annotations/cell still too high
+            # and we have good isotropy, subdivide any dimension that doesn't make it much worse
+            elif (annotations_per_cell > target_limit * 1.1 and  # Still over target
+                  original_isotropy < 2.0 and                   # Already fairly isotropic
+                  test_isotropy <= original_isotropy * 1.2):     # Don't make isotropy much worse
+                should_subdivide = True
+            
+            if should_subdivide:
+                next_grid_shape[dim] *= 2
+                made_change = True
+        
+        # If no beneficial subdivision found, stop
+        if not made_change:
+            break
+            
+        current_grid_shape = next_grid_shape
+        level += 1
+        
+        # Safety check to prevent infinite loops
+        if level > 10:
+            break
+    
+    # # Add a final high-resolution level with target chunk size of approximately [15000, 15000, 2000]
+    # # This level divides the volume into chunks that are suitable for high-resolution queries
+    # target_chunk_size = np.array([15000, 15000, 2000], dtype=float)
+    
+    # # Calculate grid shape needed to achieve target chunk sizes (rounded up)
+    # high_res_grid_shape = np.maximum([1, 1, 1], np.ceil(total_size / target_chunk_size).astype(int))
+    
+    # # Calculate actual chunk size that divides evenly into the volume
+    # high_res_chunk_size = total_size / high_res_grid_shape
+    
+    # # Calculate total number of grid cells and annotations per cell
+    # high_res_total_cells = np.prod(high_res_grid_shape)
+    # high_res_annotations_per_cell = annotation_count / high_res_total_cells
+    
+    # # Add the high-resolution level
+    # levels.append({
+    #     "key": "spatial_high_res",
+    #     "grid_shape": high_res_grid_shape.tolist(),
+    #     "chunk_size": high_res_chunk_size.astype(int).tolist(),
+    #     "limit": target_limit
+    # })
+    
+    return levels
+
+
 def get_precomputed_info(datastack_name, table_name):
     """Get precomputed properties from the database.
 
@@ -2001,6 +2193,10 @@ def get_precomputed_info(datastack_name, table_name):
 
     Returns:
         dict: the info file for the precomputed table.
+        
+    Note:
+        Uses dynamic spatial index level calculation based on annotation distribution
+        and configurable target limits for optimal Neuroglancer performance.
     """
    
 
@@ -2009,27 +2205,14 @@ def get_precomputed_info(datastack_name, table_name):
 
     lower_bound, upper_bound = get_precomputed_bounds(datastack_name)
     total_size = np.array(upper_bound) - np.array(lower_bound)
-    spatial_keys = [
-        {"key":"spatial_overview",
-        "grid_shape": [1, 1, 1],
-        "chunk_size": total_size.tolist(),
-        "limit": 10000
-    }
-    ]
-    if mat_row_count> current_app.config.get("PRECOMPUTED_OVERVIEW_MAX_SIZE", 50000):
-        chunk_size = np.array(current_app.config.get("PRECOMPUTED_CHUNK_SIZE", [15000, 15000, 2000]))
-        grid_shape = np.ceil(total_size / chunk_size).astype(int).tolist()
-        # make the chunk size so it fits precisely into the total size
-        chunk_size = (total_size / grid_shape).astype(int).tolist()
-
-        spatial_keys.append(
-            {
-                "key":"spatial_high_res",
-                "grid_shape": grid_shape,
-                "chunk_size": chunk_size,
-                "limit": 10000
-            }
-        )
+    
+    # Use dynamic spatial index level calculation
+    target_limit = current_app.config.get("PRECOMPUTED_SPATIAL_INDEX_LIMIT", 10000)
+    spatial_keys = calculate_spatial_index_levels(
+        total_size=total_size,
+        annotation_count=mat_row_count,
+        target_limit=target_limit
+    )
 
     metadata = {
         "@type": "neuroglancer_annotations_v1",
@@ -2091,7 +2274,8 @@ def query_spatial_no_filter(
     lower_bound: np.array,
     upper_bound: np.array,
     timestamp: datetime.datetime = None,
-    sampling: bool = True
+    volume_fraction: float = 1.0,
+    sampling: bool = True,
 ):
     """get precomputed annotation by id
 
@@ -2104,6 +2288,8 @@ def query_spatial_no_filter(
          units should be in nanometers
         timestamp (datetime.datetime, optional): timestamp to use for the query.
          Defaults to None in which case will use the latest timestamp of root_id
+        volume_fraction (float, optional): fraction of the volume this represents.
+        sampling (bool, optional): whether to apply spatial sampling.
 
     Returns:
         pd.DataFrame: dataframe of precomputed properties with grid-based spatial sampling
@@ -2180,14 +2366,21 @@ def query_spatial_no_filter(
     
     # Add hash sampling configuration if we have spatial info
     if spatial_column and spatial_table and sampling:
+        # Get the target limit for spatial sampling
+        max_points = current_app.config.get("QUERY_LIMIT_SIZE", 10000)
+        
         user_data["hash_sampling_config"] = {
             "enabled": True,
             "table_name": spatial_table,
             "spatial_column": spatial_column,
+            "volume_fraction": volume_fraction,
+            "max_points": max_points,
         }
     
+
     return_vals = assemble_live_query_dataframe(
-        user_data, datastack_name=datastack_name, args={})
+        user_data, datastack_name=datastack_name, args={}
+    )
     df, column_names, mat_warnings, prod_warnings, remap_warnings = return_vals
 
     return df
@@ -2478,36 +2671,65 @@ class LiveTablesAvailable(Resource):
         return Response(html_content, mimetype='text/html')
 
 
+# General spatial endpoint that handles all spatial levels (spatial_overview, spatial_level_1, spatial_level_2, etc.)
+# This replaces the old spatial_high_res endpoint and provides a unified interface for all spatial levels
+
+# Cache for spatial query results with 20-minute TTL
+_spatial_bytes_cache = TTLCache(maxsize=1000, ttl=1200)  # 20 minutes = 1200 seconds
+
+def _cache_key_spatial_bytes(datastack_name, table_name, spatial_level, x_bin, y_bin, z_bin, timestamp):
+    """Generate cache key for spatial bytes result."""
+    # Round timestamp to minute precision to improve cache hit rate
+    timestamp_str = None
+    if timestamp is not None:
+        timestamp_rounded = timestamp.replace(second=0, microsecond=0)
+        timestamp_str = timestamp_rounded.isoformat()
+    
+    return hashkey(datastack_name, table_name, spatial_level, x_bin, y_bin, z_bin, timestamp_str)
+
 @client_bp.route(
-    "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/spatial_high_res/<int:x_bin>_<int:y_bin>_<int:z_bin>"
+    "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/<string:spatial_level>/<int:x_bin>_<int:y_bin>_<int:z_bin>"
 )
-class LiveTableSpatialOverview(Resource):
+class LiveTableSpatialLevel(Resource):
     method_decorators = [
         validate_datastack,
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
     ]
 
-    @client_bp.doc("get_precomputed high resolution spatial cutout", security="apikey")
-    def get(self, datastack_name: str, table_name: str,  x_bin:int, y_bin:int, z_bin:int, version: int = 0, target_datastack: str = None, target_version: int = None):
-        """get precomputed high resolution spatial cutout for a table
+    @client_bp.doc("get_precomputed spatial level cutout", security="apikey")
+    def get(self, datastack_name: str, table_name: str, spatial_level: str, x_bin: int, y_bin: int, z_bin: int, version: int = 0, target_datastack: str = None, target_version: int = None):
+        """get precomputed spatial cutout for a table at any spatial level
+
+        This is a general endpoint that works with all spatial levels defined in the 
+        precomputed info. It dynamically determines the chunk size and grid bounds
+        based on the spatial level configuration.
 
         Args:
             datastack_name (str): datastack name
             table_name (str): table name
-            x_bin (int): x bin size for spatial cutout
-            y_bin (int): y bin size for spatial cutout
-            z_bin (int): z bin size for spatial cutout
+            spatial_level (str): spatial level key (e.g., 'spatial_overview', 'spatial_level_1', 'spatial_level_2', etc.)
+                                Must match a key from the spatial index configuration
+            x_bin (int): x bin index for spatial grid coordinate (0-based)
+            y_bin (int): y bin index for spatial grid coordinate (0-based)  
+            z_bin (int): z bin index for spatial grid coordinate (0-based)
             version (int): version number (ignored)
             target_datastack (str): target datastack name (ignored)
             target_version (int): target version number (ignored)
 
         Query Parameters:
-            None - grid-based spatial sampling is automatically applied using 
-            QUERY_LIMIT_SIZE from Flask config to ensure good performance
+            None - Intelligent spatial sampling is automatically applied based on the 
+            volume fraction and grid density. Fine-grained chunks use less sampling,
+            while coarse chunks use more aggressive sampling for optimal performance.
 
         Returns:
-            bytes: byte stream of precomputed spatial overview with representative sampling
+            bytes: byte stream of precomputed spatial data with adaptive sampling
+            
+        Example URLs:
+            .../precomputed/spatial_overview/0_0_0
+            .../precomputed/spatial_level_1/0_0_0  
+            .../precomputed/spatial_level_1/1_2_0
+            .../precomputed/spatial_level_2/4_3_1
         """
         precomputed_info = get_precomputed_info(datastack_name, table_name)
 
@@ -2528,98 +2750,155 @@ class LiveTableSpatialOverview(Resource):
         spatial_keys = precomputed_info.get("spatial", [])
         spatial_key = None
         for spatial_index in spatial_keys:
-            if spatial_index["key"]=="spatial_high_res":
+            if spatial_index["key"] == spatial_level:
                 spatial_key = spatial_index
                 break
+        
+        if spatial_key is None:
+            abort(404, f"Spatial level '{spatial_level}' not found for table '{table_name}'")
+        
+        # Validate grid coordinates are within valid bounds
+        grid_shape = spatial_key.get("grid_shape", [1, 1, 1])
+        if (x_bin < 0 or x_bin >= grid_shape[0] or
+            y_bin < 0 or y_bin >= grid_shape[1] or 
+            z_bin < 0 or z_bin >= grid_shape[2]):
+            abort(400, f"Grid coordinates ({x_bin}, {y_bin}, {z_bin}) are out of bounds for spatial level '{spatial_level}' with grid shape {grid_shape}")
+        
         lower_bound, upper_bound = get_precomputed_bounds(datastack_name)
 
         chunk_size = np.array(spatial_key["chunk_size"])
+        grid_shape = np.array(spatial_key["grid_shape"])
+        
+        # Calculate what fraction of the total volume this chunk represents
+        total_volume = np.prod(np.array(upper_bound) - np.array(lower_bound))
+        chunk_volume = np.prod(chunk_size)
+        
+        # Validate volume calculations to prevent invalid tablesample parameters
+        if total_volume <= 0:
+            print(f"WARNING: Invalid total_volume: {total_volume}, bounds: {lower_bound} to {upper_bound}")
+            volume_fraction = 1.0  # Fallback to no sampling
+        elif chunk_volume <= 0:
+            print(f"WARNING: Invalid chunk_volume: {chunk_volume}, chunk_size: {chunk_size}")
+            volume_fraction = 1.0  # Fallback to no sampling
+        else:
+            volume_fraction = chunk_volume / total_volume
+            
+        # Ensure volume_fraction is valid for tablesample
+        if not np.isfinite(volume_fraction) or volume_fraction <= 0:
+            print(f"WARNING: Invalid volume_fraction: {volume_fraction}, defaulting to 1.0")
+            volume_fraction = 1.0
+        elif volume_fraction > 1.0:
+            print(f"WARNING: volume_fraction > 1.0: {volume_fraction}, capping at 1.0")
+            volume_fraction = 1.0
+        
         # get the lower and upper bounds of this grid
         lower_bound = np.array(lower_bound) + np.array(
             [x_bin * chunk_size[0], y_bin * chunk_size[1], z_bin * chunk_size[2]]
         )
         upper_bound = lower_bound + chunk_size
-
-        df = query_spatial_no_filter(datastack_name, table_name, lower_bound, upper_bound, timestamp, sampling=False)
-
-        bytes = format_df_to_bytes(df, datastack_name, table_name)
-
-        response= Response(bytes, mimetype='application/octet-stream')
-        response.headers["Content-Disposition"] = (
-            f"attachment; filename={datastack_name}_{table_name}_spatial_overview.bin"
-        )
-        headers = {
-            "access-control-allow-credentials": "true",
-            "access-control-expose-headers": "Cache-Control, Content-Disposition, Content-Encoding, Content-Length, Content-Type, Date, ETag, Server, Vary, X-Content-Type-Options, X-Frame-Options, X-Powered-By, X-XSS-Protection",
-            "content-disposition": "attachment",
-            "Content-Type": "application/octet-stream",
-            "Content-Name": f"{datastack_name}_{table_name}_spatial_overview.bin",
-        }
-        response.headers.update(headers)
-        return response
-
-
-@client_bp.route(
-    "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/spatial_overview/0_0_0"
-)
-class LiveTableSpatialOverview(Resource):
-    method_decorators = [
-        validate_datastack,
-        auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
-    ]
-
-    @client_bp.doc("get_precomputed_overview", security="apikey")
-    def get(self, datastack_name: str, table_name: str,  version: int = 0, target_datastack: str = None, target_version: int = None):
-        """get precomputed spatial overview for a table
-
-        Args:
-            datastack_name (str): datastack name
-            table_name (str): table name
-            version (int): version number (ignored)
-            target_datastack (str): target datastack name (ignored)
-            target_version (int): target version number (ignored)
-
-        Query Parameters:
-            None - grid-based spatial sampling is automatically applied using 
-            QUERY_LIMIT_SIZE from Flask config to ensure good performance
-
-        Returns:
-            bytes: byte stream of precomputed spatial overview with representative sampling
-        """
-  
-        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-            target_datastack
-        )
-        if version is not None:
-            with db_manager.session_scope(aligned_volume_name) as session:
-                analysis_version = session.query(AnalysisVersion).filter(
-                    AnalysisVersion.datastack == datastack_name,
-                    AnalysisVersion.version == version,
-                ).one_or_none()
-                timestamp = analysis_version.time_stamp.astimezone(datetime.timezone.utc) if analysis_version else None
+        if "high_res" in spatial_level:
+            sampling=False
         else:
-            timestamp = None
+            sampling = True
         
-        lower_bound, upper_bound = get_precomputed_bounds(datastack_name)
+        # Check cache first for this specific spatial chunk
+        cache_key = _cache_key_spatial_bytes(datastack_name, table_name, spatial_level, x_bin, y_bin, z_bin, timestamp)
         
-        df = query_spatial_no_filter(datastack_name, table_name, None, None, timestamp)
+        if cache_key in _spatial_bytes_cache:
+            bytes_data = _spatial_bytes_cache[cache_key]
+        else:
+            # Query and format data if not in cache
+            df = query_spatial_no_filter(datastack_name,
+                                         table_name,
+                                         lower_bound,
+                                         upper_bound,
+                                         timestamp,
+                                         volume_fraction=volume_fraction,
+                                         sampling=sampling)
+            
+            bytes_data = format_df_to_bytes(df, datastack_name, table_name)
+            
+            # Cache the result
+            _spatial_bytes_cache[cache_key] = bytes_data
 
-        bytes = format_df_to_bytes(df, datastack_name, table_name)
-
-        response= Response(bytes, mimetype='application/octet-stream')
+        response= Response(bytes_data, mimetype='application/octet-stream')
         response.headers["Content-Disposition"] = (
-            f"attachment; filename={datastack_name}_{table_name}_spatial_overview.bin"
+            f"attachment; filename={datastack_name}_{table_name}_{spatial_level}_{x_bin}_{y_bin}_{z_bin}.bin"
         )
         headers = {
             "access-control-allow-credentials": "true",
             "access-control-expose-headers": "Cache-Control, Content-Disposition, Content-Encoding, Content-Length, Content-Type, Date, ETag, Server, Vary, X-Content-Type-Options, X-Frame-Options, X-Powered-By, X-XSS-Protection",
             "content-disposition": "attachment",
             "Content-Type": "application/octet-stream",
-            "Content-Name": f"{datastack_name}_{table_name}_spatial_overview.bin",
+            "Content-Name": f"{datastack_name}_{table_name}_{spatial_level}_{x_bin}_{y_bin}_{z_bin}.bin",
         }
         response.headers.update(headers)
         return response
+
+
+# # Backward compatibility endpoint for spatial_overview at coordinates 0_0_0
+# # New code should use the general spatial endpoint: .../precomputed/spatial_overview/0_0_0
+# @client_bp.route(
+#     "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/spatial_overview/0_0_0"
+# )
+# class LiveTableSpatialOverview(Resource):
+#     method_decorators = [
+#         validate_datastack,
+#         auth_requires_permission("view", table_arg="datastack_name"),
+#         reset_auth,
+#     ]
+
+#     @client_bp.doc("get_precomputed_overview", security="apikey")
+#     def get(self, datastack_name: str, table_name: str,  version: int = 0, target_datastack: str = None, target_version: int = None):
+#         """get precomputed spatial overview for a table
+
+#         Args:
+#             datastack_name (str): datastack name
+#             table_name (str): table name
+#             version (int): version number (ignored)
+#             target_datastack (str): target datastack name (ignored)
+#             target_version (int): target version number (ignored)
+
+#         Query Parameters:
+#             None - grid-based spatial sampling is automatically applied using 
+#             QUERY_LIMIT_SIZE from Flask config to ensure good performance
+
+#         Returns:
+#             bytes: byte stream of precomputed spatial overview with representative sampling
+#         """
+  
+#         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+#             target_datastack
+#         )
+#         if version is not None:
+#             with db_manager.session_scope(aligned_volume_name) as session:
+#                 analysis_version = session.query(AnalysisVersion).filter(
+#                     AnalysisVersion.datastack == datastack_name,
+#                     AnalysisVersion.version == version,
+#                 ).one_or_none()
+#                 timestamp = analysis_version.time_stamp.astimezone(datetime.timezone.utc) if analysis_version else None
+#         else:
+#             timestamp = None
+        
+#         lower_bound, upper_bound = get_precomputed_bounds(datastack_name)
+        
+#         df = query_spatial_no_filter(datastack_name, table_name, None, None, timestamp)
+
+#         bytes = format_df_to_bytes(df, datastack_name, table_name)
+
+#         response= Response(bytes, mimetype='application/octet-stream')
+#         response.headers["Content-Disposition"] = (
+#             f"attachment; filename={datastack_name}_{table_name}_spatial_overview.bin"
+#         )
+#         headers = {
+#             "access-control-allow-credentials": "true",
+#             "access-control-expose-headers": "Cache-Control, Content-Disposition, Content-Encoding, Content-Length, Content-Type, Date, ETag, Server, Vary, X-Content-Type-Options, X-Frame-Options, X-Powered-By, X-XSS-Protection",
+#             "content-disposition": "attachment",
+#             "Content-Type": "application/octet-stream",
+#             "Content-Name": f"{datastack_name}_{table_name}_spatial_overview.bin",
+#         }
+#         response.headers.update(headers)
+#         return response
 
 @client_bp.route(
     "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/by_id/<int:id>"
