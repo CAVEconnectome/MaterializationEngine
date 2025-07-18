@@ -169,7 +169,7 @@ class QueryManager:
                     seg_columns = [
                         c for c in segmodel.__table__.columns if c.key != "id"
                     ]
-                    if random_sample and self._random_sample:
+                    if random_sample and self._random_sample is not None:
                         annmodel_alias1 = aliased(
                             annmodel, tablesample(annmodel, self._random_sample)
                         )
@@ -186,7 +186,7 @@ class QueryManager:
                     # self._models[segmodel.__tablename__] = segmodel_alias
 
                 else:
-                    if random_sample and self._random_sample:
+                    if random_sample and self._random_sample is not None:
                         annmodel_alias1 = aliased(
                             annmodel, tablesample(annmodel, self._random_sample)
                         )
@@ -195,7 +195,7 @@ class QueryManager:
                     self._models[table_name] = annmodel_alias1
             else:
                 model = self._get_flat_model(table_name)
-                if self._random_sample:
+                if self._random_sample is not None:
                     model = aliased(model, tablesample, self._random_sample)
                 self._models[table_name] = model
 
@@ -684,12 +684,22 @@ class QueryManager:
         # This approach hashes the geometry coordinates to get a pseudo-random but deterministic sample
         
         # Calculate the sampling ratio based on actual table size and desired max_points
+        # Add validation to prevent division by zero or invalid values
+        if max_points <= 0:
+            print(f"WARNING: Invalid max_points: {max_points}, using default 10000")
+            max_points = 10000
+            
         if total_row_count and total_row_count > 0:
             # Use actual row count for precise sampling calculation
             sampling_factor = max(2, int(total_row_count / max_points))
         else:
             # Fallback to estimate if row count is not available
             sampling_factor = max(2, int(30_000_000 / max_points))
+            
+        # Additional validation to ensure sampling_factor is valid
+        if sampling_factor <= 0 or not np.isfinite(sampling_factor):
+            print(f"WARNING: Invalid sampling_factor: {sampling_factor}, using default 10")
+            sampling_factor = 10
 
         # Use MD5 hash of the geometry text representation for pseudo-random sampling
         # Use a simpler approach that avoids potential hex parsing issues
@@ -717,12 +727,6 @@ class QueryManager:
         Get the effective limit considering hash sampling
         """
         if hasattr(self, '_hash_sampling') and self._hash_sampling:
-            max_points = self._hash_sampling.get('max_points')
-            if max_points:
-                # Use the smaller of the configured limit and max_points
-                if self.limit:
-                    return min(self.limit, 2*max_points)
-                else:
-                    return 2*max_points
+            self.limit = None
         
         return self.limit
