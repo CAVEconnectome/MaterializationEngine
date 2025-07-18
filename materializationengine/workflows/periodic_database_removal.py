@@ -79,8 +79,27 @@ def remove_expired_databases(delete_threshold: int = 5, datastack: str = None) -
                     .order_by(AnalysisVersion.time_stamp)
                     .all()
                 )
+                latest_valid_version_row = (
+                    session.query(AnalysisVersion)
+                    .filter(AnalysisVersion.valid == True)
+                    .order_by(AnalysisVersion.time_stamp.desc())
+                    .first()
+                )
+                
+                
+                if latest_valid_version_row:
+                    expired_results_ids = [version.id for version in expired_results]
+                    if latest_valid_version_row.id in expired_results_ids:
+                        celery_logger.warning(
+                            f"Latest valid version {latest_valid_version_row} is in expired list, "
+                            "removing it from the expired versions."
+                        )
+                        # then we want to remove the latest_valid_version from the expired list
+                        expired_results = [
+                            version for version in expired_results 
+                            if version.id != latest_valid_version_row.id
+                        ]
                 expired_versions = [str(expired_db) for expired_db in expired_results]
-
                 non_valid_results = (
                     session.query(AnalysisVersion)
                     .filter(AnalysisVersion.valid == False)
