@@ -79,8 +79,20 @@ def remove_expired_databases(delete_threshold: int = 5, datastack: str = None) -
                     .order_by(AnalysisVersion.time_stamp)
                     .all()
                 )
+                latest_valid_version_row = (
+                    session.query(AnalysisVersion)
+                    .filter(AnalysisVersion.valid == True)
+                    .order_by(AnalysisVersion.time_stamp.desc())
+                    .first()
+                )
+                
                 expired_versions = [str(expired_db) for expired_db in expired_results]
-
+                if latest_valid_version_row:
+                    # then we want to remove the latest_valid_version from the expired list
+                    expired_versions = [
+                        version for version in expired_versions 
+                        if version.id != latest_valid_version_row.id
+                    ]
                 non_valid_results = (
                     session.query(AnalysisVersion)
                     .filter(AnalysisVersion.valid == False)
@@ -127,7 +139,7 @@ def remove_expired_databases(delete_threshold: int = 5, datastack: str = None) -
 
                             if len(remaining_databases) == delete_threshold:
                                 break
-
+                            
                             if (len(databases) - len(dropped_dbs)) > delete_threshold:
                                 try:
                                     exists_query = f"SELECT 1 FROM pg_database WHERE datname='{database}'"
