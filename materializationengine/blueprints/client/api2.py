@@ -38,6 +38,7 @@ from materializationengine.blueprints.client.common import (
 from materializationengine.blueprints.client.common import (
     unhandled_exception as common_unhandled_exception,
 )
+from materializationengine.request_db import request_db_session
 import pandas as pd
 import numpy as np
 from marshmallow import fields as mm_fields
@@ -935,21 +936,21 @@ class FrozenTablesMetadata(Resource):
             return [], 404
         
 
-        db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        for table in analysis_tables:
+        with request_db_session(aligned_volume_name) as db:
+            for table in analysis_tables:
 
-            table_name = table["table_name"]
-            ann_md = db.database.get_table_metadata(table_name)
-            # the get_table_metadata function joins on the segmentationmetadata which
-            # has the segmentation_table in the table_name and the annotation table name in the annotation_table
-            # field.  So when we update here, we overwrite the table_name with the segmentation table name,
-            # which was not the intent of the API.
-            ann_table = ann_md.pop("annotation_table", None)
-            if ann_table:
-                ann_md["table_name"] = ann_table
-            ann_md.pop("id")
-            ann_md.pop("deleted")
-            table.update(ann_md)
+                table_name = table["table_name"]
+                ann_md = db.database.get_table_metadata(table_name)
+                # the get_table_metadata function joins on the segmentationmetadata which
+                # has the segmentation_table in the table_name and the annotation table name in the annotation_table
+                # field.  So when we update here, we overwrite the table_name with the segmentation table name,
+                # which was not the intent of the API.
+                ann_table = ann_md.pop("annotation_table", None)
+                if ann_table:
+                    ann_md["table_name"] = ann_table
+                ann_md.pop("id")
+                ann_md.pop("deleted")
+                table.update(ann_md)
 
         return analysis_tables, 200
 
@@ -996,23 +997,23 @@ class FrozenTableMetadata(Resource):
 
  
 
-        db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        ann_md = db.database.get_table_metadata(table_name)
-        if ann_md is None:
-            return (
-                f"No metadata found for table named {table_name} in version {version}",
-                404,
-            )
-        # the get_table_metadata function joins on the segmentationmetadata which
-        # has the segmentation_table in the table_name and the annotation table name in the annotation_table
-        # field.  So when we update here, we overwrite the table_name with the segmentation table name,
-        # which was not the intent of the API.
-        ann_table = ann_md.pop("annotation_table", None)
-        if ann_table:
-            ann_md["table_name"] = ann_table
-        ann_md.pop("id")
-        ann_md.pop("deleted")
-        analysis_table.update(ann_md)
+        with request_db_session(aligned_volume_name) as db:
+            ann_md = db.database.get_table_metadata(table_name)
+            if ann_md is None:
+                return (
+                    f"No metadata found for table named {table_name} in version {version}",
+                    404,
+                )
+            # the get_table_metadata function joins on the segmentationmetadata which
+            # has the segmentation_table in the table_name and the annotation table name in the annotation_table
+            # field.  So when we update here, we overwrite the table_name with the segmentation table name,
+            # which was not the intent of the API.
+            ann_table = ann_md.pop("annotation_table", None)
+            if ann_table:
+                ann_md["table_name"] = ann_table
+            ann_md.pop("id")
+            ann_md.pop("deleted")
+            analysis_table.update(ann_md)
         return analysis_table, 200
 
 
@@ -1187,49 +1188,51 @@ def process_view_columns(df, model, column_names, tags, bool_tags, numerical):
 
 
 def preprocess_dataframe(df, table_name, aligned_volume_name, column_names):
-    db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    # check if this is a reference table
-    table_metadata = db.database.get_table_metadata(table_name)
-    schema = db.schema.get_flattened_schema(table_metadata["schema_type"])
-    fields = schema._declared_fields
+    with request_db_session(aligned_volume_name) as db:
+        # check if this is a reference table
+        table_metadata = db.database.get_table_metadata(table_name)
+        schema = db.schema.get_flattened_schema(table_metadata["schema_type"])
+        fields = schema._declared_fields
 
-    if table_metadata["reference_table"]:
-        ref_table = table_metadata["reference_table"]
-        ref_table_metadata = db.database.get_table_metadata(ref_table)
-        ref_schema = db.schema.get_flattened_schema(ref_table_metadata["schema_type"])
-        ref_fields = ref_schema._declared_fields
+        ref_fields = None
+        ref_table = None
+        if table_metadata["reference_table"]:
+            ref_table = table_metadata["reference_table"]
+            ref_table_metadata = db.database.get_table_metadata(ref_table)
+            ref_schema = db.schema.get_flattened_schema(ref_table_metadata["schema_type"])
+            ref_fields = ref_schema._declared_fields
 
-    # find the first column that ends with _root_id using next
-    try:
-        root_id_col = next(
-            (col for col in df.columns if col.endswith("_root_id")), None
-        )
-    except StopIteration:
-        raise ValueError("No root_id column found in dataframe")
+        # find the first column that ends with _root_id using next
+        try:
+            root_id_col = next(
+                (col for col in df.columns if col.endswith("_root_id")), None
+            )
+        except StopIteration:
+            raise ValueError("No root_id column found in dataframe")
 
-    # pick only the first row with each root_id
-    # df = df.drop_duplicates(subset=[root_id_col])
-    # drop any row with root_id =0
-    df = df[df[root_id_col] != 0]
+        # pick only the first row with each root_id
+        # df = df.drop_duplicates(subset=[root_id_col])
+        # drop any row with root_id =0
+        df = df[df[root_id_col] != 0]
 
-    # iterate through the columns and put them into
-    # categories of 'tags' for strings, 'numerical' for numbers
+        # iterate through the columns and put them into
+        # categories of 'tags' for strings, 'numerical' for numbers
 
-    tags = []
-    numerical = []
-    bool_tags = []
+        tags = []
+        numerical = []
+        bool_tags = []
 
-    process_fields(df, fields, column_names[table_name], tags, bool_tags, numerical)
+        process_fields(df, fields, column_names[table_name], tags, bool_tags, numerical)
 
-    if table_metadata["reference_table"]:
-        process_fields(
-            df,
-            ref_fields,
-            column_names[ref_table],
-            tags,
-            bool_tags,
-            numerical,
-        )
+        if table_metadata["reference_table"]:
+            process_fields(
+                df,
+                ref_fields,
+                column_names[ref_table],
+                tags,
+                bool_tags,
+                numerical,
+            )
     # Look across the tag columns and make sure that there are no
     # duplicate string values across distinct columns
     unique_vals = {}
@@ -1256,31 +1259,31 @@ def preprocess_dataframe(df, table_name, aligned_volume_name, column_names):
 
 
 def preprocess_view_dataframe(df, view_name, db_name, column_names):
-    db = dynamic_annotation_cache.get_db(db_name)
-    # check if this is a reference table
-    view_table = db.database.get_view_table(view_name)
+    with request_db_session(db_name) as db:
+        # check if this is a reference table
+        view_table = db.database.get_view_table(view_name)
 
-    # find the first column that ends with _root_id using next
-    try:
-        root_id_col = next(
-            (col for col in df.columns if col.endswith("_root_id")), None
-        )
-    except StopIteration:
-        raise ValueError("No root_id column found in dataframe")
+        # find the first column that ends with _root_id using next
+        try:
+            root_id_col = next(
+                (col for col in df.columns if col.endswith("_root_id")), None
+            )
+        except StopIteration:
+            raise ValueError("No root_id column found in dataframe")
 
-    # pick only the first row with each root_id
-    # df = df.drop_duplicates(subset=[root_id_col])
-    # drop any row with root_id =0
-    df = df[df[root_id_col] != 0]
+        # pick only the first row with each root_id
+        # df = df.drop_duplicates(subset=[root_id_col])
+        # drop any row with root_id =0
+        df = df[df[root_id_col] != 0]
 
-    # iterate through the columns and put them into
-    # categories of 'tags' for strings, 'numerical' for numbers
+        # iterate through the columns and put them into
+        # categories of 'tags' for strings, 'numerical' for numbers
 
-    tags = []
-    numerical = []
-    bool_tags = []
+        tags = []
+        numerical = []
+        bool_tags = []
 
-    process_view_columns(df, view_table, column_names, tags, bool_tags, numerical)
+        process_view_columns(df, view_table, column_names, tags, bool_tags, numerical)
 
     # Look across the tag columns and make sure that there are no
     # duplicate string values across distinct columns
@@ -1362,9 +1365,9 @@ class MatTableSegmentInfo(Resource):
         if mat_row_count > current_app.config["QUERY_LIMIT_SIZE"]:
             return "Table too large to return info", 400
         else:
-            db = dynamic_annotation_cache.get_db(aligned_volume_name)
-            # check if this is a reference table
-            table_metadata = db.database.get_table_metadata(table_name)
+            with request_db_session(aligned_volume_name) as db:
+                # check if this is a reference table
+                table_metadata = db.database.get_table_metadata(table_name)
 
             if table_metadata["reference_table"]:
                 ref_table = table_metadata["reference_table"]
@@ -1448,9 +1451,9 @@ class MatTableSegmentInfoLive(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        # check if this is a reference table
-        table_metadata = db.database.get_table_metadata(table_name)
+        with request_db_session(aligned_volume_name) as db:
+            # check if this is a reference table
+            table_metadata = db.database.get_table_metadata(table_name)
 
         user_data = {
             "table": table_name,
@@ -1619,8 +1622,8 @@ class TableUniqueStringValues(Resource):
         aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
             datastack_name
         )
-        db = dynamic_annotation_cache.get_db(aligned_volume_name)
-        unique_values = db.database.get_unique_string_values(table_name)
+        with request_db_session(aligned_volume_name) as db:
+            unique_values = db.database.get_unique_string_values(table_name)
         return unique_values, 200
 
 
@@ -1632,8 +1635,8 @@ def assemble_live_query_dataframe(user_data, datastack_name, args):
     past_ver, future_ver, aligned_vol = get_closest_versions(
         datastack_name, user_data["timestamp"]
     )
-    db = dynamic_annotation_cache.get_db(aligned_vol)
-    check_read_permission(db, user_data["table"])
+    with request_db_session(aligned_vol) as db:
+        check_read_permission(db, user_data["table"])
     allow_invalid_root_ids = args.get("allow_invalid_root_ids", False)
     # TODO add table owner warnings
     # if has_joins:
@@ -1694,15 +1697,15 @@ def assemble_live_query_dataframe(user_data, datastack_name, args):
     cg_client = chunkedgraph_cache.get_client(pcg_table_name_for_mat_query)
 
     meta_db_aligned_volume, _ = get_relevant_datastack_info(datastack_name) 
-    meta_db = dynamic_annotation_cache.get_db(meta_db_aligned_volume)
-    md = meta_db.database.get_table_metadata(user_data["table"])
-    if not user_data.get("desired_resolution", None):
-        des_res = [
-            md["voxel_resolution_x"],
-            md["voxel_resolution_y"],
-            md["voxel_resolution_z"],
-        ]
-        user_data["desired_resolution"] = des_res
+    with request_db_session(meta_db_aligned_volume) as meta_db:
+        md = meta_db.database.get_table_metadata(user_data["table"])
+        if not user_data.get("desired_resolution", None):
+            des_res = [
+                md["voxel_resolution_x"],
+                md["voxel_resolution_y"],
+                md["voxel_resolution_z"],
+            ]
+            user_data["desired_resolution"] = des_res
 
     modified_user_data, query_map, remap_warnings = remap_query(
         user_data,
@@ -1914,7 +1917,7 @@ def get_precomputed_properties_and_relationships(datastack_name, table_name):
     """
 
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
-    db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    
     past_version, _, _ = get_closest_versions(
         datastack_name, datetime.datetime.now(tz=pytz.utc)
     )
@@ -1925,9 +1928,9 @@ def get_precomputed_properties_and_relationships(datastack_name, table_name):
             .filter(MaterializedMetadata.table_name == table_name)
             .scalar()
         )
-
-    # check if this is a reference table
-    table_metadata = db.database.get_table_metadata(table_name)
+    with request_db_session(aligned_volume_name) as db:
+        # check if this is a reference table
+        table_metadata = db.database.get_table_metadata(table_name)
     # convert timestamp string to timestamp object
     # with UTC timezone
     if isinstance(past_version['time_stamp'], str):
@@ -2296,62 +2299,63 @@ def query_spatial_no_filter(
          applied to limit results to QUERY_LIMIT_SIZE for better performance
     """
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
-    db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    table_metadata = db.database.get_table_metadata(table_name)
     
-
-    vals = get_precomputed_properties_and_relationships(datastack_name, table_name)
-    relationships, properties, d, column_names, ann_type, mat_row_count = vals
-
-    timestamp = datetime.datetime.now(tz=pytz.utc) if timestamp is None else timestamp
-    
-    spatial_column = None
-    spatial_table = None
-    vox_res = None
-    
-    table_schema = db.schema.get_flattened_schema(table_metadata["schema_type"])
-    table_fields = table_schema._declared_fields
-    for field_name, field in table_fields.items():
-        if isinstance(field, PostGISField):
-            spatial_column = field_name
-            spatial_table = table_name
-            vox_res = np.array(
-                    [
-                        table_metadata["voxel_resolution_x"],
-                        table_metadata["voxel_resolution_y"],
-                        table_metadata["voxel_resolution_z"],
-                    ])
+    with request_db_session(aligned_volume_name) as db:
+        table_metadata = db.database.get_table_metadata(table_name)
         
-    user_data = {
-        "table": table_name,
-        "timestamp": timestamp,
-        "suffixes": {table_name: ""},
-        "desired_resolution": [1, 1, 1],
-    }
-    
-    if table_metadata["reference_table"]:
-        ref_table = table_metadata["reference_table"]
-        user_data["suffixes"][ref_table] = "_ref"
-        user_data["join_tables"] = [[table_name, "target_id", ref_table, "id"]]
-        # find the spatial column in the reference table
-        if (spatial_column is  None):
-            # get the reference table schema
-            ref_metadata = db.database.get_table_metadata(ref_table)
-            ref_schema = db.schema.get_flattened_schema(ref_metadata["schema_type"])
-            ref_fields = ref_schema._declared_fields
+
+        vals = get_precomputed_properties_and_relationships(datastack_name, table_name)
+        relationships, properties, d, column_names, ann_type, mat_row_count = vals
+
+        timestamp = datetime.datetime.now(tz=pytz.utc) if timestamp is None else timestamp
+        
+        spatial_column = None
+        spatial_table = None
+        vox_res = None
+        
+        table_schema = db.schema.get_flattened_schema(table_metadata["schema_type"])
+        table_fields = table_schema._declared_fields
+        for field_name, field in table_fields.items():
+            if isinstance(field, PostGISField):
+                spatial_column = field_name
+                spatial_table = table_name
+                vox_res = np.array(
+                        [
+                            table_metadata["voxel_resolution_x"],
+                            table_metadata["voxel_resolution_y"],
+                            table_metadata["voxel_resolution_z"],
+                        ])
             
-            for field_name, field in ref_fields.items():
-                if isinstance(field, PostGISField):
-                    spatial_column = field_name
-                    spatial_table = ref_table
-                    vox_res = np.array(
-                    [
-                        ref_metadata["voxel_resolution_x"],
-                        ref_metadata["voxel_resolution_y"],
-                        ref_metadata["voxel_resolution_z"],
-                    ])
-                    break
-            
+        user_data = {
+            "table": table_name,
+            "timestamp": timestamp,
+            "suffixes": {table_name: ""},
+            "desired_resolution": [1, 1, 1],
+        }
+        
+        if table_metadata["reference_table"]:
+            ref_table = table_metadata["reference_table"]
+            user_data["suffixes"][ref_table] = "_ref"
+            user_data["join_tables"] = [[table_name, "target_id", ref_table, "id"]]
+            # find the spatial column in the reference table
+            if (spatial_column is  None):
+                # get the reference table schema
+                ref_metadata = db.database.get_table_metadata(ref_table)
+                ref_schema = db.schema.get_flattened_schema(ref_metadata["schema_type"])
+                ref_fields = ref_schema._declared_fields
+                
+                for field_name, field in ref_fields.items():
+                    if isinstance(field, PostGISField):
+                        spatial_column = field_name
+                        spatial_table = ref_table
+                        vox_res = np.array(
+                        [
+                            ref_metadata["voxel_resolution_x"],
+                            ref_metadata["voxel_resolution_y"],
+                            ref_metadata["voxel_resolution_z"],
+                        ])
+                        break
+                
     if (spatial_column is None):
         abort(400, f"No spatial column found for table {table_name}")
     
@@ -2404,8 +2408,8 @@ def query_by_id(
         pd.DataFrame: dataframe of precomputed properties
     """
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
-    db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    table_metadata = db.database.get_table_metadata(table_name)
+    with request_db_session(aligned_volume_name) as db:
+        table_metadata = db.database.get_table_metadata(table_name)
 
     vals = get_precomputed_properties_and_relationships(datastack_name, table_name)
     relationships, properties, geometry_columns, column_names, ann_type, mat_row_count = vals
@@ -2455,8 +2459,8 @@ def live_query_by_relationship(
         pd.DataFrame: dataframe of precomputed relationships
     """
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
-    db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    table_metadata = db.database.get_table_metadata(table_name)
+    with request_db_session(aligned_volume_name) as db:
+        table_metadata = db.database.get_table_metadata(table_name)
  
     vals = get_precomputed_properties_and_relationships(datastack_name, table_name)
     relationships, properties, geometry_columns, column_names, ann_type, mat_row_count = vals
@@ -3053,10 +3057,9 @@ class AvailableViews(Resource):
             mat_db_name = f"{aligned_volume_name}"
         else:
             mat_db_name = f"{datastack_name}__mat{version}"
-
-        meta_db = dynamic_annotation_cache.get_db(mat_db_name)
-        views = meta_db.database.get_views(datastack_name)
-        views = AnalysisViewSchema().dump(views, many=True)
+        with request_db_session(mat_db_name) as meta_db:
+            views = meta_db.database.get_views(datastack_name)
+            views = AnalysisViewSchema().dump(views, many=True)
         view_d = {}
         for view in views:
             name = view.pop("table_name")
@@ -3102,9 +3105,8 @@ class ViewMetadata(Resource):
             mat_db_name = f"{aligned_volume_name}"
         else:
             mat_db_name = f"{datastack_name}__mat{version}"
-
-        meta_db = dynamic_annotation_cache.get_db(mat_db_name)
-        md = meta_db.database.get_view_metadata(datastack_name, view_name)
+        with request_db_session(mat_db_name) as meta_db:
+            md = meta_db.database.get_view_metadata(datastack_name, view_name)
 
         return md
 
@@ -3142,9 +3144,8 @@ def assemble_view_dataframe(datastack_name, version, view_name, data, args):
     get_count = args.get("count", False)
     if get_count:
         limit = None
-
-    mat_db = dynamic_annotation_cache.get_db(mat_db_name)
-    md = mat_db.database.get_view_metadata(datastack_name, view_name)
+    with request_db_session(mat_db_name) as mat_db:
+        md = mat_db.database.get_view_metadata(datastack_name, view_name)
 
     if not data.get("desired_resolution", None):
         des_res = [
@@ -3493,9 +3494,8 @@ class ViewSchema(Resource):
             mat_db_name = f"{aligned_volume_name}"
         else:
             mat_db_name = f"{datastack_name}__mat{version}"
-
-        meta_db = dynamic_annotation_cache.get_db(mat_db_name)
-        table = meta_db.database.get_view_table(view_name)
+        with request_db_session(mat_db_name) as meta_db:
+            table = meta_db.database.get_view_table(view_name)
 
         return get_table_schema(table)
 
@@ -3537,9 +3537,8 @@ class ViewSchemas(Resource):
             mat_db_name = f"{aligned_volume_name}"
         else:
             mat_db_name = f"{datastack_name}__mat{version}"
-
-        meta_db = dynamic_annotation_cache.get_db(mat_db_name)
-        views = meta_db.database.get_views(datastack_name)
+        with request_db_session(mat_db_name) as meta_db:
+            views = meta_db.database.get_views(datastack_name)
         if not views:
             return {}, 404
         
