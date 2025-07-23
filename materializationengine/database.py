@@ -119,13 +119,13 @@ class DatabaseConnectionManager:
     
     def cleanup(self):
         """Cleanup any remaining sessions and dispose of engine pools."""
-        for database_name, session_factory in self._session_factories.items():
+        for database_name, session_factory in list(self._session_factories.items()):
             try:
                 session_factory.remove()
             except Exception as e:
                 celery_logger.error(f"Error cleaning up sessions for {database_name}: {e}")
         
-        for database_name, engine in self._engines.items():
+        for database_name, engine in list(self._engines.items()):
             try:
                 engine.dispose()
             except Exception as e:
