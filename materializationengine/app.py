@@ -24,6 +24,7 @@ from materializationengine.utils import get_instance_folder_path
 from materializationengine.views import views_bp
 from materializationengine.limiter import limiter
 from materializationengine.migrate import migrator
+from materializationengine.request_db import init_request_db_cleanup
 
 db = SQLAlchemy(model_class=Base)
 
@@ -62,7 +63,8 @@ def create_app(config_name: str = None):
     else:
         app = configure_app(app)
 
-
+    # Initialize request-scoped database session cleanup
+    init_request_db_cleanup(app)
     
     # register blueprints
     apibp = Blueprint("api", __name__, url_prefix="/materialize")
