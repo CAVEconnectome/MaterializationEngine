@@ -56,14 +56,14 @@ class DatabaseConnectionManager:
     def get_engine(self, database_name: str):
         """Get or create SQLAlchemy engine with proper pooling configuration."""
         if database_name not in self._engines:
+            SQL_URI_CONFIG = current_app.config["SQLALCHEMY_DATABASE_URI"]
+            sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
+            sql_uri = f"{sql_base_uri}/{database_name}"
+            
+            pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 20)
+            max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 30)
+            
             try:
-                SQL_URI_CONFIG = current_app.config["SQLALCHEMY_DATABASE_URI"]
-                sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
-                sql_uri = f"{sql_base_uri}/{database_name}"
-                
-                pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 20)
-                max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 30)
-                
                 engine = create_engine(
                     sql_uri,
                     poolclass=QueuePool,
@@ -75,27 +75,24 @@ class DatabaseConnectionManager:
                 )
                 
                 # Test the connection to make sure the database exists and is accessible
-                try:
-                    with engine.connect() as conn:
-                        conn.execute(text("SELECT 1"))
-                    celery_logger.info(f"Successfully connected to database {database_name}")
-                except Exception as conn_error:
-                    engine.dispose()  # Clean up the failed engine
-                    celery_logger.error(f"Failed to connect to database {database_name}: {conn_error}")
-                    raise ConnectionError(f"Cannot connect to database '{database_name}'. "
-                                        f"Please check if the database exists and is accessible. "
-                                        f"Connection URI: {sql_base_uri}/<database_name>. "
-                                        f"Error: {conn_error}")
+                with engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
                 
+                # Only store engine if connection test passes
                 self._engines[database_name] = engine
                 celery_logger.info(f"Created new connection pool for {database_name} "
                            f"(size={pool_size}, max_overflow={max_overflow})")
+                
             except Exception as e:
-                celery_logger.error(f"Failed to create engine for database {database_name}: {e}")
-                raise
-        
-        if database_name not in self._engines:
-            raise KeyError(f"Engine for database '{database_name}' was not created successfully")
+                # Clean up engine if it was created but connection failed
+                if 'engine' in locals():
+                    engine.dispose()
+                
+                celery_logger.error(f"Failed to create/connect to database {database_name}: {e}")
+                raise ConnectionError(f"Cannot connect to database '{database_name}'. "
+                                    f"Please check if the database exists and is accessible. "
+                                    f"Connection URI: {sql_uri}. "
+                                    f"Error: {e}")
             
         return self._engines[database_name]
     
