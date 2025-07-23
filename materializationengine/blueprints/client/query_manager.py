@@ -1,6 +1,6 @@
 from collections import defaultdict
 from materializationengine.database import dynamic_annotation_cache
-from flask import abort
+from flask import abort, current_app
 from materializationengine.blueprints.client.query import (
     make_spatial_filter,
     _execute_query,
@@ -43,6 +43,11 @@ class QueryManager:
         self._segmentation_source = segmentation_source
         self._split_mode = split_mode
         self._random_sample = random_sample
+        
+        # Debug logging for random sample
+        current_app.logger.debug(f"QueryManager initialized with random_sample: {random_sample} (type: {type(random_sample)})")
+        if random_sample is not None:
+            current_app.logger.debug(f"random_sample > 0: {random_sample > 0}, random_sample <= 100: {random_sample <= 100}")
 
         self._split_mode_outer = split_mode_outer
         self._split_models = {}
@@ -186,17 +191,27 @@ class QueryManager:
                     # self._models[segmodel.__tablename__] = segmodel_alias
 
                 else:
-                    if random_sample and self._random_sample is not None:
-                        annmodel_alias1 = aliased(
-                            annmodel, tablesample(annmodel, self._random_sample)
-                        )
+                    if random_sample and self._random_sample is not None and self._random_sample > 0:
+                        # Ensure the random sample is a valid percentage (convert to float if needed)
+                        sample_value = float(self._random_sample)
+                        if sample_value <= 0 or sample_value > 100:
+                            abort(500, f"Invalid random_sample value: {sample_value}, skipping TABLESAMPLE")
+                        else:
+                            annmodel_alias1 = aliased(
+                                annmodel, tablesample(annmodel, sample_value)
+                            )
                     else:
                         annmodel_alias1 = annmodel
                     self._models[table_name] = annmodel_alias1
             else:
                 model = self._get_flat_model(table_name)
-                if self._random_sample is not None:
-                    model = aliased(model, tablesample, self._random_sample)
+                if self._random_sample is not None and self._random_sample > 0:
+                    # Ensure the random sample is a valid percentage (convert to float if needed)
+                    sample_value = float(self._random_sample)
+                    if sample_value <= 0 or sample_value > 100:
+                        abort(500, f"Invalid random_sample value: {sample_value}, skipping TABLESAMPLE")
+                    else:
+                        model = aliased(model, tablesample(model, sample_value))
                 self._models[table_name] = model
 
     def _find_relevant_model(self, table_name, column_name):
