@@ -61,8 +61,8 @@ class DatabaseConnectionManager:
                 sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
                 sql_uri = f"{sql_base_uri}/{database_name}"
                 
-                pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 5)
-                max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 5)
+                pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 20)
+                max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 30)
                 
                 self._engines[database_name] = create_engine(
                     sql_uri,
@@ -165,8 +165,8 @@ class DynamicMaterializationCache:
 
     def _get_mat_client(self, database: str):
         sql_uri_config = get_config_param("SQLALCHEMY_DATABASE_URI")
-        pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 5)
-        max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 5)
+        pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 20)
+        max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 30)
         mat_client = DynamicAnnotationInterface(
             sql_uri_config, database, pool_size, max_overflow
         )
