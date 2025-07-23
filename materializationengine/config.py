@@ -68,8 +68,8 @@ class BaseConfig:
     else:
         AUTH_TOKEN = ""
 
-    DB_CONNECTION_POOL_SIZE = 5
-    DB_CONNECTION_MAX_OVERFLOW = 5
+    DB_CONNECTION_POOL_SIZE = 20
+    DB_CONNECTION_MAX_OVERFLOW = 30
 
     BEAT_SCHEDULES = [
         {
