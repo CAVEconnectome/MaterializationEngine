@@ -169,10 +169,20 @@ class QueryManager:
                     seg_columns = [
                         c for c in segmodel.__table__.columns if c.key != "id"
                     ]
-                    if random_sample and self._random_sample is not None:
-                        annmodel_alias1 = aliased(
-                            annmodel, tablesample(annmodel, self._random_sample)
-                        )
+                    if random_sample and self._random_sample is not None and self._random_sample > 0:
+                        # Ensure the random sample is a valid percentage (convert to float if needed)
+                        try:
+                            sample_value = float(self._random_sample)
+                            if not np.isfinite(sample_value) or sample_value <= 0 or sample_value > 100:
+                                # Skip TABLESAMPLE if invalid
+                                annmodel_alias1 = annmodel
+                            else:
+                                annmodel_alias1 = aliased(
+                                    annmodel, tablesample(annmodel, sample_value)
+                                )
+                        except (ValueError, TypeError):
+                            # Skip TABLESAMPLE if conversion fails
+                            annmodel_alias1 = annmodel
                     else:
                         annmodel_alias1 = annmodel
                     subquery = (
@@ -180,7 +190,9 @@ class QueryManager:
                         .join(segmodel, annmodel_alias1.id == segmodel.id, isouter=True)
                         .subquery()
                     )
-                    annmodel_alias = aliased(subquery, name=table_name, flat=True)
+                    # Use flat=False to preserve parameter binding context when TABLESAMPLE is used
+                    use_flat = not (random_sample and self._random_sample is not None and self._random_sample > 0)
+                    annmodel_alias = aliased(subquery, name=table_name, flat=use_flat)
 
                     self._models[table_name] = annmodel_alias
                     # self._models[segmodel.__tablename__] = segmodel_alias
@@ -188,13 +200,16 @@ class QueryManager:
                 else:
                     if random_sample and self._random_sample is not None and self._random_sample > 0:
                         # Ensure the random sample is a valid percentage (convert to float if needed)
-                        sample_value = float(self._random_sample)
-                        if sample_value <= 0 or sample_value > 100:
-                            abort(500, f"Invalid random_sample value: {sample_value}, skipping TABLESAMPLE")
-                        else:
-                            annmodel_alias1 = aliased(
-                                annmodel, tablesample(annmodel, sample_value)
-                            )
+                        try:
+                            sample_value = float(self._random_sample)
+                            if not np.isfinite(sample_value) or sample_value <= 0 or sample_value > 100:
+                                abort(500, f"Invalid random_sample value: {sample_value}, skipping TABLESAMPLE")
+                            else:
+                                annmodel_alias1 = aliased(
+                                    annmodel, tablesample(annmodel, sample_value)
+                                )
+                        except (ValueError, TypeError) as e:
+                            abort(500, f"Cannot convert random_sample to float: {self._random_sample}, error: {e}")
                     else:
                         annmodel_alias1 = annmodel
                     self._models[table_name] = annmodel_alias1
@@ -202,11 +217,14 @@ class QueryManager:
                 model = self._get_flat_model(table_name)
                 if self._random_sample is not None and self._random_sample > 0:
                     # Ensure the random sample is a valid percentage (convert to float if needed)
-                    sample_value = float(self._random_sample)
-                    if sample_value <= 0 or sample_value > 100:
-                        abort(500, f"Invalid random_sample value: {sample_value}, skipping TABLESAMPLE")
-                    else:
-                        model = aliased(model, tablesample(model, sample_value))
+                    try:
+                        sample_value = float(self._random_sample)
+                        if not np.isfinite(sample_value) or sample_value <= 0 or sample_value > 100:
+                            abort(500, f"Invalid random_sample value: {sample_value}, skipping TABLESAMPLE")
+                        else:
+                            model = aliased(model, tablesample(model, sample_value))
+                    except (ValueError, TypeError) as e:
+                        abort(500, f"Cannot convert random_sample to float: {self._random_sample}, error: {e}")
                 self._models[table_name] = model
 
     def _find_relevant_model(self, table_name, column_name):
