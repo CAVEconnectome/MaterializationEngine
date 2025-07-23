@@ -44,11 +44,6 @@ class QueryManager:
         self._split_mode = split_mode
         self._random_sample = random_sample
         
-        # Debug logging for random sample
-        current_app.logger.debug(f"QueryManager initialized with random_sample: {random_sample} (type: {type(random_sample)})")
-        if random_sample is not None:
-            current_app.logger.debug(f"random_sample > 0: {random_sample > 0}, random_sample <= 100: {random_sample <= 100}")
-
         self._split_mode_outer = split_mode_outer
         self._split_models = {}
         self._flat_models = {}
