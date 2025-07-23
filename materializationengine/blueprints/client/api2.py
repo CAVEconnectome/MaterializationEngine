@@ -2065,18 +2065,6 @@ def calculate_spatial_index_levels(total_size, annotation_count, target_limit=10
             "limit": target_limit
         }]
         
-        # Still add the high-resolution level
-        target_chunk_size = np.array([15000, 15000, 2000], dtype=float)
-        high_res_grid_shape = np.maximum([1, 1, 1], np.ceil(total_size / target_chunk_size).astype(int))
-        high_res_chunk_size = total_size / high_res_grid_shape
-        
-        levels.append({
-            "key": "spatial_high_res",
-            "grid_shape": high_res_grid_shape.tolist(),
-            "chunk_size": high_res_chunk_size.astype(int).tolist(),
-            "limit": target_limit
-        })
-        
         return levels
     
     levels = []
