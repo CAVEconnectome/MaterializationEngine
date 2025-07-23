@@ -56,25 +56,32 @@ class DatabaseConnectionManager:
     def get_engine(self, database_name: str):
         """Get or create SQLAlchemy engine with proper pooling configuration."""
         if database_name not in self._engines:
-            SQL_URI_CONFIG = current_app.config["SQLALCHEMY_DATABASE_URI"]
-            sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
-            sql_uri = f"{sql_base_uri}/{database_name}"
-            
-            pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 5)
-            max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 5)
-            
-            self._engines[database_name] = create_engine(
-                sql_uri,
-                poolclass=QueuePool,
-                pool_size=pool_size,
-                max_overflow=max_overflow,
-                pool_timeout=30,
-                pool_recycle=1800,  # Recycle connections after 30 minutes
-                pool_pre_ping=True,  # Ensure connections are still valid
-            )
-            
-            celery_logger.info(f"Created new connection pool for {database_name} "
-                       f"(size={pool_size}, max_overflow={max_overflow})")
+            try:
+                SQL_URI_CONFIG = current_app.config["SQLALCHEMY_DATABASE_URI"]
+                sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
+                sql_uri = f"{sql_base_uri}/{database_name}"
+                
+                pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 5)
+                max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 5)
+                
+                self._engines[database_name] = create_engine(
+                    sql_uri,
+                    poolclass=QueuePool,
+                    pool_size=pool_size,
+                    max_overflow=max_overflow,
+                    pool_timeout=30,
+                    pool_recycle=1800,  # Recycle connections after 30 minutes
+                    pool_pre_ping=True,  # Ensure connections are still valid
+                )
+                
+                celery_logger.info(f"Created new connection pool for {database_name} "
+                           f"(size={pool_size}, max_overflow={max_overflow})")
+            except Exception as e:
+                celery_logger.error(f"Failed to create engine for database {database_name}: {e}")
+                raise
+        
+        if database_name not in self._engines:
+            raise KeyError(f"Engine for database '{database_name}' was not created successfully")
             
         return self._engines[database_name]
     
