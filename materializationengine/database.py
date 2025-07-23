@@ -3,7 +3,7 @@ from urllib.parse import urlparse
 
 from dynamicannotationdb import DynamicAnnotationInterface
 from flask import current_app
-from sqlalchemy import MetaData, create_engine
+from sqlalchemy import MetaData, create_engine, text
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.pool import QueuePool
 
@@ -64,7 +64,7 @@ class DatabaseConnectionManager:
                 pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 20)
                 max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 30)
                 
-                self._engines[database_name] = create_engine(
+                engine = create_engine(
                     sql_uri,
                     poolclass=QueuePool,
                     pool_size=pool_size,
@@ -74,6 +74,20 @@ class DatabaseConnectionManager:
                     pool_pre_ping=True,  # Ensure connections are still valid
                 )
                 
+                # Test the connection to make sure the database exists and is accessible
+                try:
+                    with engine.connect() as conn:
+                        conn.execute(text("SELECT 1"))
+                    celery_logger.info(f"Successfully connected to database {database_name}")
+                except Exception as conn_error:
+                    engine.dispose()  # Clean up the failed engine
+                    celery_logger.error(f"Failed to connect to database {database_name}: {conn_error}")
+                    raise ConnectionError(f"Cannot connect to database '{database_name}'. "
+                                        f"Please check if the database exists and is accessible. "
+                                        f"Connection URI: {sql_base_uri}/<database_name>. "
+                                        f"Error: {conn_error}")
+                
+                self._engines[database_name] = engine
                 celery_logger.info(f"Created new connection pool for {database_name} "
                            f"(size={pool_size}, max_overflow={max_overflow})")
             except Exception as e:
