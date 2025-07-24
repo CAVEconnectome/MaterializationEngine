@@ -15,7 +15,7 @@ class BaseConfig:
     TESTING = False
     LOGGING_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
     LOGGING_LOCATION = HOME + "/.materializationengine/bookshelf.log"
-    LOGGING_LEVEL = logging.DEBUG
+    LOGGING_LEVEL = logging.WARNING
     SQLALCHEMY_DATABASE_URI = "sqlite://"
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     REDIS_URL = "redis://"
@@ -168,7 +168,7 @@ class TestConfig(BaseConfig):
 
 class ProductionConfig(BaseConfig):
     ENV = "production"
-    LOGGING_LEVEL = logging.INFO
+    LOGGING_LEVEL = logging.WARNING
     CELERY_BROKER = os.environ.get("REDIS_URL")
     CELERY_RESULT_BACKEND = os.environ.get("REDIS_URL")
     REDIS_URL = os.environ.get("REDIS_URL")
