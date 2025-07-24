@@ -53,7 +53,7 @@ def create_app(config_name: str = None):
         template_folder="../templates",
     )
     CORS(app, expose_headers=["WWW-Authenticate", "column_names"])
-    logging.basicConfig(level=logging.INFO)
+    
     app.json_encoder = AEEncoder
     app.config["RESTX_JSON"] = {"cls": AEEncoder}
 
@@ -62,7 +62,7 @@ def create_app(config_name: str = None):
         app.config.from_object(config[config_name])
     else:
         app = configure_app(app)
-
+    logging.basicConfig(level=app.config['LOGGING_LEVEL'])
     # Initialize request-scoped database session cleanup
     init_request_db_cleanup(app)
     
