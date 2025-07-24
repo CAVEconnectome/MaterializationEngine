@@ -63,6 +63,15 @@ def create_app(config_name: str = None):
     else:
         app = configure_app(app)
     logging.basicConfig(level=app.config['LOGGING_LEVEL'])
+    
+    # Suppress noisy debug messages from fsevents
+    logging.getLogger('fsevents').setLevel(app.config['LOGGING_LEVEL'])
+    logging.getLogger('urllib3').setLevel(app.config['LOGGING_LEVEL'])
+    logging.getLogger('google').setLevel(app.config['LOGGING_LEVEL'])
+    logging.getLogger('materializationengine').setLevel(app.config['LOGGING_LEVEL'])
+    logging.getLogger('root').setLevel(app.config['LOGGING_LEVEL'])
+    logging.getLogger('python_jsonschema_objects').setLevel(app.config['LOGGING_LEVEL'])
+
     # Initialize request-scoped database session cleanup
     init_request_db_cleanup(app)
     
