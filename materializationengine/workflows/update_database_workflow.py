@@ -25,7 +25,7 @@ from materializationengine.workflows.update_root_ids import (
 celery_logger = get_task_logger(__name__)
 
 
-@celery.task(name="workflow:run_periodic_database_update")
+@celery.task(name="orchestration:run_periodic_database_update")
 def run_periodic_database_update(datastack: str = None) -> None:
     """
     Run update database workflow. Steps are as follows:
@@ -53,11 +53,11 @@ def run_periodic_database_update(datastack: str = None) -> None:
     return True
 
 
-@celery.task(
+@celery.task(o
     bind=True,
     base=LockedTask,
     timeout=int(60 * 60 * 24),  # Task locked for 1 day
-    name="workflow:update_database_workflow",
+    name="orchestration:update_database_workflow",
 )
 def update_database_workflow(self, datastack_info: dict, **kwargs):
     """Updates 'live' database:
