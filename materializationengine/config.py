@@ -70,6 +70,13 @@ class BaseConfig:
 
     DB_CONNECTION_POOL_SIZE = 20
     DB_CONNECTION_MAX_OVERFLOW = 30
+    
+    # Spatial cache configuration (in seconds)
+    SPATIAL_CACHE_TTL = 1200  # 20 minutes = 1200 seconds
+    
+    # Cache backend configuration
+    # Options: 'simple' (memory), 'filesystem' (local files), 'RedisCache' (production)
+    CACHE_TYPE = "RedisCache"
 
     BEAT_SCHEDULES = [
         {
@@ -151,6 +158,9 @@ class DevConfig(BaseConfig):
     CELERY_RESULT_BACKEND = REDIS_URL
     USE_SENTINEL = os.environ.get("USE_SENTINEL", False)
     
+    # Use simple memory cache for development (no Redis dependency)
+    CACHE_TYPE = "simple"
+    
 
 
 class TestConfig(BaseConfig):
@@ -164,6 +174,9 @@ class TestConfig(BaseConfig):
     CELERY_RESULT_BACKEND = "redis://"
     MATERIALIZATION_ROW_CHUNK_SIZE = 2
     BEAT_SCHEDULES = []
+    
+    # Use simple memory cache for testing (no external dependencies)
+    CACHE_TYPE = "simple"
 
 
 class ProductionConfig(BaseConfig):

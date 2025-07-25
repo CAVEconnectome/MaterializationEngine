@@ -4,6 +4,7 @@ import pytz
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
 from cachetools import TTLCache, cached, LRUCache
+from materializationengine.cache import cache
 from functools import wraps
 from typing import List
 
@@ -2697,18 +2698,38 @@ class LiveTablesAvailable(Resource):
 # General spatial endpoint that handles all spatial levels (spatial_overview, spatial_level_1, spatial_level_2, etc.)
 # This replaces the old spatial_high_res endpoint and provides a unified interface for all spatial levels
 
-# Cache for spatial query results with 20-minute TTL
-_spatial_bytes_cache = TTLCache(maxsize=1000, ttl=1200)  # 20 minutes = 1200 seconds
-
-def _cache_key_spatial_bytes(datastack_name, table_name, spatial_level, x_bin, y_bin, z_bin, timestamp):
+def _cache_key_spatial_bytes(datastack_name, table_name, spatial_level, x_bin, y_bin, z_bin):
     """Generate cache key for spatial bytes result."""
-    # Round timestamp to minute precision to improve cache hit rate
-    timestamp_str = None
-    if timestamp is not None:
-        timestamp_rounded = timestamp.replace(second=0, microsecond=0)
-        timestamp_str = timestamp_rounded.isoformat()
     
-    return hashkey(datastack_name, table_name, spatial_level, x_bin, y_bin, z_bin, timestamp_str)
+    # Create a cache key string (Flask-Caching handles hashing)
+    return f"spatial_bytes:{datastack_name}:{table_name}:{spatial_level}:{x_bin}_{y_bin}_{z_bin}"
+
+
+def clear_spatial_cache(datastack_name: str = None, table_name: str = None):
+    """
+    Clear spatial cache entries. Useful for cache invalidation during updates.
+    
+    Args:
+        datastack_name: If specified, clear only entries for this datastack
+        table_name: If specified (with datastack_name), clear only entries for this table
+    """
+    try:
+        if datastack_name and table_name:
+            # Clear specific table cache
+            pattern = f"spatial_bytes:{datastack_name}:{table_name}:*"
+            # Flask-Caching doesn't have pattern deletion, so we'd need to track keys
+            # For now, just clear all spatial cache
+            cache.delete_memoized(_cache_key_spatial_bytes)
+        elif datastack_name:
+            # Clear datastack cache - same limitation
+            cache.delete_memoized(_cache_key_spatial_bytes)
+        else:
+            # Clear all spatial cache
+            cache.delete_memoized(_cache_key_spatial_bytes)
+        return True
+    except Exception as e:
+        current_app.logger.warning(f"Failed to clear spatial cache: {e}")
+        return False
 
 @client_bp.route(
     "/datastack/<string:datastack_name>/table/<string:table_name>/precomputed/<string:spatial_level>/<int:x_bin>_<int:y_bin>_<int:z_bin>"
@@ -2754,82 +2775,83 @@ class LiveTableSpatialLevel(Resource):
             .../precomputed/spatial_level_1/1_2_0
             .../precomputed/spatial_level_2/4_3_1
         """
-        precomputed_info = get_precomputed_info(datastack_name, table_name)
+        # Check Redis cache first for this specific spatial chunk
+        cache_key = _cache_key_spatial_bytes(datastack_name, table_name, spatial_level, x_bin, y_bin, z_bin)
+        
+        bytes_data = cache.get(cache_key)
+        if bytes_data is None:
 
-        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
-            target_datastack
-        )
-        if version is not None:
-            with db_manager.session_scope(aligned_volume_name) as session:
-                analysis_version = session.query(AnalysisVersion).filter(
-                    AnalysisVersion.datastack == datastack_name,
-                    AnalysisVersion.version == version,
-                ).one_or_none()
-                timestamp = analysis_version.time_stamp.astimezone(datetime.timezone.utc) if analysis_version else None
-        else:
-            timestamp = None
-        
-        # get the info for this spatial index from the precomputed info
-        spatial_keys = precomputed_info.get("spatial", [])
-        spatial_key = None
-        for spatial_index in spatial_keys:
-            if spatial_index["key"] == spatial_level:
-                spatial_key = spatial_index
-                break
-        
-        if spatial_key is None:
-            abort(404, f"Spatial level '{spatial_level}' not found for table '{table_name}'")
-        
-        # Validate grid coordinates are within valid bounds
-        grid_shape = spatial_key.get("grid_shape", [1, 1, 1])
-        if (x_bin < 0 or x_bin >= grid_shape[0] or
-            y_bin < 0 or y_bin >= grid_shape[1] or 
-            z_bin < 0 or z_bin >= grid_shape[2]):
-            abort(400, f"Grid coordinates ({x_bin}, {y_bin}, {z_bin}) are out of bounds for spatial level '{spatial_level}' with grid shape {grid_shape}")
-        
-        lower_bound, upper_bound = get_precomputed_bounds(datastack_name)
+            precomputed_info = get_precomputed_info(datastack_name, table_name)
 
-        chunk_size = np.array(spatial_key["chunk_size"])
-        grid_shape = np.array(spatial_key["grid_shape"])
-        
-        # Calculate what fraction of the total volume this chunk represents
-        total_volume = np.prod(np.array(upper_bound) - np.array(lower_bound))
-        chunk_volume = np.prod(chunk_size)
-        
-        # Validate volume calculations to prevent invalid tablesample parameters
-        if total_volume <= 0:
-            print(f"WARNING: Invalid total_volume: {total_volume}, bounds: {lower_bound} to {upper_bound}")
-            volume_fraction = 1.0  # Fallback to no sampling
-        elif chunk_volume <= 0:
-            print(f"WARNING: Invalid chunk_volume: {chunk_volume}, chunk_size: {chunk_size}")
-            volume_fraction = 1.0  # Fallback to no sampling
-        else:
-            volume_fraction = chunk_volume / total_volume
+            aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+                target_datastack
+            )
+            if version is not None:
+                with db_manager.session_scope(aligned_volume_name) as session:
+                    analysis_version = session.query(AnalysisVersion).filter(
+                        AnalysisVersion.datastack == datastack_name,
+                        AnalysisVersion.version == version,
+                    ).one_or_none()
+                    timestamp = analysis_version.time_stamp.astimezone(datetime.timezone.utc) if analysis_version else None
+            else:
+                timestamp = None
             
-        # Ensure volume_fraction is valid for tablesample
-        if not np.isfinite(volume_fraction) or volume_fraction <= 0:
-            print(f"WARNING: Invalid volume_fraction: {volume_fraction}, defaulting to 1.0")
-            volume_fraction = 1.0
-        elif volume_fraction > 1.0:
-            print(f"WARNING: volume_fraction > 1.0: {volume_fraction}, capping at 1.0")
-            volume_fraction = 1.0
+            # get the info for this spatial index from the precomputed info
+            spatial_keys = precomputed_info.get("spatial", [])
+            spatial_key = None
+            for spatial_index in spatial_keys:
+                if spatial_index["key"] == spatial_level:
+                    spatial_key = spatial_index
+                    break
+            
+            if spatial_key is None:
+                abort(404, f"Spatial level '{spatial_level}' not found for table '{table_name}'")
+            
+            # Validate grid coordinates are within valid bounds
+            grid_shape = spatial_key.get("grid_shape", [1, 1, 1])
+            if (x_bin < 0 or x_bin >= grid_shape[0] or
+                y_bin < 0 or y_bin >= grid_shape[1] or 
+                z_bin < 0 or z_bin >= grid_shape[2]):
+                abort(400, f"Grid coordinates ({x_bin}, {y_bin}, {z_bin}) are out of bounds for spatial level '{spatial_level}' with grid shape {grid_shape}")
+            
+            lower_bound, upper_bound = get_precomputed_bounds(datastack_name)
+
+            chunk_size = np.array(spatial_key["chunk_size"])
+            grid_shape = np.array(spatial_key["grid_shape"])
+            
+            # Calculate what fraction of the total volume this chunk represents
+            total_volume = np.prod(np.array(upper_bound) - np.array(lower_bound))
+            chunk_volume = np.prod(chunk_size)
+            
+            # Validate volume calculations to prevent invalid tablesample parameters
+            if total_volume <= 0:
+                print(f"WARNING: Invalid total_volume: {total_volume}, bounds: {lower_bound} to {upper_bound}")
+                volume_fraction = 1.0  # Fallback to no sampling
+            elif chunk_volume <= 0:
+                print(f"WARNING: Invalid chunk_volume: {chunk_volume}, chunk_size: {chunk_size}")
+                volume_fraction = 1.0  # Fallback to no sampling
+            else:
+                volume_fraction = chunk_volume / total_volume
+                
+            # Ensure volume_fraction is valid for tablesample
+            if not np.isfinite(volume_fraction) or volume_fraction <= 0:
+                print(f"WARNING: Invalid volume_fraction: {volume_fraction}, defaulting to 1.0")
+                volume_fraction = 1.0
+            elif volume_fraction > 1.0:
+                print(f"WARNING: volume_fraction > 1.0: {volume_fraction}, capping at 1.0")
+                volume_fraction = 1.0
+            
+            # get the lower and upper bounds of this grid
+            lower_bound = np.array(lower_bound) + np.array(
+                [x_bin * chunk_size[0], y_bin * chunk_size[1], z_bin * chunk_size[2]]
+            )
+            upper_bound = lower_bound + chunk_size
+            if "high_res" in spatial_level:
+                sampling=False
+            else:
+                sampling = True
         
-        # get the lower and upper bounds of this grid
-        lower_bound = np.array(lower_bound) + np.array(
-            [x_bin * chunk_size[0], y_bin * chunk_size[1], z_bin * chunk_size[2]]
-        )
-        upper_bound = lower_bound + chunk_size
-        if "high_res" in spatial_level:
-            sampling=False
-        else:
-            sampling = True
-        
-        # Check cache first for this specific spatial chunk
-        cache_key = _cache_key_spatial_bytes(datastack_name, table_name, spatial_level, x_bin, y_bin, z_bin, timestamp)
-        
-        if cache_key in _spatial_bytes_cache:
-            bytes_data = _spatial_bytes_cache[cache_key]
-        else:
+
             # Query and format data if not in cache
             df = query_spatial_no_filter(datastack_name,
                                          table_name,
@@ -2841,8 +2863,9 @@ class LiveTableSpatialLevel(Resource):
             
             bytes_data = format_df_to_bytes(df, datastack_name, table_name)
             
-            # Cache the result
-            _spatial_bytes_cache[cache_key] = bytes_data
+            # Cache the result in Redis with configurable TTL
+            cache_ttl = current_app.config.get('SPATIAL_CACHE_TTL', 1200)
+            cache.set(cache_key, bytes_data, timeout=cache_ttl)
 
         response= Response(bytes_data, mimetype='application/octet-stream')
         response.headers["Content-Disposition"] = (

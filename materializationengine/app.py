@@ -25,6 +25,7 @@ from materializationengine.views import views_bp
 from materializationengine.limiter import limiter
 from materializationengine.migrate import migrator
 from materializationengine.request_db import init_request_db_cleanup
+from materializationengine.cache import cache
 
 db = SQLAlchemy(model_class=Base)
 
@@ -97,6 +98,34 @@ def create_app(config_name: str = None):
 
     db.init_app(app)
     ma.init_app(app)
+    
+    # Initialize Flask-Caching with configurable backend
+    cache_type = app.config.get('CACHE_TYPE', 'RedisCache')
+    
+    if cache_type == 'simple':
+        # Simple in-memory cache for local development
+        cache_config = {
+            'CACHE_TYPE': 'SimpleCache',
+            'CACHE_DEFAULT_TIMEOUT': app.config.get('SPATIAL_CACHE_TTL', 1200),
+        }
+    elif cache_type == 'filesystem':
+        # Filesystem cache for local development (persists across restarts)
+        import tempfile
+        cache_config = {
+            'CACHE_TYPE': 'FileSystemCache',
+            'CACHE_DIR': app.config.get('CACHE_DIR', tempfile.gettempdir()),
+            'CACHE_DEFAULT_TIMEOUT': app.config.get('SPATIAL_CACHE_TTL', 1200),
+        }
+    else:
+        # Redis cache for production
+        cache_config = {
+            'CACHE_TYPE': 'RedisCache',
+            'CACHE_REDIS_URL': app.config.get('REDIS_URL', 'redis://localhost:6379/0'),
+            'CACHE_DEFAULT_TIMEOUT': app.config.get('SPATIAL_CACHE_TTL', 1200),
+            'CACHE_KEY_PREFIX': 'mateng_cache:',
+        }
+    
+    cache.init_app(app, config=cache_config)
 
     # add the AppGroup to the app
     app.cli.add_command(migrator)

@@ -41,6 +41,7 @@ dependencies = [
     "dynamicannotationdb>=5.13.1",
     "nglui>=3.2.1,<4",
     "Flask-Limiter[redis]",
+    "Flask-Caching",
     "cryptography>=44.0.2",
     "uwsgi>=2.0.30",
 ]
