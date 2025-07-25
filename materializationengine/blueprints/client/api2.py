@@ -2301,18 +2301,50 @@ def query_spatial_no_filter(
         spatial_table = None
         vox_res = None
         
+        # Find the best spatial column using improved selection logic
+        def select_best_spatial_column(fields, table_name, metadata):
+            """Select the best spatial column, prioritizing those with corresponding root_id fields."""
+            from materializationengine.utils import make_root_id_column_name
+            
+            spatial_columns = []
+            all_field_names = set(fields.keys())
+            
+            # Collect all PostGIS fields
+            for field_name, field in fields.items():
+                if isinstance(field, PostGISField):
+                    # Check if this spatial column has a corresponding root_id field
+                    try:
+                        root_id_name = field_name[:-9] + "_root_id"
+                        has_root_id = root_id_name in all_field_names
+                    except (IndexError, AttributeError):
+                        # If root_id name construction fails, assume no root_id
+                        has_root_id = False
+                    
+                    spatial_columns.append({
+                        'field_name': field_name,
+                        'table_name': table_name,
+                        'metadata': metadata,
+                        'has_root_id': has_root_id
+                    })
+            
+            # Sort by priority: root_id fields first, then by order found
+            spatial_columns.sort(key=lambda x: (not x['has_root_id'], x['field_name']))
+            
+            return spatial_columns[0] if spatial_columns else None
+        
         table_schema = db.schema.get_flattened_schema(table_metadata["schema_type"])
         table_fields = table_schema._declared_fields
-        for field_name, field in table_fields.items():
-            if isinstance(field, PostGISField):
-                spatial_column = field_name
-                spatial_table = table_name
-                vox_res = np.array(
-                        [
-                            table_metadata["voxel_resolution_x"],
-                            table_metadata["voxel_resolution_y"],
-                            table_metadata["voxel_resolution_z"],
-                        ])
+        
+        # Try to find spatial column in main table
+        best_spatial = select_best_spatial_column(table_fields, table_name, table_metadata)
+        if best_spatial:
+            spatial_column = best_spatial['field_name']
+            spatial_table = best_spatial['table_name']
+            vox_res = np.array([
+                table_metadata["voxel_resolution_x"],
+                table_metadata["voxel_resolution_y"],
+                table_metadata["voxel_resolution_z"],
+            ])
             
         user_data = {
             "table": table_name,
@@ -2326,23 +2358,22 @@ def query_spatial_no_filter(
             user_data["suffixes"][ref_table] = "_ref"
             user_data["join_tables"] = [[table_name, "target_id", ref_table, "id"]]
             # find the spatial column in the reference table
-            if (spatial_column is  None):
+            if spatial_column is None:
                 # get the reference table schema
                 ref_metadata = db.database.get_table_metadata(ref_table)
                 ref_schema = db.schema.get_flattened_schema(ref_metadata["schema_type"])
                 ref_fields = ref_schema._declared_fields
                 
-                for field_name, field in ref_fields.items():
-                    if isinstance(field, PostGISField):
-                        spatial_column = field_name
-                        spatial_table = ref_table
-                        vox_res = np.array(
-                        [
-                            ref_metadata["voxel_resolution_x"],
-                            ref_metadata["voxel_resolution_y"],
-                            ref_metadata["voxel_resolution_z"],
-                        ])
-                        break
+                # Use the same improved selection logic for reference table
+                best_ref_spatial = select_best_spatial_column(ref_fields, ref_table, ref_metadata)
+                if best_ref_spatial:
+                    spatial_column = best_ref_spatial['field_name']
+                    spatial_table = best_ref_spatial['table_name']
+                    vox_res = np.array([
+                        ref_metadata["voxel_resolution_x"],
+                        ref_metadata["voxel_resolution_y"],
+                        ref_metadata["voxel_resolution_z"],
+                    ])
                 
     if (spatial_column is None):
         abort(400, f"No spatial column found for table {table_name}")
