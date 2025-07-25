@@ -41,6 +41,7 @@ from materializationengine.celery_init import celery
 from materializationengine.blueprints.client.query import specific_query
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.blueprints.client.query_manager import QueryManager
+from materializationengine.request_db import request_db_session
 from materializationengine.blueprints.client.datastack import validate_datastack
 
 from materializationengine.info_client import (
@@ -414,7 +415,8 @@ def table_view(datastack_name, id: int):
         table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
         if table is None:
             abort(404, "table not found")
-        db = dynamic_annotation_cache.get_db(aligned_volume_name)
+        
+    with request_db_session(aligned_volume_name) as db:
         check_read_permission(db, table.table_name)
    
     # mapping = {
@@ -453,11 +455,11 @@ def cell_type_local_report(datastack_name, id):
         analysis_datastack = table.analysisversion.datastack
         
     # Get database interface and check permissions
-    db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    check_read_permission(db, table_name)
-    
-    # Create model
-    Model, anno_metadata = make_flat_model(db, table)
+    with request_db_session(aligned_volume_name) as db:
+        check_read_permission(db, table_name)
+        
+        # Create model
+        Model, anno_metadata = make_flat_model(db, table)
     
     # Second session scope for materialized data
     mat_db_name = f"{datastack_name}__mat{analysis_version}"
@@ -643,10 +645,10 @@ def generic_report(datastack_name, id):
         schema = table.schema
         is_merged = table.analysisversion.is_merged
         
-    db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    check_read_permission(db, table_name)
-    
-    anno_metadata = db.database.get_table_metadata(table_name)
+    with request_db_session(aligned_volume_name) as db:
+        check_read_permission(db, table_name)
+        
+        anno_metadata = db.database.get_table_metadata(table_name)
     mat_db_name = f"{datastack_name}__mat{version}"
     
     with db_manager.session_scope(mat_db_name) as matsession:

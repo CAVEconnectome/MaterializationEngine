@@ -38,7 +38,7 @@ dependencies = [
     "flask_cors",
     "numpy>=1.20",
     "emannotationschemas>=5.19.0",
-    "dynamicannotationdb>=5.7.2",
+    "dynamicannotationdb>=5.13.1",
     "nglui>=3.2.1,<4",
     "Flask-Limiter[redis]",
     "cryptography>=44.0.2",
@@ -78,6 +78,9 @@ profile = [
 
 [tool.uv]
 default-groups = ["dev", "docs", "lint", "profile"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.bumpversion]
 current_version = "4.36.6"

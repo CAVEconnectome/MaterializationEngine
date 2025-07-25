@@ -1,6 +1,6 @@
 from collections import defaultdict
 from materializationengine.database import dynamic_annotation_cache
-from flask import abort
+from flask import abort, current_app
 from materializationengine.blueprints.client.query import (
     make_spatial_filter,
     _execute_query,
@@ -43,7 +43,7 @@ class QueryManager:
         self._segmentation_source = segmentation_source
         self._split_mode = split_mode
         self._random_sample = random_sample
-
+        
         self._split_mode_outer = split_mode_outer
         self._split_models = {}
         self._flat_models = {}
@@ -169,10 +169,20 @@ class QueryManager:
                     seg_columns = [
                         c for c in segmodel.__table__.columns if c.key != "id"
                     ]
-                    if random_sample and self._random_sample:
-                        annmodel_alias1 = aliased(
-                            annmodel, tablesample(annmodel, self._random_sample)
-                        )
+                    if random_sample and self._random_sample is not None and self._random_sample > 0:
+                        # Ensure the random sample is a valid percentage (convert to float if needed)
+                        try:
+                            sample_value = float(self._random_sample)
+                            if not np.isfinite(sample_value) or sample_value <= 0 or sample_value > 100:
+                                # Skip TABLESAMPLE if invalid
+                                annmodel_alias1 = annmodel
+                            else:
+                                annmodel_alias1 = aliased(
+                                    annmodel, tablesample(annmodel, sample_value)
+                                )
+                        except (ValueError, TypeError):
+                            # Skip TABLESAMPLE if conversion fails
+                            annmodel_alias1 = annmodel
                     else:
                         annmodel_alias1 = annmodel
                     subquery = (
@@ -180,23 +190,41 @@ class QueryManager:
                         .join(segmodel, annmodel_alias1.id == segmodel.id, isouter=True)
                         .subquery()
                     )
-                    annmodel_alias = aliased(subquery, name=table_name, flat=True)
+                    # Use flat=False to preserve parameter binding context when TABLESAMPLE is used
+                    use_flat = not (random_sample and self._random_sample is not None and self._random_sample > 0)
+                    annmodel_alias = aliased(subquery, name=table_name, flat=use_flat)
 
                     self._models[table_name] = annmodel_alias
                     # self._models[segmodel.__tablename__] = segmodel_alias
 
                 else:
-                    if random_sample and self._random_sample:
-                        annmodel_alias1 = aliased(
-                            annmodel, tablesample(annmodel, self._random_sample)
-                        )
+                    if random_sample and self._random_sample is not None and self._random_sample > 0:
+                        # Ensure the random sample is a valid percentage (convert to float if needed)
+                        try:
+                            sample_value = float(self._random_sample)
+                            if not np.isfinite(sample_value) or sample_value <= 0 or sample_value > 100:
+                                abort(500, f"Invalid random_sample value: {sample_value}, skipping TABLESAMPLE")
+                            else:
+                                annmodel_alias1 = aliased(
+                                    annmodel, tablesample(annmodel, sample_value)
+                                )
+                        except (ValueError, TypeError) as e:
+                            abort(500, f"Cannot convert random_sample to float: {self._random_sample}, error: {e}")
                     else:
                         annmodel_alias1 = annmodel
                     self._models[table_name] = annmodel_alias1
             else:
                 model = self._get_flat_model(table_name)
-                if self._random_sample:
-                    model = aliased(model, tablesample, self._random_sample)
+                if self._random_sample is not None and self._random_sample > 0:
+                    # Ensure the random sample is a valid percentage (convert to float if needed)
+                    try:
+                        sample_value = float(self._random_sample)
+                        if not np.isfinite(sample_value) or sample_value <= 0 or sample_value > 100:
+                            abort(500, f"Invalid random_sample value: {sample_value}, skipping TABLESAMPLE")
+                        else:
+                            model = aliased(model, tablesample(model, sample_value))
+                    except (ValueError, TypeError) as e:
+                        abort(500, f"Cannot convert random_sample to float: {self._random_sample}, error: {e}")
                 self._models[table_name] = model
 
     def _find_relevant_model(self, table_name, column_name):
@@ -684,12 +712,22 @@ class QueryManager:
         # This approach hashes the geometry coordinates to get a pseudo-random but deterministic sample
         
         # Calculate the sampling ratio based on actual table size and desired max_points
+        # Add validation to prevent division by zero or invalid values
+        if max_points <= 0:
+            print(f"WARNING: Invalid max_points: {max_points}, using default 10000")
+            max_points = 10000
+            
         if total_row_count and total_row_count > 0:
             # Use actual row count for precise sampling calculation
             sampling_factor = max(2, int(total_row_count / max_points))
         else:
             # Fallback to estimate if row count is not available
             sampling_factor = max(2, int(30_000_000 / max_points))
+            
+        # Additional validation to ensure sampling_factor is valid
+        if sampling_factor <= 0 or not np.isfinite(sampling_factor):
+            print(f"WARNING: Invalid sampling_factor: {sampling_factor}, using default 10")
+            sampling_factor = 10
 
         # Use MD5 hash of the geometry text representation for pseudo-random sampling
         # Use a simpler approach that avoids potential hex parsing issues
@@ -717,12 +755,6 @@ class QueryManager:
         Get the effective limit considering hash sampling
         """
         if hasattr(self, '_hash_sampling') and self._hash_sampling:
-            max_points = self._hash_sampling.get('max_points')
-            if max_points:
-                # Use the smaller of the configured limit and max_points
-                if self.limit:
-                    return min(self.limit, 2*max_points)
-                else:
-                    return 2*max_points
+            self.limit = None
         
         return self.limit

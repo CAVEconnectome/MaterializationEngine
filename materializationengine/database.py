@@ -3,7 +3,7 @@ from urllib.parse import urlparse
 
 from dynamicannotationdb import DynamicAnnotationInterface
 from flask import current_app
-from sqlalchemy import MetaData, create_engine
+from sqlalchemy import MetaData, create_engine, text
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.pool import QueuePool
 
@@ -60,21 +60,39 @@ class DatabaseConnectionManager:
             sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
             sql_uri = f"{sql_base_uri}/{database_name}"
             
-            pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 5)
-            max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 5)
+            pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 20)
+            max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 30)
             
-            self._engines[database_name] = create_engine(
-                sql_uri,
-                poolclass=QueuePool,
-                pool_size=pool_size,
-                max_overflow=max_overflow,
-                pool_timeout=30,
-                pool_recycle=1800,  # Recycle connections after 30 minutes
-                pool_pre_ping=True,  # Ensure connections are still valid
-            )
-            
-            celery_logger.info(f"Created new connection pool for {database_name} "
-                       f"(size={pool_size}, max_overflow={max_overflow})")
+            try:
+                engine = create_engine(
+                    sql_uri,
+                    poolclass=QueuePool,
+                    pool_size=pool_size,
+                    max_overflow=max_overflow,
+                    pool_timeout=30,
+                    pool_recycle=1800,  # Recycle connections after 30 minutes
+                    pool_pre_ping=True,  # Ensure connections are still valid
+                )
+                
+                # Test the connection to make sure the database exists and is accessible
+                with engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
+                
+                # Only store engine if connection test passes
+                self._engines[database_name] = engine
+                celery_logger.info(f"Created new connection pool for {database_name} "
+                           f"(size={pool_size}, max_overflow={max_overflow})")
+                
+            except Exception as e:
+                # Clean up engine if it was created but connection failed
+                if 'engine' in locals():
+                    engine.dispose()
+                
+                celery_logger.error(f"Failed to create/connect to database {database_name}: {e}")
+                raise ConnectionError(f"Cannot connect to database '{database_name}'. "
+                                    f"Please check if the database exists and is accessible. "
+                                    f"Connection URI: {sql_uri}. "
+                                    f"Error: {e}")
             
         return self._engines[database_name]
     
@@ -112,13 +130,13 @@ class DatabaseConnectionManager:
     
     def cleanup(self):
         """Cleanup any remaining sessions and dispose of engine pools."""
-        for database_name, session_factory in self._session_factories.items():
+        for database_name, session_factory in list(self._session_factories.items()):
             try:
                 session_factory.remove()
             except Exception as e:
                 celery_logger.error(f"Error cleaning up sessions for {database_name}: {e}")
         
-        for database_name, engine in self._engines.items():
+        for database_name, engine in list(self._engines.items()):
             try:
                 engine.dispose()
             except Exception as e:
@@ -158,8 +176,8 @@ class DynamicMaterializationCache:
 
     def _get_mat_client(self, database: str):
         sql_uri_config = get_config_param("SQLALCHEMY_DATABASE_URI")
-        pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 5)
-        max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 5)
+        pool_size = current_app.config.get("DB_CONNECTION_POOL_SIZE", 20)
+        max_overflow = current_app.config.get("DB_CONNECTION_MAX_OVERFLOW", 30)
         mat_client = DynamicAnnotationInterface(
             sql_uri_config, database, pool_size, max_overflow
         )
