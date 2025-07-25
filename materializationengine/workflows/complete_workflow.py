@@ -33,7 +33,7 @@ celery_logger = get_task_logger(__name__)
 
 @celery.task(
     bind=True,
-    name="workflow:run_complete_workflow",
+    name="orchestration:run_complete_workflow",
 )
 def run_complete_workflow(
     self,
