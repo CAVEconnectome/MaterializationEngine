@@ -335,7 +335,6 @@ def update_metadata(self, mat_metadata: dict):
     """Update 'last_updated' column in the segmentation
     metadata table for a given segmentation table.
 
-
     Args:
         mat_metadata (dict): materialization metadata
 
@@ -346,24 +345,46 @@ def update_metadata(self, mat_metadata: dict):
     segmentation_table_name = mat_metadata["segmentation_table_name"]
 
     with db_manager.session_scope(aligned_volume) as session:
-
         materialization_time_stamp = mat_metadata["materialization_time_stamp"]
+        
+        # Parse timestamp with multiple format support
+        timestamp_formats = [
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S.%f%z",  # with timezone
+            "%Y-%m-%dT%H:%M:%S.%f%z",  # ISO format with timezone
+            "%Y-%m-%d %H:%M:%S",       # without microseconds
+            "%Y-%m-%dT%H:%M:%S",       # ISO format without microseconds
+        ]
+        
+        last_updated_time_stamp = None
+        for fmt in timestamp_formats:
+            try:
+                last_updated_time_stamp = datetime.datetime.strptime(
+                    materialization_time_stamp, fmt
+                )
+                break
+            except ValueError:
+                continue
+        
+        if last_updated_time_stamp is None:
+            celery_logger.error(f"Failed to parse timestamp: {materialization_time_stamp}")
+            raise ValueError(f"Unsupported timestamp format: {materialization_time_stamp}")
+
+        # Query for segmentation metadata with error handling
         try:
-            last_updated_time_stamp = datetime.datetime.strptime(
-                materialization_time_stamp, "%Y-%m-%d %H:%M:%S.%f"
-            )
-        except ValueError:
-            last_updated_time_stamp = datetime.datetime.strptime(
-                materialization_time_stamp, "%Y-%m-%dT%H:%M:%S.%f"
-            )
-
-
             seg_metadata = (
                 session.query(SegmentationMetadata)
                 .filter(SegmentationMetadata.table_name == segmentation_table_name)
                 .one()
             )
             seg_metadata.last_updated = last_updated_time_stamp
+            session.commit()
+            celery_logger.info(f"Updated metadata for {segmentation_table_name}")
+            
+        except Exception as e:
+            celery_logger.error(f"Failed to update segmentation metadata for {segmentation_table_name}: {e}")
+            raise
 
     return {
         f"Table: {segmentation_table_name}": f"Time stamp {materialization_time_stamp}"
