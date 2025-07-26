@@ -53,7 +53,7 @@ def run_periodic_database_update(datastack: str = None) -> None:
     return True
 
 
-@celery.task(o
+@celery.task(
     bind=True,
     base=LockedTask,
     timeout=int(60 * 60 * 24),  # Task locked for 1 day
