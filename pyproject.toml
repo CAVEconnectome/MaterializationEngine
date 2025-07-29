@@ -37,7 +37,7 @@ dependencies = [
     "pyarrow",
     "flask_cors",
     "numpy>=1.20",
-    "emannotationschemas>=5.19.0",
+    "emannotationschemas>=5.24.0",
     "dynamicannotationdb>=5.13.1",
     "nglui>=3.2.1,<4",
     "Flask-Limiter[redis]",

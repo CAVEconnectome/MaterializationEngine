@@ -757,7 +757,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/40/b5/476da64a201aaf428
 
 [[package]]
 name = "emannotationschemas"
-version = "5.19.0"
+version = "5.24.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "flask-cors" },
@@ -769,7 +769,7 @@ dependencies = [
     { name = "shapely" },
     { name = "sqlalchemy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ef/8a/c85b0dab2d66b899db4aced9ca8c072e7a6b15f41b2bb59ec173d47142d3/emannotationschemas-5.19.0.tar.gz", hash = "sha256:fc91bc63b609f54982ed55805f2e6d103053f14c0c55a04411e61520c40b3627", size = 38020, upload-time = "2025-07-01T15:53:20.128Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/76/bb/8b6918c228d7568ddd0488981b3a11556b99dc1d134bfdd5151f276a8716/emannotationschemas-5.24.0.tar.gz", hash = "sha256:bd15761ba593a4b0d3dd375d5e9058032632e309d9eecfe2293a30bbd67602b7", size = 37834, upload-time = "2025-07-29T19:09:30.679Z" }
 
 [[package]]
 name = "executing"
@@ -1621,7 +1621,7 @@ requires-dist = [
     { name = "cloud-volume", specifier = ">=8.5.4" },
     { name = "cryptography", specifier = ">=44.0.2" },
     { name = "dynamicannotationdb", specifier = ">=5.13.1" },
-    { name = "emannotationschemas", specifier = ">=5.19.0" },
+    { name = "emannotationschemas", specifier = ">=5.24.0" },
     { name = "flask", specifier = ">=2.0.2,<3.0" },
     { name = "flask-accepts" },
     { name = "flask-admin" },
