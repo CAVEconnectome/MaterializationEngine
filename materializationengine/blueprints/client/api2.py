@@ -530,11 +530,12 @@ def execute_production_query(
     df, warnings = update_rootids(
         df, user_timestamp, {}, cg_client, allow_missing_lookups
     )
-    if len(df) >= user_data["limit"]:
-        warnings.append(
-            f"result has {len(df)} entries, which is equal or more \
-than limit of {user_data['limit']} there may be more results which are not shown"
-        )
+    if "limit" in user_data:
+        if len(df) >= user_data["limit"]:
+            warnings.append(
+                f"result has {len(df)} entries, which is equal or more \
+    than limit of {user_data['limit']} there may be more results which are not shown"
+            )
     return df, column_names, warnings
 
 
@@ -1628,10 +1629,10 @@ class TableUniqueStringValues(Resource):
 
 
 def assemble_live_query_dataframe(user_data, datastack_name, args):
-    # user_data["limit"] = min(
-    #     current_app.config["QUERY_LIMIT_SIZE"],
-    #     user_data.get("limit", current_app.config["QUERY_LIMIT_SIZE"]),
-    # )
+    user_data["limit"] = min(
+        current_app.config["QUERY_LIMIT_SIZE"],
+        user_data.get("limit", current_app.config["QUERY_LIMIT_SIZE"]),
+    )
     past_ver, future_ver, aligned_vol = get_closest_versions(
         datastack_name, user_data["timestamp"]
     )
