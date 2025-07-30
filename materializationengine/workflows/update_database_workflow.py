@@ -86,13 +86,23 @@ def update_database_workflow(self, datastack_info: dict, **kwargs):
     try:
         for mat_metadata in mat_info:
             if mat_metadata.get("segmentation_table_name"):
-                workflow = chain(
-                    ingest_new_annotations_workflow(mat_metadata),
-                    # find_missing_root_ids_workflow(mat_metadata), # skip for now
-                    update_root_ids_workflow(mat_metadata),
-                )
+                workflow_tasks = []
+                
+                ingest_task = ingest_new_annotations_workflow(mat_metadata)
+                if ingest_task:
+                    workflow_tasks.append(ingest_task)
+                
+                # find_missing_root_ids_workflow(mat_metadata), # skip for now
+                
+                update_task = update_root_ids_workflow(mat_metadata)
+                if update_task:
+                    workflow_tasks.append(update_task)
 
-                update_live_database_workflow.append(workflow)
+                if workflow_tasks:
+                    workflow = chain(*workflow_tasks)
+                    update_live_database_workflow.append(workflow)
+                else:
+                    update_live_database_workflow.append(fin.si())
             else:
                 update_live_database_workflow.append(fin.si())
 
