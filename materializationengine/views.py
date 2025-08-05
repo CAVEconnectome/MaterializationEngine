@@ -58,7 +58,7 @@ from materializationengine.schemas import (
 from materializationengine.utils import check_read_permission, get_config_param
 
 
-__version__ = "5.7.2"
+__version__ = "5.7.3"
 
 views_bp = Blueprint("views", __name__, url_prefix="/materialize/views")
 
