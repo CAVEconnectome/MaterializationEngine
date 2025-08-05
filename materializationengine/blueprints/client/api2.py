@@ -1771,6 +1771,7 @@ def assemble_live_query_dataframe(user_data, datastack_name, args):
 @client_bp.route("/datastack/<string:datastack_name>/query")
 class LiveTableQuery(Resource):
     method_decorators = [
+        validate_datastack,
         limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
@@ -1778,12 +1779,14 @@ class LiveTableQuery(Resource):
 
     @client_bp.doc("v2_query", security="apikey")
     @accepts("V2QuerySchema", schema=V2QuerySchema, api=client_bp)
-    def post(self, datastack_name: str):
+    def post(self, datastack_name: str,
+        version: int = 0,
+        target_version: int = None,
+        target_datastack: str = None):
         """endpoint for doing a query with filters
 
         Args:
             datastack_name (str): datastack name
-            table_name (str): table names
 
         Payload:
         All values are optional.  Limit has an upper bound set by the server.
