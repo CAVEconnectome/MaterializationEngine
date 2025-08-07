@@ -79,7 +79,7 @@ def run_complete_workflow(
         if mat_metadata.get("segmentation_table_name"):
             workflow = chain(
                 ingest_new_annotations_workflow(mat_metadata),
-                # find_missing_root_ids_workflow(mat_metadata), # skip for now
+                find_missing_root_ids_workflow(mat_metadata), # skip for now
                 update_root_ids_workflow(mat_metadata),
             )
         else:
