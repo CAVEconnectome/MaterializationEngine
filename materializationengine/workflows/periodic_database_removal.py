@@ -174,6 +174,7 @@ def remove_expired_databases(delete_threshold: int = 5, datastack: str = None) -
                                     database_version = database.rsplit("__mat")[-1]
                                     expired_db = (
                                         session.query(AnalysisVersion)
+                                        .filter(AnalysisVersion.datastack == datastack)
                                         .filter(AnalysisVersion.version == database_version)
                                         .one()
                                     )
