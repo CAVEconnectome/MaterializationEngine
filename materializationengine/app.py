@@ -128,7 +128,7 @@ def create_app(config_name: str = None):
             
         # setup cors on upload bucket
         try:
-            bucket_name = app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
+            bucket_name = app.config.get("MATERIALIZATION_UPLOAD_BUCKET_NAME")
             storage_service = StorageService(bucket_name)
             storage_service.configure_cors()
         except Exception as e:
