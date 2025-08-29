@@ -64,7 +64,23 @@ jobs:
       - name: Update uv.lock file
         run: |
           echo "Updating uv.lock file after dependency changes"
-          uv sync
+          # Retry uv sync up to 3 times with delays for PyPI propagation
+          for i in {1..3}; do
+            echo "Attempt $i/3: Running uv sync..."
+            if uv sync; then
+              echo "✅ uv sync succeeded on attempt $i"
+              break
+            else
+              echo "❌ uv sync failed on attempt $i"
+              if [ $i -lt 3 ]; then
+                echo "Waiting 30 seconds before retry..."
+                sleep 30
+              else
+                echo "All retry attempts failed"
+                exit 1
+              fi
+            fi
+          done
           echo "Updated uv.lock"
           
       - name: Commit dependency update
