@@ -3,6 +3,12 @@ name: Update Helm Chart
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to update chart to (leave empty to use latest release)"
+        required: false
+        type: string
 
 jobs:
   update-chart:
@@ -17,12 +23,28 @@ jobs:
         
       - name: Get release version
         id: get-version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Extract version from release tag (remove 'v' prefix if present)
-          version="${{ github.event.release.tag_name }}"
-          version="${version#v}"
-          echo "VERSION=$version" >> $GITHUB_OUTPUT
-          echo "Release version: $version"
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then
+            # Manual trigger with specified version
+            version="${{ github.event.inputs.version }}"
+            version="${version#v}"  # remove 'v' prefix if present
+            echo "VERSION=$version" >> $GITHUB_OUTPUT
+            echo "Manual trigger - using version: $version"
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            # Manual trigger without version - use latest release
+            latest_release=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+            version="${latest_release#v}"
+            echo "VERSION=$version" >> $GITHUB_OUTPUT
+            echo "Manual trigger - using latest release version: $version"
+          else
+            # Automatic trigger from release event
+            version="${{ github.event.release.tag_name }}"
+            version="${version#v}"
+            echo "VERSION=$version" >> $GITHUB_OUTPUT
+            echo "Release trigger - using version: $version"
+          fi
           
       - name: Generate GitHub App Token
         id: generate-token
