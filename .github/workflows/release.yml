@@ -90,14 +90,71 @@ jobs:
           draft: false
           prerelease: false
           
-      - name: Trigger Helm Chart Update
-        if: ${{ github.event.inputs.dry-run == 'false' }}
-        uses: actions/github-script@v7
+  update-chart:
+    name: Update materializationengine Helm chart
+    runs-on: ubuntu-latest
+    needs: bump
+    if: ${{ github.event.inputs.dry-run == 'false' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout MaterializationEngine repo
+        uses: actions/checkout@v4
+        
+      - name: Checkout cave-helm-charts repo
+        uses: actions/checkout@v4
         with:
-          script: |
-            github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'update-helm-chart.yml',
-              ref: 'master'
-            })
+          repository: CAVEconnectome/cave-helm-charts
+          token: ${{ secrets.HELM_CHART_UPDATE_TOKEN }}
+          path: helm-charts
+          
+      - name: Update Chart.yaml appVersion
+        id: update-chart
+        run: |
+          cd helm-charts
+          chart_file="charts/materializationengine/Chart.yaml"
+          
+          # Get current chart version
+          current_chart_version=$(grep '^version:' $chart_file | cut -d' ' -f2)
+          echo "Current chart version: $current_chart_version"
+          
+          # Update appVersion
+          sed -i "s/^appVersion: .*/appVersion: \"${{ needs.bump.outputs.VERSION }}\"/" $chart_file
+          
+          # Bump chart patch version
+          new_chart_version=$(echo $current_chart_version | awk -F. '{$NF = $NF + 1;} 1' | sed 's/ /./g')
+          sed -i "s/^version: .*/version: $new_chart_version/" $chart_file
+          
+          echo "Updated to chart version: $new_chart_version"
+          echo "Updated to app version: ${{ needs.bump.outputs.VERSION }}"
+          echo "CHART_VERSION=$new_chart_version" >> $GITHUB_OUTPUT
+          
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.HELM_CHART_UPDATE_TOKEN }}
+          path: helm-charts
+          commit-message: |
+            Update materializationengine to v${{ needs.bump.outputs.VERSION }}
+            
+            - Update appVersion to ${{ needs.bump.outputs.VERSION }}
+            - Bump chart version to ${{ steps.update-chart.outputs.CHART_VERSION }}
+          title: "chore: update materializationengine to v${{ needs.bump.outputs.VERSION }}"
+          body: |
+            ## Auto-generated chart update
+            
+            This PR automatically updates the materializationengine Helm chart following the release of MaterializationEngine v${{ needs.bump.outputs.VERSION }}.
+            
+            ### Changes
+            - 📦 **appVersion**: `${{ needs.bump.outputs.VERSION }}`
+            - 🔢 **chart version**: `${{ steps.update-chart.outputs.CHART_VERSION }}`
+            
+            ### Release Notes
+            See the full release notes: https://github.com/CAVEconnectome/MaterializationEngine/releases/tag/v${{ needs.bump.outputs.VERSION }}
+            
+            ---
+            *This PR was automatically created by the MaterializationEngine release workflow.*
+          branch: auto-update/materializationengine-v${{ needs.bump.outputs.VERSION }}
+          branch-suffix: timestamp
+          delete-branch: true
