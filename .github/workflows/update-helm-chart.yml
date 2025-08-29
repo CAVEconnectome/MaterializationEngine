@@ -52,6 +52,7 @@ jobs:
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: CAVEconnectome
           repositories: cave-helm-charts
           
       - name: Checkout cave-helm-charts repo
