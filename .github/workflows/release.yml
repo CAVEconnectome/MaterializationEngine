@@ -2,7 +2,6 @@
 name: publish release
 
 on:
-  # run this workflow when manually triggered
   workflow_dispatch:
     inputs:
       part:
@@ -20,6 +19,18 @@ on:
         description: "Skip tests"
         type: boolean
         required: true
+        default: false
+  workflow_call:
+    inputs:
+      part:
+        description: "Semver part to bump (major, minor, patch)"
+        type: string
+        required: false
+        default: "patch"
+      dry-run:
+        description: "Dry run"
+        type: boolean
+        required: false
         default: false
 
 jobs:
@@ -51,9 +62,9 @@ jobs:
         run: pip install bumpversion
       - name: Bump version with bumpversion
         run: |
-          bumpversion ${{ github.event.inputs.part }}
+          bumpversion ${{ inputs.part || github.event.inputs.part }}
       - name: Commit and push with tags
-        if: ${{ github.event.inputs.dry-run == 'false' }}
+        if: ${{ (inputs.dry-run == false) || (github.event.inputs.dry-run == 'false') }}
         run: git push --follow-tags
       - name: Get version
         id: get-version
@@ -73,7 +84,7 @@ jobs:
         run: echo ${{ steps.get-version.outputs.SHORT_VERSION }}
       
       - name: Create GitHub Release
-        if: ${{ github.event.inputs.dry-run == 'false' }}
+        if: ${{ (inputs.dry-run == false) || (github.event.inputs.dry-run == 'false') }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.get-version.outputs.VERSION }}
@@ -94,7 +105,7 @@ jobs:
     name: Update materializationengine Helm chart
     runs-on: ubuntu-latest
     needs: bump
-    if: ${{ github.event.inputs.dry-run == 'false' }}
+    if: ${{ (inputs.dry-run == false) || (github.event.inputs.dry-run == 'false') }}
     permissions:
       contents: read
       id-token: write
