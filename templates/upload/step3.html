@@ -44,12 +44,31 @@
 
                     <!-- Reference Table -->
                     <div class="form-group mb-3" x-show="$store.metadata.state.isReferenceSchema" x-cloak>
-                        <label class="form-label">Reference Table *</label>
-                        <input type="text" class="form-control"
-                            :class="{ 'is-invalid': $store.metadata.state.validationErrors.reference_table }"
-                            x-model="$store.metadata.state.reference_table">
-                        <div class="invalid-feedback" x-text="$store.metadata.state.validationErrors.reference_table">
+                        <label class="form-label" for="reference_table">Reference Table *</label>
+                        <select class="form-select"
+                                id="reference_table"
+                                x-model="$store.metadata.state.reference_table"
+                                :disabled="!$store.metadata.state.isReferenceSchema || $store.metadata.state.referenceTableOptions.length === 0"
+                                @change="$store.metadata.saveState(); $store.metadata.validateForm()"
+                                :class="{ 'is-invalid': $store.metadata.state.validationErrors.reference_table }">
+                            <option value="">Select a reference table...</option>
+                            <template x-for="table in $store.metadata.state.referenceTableOptions" :key="table">
+                                <option :value="table" x-text="table"></option>
+                            </template>
+                        </select>
+                        <div x-show="!$store.metadata.state.isReferenceSchema || $store.metadata.state.referenceTableOptions.length === 0 && $store.metadata.state.isReferenceSchema" 
+                             class="form-text">
+                             <span x-show="$store.metadata.state.datastack_name && $store.metadata.state.isReferenceSchema && $store.metadata.state.referenceTableOptions.length === 0">Loading reference tables or none available for the selected datastack.</span>
+                             <span x-show="!$store.metadata.state.datastack_name && $store.metadata.state.isReferenceSchema">Please select a datastack first.</span>
                         </div>
+                        <div class="invalid-feedback" x-text="$store.metadata.state.validationErrors.reference_table"></div>
+                    </div>
+                    
+                    <!-- Show a message or disabled input if reference table is not applicable -->
+                    <div class="form-group mb-3" x-show="!$store.metadata.state.isReferenceSchema" x-cloak>
+                        <label class="form-label" for="reference_table_disabled">Reference Table</label>
+                        <input type="text" id="reference_table_disabled" class="form-control"
+                               placeholder="Not applicable for this schema type" disabled />
                     </div>
 
                     <!-- Flat Segmentation Source -->

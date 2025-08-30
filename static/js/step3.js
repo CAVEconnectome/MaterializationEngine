@@ -7,31 +7,32 @@ document.addEventListener("alpine:init", () => {
       description: "",
       notice_text: "",
       reference_table: "",
+      referenceTableOptions: [],
       flat_segmentation_source: "",
       voxel_resolution_nm_x: 1,
       voxel_resolution_nm_y: 1,
       voxel_resolution_nm_z: 1,
-      write_permission: "PRIVATE",
-      read_permission: "PRIVATE",
+      write_permission: "PUBLIC",
+      read_permission: "PUBLIC",
       validationErrors: {},
       isReferenceSchema: false,
       metadataSaved: false,
     },
 
-    init() {
-      this.loadInitialState();
-      this.checkIfReferenceSchema();
+    async init() {
+      await this.loadInitialState();
+
       if (Object.keys(this.state).some((key) => this.state[key])) {
         this.validateForm();
       }
     },
 
-    loadInitialState() {
+    async loadInitialState() {
       const savedState = localStorage.getItem("metadataStore");
       if (savedState) {
         const state = JSON.parse(savedState);
         Object.keys(state).forEach((key) => {
-          if (key !== "validationErrors") {
+          if (key !== "validationErrors" && key !== "referenceTableOptions") {
             this.state[key] = state[key];
           }
         });
@@ -47,11 +48,13 @@ document.addEventListener("alpine:init", () => {
           }
         }
       }
+      await this.checkIfReferenceSchema();
     },
 
     saveState() {
       const stateToSave = { ...this.state };
       delete stateToSave.validationErrors;
+      delete stateToSave.referenceTableOptions;
       localStorage.setItem("metadataStore", JSON.stringify(stateToSave));
     },
 
@@ -66,7 +69,51 @@ document.addEventListener("alpine:init", () => {
 
         if (schemaModel && schemaModel.fields) {
           this.state.isReferenceSchema = "target_id" in schemaModel.fields;
+        } else {
+          this.state.isReferenceSchema = false;
         }
+      } else {
+        this.state.isReferenceSchema = false;
+      }
+
+      if (this.state.isReferenceSchema) {
+        await this.fetchReferenceTableOptions();
+      } else {
+        this.state.referenceTableOptions = [];
+        this.state.reference_table = "";
+      }
+    },
+
+    async fetchReferenceTableOptions() {
+      if (!this.state.datastack_name) {
+        console.warn("Datastack name not set, cannot fetch reference tables.");
+        this.state.referenceTableOptions = [];
+        return;
+      }
+      try {
+        const response = await fetch(
+          `/materialize/upload/api/datastack/${this.state.datastack_name}/valid-annotation-tables`
+        );
+        if (!response.ok) {
+          const errorData = await response
+            .json()
+            .catch(() => ({ message: "Failed to fetch reference tables" }));
+          throw new Error(
+            errorData.message || "Failed to fetch reference tables"
+          );
+        }
+        const data = await response.json();
+        if (data.status === "success" && Array.isArray(data.table_names)) {
+          this.state.referenceTableOptions = data.table_names;
+        } else {
+          this.state.referenceTableOptions = [];
+          console.error("Error in fetching reference tables:", data.message);
+        }
+      } catch (error) {
+        console.error("Error fetching reference table options:", error);
+        this.state.referenceTableOptions = [];
+        this.state.validationErrors.reference_table =
+          "Could not load reference tables.";
       }
     },
 
@@ -88,6 +135,10 @@ document.addEventListener("alpine:init", () => {
       if (this.state.isReferenceSchema && !this.state.reference_table) {
         errors.reference_table =
           "Reference table is required for this schema type";
+      }
+
+      if (this.state.isReferenceSchema && this.state.referenceTableOptions.length > 0 && !this.state.reference_table) {
+          errors.reference_table = "Please select a reference table.";
       }
 
       ["x", "y", "z"].forEach((dim) => {

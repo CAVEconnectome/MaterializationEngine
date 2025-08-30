@@ -180,13 +180,14 @@ class IndexCache:
             raise (e)
         return True
 
-    def add_indices_sql_commands(self, table_name: str, model, engine):
+    def add_indices_sql_commands(self, table_name: str, model, engine, skip_foreign_keys=False):
         """Add missing indices by comparing reflected table and
         model indices. Will add missing indices from model to table.
 
         Args:
             table_name (str): target table to drop constraints and indices
             engine (SQLAlchemy Engine instance): supplied SQLAlchemy engine
+            skip_foreign_keys (bool): skip adding foreign keys
 
         Returns:
             str: list of indices added to table
@@ -205,7 +206,8 @@ class IndexCache:
                 command = f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} ({column_name});"
             if index_type == "spatial_index":
                 command = f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} USING GIST ({column_name} gist_geometry_ops_nd);"
-            if index_type == "foreign_key":
+            
+            if index_type == "foreign_key" and not skip_foreign_keys:
                 foreign_key_name = model_indices[index]["foreign_key_name"]
                 foreign_key_table = model_indices[index]["foreign_key_table"]
                 foreign_key_column = model_indices[index]["foreign_key_column"]
