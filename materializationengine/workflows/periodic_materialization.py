@@ -44,7 +44,7 @@ def process_datastack(datastack, days_to_expire, merge_tables):
     return True
 
 
-@celery.task(name="workflow:run_periodic_materialization")
+@celery.task(name="orchestration:run_periodic_materialization")
 def run_periodic_materialization(
     days_to_expire: int = None, merge_tables: bool = True, datastack: str = None
 ) -> None:

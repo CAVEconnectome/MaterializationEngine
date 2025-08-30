@@ -312,8 +312,12 @@ def generate_simple_query_dataframe(
     qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
     qm.apply_filter(data.get("filter_greater_dict", None), qm.apply_greater_filter)
     qm.apply_filter(data.get("filter_less_dict", None), qm.apply_less_filter)
-    qm.apply_filter(data.get("filter_greater_equal_dict", None), qm.apply_greater_equal_filter)
-    qm.apply_filter(data.get("filter_less_equal_dict", None), qm.apply_less_equal_filter)
+    qm.apply_filter(
+        data.get("filter_greater_equal_dict", None), qm.apply_greater_equal_filter
+    )
+    qm.apply_filter(
+        data.get("filter_less_equal_dict", None), qm.apply_less_equal_filter
+    )
     qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
     qm.apply_filter(data.get("filter_regex_dict", None), qm.apply_regex_filter)
     qm.apply_filter({table_name: {"valid": True}}, qm.apply_equal_filter)
@@ -474,8 +478,12 @@ def generate_complex_query_dataframe(
     qm.apply_filter(data.get("filter_equal_dict", None), qm.apply_equal_filter)
     qm.apply_filter(data.get("filter_greater_dict", None), qm.apply_greater_filter)
     qm.apply_filter(data.get("filter_less_dict", None), qm.apply_less_filter)
-    qm.apply_filter(data.get("filter_greater_equal_dict", None), qm.apply_greater_equal_filter)
-    qm.apply_filter(data.get("filter_less_equal_dict", None), qm.apply_less_equal_filter)
+    qm.apply_filter(
+        data.get("filter_greater_equal_dict", None), qm.apply_greater_equal_filter
+    )
+    qm.apply_filter(
+        data.get("filter_less_equal_dict", None), qm.apply_less_equal_filter
+    )
     qm.apply_filter(data.get("filter_spatial_dict", None), qm.apply_spatial_filter)
     qm.apply_filter(data.get("filter_regex_dict", None), qm.apply_regex_filter)
     for table_info in data["tables"]:

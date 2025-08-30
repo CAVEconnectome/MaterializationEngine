@@ -98,9 +98,12 @@ def fix_columns_with_query(
                 pass
             #    df[colname] = _fix_boolean_column(df[colname])
             elif coltype is DateTime:
+                # if the first entry for this column has a decimal point,
+                # then it is one format and we want to convert it using that format
                 df[colname] = pd.to_datetime(
-                    df[colname], utc=True, infer_datetime_format=True
+                    df[colname], utc=True, format='ISO8601'
                 )
+               
             elif coltype is Geometry and fix_wkb is True:
                 df[colname] = fix_wkb_column(
                     df[colname],

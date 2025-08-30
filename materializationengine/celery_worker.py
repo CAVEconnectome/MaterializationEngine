@@ -32,7 +32,26 @@ def create_celery(app=None):
         celery.conf.result_backend_transport_options = {
             "master_name": app.config["MASTER_NAME"]
         }
-
+    # Configure Celery and related loggers
+    log_level = app.config["LOGGING_LEVEL"]
+    celery_logger.setLevel(log_level)
+    
+    # Configure all Celery internal loggers to suppress noisy messages
+    celery_loggers = [
+        'celery',
+        'celery.worker',
+        'celery.worker.consumer', 
+        'celery.worker.strategy',
+        'celery.worker.heartbeat',
+        'celery.worker.job',
+        'celery.beat',
+        'celery.control',
+        'celery.app.trace'
+    ]
+    
+    for logger_name in celery_loggers:
+        logging.getLogger(logger_name).setLevel(log_level)
+    
     celery.conf.update(
         {
             "task_routes": ("materializationengine.task_router.TaskRouter"),
@@ -74,12 +93,10 @@ def create_celery(app=None):
 @after_setup_logger.connect
 def celery_loggers(logger, *args, **kwargs):
     """
-    Display the Celery banner appears in the log output.
-    https://www.distributedpython.com/2018/10/01/celery-docker-startup/
+    Add stdout handler for Celery logger output.
     """
-    logger.info(f"Customize Celery logger, default handler: {logger.handlers[0]}")
     logger.addHandler(logging.StreamHandler(sys.stdout))
-
+    
 
 def days_till_next_month(date):
     """function to pick out the same weekday in the next month

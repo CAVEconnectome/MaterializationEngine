@@ -15,7 +15,7 @@ class BaseConfig:
     TESTING = False
     LOGGING_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
     LOGGING_LOCATION = HOME + "/.materializationengine/bookshelf.log"
-    LOGGING_LEVEL = logging.DEBUG
+    LOGGING_LEVEL = logging.WARNING
     SQLALCHEMY_DATABASE_URI = "sqlite://"
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     REDIS_URL = "redis://"
@@ -32,6 +32,9 @@ class BaseConfig:
     MASTER_NAME = os.environ.get("MASTER_NAME", None)
     MATERIALIZATION_ROW_CHUNK_SIZE = 500
     QUERY_LIMIT_SIZE = 200000
+    PRECOMPUTED_OVERVIEW_MAX_SIZE = 10000
+    PRECOMPUTED_SPATIAL_INDEX_LIMIT = 10000
+    HASH_SAMPLING_THRESHOLD_PERCENT = 5.0
     QUEUE_LENGTH_LIMIT = 10000
     QUEUES_TO_THROTTLE = ["process"]
     THROTTLE_QUEUES = True
@@ -65,8 +68,8 @@ class BaseConfig:
     else:
         AUTH_TOKEN = ""
 
-    DB_CONNECTION_POOL_SIZE = 5
-    DB_CONNECTION_MAX_OVERFLOW = 5
+    DB_CONNECTION_POOL_SIZE = 20
+    DB_CONNECTION_MAX_OVERFLOW = 30
 
     BEAT_SCHEDULES = [
         {
@@ -165,7 +168,7 @@ class TestConfig(BaseConfig):
 
 class ProductionConfig(BaseConfig):
     ENV = "production"
-    LOGGING_LEVEL = logging.INFO
+    LOGGING_LEVEL = logging.WARNING
     CELERY_BROKER = os.environ.get("REDIS_URL")
     CELERY_RESULT_BACKEND = os.environ.get("REDIS_URL")
     REDIS_URL = os.environ.get("REDIS_URL")

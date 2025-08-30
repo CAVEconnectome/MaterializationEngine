@@ -1,6 +1,6 @@
 from collections import defaultdict
 from materializationengine.database import dynamic_annotation_cache
-from flask import abort
+from flask import abort, current_app
 from materializationengine.blueprints.client.query import (
     make_spatial_filter,
     _execute_query,
@@ -9,7 +9,7 @@ from materializationengine.blueprints.client.query import (
 import numpy as np
 from geoalchemy2.types import Geometry
 from sqlalchemy.sql.sqltypes import Integer, String
-from sqlalchemy import or_, func
+from sqlalchemy import or_, func, text
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.selectable import Alias
 from sqlalchemy.sql.schema import Table
@@ -43,7 +43,7 @@ class QueryManager:
         self._segmentation_source = segmentation_source
         self._split_mode = split_mode
         self._random_sample = random_sample
-
+        
         self._split_mode_outer = split_mode_outer
         self._split_models = {}
         self._flat_models = {}
@@ -169,10 +169,20 @@ class QueryManager:
                     seg_columns = [
                         c for c in segmodel.__table__.columns if c.key != "id"
                     ]
-                    if random_sample and self._random_sample:
-                        annmodel_alias1 = aliased(
-                            annmodel, tablesample(annmodel, self._random_sample)
-                        )
+                    if random_sample and self._random_sample is not None and self._random_sample > 0:
+                        # Ensure the random sample is a valid percentage (convert to float if needed)
+                        try:
+                            sample_value = float(self._random_sample)
+                            if not np.isfinite(sample_value) or sample_value <= 0 or sample_value > 100:
+                                # Skip TABLESAMPLE if invalid
+                                annmodel_alias1 = annmodel
+                            else:
+                                annmodel_alias1 = aliased(
+                                    annmodel, tablesample(annmodel, sample_value)
+                                )
+                        except (ValueError, TypeError):
+                            # Skip TABLESAMPLE if conversion fails
+                            annmodel_alias1 = annmodel
                     else:
                         annmodel_alias1 = annmodel
                     subquery = (
@@ -180,23 +190,41 @@ class QueryManager:
                         .join(segmodel, annmodel_alias1.id == segmodel.id, isouter=True)
                         .subquery()
                     )
-                    annmodel_alias = aliased(subquery, name=table_name, flat=True)
+                    # Use flat=False to preserve parameter binding context when TABLESAMPLE is used
+                    use_flat = not (random_sample and self._random_sample is not None and self._random_sample > 0)
+                    annmodel_alias = aliased(subquery, name=table_name, flat=use_flat)
 
                     self._models[table_name] = annmodel_alias
                     # self._models[segmodel.__tablename__] = segmodel_alias
 
                 else:
-                    if random_sample and self._random_sample:
-                        annmodel_alias1 = aliased(
-                            annmodel, tablesample(annmodel, self._random_sample)
-                        )
+                    if random_sample and self._random_sample is not None and self._random_sample > 0:
+                        # Ensure the random sample is a valid percentage (convert to float if needed)
+                        try:
+                            sample_value = float(self._random_sample)
+                            if not np.isfinite(sample_value) or sample_value <= 0 or sample_value > 100:
+                                abort(500, f"Invalid random_sample value: {sample_value}, skipping TABLESAMPLE")
+                            else:
+                                annmodel_alias1 = aliased(
+                                    annmodel, tablesample(annmodel, sample_value)
+                                )
+                        except (ValueError, TypeError) as e:
+                            abort(500, f"Cannot convert random_sample to float: {self._random_sample}, error: {e}")
                     else:
                         annmodel_alias1 = annmodel
                     self._models[table_name] = annmodel_alias1
             else:
                 model = self._get_flat_model(table_name)
-                if self._random_sample:
-                    model = aliased(model, tablesample, self._random_sample)
+                if self._random_sample is not None and self._random_sample > 0:
+                    # Ensure the random sample is a valid percentage (convert to float if needed)
+                    try:
+                        sample_value = float(self._random_sample)
+                        if not np.isfinite(sample_value) or sample_value <= 0 or sample_value > 100:
+                            abort(500, f"Invalid random_sample value: {sample_value}, skipping TABLESAMPLE")
+                        else:
+                            model = aliased(model, tablesample(model, sample_value))
+                    except (ValueError, TypeError) as e:
+                        abort(500, f"Cannot convert random_sample to float: {self._random_sample}, error: {e}")
                 self._models[table_name] = model
 
     def _find_relevant_model(self, table_name, column_name):
@@ -208,7 +236,6 @@ class QueryManager:
         return model
 
     def join_tables(self, table1, column1, table2, column2, isouter=False):
-
         self.add_table(table1, random_sample=True)
         self.add_table(table2)
 
@@ -302,7 +329,6 @@ class QueryManager:
         # if the column_name is not in the table_name list
         # then we should add it
         if column_name not in self._selected_columns[table_name]:
-
             model = self._find_relevant_model(
                 table_name=table_name, column_name=column_name
             )
@@ -459,7 +485,8 @@ class QueryManager:
             user_data.get("filter_less_dict", None), self.apply_less_filter
         )
         self.apply_filter(
-            user_data.get("filter_greater_equal_dict", None), self.apply_greater_equal_filter
+            user_data.get("filter_greater_equal_dict", None),
+            self.apply_greater_equal_filter,
         )
         self.apply_filter(
             user_data.get("filter_less_equal_dict", None), self.apply_less_equal_filter
@@ -491,6 +518,7 @@ class QueryManager:
             filter_args: Iterable of iterables
             select_columns: None or Iterable of str
             offset: Int offset of query
+            limit: Int limit of query
 
         Returns:
             SQLAchemy query object
@@ -566,7 +594,6 @@ class QueryManager:
                         ]
                         query_args += column_args
                     else:
-
                         if self._split_mode and (
                             column.key.endswith("_root_id")
                             or column.key.endswith("_supervoxel_id")
@@ -604,14 +631,22 @@ class QueryManager:
                         else:
                             query_args.append(column)
 
+        # Apply hash sampling filters before building the query
+        hash_filters = self._get_hash_sampling_filters()
+        filters_with_hash = self._filters + hash_filters if hash_filters else self._filters
+        
+        # Update limit if grid sampling is enabled
+        effective_limit = self._get_effective_limit()
+
         query = self._make_query(
             query_args=self._models.values(),
             join_args=self._joins,
-            filter_args=self._filters,
+            filter_args=filters_with_hash,
             select_columns=query_args,
             offset=self.offset,
-            limit=self.limit,
+            limit=effective_limit,
         )
+        
         df = _execute_query(
             self._db.database.session,
             self._db.database.engine,
@@ -621,3 +656,105 @@ class QueryManager:
             get_count=self.get_count,
         )
         return df, column_names
+
+    def add_hash_spatial_sampling(self, table_name: str, spatial_column: str, max_points: int = 10000, total_row_count: int = None):
+        """
+        Configure hash-based spatial sampling for a table to limit result size
+        while maintaining spatial representativeness.
+        
+        Args:
+            table_name: Name of the table to sample
+            spatial_column: Name of the spatial geometry column
+            max_points: Maximum number of points to return
+            bounds: Optional bounds dictionary with lower_bound, upper_bound, and vox_res
+            total_row_count: Actual number of rows in the table for accurate sampling calculation
+        """
+
+        self._hash_sampling = {
+            'table_name': table_name,
+            'spatial_column': spatial_column,
+            'max_points': max_points,
+            'total_row_count': total_row_count  # Store the actual row count
+        }
+
+    def _get_hash_sampling_filters(self):
+        """
+        Get hash sampling filters to be added to the query filters
+        """
+        if not hasattr(self, '_hash_sampling') or not self._hash_sampling:
+            return []
+            
+        config = self._hash_sampling
+        table_name = config['table_name']
+        spatial_col = config['spatial_column']
+        max_points = config.get('max_points', 10000)  # Default to 10000 if not specified
+        total_row_count = config.get('total_row_count', 30_000_000)  # Get the actual row count if available
+        
+        # Use existing model from the QueryManager to avoid duplicate table references
+        model = self._models.get(table_name)
+        if model is None:
+            return []  # Can't build filter if we don't have the model in our query
+            
+        try:
+            geom_column = get_column(model, spatial_col)
+        except:
+            return []  # Can't build filter if we can't get the column
+        
+        # Create SQLAlchemy expressions for grid sampling
+        # Instead of requiring exact grid intersections, we'll use a subquery approach
+        # that selects a limited number of points from each grid cell
+        
+        # For now, let's use a simpler approach: sample points that fall into 
+        # specific grid cells using integer division to assign grid coordinates
+        # This is more likely to return actual results
+        
+        # Use hash-based sampling for better spatial distribution without visible grid patterns
+        # This approach hashes the geometry coordinates to get a pseudo-random but deterministic sample
+        
+        # Calculate the sampling ratio based on actual table size and desired max_points
+        # Add validation to prevent division by zero or invalid values
+        if max_points <= 0:
+            print(f"WARNING: Invalid max_points: {max_points}, using default 10000")
+            max_points = 10000
+            
+        if total_row_count and total_row_count > 0:
+            # Use actual row count for precise sampling calculation
+            sampling_factor = max(2, int(total_row_count / max_points))
+        else:
+            # Fallback to estimate if row count is not available
+            sampling_factor = max(2, int(30_000_000 / max_points))
+            
+        # Additional validation to ensure sampling_factor is valid
+        if sampling_factor <= 0 or not np.isfinite(sampling_factor):
+            print(f"WARNING: Invalid sampling_factor: {sampling_factor}, using default 10")
+            sampling_factor = 10
+
+        # Use MD5 hash of the geometry text representation for pseudo-random sampling
+        # Use a simpler approach that avoids potential hex parsing issues
+        geom_text = func.ST_AsText(geom_column)
+        geom_hash = func.md5(geom_text)
+        
+        # Use the first few characters of the hash and convert each character to its ASCII value
+        # This is more reliable than trying to parse hex directly
+        # Take first 4 characters and sum their ASCII values for a pseudo-random integer
+        char1 = func.ascii(func.substr(geom_hash, 1, 1))
+        char2 = func.ascii(func.substr(geom_hash, 2, 1))
+        char3 = func.ascii(func.substr(geom_hash, 3, 1))
+        char4 = func.ascii(func.substr(geom_hash, 4, 1))
+        
+        # Create a pseudo-random integer from ASCII values
+        hash_as_int = char1 * 1000 + char2 * 100 + char3 * 10 + char4
+        
+        # Use modulo to get uniform distribution
+        grid_filter = func.mod(hash_as_int, sampling_factor) == 0
+        
+        return [(grid_filter,)]
+    
+    def _get_effective_limit(self):
+        """
+        Get the effective limit considering hash sampling
+        """
+        if hasattr(self, '_hash_sampling') and self._hash_sampling:
+            self.limit = None
+        
+        return self.limit

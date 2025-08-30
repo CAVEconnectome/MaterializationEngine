@@ -1,1 +1,0 @@
-docker run -v ${PWD}:/app caveconnectome/materializationengine:py39 /bin/bash -c "pip install pip-tools && pip-compile -v -r requirements.in"

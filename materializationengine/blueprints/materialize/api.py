@@ -19,7 +19,7 @@ from materializationengine.info_client import (
 from dynamicannotationdb.models import AnalysisVersion
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from materializationengine.blueprints.materialize.schemas import BadRootsSchema
-from middle_auth_client import auth_requires_admin, auth_requires_permission
+from middle_auth_client import auth_requires_admin, auth_requires_permission, auth_requires_dataset_admin
 from sqlalchemy import MetaData, Table
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoSuchTableError
@@ -35,7 +35,7 @@ from materializationengine.blueprints.materialize.schemas import (
 )
 
 
-__version__ = "5.0.1"
+__version__ = "5.11.0"
 
 
 bulk_upload_parser = reqparse.RequestParser()
@@ -412,7 +412,7 @@ response_model = mat_bp.model(
 )
 class DumpTableToBucketAsCSV(Resource):
     @reset_auth
-    @auth_requires_admin
+    @auth_requires_dataset_admin(table_arg="datastack_name")
     @mat_bp.doc("Take table or view and dump it to a bucket as csv", security="apikey")
     @mat_bp.response(200, "Success", response_model)
     @mat_bp.response(500, "Internal Server Error", response_model)
@@ -425,6 +425,7 @@ class DumpTableToBucketAsCSV(Resource):
             table_name (str): name of table or view to dump
         """
         mat_db_name = f"{datastack_name}__mat{version}"
+        # get the segmentation table name of the table_name
 
         # TODO: add validation of parameters
         sql_instance_name = current_app.config.get("SQL_INSTANCE_NAME", None)

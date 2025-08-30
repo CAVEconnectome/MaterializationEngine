@@ -35,6 +35,8 @@ def validate_datastack(f):
         with db_manager.session_scope(aligned_volume_name) as session:
             version_query = session.query(AnalysisVersion).filter(
                 AnalysisVersion.datastack == target_datastack
+            ).order_by(
+                AnalysisVersion.time_stamp.desc()
             )
             if target_version:
                 if target_version == 0:

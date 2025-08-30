@@ -24,6 +24,7 @@ from materializationengine.utils import get_instance_folder_path
 from materializationengine.views import views_bp
 from materializationengine.limiter import limiter
 from materializationengine.migrate import migrator
+from materializationengine.request_db import init_request_db_cleanup
 
 db = SQLAlchemy(model_class=Base)
 
@@ -33,6 +34,8 @@ class AEEncoder(json.JSONEncoder):
         if isinstance(obj, np.ndarray):
             return obj.tolist()
         if isinstance(obj, np.uint64):
+            return int(obj)
+        if isinstance(obj, np.int64):
             return int(obj)
         if isinstance(obj, (datetime, date)):
             return obj.isoformat()
@@ -50,7 +53,7 @@ def create_app(config_name: str = None):
         template_folder="../templates",
     )
     CORS(app, expose_headers=["WWW-Authenticate", "column_names"])
-    logging.basicConfig(level=logging.INFO)
+    
     app.json_encoder = AEEncoder
     app.config["RESTX_JSON"] = {"cls": AEEncoder}
 
@@ -59,8 +62,18 @@ def create_app(config_name: str = None):
         app.config.from_object(config[config_name])
     else:
         app = configure_app(app)
+    logging.basicConfig(level=app.config['LOGGING_LEVEL'])
+    
+    # Suppress noisy debug messages from fsevents
+    logging.getLogger('fsevents').setLevel(app.config['LOGGING_LEVEL'])
+    logging.getLogger('urllib3').setLevel(app.config['LOGGING_LEVEL'])
+    logging.getLogger('google').setLevel(app.config['LOGGING_LEVEL'])
+    logging.getLogger('materializationengine').setLevel(app.config['LOGGING_LEVEL'])
+    logging.getLogger('root').setLevel(app.config['LOGGING_LEVEL'])
+    logging.getLogger('python_jsonschema_objects').setLevel(app.config['LOGGING_LEVEL'])
 
-
+    # Initialize request-scoped database session cleanup
+    init_request_db_cleanup(app)
     
     # register blueprints
     apibp = Blueprint("api", __name__, url_prefix="/materialize")
