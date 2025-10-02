@@ -11,6 +11,7 @@ import nglui
 import numpy as np
 import pandas as pd
 import pytz
+import copy
 import werkzeug
 from cachetools import LRUCache, TTLCache, cached
 from cachetools.keys import hashkey
@@ -1765,7 +1766,16 @@ def assemble_live_query_dataframe(user_data, datastack_name, args):
     final_mat_warnings = mat_warnings if isinstance(mat_warnings, list) else ([mat_warnings] if mat_warnings else [])
     final_prod_warnings = prod_warnings if isinstance(prod_warnings, list) else ([prod_warnings] if prod_warnings else [])
 
-    return df, column_names, final_mat_warnings, final_prod_warnings, final_remap_warnings
+    # we want to drop columns that the user didn't ask for (mostly supervoxel columns)
+    filter_column_names = copy.deepcopy(column_names)
+    if user_data.get('select_columns', None) is not None:
+        for table, column_map in column_names.items():
+            for col, df_col_name in column_map.items():
+                if col not in user_data['select_columns'][table]:
+                    # then we want to drop this column
+                    df.drop(df_col_name, axis=1, inplace=True)
+                    filter_column_names[table].pop(col)
+    return df, filter_column_names, final_mat_warnings, final_prod_warnings, final_remap_warnings
 
 
 @client_bp.expect(query_parser)

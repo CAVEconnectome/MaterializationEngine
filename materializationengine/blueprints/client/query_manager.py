@@ -332,12 +332,8 @@ class QueryManager:
             model = self._find_relevant_model(
                 table_name=table_name, column_name=column_name
             )
-            if isinstance(model, Alias):
-                if column_name not in model.c.keys():
-                    raise ValueError(
-                        f"{column_name} not in model or models for {table_name}"
-                    )
-            elif isinstance(model, Table):
+            
+            if isinstance(model, (Alias, Table)):
                 if column_name not in model.c.keys():
                     raise ValueError(
                         f"{column_name} not in model or models for {table_name}"
@@ -347,13 +343,25 @@ class QueryManager:
                     raise ValueError(
                         f"{column_name} not in model or models for {table_name}"
                     )
+            # if the column name has the form X_root_id and there is a corresponding field
+            # called X_supervoxel_id then also select the supervoxel_id column
+            if column_name.endswith('root_id'):
+                base = column_name[:-len('root_id')]
+                supervoxel_column = base + "supervoxel_id"
+
+                try:
+                    self.select_column(table_name, supervoxel_column)
+                except ValueError:
+                    pass
 
             self._selected_columns[table_name].append(column_name)
 
-    def select_all_columns(self, table_name):
+    def select_all_columns(self, table_name, columns_to_skip=None):
         if self._split_mode:
             annmodel, segmodel = self._get_split_model(table_name=table_name)
             ann_columns = [c.key for c in annmodel.__table__.columns]
+            if columns_to_skip is not None:
+                ann_columns = [c for c in ann_columns if c not in columns_to_skip]
             if segmodel is not None:
                 seg_columns = [
                     c.key for c in segmodel.__table__.columns if c.key != "id"
@@ -455,11 +463,11 @@ class QueryManager:
         # if none are specified select all the columns in the tables
         # referred to
         else:
-            self.select_all_columns(user_data["table"])
+            self.select_all_columns(user_data["table"], ['valid', 'superceded_id'])
             joins = user_data.get("join_tables", [])
             for join in joins:
-                self.select_all_columns(join[0])
-                self.select_all_columns(join[2])
+                self.select_all_columns(join[0],  ['valid', 'superceded_id'])
+                self.select_all_columns(join[2],  ['valid', 'superceded_id'])
         if user_data.get("offset", None):
             self.offset = user_data["offset"]
         if user_data.get("limit", None):
