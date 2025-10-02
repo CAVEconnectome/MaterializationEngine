@@ -592,6 +592,7 @@ def combine_queries(
     chosen_version: AnalysisVersion,
     user_data: dict,
     column_names: dict,
+    column_names_prod: dict,
 ) -> pd.DataFrame:
     """combine a materialized query with an production query
        will remove deleted rows from materialized query,
@@ -603,11 +604,12 @@ def combine_queries(
         mat_df (pd.DataFrame): _description_
         prod_df (pd.DataFrame): _description_
         user_data (dict): _description_
+        
 
     Returns:
         pd.DataFrame: _description_
     """
-    crud_columns, created_columns = collect_crud_columns(column_names=column_names)
+    crud_columns, created_columns = collect_crud_columns(column_names=column_names_prod)
     if mat_df is not None:
         if len(mat_df) == 0:
             if prod_df is None:
@@ -624,17 +626,16 @@ def combine_queries(
     if (prod_df is None) and (mat_df is None):
         abort(400, f"This query on table {user_data['table']} returned no results")
 
-    crud_columns, created_columns = collect_crud_columns(column_names=column_names)
 
     if prod_df is not None:
         # if we are moving forward in time
         if chosen_timestamp < user_timestamp:
             deleted_between = (
-                prod_df[column_names[table]["deleted"]] > chosen_timestamp
-            ) & (prod_df[column_names[table]["deleted"]] < user_timestamp)
+                prod_df[column_names_prod[table]["deleted"]] > chosen_timestamp
+            ) & (prod_df[column_names_prod[table]["deleted"]] < user_timestamp)
             created_between = (
-                prod_df[column_names[table]["created"]] > chosen_timestamp
-            ) & (prod_df[column_names[table]["created"]] < user_timestamp)
+                prod_df[column_names_prod[table]["created"]] > chosen_timestamp
+            ) & (prod_df[column_names_prod[table]["created"]] < user_timestamp)
 
             to_delete_in_mat = deleted_between & ~created_between
             to_add_in_mat = created_between & ~deleted_between
@@ -644,11 +645,11 @@ def combine_queries(
                 cut_prod_df = prod_df
         else:
             deleted_between = (
-                prod_df[column_names[table]["deleted"]] > user_timestamp
-            ) & (prod_df[column_names[table]["deleted"]] < chosen_timestamp)
+                prod_df[column_names_prod[table]["deleted"]] > user_timestamp
+            ) & (prod_df[column_names_prod[table]["deleted"]] < chosen_timestamp)
             created_between = (
-                prod_df[column_names[table]["created"]] > user_timestamp
-            ) & (prod_df[column_names[table]["created"]] < chosen_timestamp)
+                prod_df[column_names_prod[table]["created"]] > user_timestamp
+            ) & (prod_df[column_names_prod[table]["created"]] < chosen_timestamp)
             to_delete_in_mat = created_between & ~deleted_between
             to_add_in_mat = deleted_between & ~created_between
             if len(prod_df[created_between].index) > 0:
@@ -1757,7 +1758,7 @@ def assemble_live_query_dataframe(user_data, datastack_name, args):
     naive_ts_for_combine = loc_cv_time_stamp 
     minimal_chosen_version_for_combine = MinimalChosenVersion(naive_ts_for_combine)
 
-    df = combine_queries(mat_df, prod_df, minimal_chosen_version_for_combine, user_data, column_names)
+    df = combine_queries(mat_df, prod_df, minimal_chosen_version_for_combine, user_data, column_names, column_names_prod)
     df = apply_filters(df, user_data, column_names)
     
     final_remap_warnings = remap_warnings if isinstance(remap_warnings, list) else ([remap_warnings] if remap_warnings else [])
