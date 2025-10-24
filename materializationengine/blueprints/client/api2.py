@@ -90,7 +90,7 @@ from materializationengine.blueprints.client.utils import after_request
 from materializationengine.blueprints.client.precomputed import AnnotationWriter
 
 
-__version__ = "5.12.0"
+__version__ = "5.12.1"
 
 
 authorizations = {
