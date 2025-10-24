@@ -1992,6 +1992,7 @@ def get_precomputed_properties_and_relationships(datastack_name, table_name):
             continue
         elif c.endswith("pt_root_id"):
             continue
+        elif c.endswith("superceded_by")
         if c in geometry_columns:
             continue
         elif c in unique_values.keys():
@@ -2565,6 +2566,8 @@ def format_df_to_bytes(df, datastack_name, table_name, encode_single=False):
             geometry_columns[1] + "_y",
             geometry_columns[1] + "_z",
         ]
+    else:
+        abort("400", "Unsupported annotation type {}".format(anntype))
     for p in properties:
         if p.enum_values is not None:
             df[p.id].replace(
@@ -2578,7 +2581,7 @@ def format_df_to_bytes(df, datastack_name, table_name, encode_single=False):
             for r in relationships:
                 if r in df.columns:
                     kwargs[r] = df.loc[i, r]
-        if row["valid"]:
+        if row.get("valid", True):
             if anntype == "point":
                 point = df.loc[i, point_cols].tolist()
                 writer.add_point(point, id=df.loc[i, "id"], **kwargs)
