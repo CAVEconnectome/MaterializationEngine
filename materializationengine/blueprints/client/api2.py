@@ -1992,7 +1992,6 @@ def get_precomputed_properties_and_relationships(datastack_name, table_name):
             continue
         elif c.endswith("pt_root_id"):
             continue
-        elif c.endswith("superceded_by")
         if c in geometry_columns:
             continue
         elif c in unique_values.keys():
