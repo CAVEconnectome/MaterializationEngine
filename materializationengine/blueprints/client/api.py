@@ -2,6 +2,19 @@ from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 from flask import abort, request
 from flask_accepts import accepts
 from flask_restx import Namespace, Resource, inputs, reqparse
+from middle_auth_client import auth_requires_permission
+
+from materializationengine.blueprints.client.common import (
+    get_analysis_version_and_table,
+    get_flat_model,
+    handle_complex_query,
+    handle_simple_query,
+    validate_table_args,
+)
+from materializationengine.blueprints.client.common import (
+    unhandled_exception as common_unhandled_exception,
+)
+from materializationengine.blueprints.client.datastack import validate_datastack
 from materializationengine.blueprints.client.schemas import (
     ComplexQuerySchema,
     SimpleQuerySchema,
@@ -11,24 +24,13 @@ from materializationengine.blueprints.client.utils import (
     update_notice_text_warnings,
 )
 from materializationengine.blueprints.reset_auth import reset_auth
-from materializationengine.database import dynamic_annotation_cache, db_manager
+from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.info_client import (
     get_aligned_volumes,
     get_relevant_datastack_info,
 )
-from materializationengine.blueprints.client.common import (
-    handle_complex_query,
-    handle_simple_query,
-    validate_table_args,
-    get_analysis_version_and_table,
-    get_flat_model,
-    unhandled_exception as common_unhandled_exception,
-)
 from materializationengine.models import MaterializedMetadata
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
-from middle_auth_client import auth_requires_permission
-from materializationengine.blueprints.client.datastack import validate_datastack
-
 
 __version__ = "5.12.1"
 

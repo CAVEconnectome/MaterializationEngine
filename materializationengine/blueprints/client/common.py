@@ -1,26 +1,29 @@
-from dynamicannotationdb.models import AnalysisVersion, AnalysisTable
+import textwrap
+import traceback
+
+import numpy as np
 from cachetools import LRUCache, cached
 from cachetools.keys import hashkey
-from flask import abort, current_app
+from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
+from flask import abort, current_app, g, request
+
 from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.blueprints.client.utils import (
-    update_notice_text_warnings,
-    create_query_response,
     collect_crud_columns,
+    create_query_response,
+    update_notice_text_warnings,
 )
-from materializationengine.database import dynamic_annotation_cache, db_manager
-from materializationengine.models import MaterializedMetadata
-from materializationengine.utils import check_read_permission
+from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.info_client import (
     get_relevant_datastack_info,
 )
-import numpy as np
-import textwrap
-from flask import g, request
-import traceback
-from materializationengine.schemas import AnalysisVersionSchema, AnalysisTableSchema
+from materializationengine.models import MaterializedMetadata
+from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
+from materializationengine.utils import check_read_permission
 
-
+sql_query_warning = """Query was executed using streaming via CSV, which can mangle types.
+Please upgrade to caveclient > 8.0.0 to avoid type mangling.
+Because you may have been affected by mangled types, this change is breaking, but it should provide an improved experience."""
 def unhandled_exception(e):
     status_code = 500
     user_ip = str(request.remote_addr)
@@ -341,11 +344,7 @@ def generate_simple_query_dataframe(
         warnings.append(f'201 - "Limited query to {limit} rows')
     warnings = update_notice_text_warnings(ann_md, warnings, table_name)
     if not direct_sql_pandas:
-        warnings.append(
-            """Query was executed using streaming via CSV, which can mangle types.
-Please upgrade to caveclient > 8.0.0 to avoid type mangling.
-Because you may have been affected by mangled types, this change is breaking, but it should provide an improved experience."""
-        )
+        warnings.append(sql_query_warning)
     return df, warnings, column_names
 
 

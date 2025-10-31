@@ -1,17 +1,15 @@
+import copy
 import datetime
+import io
 import json
-import pytz
-from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
-
-from cachetools import TTLCache, cached, LRUCache
 from functools import wraps
 from typing import List
 
+import cloudvolume
 import nglui
 import numpy as np
 import pandas as pd
 import pytz
-import copy
 import werkzeug
 from cachetools import LRUCache, TTLCache, cached
 from cachetools.keys import hashkey
@@ -25,6 +23,7 @@ from marshmallow import fields as mm_fields
 from middle_auth_client import (
     auth_requires_permission,
 )
+from neuroglancer import viewer_state
 from sqlalchemy.sql.sqltypes import Boolean, DateTime, Float, Integer, Numeric, String
 
 from materializationengine.blueprints.client.common import (
@@ -34,32 +33,19 @@ from materializationengine.blueprints.client.common import (
     get_analysis_version_and_tables,
     handle_complex_query,
     handle_simple_query,
+    sql_query_warning,
     validate_table_args,
 )
 from materializationengine.blueprints.client.common import (
     unhandled_exception as common_unhandled_exception,
 )
-from materializationengine.request_db import request_db_session
-import pandas as pd
-import numpy as np
-from marshmallow import fields as mm_fields
-from emannotationschemas.schemas.base import PostGISField
-import datetime
-from typing import List
-import werkzeug
-from sqlalchemy.sql.sqltypes import String, Integer, Float, DateTime, Boolean, Numeric
-import io
-from geoalchemy2.types import Geometry
-import nglui
-from neuroglancer import viewer_state
-import cloudvolume
-
 from materializationengine.blueprints.client.datastack import validate_datastack
 from materializationengine.blueprints.client.new_query import (
     remap_query,
     strip_root_id_filters,
     update_rootids,
 )
+from materializationengine.blueprints.client.precomputed import AnnotationWriter
 from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.blueprints.client.schemas import (
     AnalysisViewSchema,
@@ -76,19 +62,13 @@ from materializationengine.blueprints.client.utils import (
 )
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
-from materializationengine.database import (
-    dynamic_annotation_cache,
-    db_manager
-)
+from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.info_client import get_aligned_volumes, get_datastack_info
 from materializationengine.limiter import limit_by_category
 from materializationengine.models import MaterializedMetadata
+from materializationengine.request_db import request_db_session
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from materializationengine.utils import check_read_permission
-from materializationengine.blueprints.client.utils import update_notice_text_warnings
-from materializationengine.blueprints.client.utils import after_request
-from materializationengine.blueprints.client.precomputed import AnnotationWriter
-
 
 __version__ = "5.12.1"
 
@@ -494,10 +474,7 @@ def execute_materialized_query(
         than limit of {user_data['limit']} there may be more results which are not shown"
                     )
             if not direct_sql_pandas:
-                warnings.append("query was executing using streaming via csv, which can mangle types. \
-                                Please upgrade to caveclient>8.0.0 to avoid type mangling. \
-                                because you may have been corrected for mangled types this change is breaking, \
-                                but should be an improved experience.")
+                warnings.append(sql_query_warning)
             return df, column_names, warnings
         else:
             return None, {}, []
@@ -1797,10 +1774,7 @@ def assemble_live_query_dataframe(user_data, datastack_name, args):
     final_mat_warnings = mat_warnings if isinstance(mat_warnings, list) else ([mat_warnings] if mat_warnings else [])
     final_prod_warnings = prod_warnings if isinstance(prod_warnings, list) else ([prod_warnings] if prod_warnings else [])
     if not direct_sql_pandas:
-        final_mat_warnings.append("query was executed using streaming via csv, which was mangling types. \
-                                   Please upgrade to caveclient>8.0.0 to avoid type mangling. \
-                                   because you may have been corrected for mangled types this change is breaking, \
-                                   but should be an improved experience.")
+        final_mat_warnings.append(sql_query_warning)
     # we want to drop columns that the user didn't ask for (mostly supervoxel columns)
     filter_column_names = copy.deepcopy(column_names)
     if user_data.get('select_columns', None) is not None:

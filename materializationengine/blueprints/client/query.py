@@ -8,16 +8,15 @@ import numpy as np
 import pandas as pd
 import shapely
 from geoalchemy2.elements import WKBElement
-
 from geoalchemy2.shape import to_shape
 from geoalchemy2.types import Geometry
 from multiwrapper import multiprocessing_utils as mu
 from sqlalchemy import func, not_
 from sqlalchemy.orm import Query
-from sqlalchemy.sql.sqltypes import Boolean, Integer, DateTime
-from sqlalchemy.sql.selectable import Alias
 from sqlalchemy.orm.util import AliasedClass
 from sqlalchemy.sql.schema import Table
+from sqlalchemy.sql.selectable import Alias
+from sqlalchemy.sql.sqltypes import Boolean, DateTime, Integer
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
 
@@ -328,9 +327,6 @@ def _execute_query(
         count = query.count()
         df = pd.DataFrame({"count": [count]})
     else:
-        
-        # print(query.statement.compile(engine, compile_kwargs={"literal_binds": True}))
-       
         if direct_sql_pandas:
             with engine.connect() as connection:
                 statement = str(query.statement.compile(engine, compile_kwargs={"literal_binds": True}))
