@@ -341,10 +341,11 @@ def generate_simple_query_dataframe(
         warnings.append(f'201 - "Limited query to {limit} rows')
     warnings = update_notice_text_warnings(ann_md, warnings, table_name)
     if not direct_sql_pandas:
-        warnings.append("query was executing using streaming via csv, which can mangle types. \
-                Please upgrade to caveclient>8.0.0 to avoid type mangling. \
-                because you may have been corrected for mangled types this change is breaking, \
-                but should be an improved experience.")
+        warnings.append(
+            """Query was executed using streaming via CSV, which can mangle types.
+Please upgrade to caveclient > 8.0.0 to avoid type mangling.
+Because you may have been affected by mangled types, this change is breaking, but it should provide an improved experience."""
+        )
     return df, warnings, column_names
 
 
