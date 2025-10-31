@@ -295,7 +295,7 @@ def generate_simple_query_dataframe(
                 random_sample = None
             else:
                 random_sample = (100.0 * random_sample) / mat_row_count
-
+    direct_sql_pandas = args.get("direct_sql_pandas", False)
     qm = QueryManager(
         mat_db_name,
         segmentation_source=pcg_table_name,
@@ -305,6 +305,7 @@ def generate_simple_query_dataframe(
         offset=data.get("offset", 0),
         get_count=get_count,
         random_sample=random_sample,
+        direct_sql_pandas=direct_sql_pandas
     )
     qm.add_table(table_name, random_sample=True)
     qm.apply_filter(data.get("filter_in_dict", None), qm.apply_isin_filter)
@@ -339,7 +340,11 @@ def generate_simple_query_dataframe(
     if len(df) == limit:
         warnings.append(f'201 - "Limited query to {limit} rows')
     warnings = update_notice_text_warnings(ann_md, warnings, table_name)
-
+    if not direct_sql_pandas:
+        warnings.append("query was executing using streaming via csv, which can mangle types. \
+                Please upgrade to caveclient>8.0.0 to avoid type mangling. \
+                because you may have been corrected for mangled types this change is breaking, \
+                but should be an improved experience.")
     return df, warnings, column_names
 
 
@@ -381,7 +386,7 @@ def generate_complex_query_dataframe(
     target_version,
     args,
     data,
-    convert_desired_resolution=False,
+    convert_desired_resolution=False
 ):
     aligned_volume_name, pcg_table_name = get_relevant_datastack_info(datastack_name)
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
@@ -430,7 +435,16 @@ def generate_complex_query_dataframe(
         suffixes = {t: s for t, s in zip(uniq_tables, suffixes)}
     else:
         suffixes = data.get("suffix_map")
-
+    direct_sql_pandas = args.get("direct_sql_pandas", False)
+    if not direct_sql_pandas:
+        warn_text = textwrap.dedent(
+            """\
+            Using non-pandas query execution is deprecated
+            as it can mangle types,
+            please upgrade caveclient to >=8.0.0 to use pandas
+            for improved type handling."""
+        )
+        warnings.append(warn_text)
     random_sample = args.get("random_sample", None)
     if random_sample is not None:
         with db_manager.session_scope(db_name) as session:
@@ -454,6 +468,7 @@ def generate_complex_query_dataframe(
         offset=data.get("offset", 0),
         get_count=False,
         random_sample=random_sample,
+        direct_sql_pandas=direct_sql_pandas,
     )
     if convert_desired_resolution:
         if not data.get("desired_resolution", None):

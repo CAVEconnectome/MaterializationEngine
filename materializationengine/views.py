@@ -38,7 +38,6 @@ from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.blueprints.client.schemas import AnalysisViewSchema
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.celery_init import celery
-from materializationengine.blueprints.client.query import specific_query
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.request_db import request_db_session
@@ -664,6 +663,7 @@ def generic_report(datastack_name, id):
         segmentation_source=pcg_table_name,
         meta_db_name=aligned_volume_name,
         split_mode=not is_merged,
+        direct_sql_pandas=True
     )
     qm.add_table(table_name)
     qm.select_all_columns(table_name)
