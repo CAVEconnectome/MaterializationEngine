@@ -3234,10 +3234,7 @@ def assemble_view_dataframe(datastack_name, version, view_name, data, args):
     df.drop(columns=["deleted", "superceded"], inplace=True, errors="ignore")
     warnings = []
     if not direct_sql_pandas:
-        warnings.append("query was executing using streaming via csv, which can mangle types. \
-                Please upgrade to caveclient>8.0.0 to avoid type mangling. \
-                because you may have been corrected for mangled types this change is breaking, \
-                but should be an improved experience.")
+        warnings.append(sql_query_warning)
     current_app.logger.info("query: {}".format(data))
     current_app.logger.info("args: {}".format(args))
     user_id = str(g.auth_user["id"])
