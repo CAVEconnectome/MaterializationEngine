@@ -34,6 +34,7 @@ class QueryManager:
         get_count: bool = False,
         split_mode_outer: bool = False,
         random_sample: float = None,
+        direct_sql_pandas: bool = False
     ):
         self._db = dynamic_annotation_cache.get_db(db_name)
         if meta_db_name is None:
@@ -56,6 +57,7 @@ class QueryManager:
         self.limit = limit
         self.offset = offset
         self.get_count = get_count
+        self.direct_sql_pandas = direct_sql_pandas
         if suffixes is None:
             suffixes = defaultdict(lambda: None)
         else:
@@ -662,6 +664,7 @@ class QueryManager:
             fix_wkb=False,
             index_col=None,
             get_count=self.get_count,
+            direct_sql_pandas=self.direct_sql_pandas
         )
         return df, column_names
 
