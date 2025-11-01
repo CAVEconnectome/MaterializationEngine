@@ -1,8 +1,7 @@
-from caveclient.chunkedgraph import ChunkedGraphClient
-from caveclient.auth import AuthClient
-from caveclient.auth import default_global_server_address
 import os
 
+from caveclient.auth import AuthClient, default_global_server_address
+from caveclient.chunkedgraph import ChunkedGraphClient
 
 default_server_address = os.environ.get(
     "GLOBAL_SERVER_URL", default_global_server_address

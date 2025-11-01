@@ -1,25 +1,24 @@
 import datetime
-from typing import List
-import time
 import json
+import time
+from typing import List
 
 import gcsfs
 import numpy as np
 import pandas as pd
-from celery import chain, group, chord
+from celery import chain, chord, group
 from celery.utils.log import get_task_logger
 from dynamicannotationdb.models import AnnoMetadata, SegmentationMetadata
-
 from dynamicannotationdb.schema import DynamicSchemaClient
+
 from materializationengine.celery_init import celery
 from materializationengine.database import db_manager
 from materializationengine.index_manager import index_cache
-from materializationengine.shared_tasks import fin, add_index
+from materializationengine.shared_tasks import add_index, fin
 from materializationengine.utils import (
     create_annotation_model,
     create_segmentation_model,
 )
-
 
 celery_logger = get_task_logger(__name__)
 

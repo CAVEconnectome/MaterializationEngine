@@ -1,6 +1,6 @@
 from geoalchemy2.types import Geometry
-from sqlalchemy import engine, MetaData
-from sqlalchemy import inspect
+from sqlalchemy import MetaData, engine, inspect
+
 
 class IndexCache:
     def get_table_indices(self, table_name: str, engine: engine):

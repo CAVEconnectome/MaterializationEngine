@@ -1,6 +1,5 @@
 from celery import Celery
 
-
 celery = Celery(
     include=[
         "materializationengine.workflows.ingest_new_annotations",

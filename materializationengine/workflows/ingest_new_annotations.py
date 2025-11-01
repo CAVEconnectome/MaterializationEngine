@@ -8,30 +8,30 @@ import pandas as pd
 from celery import chain, chord, group
 from celery.utils.log import get_task_logger
 from dynamicannotationdb.models import SegmentationMetadata
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.sql import func, or_, text
+
 from materializationengine.celery_init import celery
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
-from materializationengine.database import dynamic_annotation_cache, db_manager
-from materializationengine.throttle import throttle_celery
+from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.shared_tasks import (
-    generate_chunked_model_ids,
-    fin,
-    query_id_range,
     create_chunks,
-    update_metadata,
+    fin,
+    generate_chunked_model_ids,
     get_materialization_info,
-    monitor_workflow_state,
     monitor_task_states,
+    monitor_workflow_state,
+    query_id_range,
+    update_metadata,
     workflow_complete,
 )
+from materializationengine.throttle import throttle_celery
 from materializationengine.utils import (
     create_annotation_model,
     create_segmentation_model,
     get_geom_from_wkb,
     get_query_columns_by_suffix,
 )
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.sql import or_
-from sqlalchemy.sql import func, text
 
 celery_logger = get_task_logger(__name__)
 

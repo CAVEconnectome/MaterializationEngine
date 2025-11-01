@@ -1,12 +1,13 @@
 import datetime
-import pytest
 from unittest import mock
 
+import pytest
+from dynamicannotationdb.models import AnalysisVersion
+
+from materializationengine.database import db_manager
 from materializationengine.workflows.periodic_database_removal import (
     remove_expired_databases,
 )
-from materializationengine.database import db_manager
-from dynamicannotationdb.models import AnalysisVersion
 
 
 class TestPeriodicDatabaseRemoval:

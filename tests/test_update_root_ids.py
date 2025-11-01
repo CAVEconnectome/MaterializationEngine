@@ -1,14 +1,14 @@
-from unittest.mock import MagicMock
 import sys
+from unittest.mock import MagicMock
 
 sys.modules["materializationengine.chunkedgraph_gateway"] = MagicMock()
+import logging
+
 from materializationengine.workflows.update_root_ids import (
     get_expired_root_ids_from_pcg,
     get_new_root_ids,
     get_supervoxel_id_queries,
 )
-import logging
-
 
 mocked_expired_root_id_data = [
     [20000000, 20000001],

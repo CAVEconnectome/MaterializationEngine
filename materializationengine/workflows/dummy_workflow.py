@@ -2,6 +2,7 @@ import time
 
 from celery import chain, chord
 from celery.utils.log import get_task_logger
+
 from materializationengine.celery_init import celery
 from materializationengine.shared_tasks import fin
 

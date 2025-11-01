@@ -2,28 +2,29 @@ import datetime
 
 from celery import chain, chord
 from celery.utils.log import get_task_logger
+
 from materializationengine.celery_init import celery
 from materializationengine.shared_tasks import (
     fin,
     get_materialization_info,
-    workflow_complete,
     monitor_workflow_state,
+    workflow_complete,
     workflow_failed,
 )
+from materializationengine.task import LockedTask
 from materializationengine.workflows.create_frozen_database import (
     check_tables,
+    clean_split_table_workflow,
     create_materialized_database_workflow,
     create_new_version,
     format_materialization_database_workflow,
     rebuild_reference_tables,
     set_version_status,
-    clean_split_table_workflow,
 )
 from materializationengine.workflows.ingest_new_annotations import (
+    find_missing_root_ids_workflow,
     ingest_new_annotations_workflow,
-    find_missing_root_ids_workflow
 )
-from materializationengine.task import LockedTask
 from materializationengine.workflows.update_root_ids import (
     update_root_ids_workflow,
 )

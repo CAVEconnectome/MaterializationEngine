@@ -5,7 +5,7 @@ import requests
 from cachetools import LRUCache, TTLCache, cached
 from caveclient.auth import AuthClient
 from caveclient.infoservice import InfoServiceClient
-from flask import current_app, abort
+from flask import abort, current_app
 
 from materializationengine.errors import (
     AlignedVolumeNotFoundException,

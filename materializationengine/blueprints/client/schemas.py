@@ -1,8 +1,10 @@
-from marshmallow import fields, Schema
-from marshmallow.validate import Length
 import datetime
-from flask_marshmallow import Marshmallow
+
 from dynamicannotationdb.models import AnalysisView
+from flask_marshmallow import Marshmallow
+from marshmallow import Schema, fields
+from marshmallow.validate import Length
+
 ma = Marshmallow()
 
 class Metadata(Schema):

@@ -1,18 +1,20 @@
 import datetime
 import logging
+
 from dynamicannotationdb.models import AnalysisVersion
+from emannotationschemas.models import make_annotation_model
+
+from materializationengine.index_manager import IndexCache
 from materializationengine.shared_tasks import (
-    generate_chunked_model_ids,
+    add_index,
     chunk_ids,
     collect_data,
     fin,
+    generate_chunked_model_ids,
     get_materialization_info,
     query_id_range,
-    add_index,
     update_metadata,
 )
-from materializationengine.index_manager import IndexCache
-from emannotationschemas.models import make_annotation_model
 
 index_client = IndexCache()
 

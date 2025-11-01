@@ -1,11 +1,18 @@
 from dynamicannotationdb.models import (
     AnalysisTable,
     AnalysisVersion,
-    VersionErrorTable,
     AnalysisView,
+    VersionErrorTable,
 )
 from flask_marshmallow import Marshmallow
-from marshmallow import Schema, fields, validate, ValidationError, validates_schema, post_load
+from marshmallow import (
+    Schema,
+    ValidationError,
+    fields,
+    post_load,
+    validate,
+    validates_schema,
+)
 from marshmallow_sqlalchemy import SQLAlchemyAutoSchema
 
 ma = Marshmallow()

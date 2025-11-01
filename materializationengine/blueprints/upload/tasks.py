@@ -1,19 +1,28 @@
 import json
 import os
+import shlex
 import subprocess
 from datetime import datetime, timezone
 from typing import Any, Dict, List
-import shlex
 
 import pandas as pd
 from celery import chain
 from celery.result import AsyncResult
 from celery.utils.log import get_task_logger
+from dynamicannotationdb.key_utils import build_segmentation_table_name
 from flask import current_app
 from redis import Redis
 from sqlalchemy import text
-from dynamicannotationdb.key_utils import build_segmentation_table_name
 
+from materializationengine.blueprints.upload.checkpoint_manager import (
+    CHUNK_STATUS_COMPLETED,
+    CHUNK_STATUS_ERROR,
+    CHUNK_STATUS_FAILED_PERMANENT,
+    CHUNK_STATUS_FAILED_RETRYABLE,
+    CHUNK_STATUS_PROCESSING,
+    CHUNK_STATUS_PROCESSING_SUBTASKS,
+    RedisCheckpointManager,
+)
 from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
 from materializationengine.blueprints.upload.processor import SchemaProcessor
 from materializationengine.celery_init import celery
@@ -26,15 +35,7 @@ from materializationengine.workflows.ingest_new_annotations import (
     create_segmentation_model,
 )
 from materializationengine.workflows.spatial_lookup import run_spatial_lookup_workflow
-from materializationengine.blueprints.upload.checkpoint_manager import (
-    CHUNK_STATUS_COMPLETED,
-    CHUNK_STATUS_FAILED_PERMANENT,
-    CHUNK_STATUS_FAILED_RETRYABLE,
-    CHUNK_STATUS_PROCESSING,
-    CHUNK_STATUS_PROCESSING_SUBTASKS,
-    CHUNK_STATUS_ERROR,
-    RedisCheckpointManager,
-)
+
 celery_logger = get_task_logger(__name__)
 
 # Redis client for storing job status

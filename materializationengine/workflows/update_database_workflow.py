@@ -4,19 +4,20 @@ import os
 
 from celery import chain
 from celery.utils.log import get_task_logger
+
 from materializationengine.blueprints.materialize.api import get_datastack_info
 from materializationengine.celery_init import celery
 from materializationengine.shared_tasks import (
+    fin,
     get_materialization_info,
     monitor_workflow_state,
     workflow_complete,
-    fin,
 )
 from materializationengine.task import LockedTask
 from materializationengine.utils import get_config_param
 from materializationengine.workflows.ingest_new_annotations import (
-    ingest_new_annotations_workflow,
     find_missing_root_ids_workflow,
+    ingest_new_annotations_workflow,
 )
 from materializationengine.workflows.update_root_ids import (
     update_root_ids_workflow,

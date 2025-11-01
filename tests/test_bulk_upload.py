@@ -1,8 +1,9 @@
-from materializationengine.workflows.bulk_upload import get_gcs_file_info
-from unittest import mock
-import logging
 import datetime
+import logging
 import time
+from unittest import mock
+
+from materializationengine.workflows.bulk_upload import get_gcs_file_info
 
 
 class TestBulkUpload:

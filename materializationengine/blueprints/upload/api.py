@@ -1,9 +1,9 @@
 import datetime
 import functools
-import os
-from typing import Any, Dict
 import json
+import os
 from dataclasses import asdict
+from typing import Any, Dict
 
 from dynamicannotationdb.models import AnalysisVersion
 from dynamicannotationdb.schema import DynamicSchemaClient
@@ -19,23 +19,24 @@ from flask import (
     url_for,
 )
 from flask_restx import Namespace, Resource, inputs, reqparse
-from google.cloud import storage
 from google.api_core import exceptions as google_exceptions
+from google.cloud import storage
 from middle_auth_client import (
+    auth_required,
     auth_requires_admin,
     auth_requires_permission,
-    auth_required,
 )
 from redis import StrictRedis
 
+from materializationengine import __version__
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.blueprints.upload.checkpoint_manager import (
-    RedisCheckpointManager,
+    CHUNK_STATUS_COMPLETED,
+    CHUNK_STATUS_FAILED_PERMANENT,
+    CHUNK_STATUS_FAILED_RETRYABLE,
     CHUNK_STATUS_PENDING,
     CHUNK_STATUS_PROCESSING,
-    CHUNK_STATUS_COMPLETED,
-    CHUNK_STATUS_FAILED_RETRYABLE,
-    CHUNK_STATUS_FAILED_PERMANENT,
+    RedisCheckpointManager,
 )
 from materializationengine.blueprints.upload.schema_helper import get_schema_types
 from materializationengine.blueprints.upload.schemas import UploadRequestSchema
@@ -51,8 +52,6 @@ from materializationengine.blueprints.upload.tasks import (
 from materializationengine.database import db_manager
 from materializationengine.info_client import get_datastack_info, get_datastacks
 from materializationengine.utils import get_config_param
-from materializationengine import __version__
-
 
 authorizations = {
     "apikey": {"type": "apiKey", "in": "query", "name": "middle_auth_token"}

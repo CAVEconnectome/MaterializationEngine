@@ -8,7 +8,9 @@ multiple connections.
 
 import logging
 from contextlib import contextmanager
-from flask import g, current_app
+
+from flask import current_app, g
+
 from materializationengine.database import dynamic_annotation_cache
 
 logger = logging.getLogger(__name__)

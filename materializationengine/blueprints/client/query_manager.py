@@ -1,21 +1,23 @@
+import datetime
 from collections import defaultdict
-from materializationengine.database import dynamic_annotation_cache
+
+import numpy as np
 from flask import abort, current_app
+from geoalchemy2.types import Geometry
+from sqlalchemy import func, or_, text
+from sqlalchemy.ext.declarative.api import DeclarativeMeta
+from sqlalchemy.orm import aliased
+from sqlalchemy.sql.expression import tablesample
+from sqlalchemy.sql.schema import Table
+from sqlalchemy.sql.selectable import Alias
+from sqlalchemy.sql.sqltypes import Integer, String
+
 from materializationengine.blueprints.client.query import (
-    make_spatial_filter,
     _execute_query,
     get_column,
+    make_spatial_filter,
 )
-import numpy as np
-from geoalchemy2.types import Geometry
-from sqlalchemy.sql.sqltypes import Integer, String
-from sqlalchemy import or_, func, text
-from sqlalchemy.orm import aliased
-from sqlalchemy.sql.selectable import Alias
-from sqlalchemy.sql.schema import Table
-from sqlalchemy.sql.expression import tablesample
-from sqlalchemy.ext.declarative.api import DeclarativeMeta
-import datetime
+from materializationengine.database import dynamic_annotation_cache
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
 DEFAULT_LIMIT = 250000

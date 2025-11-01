@@ -12,7 +12,6 @@ from celery.utils.log import get_task_logger
 
 from materializationengine.utils import get_config_param
 
-
 celery_logger = get_task_logger(__name__)
 
 

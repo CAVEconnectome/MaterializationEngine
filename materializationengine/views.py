@@ -39,15 +39,12 @@ from materializationengine.blueprints.client.schemas import AnalysisViewSchema
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.celery_init import celery
 from materializationengine.database import db_manager, dynamic_annotation_cache
-from materializationengine.blueprints.client.query_manager import QueryManager
-from materializationengine.request_db import request_db_session
-from materializationengine.blueprints.client.datastack import validate_datastack
-
 from materializationengine.info_client import (
     get_datastack_info,
     get_datastacks,
     get_relevant_datastack_info,
 )
+from materializationengine.request_db import request_db_session
 from materializationengine.schemas import (
     AnalysisTableSchema,
     AnalysisVersionSchema,
@@ -55,7 +52,6 @@ from materializationengine.schemas import (
     VersionErrorTableSchema,
 )
 from materializationengine.utils import check_read_permission, get_config_param
-
 
 __version__ = "5.12.1"
 

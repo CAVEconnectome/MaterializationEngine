@@ -1,10 +1,12 @@
-from sqlalchemy import Column, Integer, String, DateTime, JSON, Text, Enum, ARRAY
-from sqlalchemy.ext.declarative import declarative_base
-from datetime import datetime, timezone
-from sqlalchemy.exc import SQLAlchemyError
-from materializationengine.database import dynamic_annotation_cache
 import enum
+from datetime import datetime, timezone
+
 from flask import Flask
+from sqlalchemy import ARRAY, JSON, Column, DateTime, Enum, Integer, String, Text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.declarative import declarative_base
+
+from materializationengine.database import dynamic_annotation_cache
 
 Base = declarative_base()
 

@@ -7,7 +7,6 @@ from materializationengine.utils import (
     create_annotation_model,
 )
 
-
 celery_logger = get_task_logger(__name__)
 
 

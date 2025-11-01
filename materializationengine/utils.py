@@ -1,11 +1,13 @@
 import os
-from dynamicannotationdb.schema import DynamicSchemaClient
-from geoalchemy2.shape import to_shape
-from flask import current_app, abort, g
-from middle_auth_client.decorators import users_share_common_group
-from celery.utils.log import get_task_logger
 from typing import Any
-from cachetools import TTLCache, cached, LRUCache
+
+from cachetools import LRUCache, TTLCache, cached
+from celery.utils.log import get_task_logger
+from dynamicannotationdb.schema import DynamicSchemaClient
+from flask import abort, current_app, g
+from geoalchemy2.shape import to_shape
+from middle_auth_client.decorators import users_share_common_group
+
 celery_logger = get_task_logger(__name__)
 
 

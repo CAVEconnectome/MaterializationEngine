@@ -1,15 +1,17 @@
+import logging
+
+import pytest
+from dynamicannotationdb import DynamicAnnotationInterface
+from sqlalchemy.engine.base import Engine
+from sqlalchemy.orm import Session
+
 from materializationengine.database import (
+    db_manager,
     dynamic_annotation_cache,
     get_sql_url_params,
     ping_connection,
     reflect_tables,
-    db_manager,
 )
-from sqlalchemy.orm import Session
-from sqlalchemy.engine.base import Engine
-from dynamicannotationdb import DynamicAnnotationInterface
-import logging
-import pytest
 
 
 class TestDatabaseUtils:

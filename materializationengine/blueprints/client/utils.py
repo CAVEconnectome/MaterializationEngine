@@ -1,11 +1,12 @@
-import pyarrow as pa
-from flask import Response, request, send_file
-from cloudfiles import compression
 from io import BytesIO
 
-from materializationengine.info_client import get_datastack_info
-from materializationengine.database import db_manager
+import pyarrow as pa
+from cloudfiles import compression
 from dynamicannotationdb.models import AnalysisVersion
+from flask import Response, request, send_file
+
+from materializationengine.database import db_manager
+from materializationengine.info_client import get_datastack_info
 
 
 def collect_crud_columns(column_names):

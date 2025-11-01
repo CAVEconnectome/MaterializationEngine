@@ -1,12 +1,13 @@
+from typing import Any, Dict
+
 from marshmallow import (
+    EXCLUDE,
     Schema,
+    ValidationError,
     fields,
     validates,
-    ValidationError,
-    EXCLUDE,
     validates_schema,
 )
-from typing import Dict, Any
 
 
 class MetadataSchema(Schema):
