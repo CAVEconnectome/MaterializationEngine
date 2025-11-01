@@ -21,11 +21,17 @@ from emannotationschemas.models import (
     make_flat_model,
     make_reference_annotation_model,
 )
+from psycopg2 import sql
+from sqlalchemy import MetaData, create_engine, func
+from sqlalchemy.engine import reflection
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import OperationalError
+
 from materializationengine.blueprints.materialize.api import get_datastack_info
 from materializationengine.celery_init import celery
 from materializationengine.database import (
-    dynamic_annotation_cache,
     db_manager,
+    dynamic_annotation_cache,
 )
 from materializationengine.errors import IndexMatchError
 from materializationengine.index_manager import index_cache
@@ -40,11 +46,6 @@ from materializationengine.utils import (
     create_segmentation_model,
     get_config_param,
 )
-from psycopg2 import sql
-from sqlalchemy import MetaData, create_engine, func
-from sqlalchemy.engine import reflection
-from sqlalchemy.engine.url import make_url
-from sqlalchemy.exc import OperationalError
 
 celery_logger = get_task_logger(__name__)
 

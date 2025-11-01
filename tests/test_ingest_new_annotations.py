@@ -1,13 +1,15 @@
 # Mock pychunkgraph imports and cloudvolume before importing
 # the tasks
-import sys
 import logging
+import sys
 from unittest import mock
 
 sys.modules["materializationengine.chunkedgraph_gateway"] = mock.MagicMock()
 sys.modules["cloudvolume"] = mock.MagicMock()
 
 import numpy as np
+from numpy import nan
+
 from materializationengine.workflows.ingest_new_annotations import (
     create_missing_segmentation_table,
     get_annotations_with_missing_supervoxel_ids,
@@ -16,8 +18,6 @@ from materializationengine.workflows.ingest_new_annotations import (
     get_sql_supervoxel_ids_chunks,
     insert_segmentation_data,
 )
-from numpy import nan
-
 
 missing_segmentation_data = {
     "post_pt_supervoxel_id": [nan],

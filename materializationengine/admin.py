@@ -1,6 +1,6 @@
+from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 from flask_admin import Admin
 from flask_admin.contrib.sqla import ModelView
-from dynamicannotationdb.models import AnalysisVersion, AnalysisTable
 
 
 def setup_admin(app, db):

@@ -7,12 +7,13 @@ from typing import List
 
 from celery.utils.log import get_task_logger
 from dynamicannotationdb.models import AnalysisVersion
+from sqlalchemy import create_engine
+from sqlalchemy.engine.url import make_url
+
 from materializationengine.celery_init import celery
 from materializationengine.database import db_manager
 from materializationengine.info_client import get_aligned_volumes, get_datastack_info
 from materializationengine.utils import get_config_param
-from sqlalchemy import create_engine
-from sqlalchemy.engine.url import make_url
 
 celery_logger = get_task_logger(__name__)
 

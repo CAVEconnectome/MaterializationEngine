@@ -1,5 +1,6 @@
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 
+
 class TestModels:
     def test_analysis_version(self, mat_metadata):
         analysisversion = AnalysisVersion(

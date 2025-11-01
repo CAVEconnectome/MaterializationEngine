@@ -1,11 +1,12 @@
 import datetime
-import numpy as np
-from flask import abort
-from copy import deepcopy
-import pandas as pd
 import logging
-from typing import Iterable
 from collections import defaultdict
+from copy import deepcopy
+from typing import Iterable
+
+import numpy as np
+import pandas as pd
+from flask import abort
 
 
 def update_rootids(

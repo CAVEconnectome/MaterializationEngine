@@ -3,7 +3,7 @@ import logging
 from datetime import date, datetime, timedelta
 
 import numpy as np
-from dynamicannotationdb.models import Base, AnalysisVersion
+from dynamicannotationdb.models import AnalysisVersion, Base
 from flask import Blueprint, Flask, current_app, jsonify, redirect, url_for
 from flask_cors import CORS
 from flask_restx import Api
@@ -14,17 +14,17 @@ from materializationengine.admin import setup_admin
 from materializationengine.blueprints.client.api import client_bp
 from materializationengine.blueprints.client.api2 import client_bp as client_bp2
 from materializationengine.blueprints.materialize.api import mat_bp
-from materializationengine.blueprints.upload.api import upload_bp, spatial_lookup_bp
-from materializationengine.blueprints.upload.storage import StorageService
+from materializationengine.blueprints.upload.api import spatial_lookup_bp, upload_bp
 from materializationengine.blueprints.upload.models import init_staging_database
+from materializationengine.blueprints.upload.storage import StorageService
 from materializationengine.config import config, configure_app
 from materializationengine.database import db_manager
-from materializationengine.schemas import ma
-from materializationengine.utils import get_instance_folder_path
-from materializationengine.views import views_bp
 from materializationengine.limiter import limiter
 from materializationengine.migrate import migrator
 from materializationengine.request_db import init_request_db_cleanup
+from materializationengine.schemas import ma
+from materializationengine.utils import get_instance_folder_path
+from materializationengine.views import views_bp
 
 db = SQLAlchemy(model_class=Base)
 

@@ -5,22 +5,23 @@ import numpy as np
 import pandas as pd
 from celery import chain, chord, group
 from celery.utils.log import get_task_logger
+from requests import HTTPError
+from sqlalchemy.sql import or_, text
+
 from materializationengine.celery_init import celery
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import db_manager
 from materializationengine.shared_tasks import (
     fin,
+    generate_chunked_model_ids,
     get_materialization_info,
     monitor_task_states,
     monitor_workflow_state,
     update_metadata,
     workflow_complete,
-    generate_chunked_model_ids,
 )
 from materializationengine.throttle import throttle_celery
 from materializationengine.utils import create_segmentation_model
-from requests import HTTPError
-from sqlalchemy.sql import or_, text
 
 celery_logger = get_task_logger(__name__)
 

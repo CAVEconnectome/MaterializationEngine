@@ -1,12 +1,14 @@
-from typing import Dict, Any, Optional, Tuple, Generator, BinaryIO
-from dataclasses import dataclass
-from google.cloud import storage
-from google.auth.transport.requests import AuthorizedSession
-from google.resumable_media.requests import ResumableUpload
-import pandas as pd
-import time
 import json
+import time
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, BinaryIO, Dict, Generator, Optional, Tuple
+
+import pandas as pd
+from google.auth.transport.requests import AuthorizedSession
+from google.cloud import storage
+from google.resumable_media.requests import ResumableUpload
+
 
 @dataclass
 class StorageConfig:

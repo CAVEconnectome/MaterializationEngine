@@ -6,10 +6,10 @@ from dynamicannotationdb.models import (
     AnalysisTable,
     AnalysisVersion,
 )
-from materializationengine.database import db_manager
-
-from materializationengine.info_client import get_relevant_datastack_info
 from flask import abort
+
+from materializationengine.database import db_manager
+from materializationengine.info_client import get_relevant_datastack_info
 
 
 def parse_args(f, *args, **kwargs):

@@ -1,9 +1,10 @@
-from google.cloud import storage
-import pandas as pd
 import io
-from typing import Iterator, Optional, Callable, Dict, Any
+import time
 from dataclasses import dataclass
-import time  
+from typing import Any, Callable, Dict, Iterator, Optional
+
+import pandas as pd
+from google.cloud import storage
 
 # @dataclass
 # class UploadConfig:

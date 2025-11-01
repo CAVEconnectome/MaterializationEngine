@@ -1,5 +1,6 @@
-import cloudvolume
 import os
+
+import cloudvolume
 
 
 class CloudVolumeGateway:

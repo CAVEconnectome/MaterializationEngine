@@ -1,6 +1,7 @@
 import datetime
 import logging
 
+from materializationengine.shared_tasks import get_materialization_info
 from materializationengine.workflows.create_frozen_database import (
     add_indices,
     check_tables,
@@ -11,7 +12,6 @@ from materializationengine.workflows.create_frozen_database import (
     merge_tables,
     update_table_metadata,
 )
-from materializationengine.shared_tasks import get_materialization_info
 
 datastack_info = {
     "datastack": "test_aligned_volume",

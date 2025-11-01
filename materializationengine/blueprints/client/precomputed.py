@@ -1,9 +1,10 @@
 import numbers
-from typing import Literal, NamedTuple, Optional, Union, cast
-from collections.abc import Sequence
 import struct
-from neuroglancer import coordinate_space, viewer_state
+from collections.abc import Sequence
+from typing import Literal, NamedTuple, Optional, Union, cast
+
 import numpy as np
+from neuroglancer import coordinate_space, viewer_state
 
 
 class Annotation(NamedTuple):

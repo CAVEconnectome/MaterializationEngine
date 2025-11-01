@@ -1,6 +1,7 @@
+from functools import partial
 from itertools import groupby, islice, repeat, takewhile
 from operator import itemgetter
-from functools import partial
+
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 

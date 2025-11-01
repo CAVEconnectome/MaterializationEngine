@@ -1,6 +1,6 @@
 import datetime
 import time
-from typing import Dict, List, Any
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -22,11 +22,11 @@ from sqlalchemy.ext.declarative import declarative_base
 
 from materializationengine.blueprints.upload.checkpoint_manager import (
     CHUNK_STATUS_COMPLETED,
+    CHUNK_STATUS_ERROR,
     CHUNK_STATUS_FAILED_PERMANENT,
     CHUNK_STATUS_FAILED_RETRYABLE,
     CHUNK_STATUS_PROCESSING,
     CHUNK_STATUS_PROCESSING_SUBTASKS,
-    CHUNK_STATUS_ERROR,
     RedisCheckpointManager,
 )
 from materializationengine.celery_init import celery

@@ -1,39 +1,41 @@
 import datetime
 import logging
+import os
+import subprocess
+
+import cloudfiles
 import redis
-from dynamicannotationdb.models import AnalysisTable, Base
-from flask import abort, current_app, request, jsonify
+from dynamicannotationdb.models import AnalysisTable, AnalysisVersion, Base
+from flask import abort, current_app, jsonify, request
 from flask_accepts import accepts
-from flask_restx import Namespace, Resource, inputs, reqparse, fields
+from flask_restx import Namespace, Resource, fields, inputs, reqparse
+from middle_auth_client import (
+    auth_requires_admin,
+    auth_requires_dataset_admin,
+    auth_requires_permission,
+)
+from sqlalchemy import MetaData, Table
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import NoSuchTableError
+
 from materializationengine.blueprints.client.utils import get_latest_version
+from materializationengine.blueprints.materialize.schemas import (
+    AnnotationIDListSchema,
+    BadRootsSchema,
+    VirtualVersionSchema,
+)
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import (
-    dynamic_annotation_cache,
     db_manager,
+    dynamic_annotation_cache,
 )
 from materializationengine.info_client import (
     get_aligned_volumes,
     get_datastack_info,
     get_relevant_datastack_info,
 )
-from dynamicannotationdb.models import AnalysisVersion
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
-from materializationengine.blueprints.materialize.schemas import BadRootsSchema
-from middle_auth_client import auth_requires_admin, auth_requires_permission, auth_requires_dataset_admin
-from sqlalchemy import MetaData, Table
-from sqlalchemy.engine.url import make_url
-from sqlalchemy.exc import NoSuchTableError
 from materializationengine.utils import check_write_permission
-import os
-import subprocess
-import cloudfiles
-
-
-from materializationengine.blueprints.materialize.schemas import (
-    VirtualVersionSchema,
-    AnnotationIDListSchema,
-)
-
 
 __version__ = "5.12.1"
 
