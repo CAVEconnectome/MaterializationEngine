@@ -7,7 +7,7 @@ to reduce database load and improve performance.
 
 from cachetools import TTLCache, cached
 from materializationengine.database import dynamic_annotation_cache
-
+from materializationengine.request_db import request_db_session
 
 @cached(cache=TTLCache(maxsize=256, ttl=86400))  # 1 day TTL = 86400 seconds
 def get_cached_table_metadata(aligned_volume_name: str, table_name: str):
@@ -20,8 +20,8 @@ def get_cached_table_metadata(aligned_volume_name: str, table_name: str):
     Returns:
         dict: Table metadata dictionary
     """
-    db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    return db.database.get_table_metadata(table_name)
+    with request_db_session(aligned_volume_name) as meta_db:  
+        return meta_db.database.get_table_metadata(table_name)
 
 
 @cached(cache=TTLCache(maxsize=256, ttl=86400))  # 1 day TTL = 86400 seconds
@@ -36,5 +36,5 @@ def get_cached_view_metadata(aligned_volume_name: str, datastack_name: str, view
     Returns:
         dict: View metadata dictionary
     """
-    db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    return db.database.get_view_metadata(datastack_name, view_name)
+    with request_db_session(aligned_volume_name) as meta_db:  
+        return meta_db.database.get_view_metadata(datastack_name, view_name)
