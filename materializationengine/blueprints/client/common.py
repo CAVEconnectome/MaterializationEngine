@@ -2,11 +2,12 @@ import textwrap
 import traceback
 
 import numpy as np
-from cachetools import LRUCache, cached
+from cachetools import LRUCache, TTLCache, cached
 from cachetools.keys import hashkey
 from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
 from flask import abort, current_app, g, request
 
+from materializationengine.blueprints.client.cache import get_cached_table_metadata
 from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.blueprints.client.utils import (
     collect_crud_columns,
@@ -197,8 +198,7 @@ def get_flat_model(datastack_name: str, table_name: str, version: int):
     if not analysis_version_dict.get("valid", False):
         abort(410, "This materialization version is not available")
 
-    db = dynamic_annotation_cache.get_db(aligned_volume_name)
-    metadata = db.database.get_table_metadata(table_name)
+    metadata = get_cached_table_metadata(aligned_volume_name, table_name)
     reference_table = metadata.get("reference_table")
     if reference_table:
         table_metadata = {"reference_table": reference_table}
@@ -209,6 +209,7 @@ def get_flat_model(datastack_name: str, table_name: str, version: int):
     if schema_type is None:
         abort(500, f"Schema not found for table {table_name} in version {version}")
 
+    db = dynamic_annotation_cache.get_db(aligned_volume_name)
     return db.schema.create_flat_model(
         table_name=table_name,
         schema_type=schema_type,
@@ -254,7 +255,7 @@ def generate_simple_query_dataframe(
     db = dynamic_annotation_cache.get_db(aligned_volume_name)
     check_read_permission(db, table_name)
 
-    ann_md = db.database.get_table_metadata(table_name)
+    ann_md = get_cached_table_metadata(aligned_volume_name, table_name)
 
     analysis_version_dict, analysis_table_dict = get_analysis_version_and_table(
         datastack_name, table_name, version, aligned_volume_name

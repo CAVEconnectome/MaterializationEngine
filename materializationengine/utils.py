@@ -128,7 +128,10 @@ def check_write_permission(db, table_name):
 
 @cached(cache=TTLCache(maxsize=100, ttl=600))
 def check_read_permission(db, table_name):
-    metadata = db.database.get_table_metadata(table_name)
+    from materializationengine.blueprints.client.cache import get_cached_table_metadata
+    # Get aligned_volume_name from the db object
+    aligned_volume_name = db._aligned_volume
+    metadata = get_cached_table_metadata(aligned_volume_name, table_name)
     if metadata["read_permission"] == "GROUP":
         if not users_share_common_group(metadata["user_id"]):
             abort(
@@ -142,7 +145,10 @@ def check_read_permission(db, table_name):
 
 
 def check_ownership(db, table_name):
-    metadata = db.database.get_table_metadata(table_name)
+    from materializationengine.blueprints.client.cache import get_cached_table_metadata
+    # Get aligned_volume_name from the db object
+    aligned_volume_name = db._aligned_volume
+    metadata = get_cached_table_metadata(aligned_volume_name, table_name)
     if metadata["user_id"] != str(g.auth_user["id"]):
         abort(401, "You cannot do this because you are not the owner of this table")
     return metadata

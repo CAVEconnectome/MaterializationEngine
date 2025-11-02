@@ -1,0 +1,40 @@
+"""
+Cached metadata functions for MaterializationEngine.
+
+This module provides cached versions of frequently accessed metadata functions
+to reduce database load and improve performance.
+"""
+
+from cachetools import TTLCache, cached
+from materializationengine.database import dynamic_annotation_cache
+
+
+@cached(cache=TTLCache(maxsize=256, ttl=86400))  # 1 day TTL = 86400 seconds
+def get_cached_table_metadata(aligned_volume_name: str, table_name: str):
+    """Get table metadata with 1-day TTL cache.
+    
+    Args:
+        aligned_volume_name (str): The name of the aligned volume
+        table_name (str): The name of the table
+        
+    Returns:
+        dict: Table metadata dictionary
+    """
+    db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    return db.database.get_table_metadata(table_name)
+
+
+@cached(cache=TTLCache(maxsize=256, ttl=86400))  # 1 day TTL = 86400 seconds
+def get_cached_view_metadata(aligned_volume_name: str, datastack_name: str, view_name: str):
+    """Get view metadata with 1-day TTL cache.
+    
+    Args:
+        aligned_volume_name (str): The name of the aligned volume
+        datastack_name (str): The name of the datastack
+        view_name (str): The name of the view
+        
+    Returns:
+        dict: View metadata dictionary
+    """
+    db = dynamic_annotation_cache.get_db(aligned_volume_name)
+    return db.database.get_view_metadata(datastack_name, view_name)

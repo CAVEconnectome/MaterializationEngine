@@ -36,6 +36,7 @@ from materializationengine.blueprints.client.common import (
     sql_query_warning,
     validate_table_args,
 )
+from materializationengine.blueprints.client.cache import get_cached_view_metadata
 from materializationengine.blueprints.client.common import (
     unhandled_exception as common_unhandled_exception,
 )
@@ -3150,8 +3151,8 @@ class ViewMetadata(Resource):
             mat_db_name = f"{aligned_volume_name}"
         else:
             mat_db_name = f"{datastack_name}__mat{version}"
-        with request_db_session(mat_db_name) as meta_db:
-            md = meta_db.database.get_view_metadata(datastack_name, view_name)
+        
+        md = get_cached_view_metadata(aligned_volume_name, datastack_name, view_name)
 
         return md
 
@@ -3189,8 +3190,8 @@ def assemble_view_dataframe(datastack_name, version, view_name, data, args):
     get_count = args.get("count", False)
     if get_count:
         limit = None
-    with request_db_session(mat_db_name) as mat_db:
-        md = mat_db.database.get_view_metadata(datastack_name, view_name)
+    
+    md = get_cached_view_metadata(aligned_volume_name, datastack_name, view_name)
 
     if not data.get("desired_resolution", None):
         des_res = [
