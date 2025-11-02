@@ -328,9 +328,12 @@ def _execute_query(
         df = pd.DataFrame({"count": [count]})
     else:
         if direct_sql_pandas:
-            with engine.connect() as connection:
-                statement = str(query.statement.compile(engine, compile_kwargs={"literal_binds": True}))
-                df = pd.read_sql(statement, connection.connection, coerce_float=False, index_col=index_col, dtype_backend='pyarrow')
+            statement = str(query.statement.compile(engine, compile_kwargs={"literal_binds": True}))
+            df = pd.read_sql(statement,
+                             session.connection().connection,
+                             coerce_float=False,
+                             index_col=index_col,
+                             dtype_backend='pyarrow')   
         else:
             df = read_sql_tmpfile(
                 query.statement.compile(engine, compile_kwargs={"literal_binds": True}),

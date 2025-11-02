@@ -17,6 +17,9 @@ from sqlalchemy.sql.expression import tablesample
 from sqlalchemy.ext.declarative.api import DeclarativeMeta
 import datetime
 
+from materializationengine.blueprints.client.cache import get_cached_table_metadata, get_cached_view_metadata
+from materializationengine.database import dynamic_annotation_cache
+
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
 DEFAULT_LIMIT = 250000
 
@@ -39,8 +42,11 @@ class QueryManager:
         self._db = dynamic_annotation_cache.get_db(db_name)
         if meta_db_name is None:
             self._meta_db = self._db
+            self._meta_db_name = db_name
         else:
             self._meta_db = dynamic_annotation_cache.get_db(meta_db_name)
+            self._meta_db_name = meta_db_name
+
         self._segmentation_source = segmentation_source
         self._split_mode = split_mode
         self._random_sample = random_sample
@@ -77,7 +83,7 @@ class QueryManager:
         if table_name in self._split_models.keys():
             return self._split_models[table_name]
         else:
-            md = self._meta_db.database.get_table_metadata(table_name)
+            md = get_cached_table_metadata(self._meta_db_name, table_name)
             if md is None:
                 abort(404, f"Table {table_name} not found in metadata database")
             vox_res = np.array(
@@ -93,7 +99,7 @@ class QueryManager:
             reference_table = md.get("reference_table")
             if reference_table:
                 table_metadata = {"reference_table": reference_table}
-                ref_md = self._meta_db.database.get_table_metadata(reference_table)
+                ref_md = get_cached_table_metadata(self._meta_db_name, reference_table)
                 _ = self._db.schema.get_split_models(
                     reference_table,
                     ref_md["schema_type"],
@@ -119,7 +125,7 @@ class QueryManager:
             return self._models[table_name]
         else:
             # schema = self._meta_db.database.get_table_schema(table_name)
-            md = self._meta_db.database.get_table_metadata(table_name)
+            md = get_cached_table_metadata(self._meta_db_name, table_name)
             vox_res = np.array(
                 [
                     md["voxel_resolution_x"],
@@ -148,7 +154,7 @@ class QueryManager:
         view_table = self._db.database.get_view_table(view_name)
         self._tables.add(view_table)
         self._models[view_name] = view_table
-        md = self._meta_db.database.get_view_metadata(datastack_name, view_name)
+        md = get_cached_view_metadata(self._meta_db_name, datastack_name, view_name)
         vox_res = np.array(
             [
                 md["voxel_resolution_x"],
