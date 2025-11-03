@@ -333,7 +333,7 @@ def _execute_query(
                              session.connection().connection,
                              coerce_float=False,
                              index_col=index_col,
-                             dtype_backend='pyarrow')   
+                             dtype_backend='numpy_nullable')   
         else:
             df = read_sql_tmpfile(
                 query.statement.compile(engine, compile_kwargs={"literal_binds": True}),
