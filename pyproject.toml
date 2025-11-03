@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "materializationengine"
-version = "5.13.1"
+version = "5.13.2"
 description = "Combines DynamicAnnotationDB and PyChunkedGraph"
 readme = "README.md"
 requires-python = "==3.12.*"
@@ -38,7 +38,7 @@ dependencies = [
     "flask_cors",
     "numpy>=1.20",
     "emannotationschemas>=5.24.12",
-    "dynamicannotationdb>=5.13.1",
+    "dynamicannotationdb>=5.13.2",
     "nglui>=3.2.1,<4",
     "Flask-Limiter[redis]",
     "cryptography>=44.0.2",
@@ -83,7 +83,7 @@ default-groups = ["dev", "docs", "lint", "profile"]
 allow-direct-references = true
 
 [tool.bumpversion]
-current_version = "5.13.1"
+current_version = "5.13.2"
 parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
 serialize = ["{major}.{minor}.{patch}"]
 search = "{current_version}"
