@@ -83,7 +83,6 @@ def fix_columns_with_query(
         if n_tables == 1:
             schema_model = query.column_descriptions[0]["type"]
         for colname in df.columns:
-
             if n_tables == 1:
                 coltype = type(getattr(schema_model, colname).type)
             else:
@@ -112,7 +111,6 @@ def fix_columns_with_query(
                 )
             elif isinstance(df[colname].loc[0], Decimal) and fix_decimal is True:
                 df[colname] = _fix_decimal_column(df[colname])
-
     return df
 
 
