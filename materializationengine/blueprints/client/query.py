@@ -83,6 +83,10 @@ def fix_columns_with_query(
         if n_tables == 1:
             schema_model = query.column_descriptions[0]["type"]
         for colname in df.columns:
+            if pd.api.types.is_float_dtype(df[colname]):
+                df[colname]=df[colname].astype(np.float32)
+            if pd.api.types.is_integer_dtype(df[colname]):
+                df[colname]=df[colname].astype(int)
             if n_tables == 1:
                 coltype = type(getattr(schema_model, colname).type)
             else:
@@ -111,8 +115,8 @@ def fix_columns_with_query(
                 )
             elif isinstance(df[colname].loc[0], Decimal) and fix_decimal is True:
                 df[colname] = _fix_decimal_column(df[colname])
-            else:
-                continue
+            if pd.api.types.is_string_dtype(df[colname]):
+                df[colname]=df[colname].astype(str)
     return df
 
 
@@ -331,7 +335,7 @@ def _execute_query(
             statement = str(query.statement.compile(engine, compile_kwargs={"literal_binds": True}))
             df = pd.read_sql(statement,
                              session.connection().connection,
-                             coerce_float=False,
+                             coerce_float=True,
                              index_col=index_col,
                              dtype_backend='numpy_nullable')   
         else:

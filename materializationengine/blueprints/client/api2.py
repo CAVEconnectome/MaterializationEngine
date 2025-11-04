@@ -1248,7 +1248,7 @@ def preprocess_dataframe(df, table_name, aligned_volume_name, column_names):
     unique_vals = {}
     for tag in tags:
         unique_vals[tag] = df[tag].unique()
-        unique_vals[tag] = unique_vals[tag][~pd.isnull(unique_vals[tag])]
+        unique_vals[tag] = sorted(unique_vals[tag][~pd.isnull(unique_vals[tag])])
 
     if len(tags) > 0:
         # find all the duplicate values across columns
@@ -2564,7 +2564,7 @@ def format_df_to_bytes(df, datastack_name, table_name, encode_single=False):
             geometry_columns[0] + "_y",
             geometry_columns[0] + "_z",
         ]
-    if anntype == "line":
+    elif anntype == "line":
         pointa_cols = [
             geometry_columns[0] + "_x",
             geometry_columns[0] + "_y",
