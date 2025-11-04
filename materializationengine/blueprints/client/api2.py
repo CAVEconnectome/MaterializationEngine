@@ -259,6 +259,20 @@ metadata_parser.add_argument(
     help="whether to return all expired versions",
 )
 
+def fix_dataframe_types(df):
+    """Fix dataframe types for nglui.
+    Args:
+        df (pd.DataFrame): dataframe to fix types for.
+    Returns:
+        pd.DataFrame: dataframe with fixed types."""
+    for colname in df.columns:
+        if pd.api.types.is_float_dtype(df[colname]):
+            df[colname]=df[colname].astype(np.float32)
+        if pd.api.types.is_integer_dtype(df[colname]):
+            df[colname]=df[colname].astype(int)
+        if pd.api.types.is_string_dtype(df[colname]):
+            df[colname]=df[colname].astype(str)
+    return df
 
 @cached(cache=TTLCache(maxsize=64, ttl=600))
 def get_relevant_datastack_info(datastack_name):
@@ -1248,7 +1262,7 @@ def preprocess_dataframe(df, table_name, aligned_volume_name, column_names):
     unique_vals = {}
     for tag in tags:
         unique_vals[tag] = df[tag].unique()
-        unique_vals[tag] = unique_vals[tag][~pd.isnull(unique_vals[tag])]
+        unique_vals[tag] = sorted(unique_vals[tag][~pd.isnull(unique_vals[tag])])
 
     if len(tags) > 0:
         # find all the duplicate values across columns
@@ -1410,6 +1424,7 @@ class MatTableSegmentInfo(Resource):
                     {"desired_resolution": [1, 1, 1]},
                     convert_desired_resolution=True,
                 )
+            df = fix_dataframe_types(df)
             df, tags, bool_tags, numerical, root_id_col = preprocess_dataframe(
                 df, table_name, aligned_volume_name, column_names
             )
@@ -1481,7 +1496,7 @@ class MatTableSegmentInfoLive(Resource):
             user_data, datastack_name=datastack_name, args={"direct_sql_pandas": True}
         )
         df, column_names, _, _, _ = return_vals
-
+        df = fix_dataframe_types(df)
         vals = preprocess_dataframe(df, table_name, aligned_volume_name, column_names)
         df, tags, bool_tags, numerical, root_id_col = vals
 
@@ -1983,6 +1998,7 @@ def get_precomputed_properties_and_relationships(datastack_name, table_name):
         user_data, datastack_name=datastack_name, args={"direct_sql_pandas": True}
     )
     df, column_names, mat_warnings, prod_warnings, remap_warnings = return_vals
+    df = fix_dataframe_types(df)
 
     relationships = []
     for c in df.columns:
@@ -2198,6 +2214,7 @@ def calculate_spatial_index_levels(total_size, annotation_count, target_limit=10
     # })
     
     return levels
+
 
 
 def get_precomputed_info(datastack_name, table_name):
@@ -2430,7 +2447,7 @@ def query_spatial_no_filter(
         user_data, datastack_name=datastack_name, args={"direct_sql_pandas": True}
     )
     df, column_names, mat_warnings, prod_warnings, remap_warnings = return_vals
-
+    df = fix_dataframe_types(df)
     return df
 
 def query_by_id(
@@ -2478,7 +2495,7 @@ def query_by_id(
         user_data, datastack_name=datastack_name, args={"direct_sql_pandas": True}
     )
     df, column_names, mat_warnings, prod_warnings, remap_warnings = return_vals
-
+    df = fix_dataframe_types(df)
     return df
 
 def live_query_by_relationship(
@@ -2538,7 +2555,7 @@ def live_query_by_relationship(
         user_data, datastack_name=datastack_name, args={"direct_sql_pandas": True}
     )
     df, column_names, mat_warnings, prod_warnings, remap_warnings = return_vals
-
+    df = fix_dataframe_types(df)
     return df
 
 
@@ -2564,7 +2581,7 @@ def format_df_to_bytes(df, datastack_name, table_name, encode_single=False):
             geometry_columns[0] + "_y",
             geometry_columns[0] + "_z",
         ]
-    if anntype == "line":
+    elif anntype == "line":
         pointa_cols = [
             geometry_columns[0] + "_x",
             geometry_columns[0] + "_y",
@@ -3344,7 +3361,7 @@ class MatViewSegmentInfo(Resource):
         if label_format is None:
             if label_columns is None:
                 label_columns = df.columns[0]
-
+        df = fix_dataframe_types(df)
         seg_prop = nglui.segmentprops.SegmentProperties.from_dataframe(
             df,
             id_col=root_id_col,
