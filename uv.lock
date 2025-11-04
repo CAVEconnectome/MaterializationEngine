@@ -1550,7 +1550,7 @@ wheels = [
 
 [[package]]
 name = "materializationengine"
-version = "5.10.0"
+version = "5.13.2"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
