@@ -22,7 +22,7 @@ DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
 
 dtype_map = {
     Boolean: pd.BooleanDtype(),
-    DateTime: np.dtype('<M8[ns]'),
+    DateTime: np.dtype('datetime64[ns]'),
     Integer: pd.Int32Dtype(),
     BigInteger: pd.Int64Dtype(),
     Float: np.float32,
