@@ -25,7 +25,7 @@ dtype_map = {
     DateTime: np.dtype('datetime64[ns]'),
     Integer: pd.Int32Dtype(),
     BigInteger: pd.Int64Dtype(),
-    Float: np.float32,
+    Float: pd.Float32Dtype(),
 }
 
 def concatenate_position_columns(df):
