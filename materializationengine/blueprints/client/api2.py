@@ -266,6 +266,9 @@ def fix_dataframe_types(df):
     Returns:
         pd.DataFrame: dataframe with fixed types."""
     for colname in df.columns:
+        if df[colname].isnull().all():
+            df.drop(columns=[colname], inplace=True)
+            continue
         if pd.api.types.is_float_dtype(df[colname]):
             df[colname]=df[colname].astype(np.float32)
         if pd.api.types.is_integer_dtype(df[colname]):
@@ -1151,29 +1154,21 @@ def process_fields(df, fields, column_names, tags, bool_tags, numerical):
             or field_name == "target_id"
         ):
             continue
-
+        if col not in df.columns:
+            continue
         if isinstance(field, mm_fields.String):
-            if df[col].isnull().all():
-                continue
             # check that this column is not all nulls
             tags.append(col)
         elif isinstance(field, mm_fields.Boolean):
-            if df[col].isnull().all():
-                continue
             df[col] = df[col].astype(bool)
             bool_tags.append(col)
         elif isinstance(field, PostGISField):
-            # if all the values are NaNs skip this column
-            if df[col + "_x"].isnull().all():
-                continue
             numerical.append(col + "_x")
             numerical.append(col + "_y")
             numerical.append(col + "_z")
         elif isinstance(field, mm_fields.Number):
-            if df[col].isnull().all():
-                continue
             numerical.append(col)
-
+    return df
 
 def process_view_columns(df, model, column_names, tags, bool_tags, numerical):
     for table_column_name, table_column in model.columns.items():
@@ -1246,10 +1241,10 @@ def preprocess_dataframe(df, table_name, aligned_volume_name, column_names):
         numerical = []
         bool_tags = []
 
-        process_fields(df, fields, column_names[table_name], tags, bool_tags, numerical)
+        df = process_fields(df, fields, column_names[table_name], tags, bool_tags, numerical)
 
         if table_metadata["reference_table"]:
-            process_fields(
+            df = process_fields(
                 df,
                 ref_fields,
                 column_names[ref_table],

@@ -16,10 +16,17 @@ from sqlalchemy.orm import Query
 from sqlalchemy.orm.util import AliasedClass
 from sqlalchemy.sql.schema import Table
 from sqlalchemy.sql.selectable import Alias
-from sqlalchemy.sql.sqltypes import Boolean, DateTime, Integer
+from sqlalchemy.sql.sqltypes import Boolean, DateTime, Integer, BigInteger, Float, String
 
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
 
+dtype_map = {
+    Boolean: pd.BooleanDtype(),
+    DateTime: np.dtype('datetime64[ns]'),
+    Integer: pd.Int32Dtype(),
+    BigInteger: pd.Int64Dtype(),
+    Float: pd.Float32Dtype(),
+}
 
 def concatenate_position_columns(df):
     grps = itertools.groupby(df.columns, key=lambda x: x[:-2])
@@ -83,7 +90,6 @@ def fix_columns_with_query(
         if n_tables == 1:
             schema_model = query.column_descriptions[0]["type"]
         for colname in df.columns:
-
             if n_tables == 1:
                 coltype = type(getattr(schema_model, colname).type)
             else:
@@ -112,7 +118,6 @@ def fix_columns_with_query(
                 )
             elif isinstance(df[colname].loc[0], Decimal) and fix_decimal is True:
                 df[colname] = _fix_decimal_column(df[colname])
-
     return df
 
 
@@ -329,10 +334,16 @@ def _execute_query(
     else:
         if direct_sql_pandas:
             statement = str(query.statement.compile(engine, compile_kwargs={"literal_binds": True}))
+            dtypes = {}
+            for k in query.statement.columns.keys():
+                coltype = query.statement.columns[k].type
+                if type(coltype) in dtype_map:
+                    dtypes[k] = dtype_map[type(coltype)]
             df = pd.read_sql(statement,
                              session.connection().connection,
                              coerce_float=True,
                              index_col=index_col,
+                             dtype=dtypes,
                              dtype_backend='numpy_nullable')   
         else:
             df = read_sql_tmpfile(
