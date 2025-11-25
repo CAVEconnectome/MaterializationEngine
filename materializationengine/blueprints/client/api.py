@@ -32,7 +32,7 @@ from materializationengine.info_client import (
 from materializationengine.models import MaterializedMetadata
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 
-__version__ = "5.13.4"
+__version__ = "5.13.5"
 
 
 authorizations = {
