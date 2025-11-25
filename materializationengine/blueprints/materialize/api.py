@@ -765,24 +765,22 @@ class AnnotationResource(Resource):
             logging.error(f"Error querying annotations: {e}")
             return abort(500)
 
-@mat_bp.route("/materialize/run/create_virtual/datastack")
+@mat_bp.route("/materialize/run/create_virtual/datastack/<string:datastack_name>")
 class CreateVirtualPublicVersionResource(Resource):
     @reset_auth
-    @auth_requires_admin
+    @auth_requires_dataset_admin(table_arg="datastack_name")
     @mat_bp.doc("create virtual materialization", security="apikey")
     @accepts("VirtualVersionSchema", schema=VirtualVersionSchema, api=mat_bp)
-    def post(self):
+    def post(self, datastack_name:str):
         """Create a virtual version from an existing frozen version.
 
         Args:
             datastack_name (str): name of datastack
-            version (int): version to make virtual copy
 
         """
 
         data = request.parsed_obj
 
-        datastack_name = data.get("datastack_name")
         target_version = data.get("target_version")
         tables_to_include = data.get("tables_to_include")
         virtual_version_name = data.get("virtual_version_name")
