@@ -765,7 +765,7 @@ class AnnotationResource(Resource):
             logging.error(f"Error querying annotations: {e}")
             return abort(500)
 
-@mat_bp.route("/materialize/run/create_virtual/datastack/<str:datastack_name>")
+@mat_bp.route("/materialize/run/create_virtual/datastack/<string:datastack_name>")
 class CreateVirtualPublicVersionResource(Resource):
     @reset_auth
     @auth_requires_dataset_admin(table_arg="datastack_name")
