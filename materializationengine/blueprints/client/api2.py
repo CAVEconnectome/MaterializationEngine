@@ -71,7 +71,7 @@ from materializationengine.request_db import request_db_session
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from materializationengine.utils import check_read_permission
 
-__version__ = "5.14.0"
+__version__ = "5.13.5"
 
 
 authorizations = {
@@ -651,6 +651,13 @@ def combine_queries(
     if (prod_df is None) and (mat_df is None):
         abort(400, f"This query on table {user_data['table']} returned no results")
 
+    # if there is nothing to combine, just return the prod table to reflect 
+    # schema with no rows
+    if (mat_df is None) and len(prod_df)==0:
+        cut_prod_df = prod_df.drop(crud_columns, axis=1,errors="ignore")
+        if len(created_columns) > 0:
+            cut_prod_df = cut_prod_df.drop(created_columns, axis=1,errors="ignore")
+        return cut_prod_df.reset_index()
 
     if prod_df is not None:
         # if we are moving forward in time

@@ -85,37 +85,38 @@ def fix_columns_with_query(
 ):
     """Use a query object to suggest how to convert columns imported from csv to correct types."""
 
-    if len(df) > 0:
-        n_tables = len(query.column_descriptions)
+
+    n_tables = len(query.column_descriptions)
+    if n_tables == 1:
+        schema_model = query.column_descriptions[0]["type"]
+    for colname in df.columns:
         if n_tables == 1:
-            schema_model = query.column_descriptions[0]["type"]
-        for colname in df.columns:
-            if n_tables == 1:
-                coltype = type(getattr(schema_model, colname).type)
-            else:
-                coltype = type(
-                    next(
-                        col["type"]
-                        for col in query.column_descriptions
-                        if col["name"] == colname
+            coltype = type(getattr(schema_model, colname).type)
+        else:
+            coltype = type(
+                next(
+                    col["type"]
+                    for col in query.column_descriptions
+                    if col["name"] == colname
+                )
+            )
+        if coltype is Boolean:
+            pass
+        #    df[colname] = _fix_boolean_column(df[colname])
+        elif coltype is DateTime:
+            # if the first entry for this column has a decimal point,
+            # then it is one format and we want to convert it using that format
+            df[colname] = pd.to_datetime(
+                df[colname], utc=True, format='ISO8601'
+            )
+        if len(df) > 0:
+            if coltype is Geometry and fix_wkb is True:
+                
+                    df[colname] = fix_wkb_column(
+                        df[colname],
+                        wkb_data_start_ind=wkb_data_start_ind,
+                        n_threads=n_threads,
                     )
-                )
-            if coltype is Boolean:
-                pass
-            #    df[colname] = _fix_boolean_column(df[colname])
-            elif coltype is DateTime:
-                # if the first entry for this column has a decimal point,
-                # then it is one format and we want to convert it using that format
-                df[colname] = pd.to_datetime(
-                    df[colname], utc=True, format='ISO8601'
-                )
-               
-            elif coltype is Geometry and fix_wkb is True:
-                df[colname] = fix_wkb_column(
-                    df[colname],
-                    wkb_data_start_ind=wkb_data_start_ind,
-                    n_threads=n_threads,
-                )
             elif isinstance(df[colname].loc[0], Decimal) and fix_decimal is True:
                 df[colname] = _fix_decimal_column(df[colname])
     return df
