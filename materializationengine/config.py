@@ -52,9 +52,9 @@ class BaseConfig:
     CELERY_WORKER_AUTOSHUTDOWN_MAX_TASKS = 1
     CELERY_WORKER_AUTOSHUTDOWN_DELAY_SECONDS = 2
 
-    REDIS_HOST="localhost"
-    REDIS_PORT=6379
-    REDIS_PASSWORD=""
+    REDIS_HOST = "localhost"
+    REDIS_PORT = 6379
+    REDIS_PASSWORD = ""
     SESSION_TYPE = "redis"
     PERMANENT_SESSION_LIFETIME = timedelta(hours=24)
     SESSION_PREFIX = "annotation_upload_"
