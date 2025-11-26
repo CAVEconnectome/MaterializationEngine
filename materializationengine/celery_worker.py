@@ -1,11 +1,15 @@
 import datetime
 import logging
 import os
+import signal
 import sys
+import threading
+import time
 import warnings
 from typing import Any, Callable, Dict
 
 import redis
+from celery import signals
 from celery.app.builtins import add_backend_cleanup_task
 from celery.schedules import crontab
 from celery.signals import after_setup_logger
@@ -22,6 +26,61 @@ from materializationengine.utils import get_config_param
 celery_logger = get_task_logger(__name__)
 
 
+_task_execution_count = 0
+_shutdown_requested = False
+
+
+def _request_worker_shutdown(delay_seconds: int, observed_count: int) -> None:
+    """Delay and then terminate the worker process."""
+    # Delay slightly so task result propagation finishes
+    time.sleep(max(delay_seconds, 0))
+    celery_logger.info(
+        "Auto-shutdown: terminating worker PID %s after %s tasks",
+        os.getpid(),
+        observed_count,
+    )
+    try:
+        os.kill(os.getpid(), signal.SIGTERM)
+    except Exception as exc:  # pragma: no cover - best-effort shutdown
+        celery_logger.error("Failed to terminate worker: %s", exc)
+
+
+def _auto_shutdown_handler(sender=None, **kwargs):
+    """Trigger worker shutdown after configurable task count when enabled."""
+    if not celery.conf.get("worker_autoshutdown_enabled", False):
+        return
+
+    max_tasks = celery.conf.get("worker_autoshutdown_max_tasks", 1)
+    if max_tasks <= 0:
+        return
+
+    global _task_execution_count, _shutdown_requested
+    if _shutdown_requested:
+        return
+
+    _task_execution_count += 1
+
+    if _task_execution_count < max_tasks:
+        return
+
+    _shutdown_requested = True
+    delay = celery.conf.get("worker_autoshutdown_delay_seconds", 2)
+    celery_logger.info(
+        "Auto-shutdown triggered after %s tasks; terminating in %ss",
+        _task_execution_count,
+        delay,
+    )
+    shutdown_thread = threading.Thread(
+        target=_request_worker_shutdown,
+        args=(delay, _task_execution_count),
+        daemon=True,
+    )
+    shutdown_thread.start()
+
+
+signals.task_postrun.connect(_auto_shutdown_handler, weak=False)
+
+
 def create_celery(app=None):
     celery.conf.broker_url = app.config["CELERY_BROKER_URL"]
     celery.conf.result_backend = app.config["CELERY_RESULT_BACKEND"]
@@ -31,6 +90,23 @@ def create_celery(app=None):
         }
         celery.conf.result_backend_transport_options = {
             "master_name": app.config["MASTER_NAME"]
+
+        celery.conf.worker_autoshutdown_enabled = app.config.get(
+            "CELERY_WORKER_AUTOSHUTDOWN_ENABLED", False
+        )
+        celery.conf.worker_autoshutdown_max_tasks = app.config.get(
+            "CELERY_WORKER_AUTOSHUTDOWN_MAX_TASKS", 1
+        )
+        celery.conf.worker_autoshutdown_delay_seconds = app.config.get(
+            "CELERY_WORKER_AUTOSHUTDOWN_DELAY_SECONDS", 2
+        )
+
+        if celery.conf.worker_autoshutdown_enabled:
+            celery_logger.info(
+                "Worker auto-shutdown enabled: max_tasks=%s delay=%ss",
+                celery.conf.worker_autoshutdown_max_tasks,
+                celery.conf.worker_autoshutdown_delay_seconds,
+            )
         }
     # Configure Celery and related loggers
     log_level = app.config["LOGGING_LEVEL"]
