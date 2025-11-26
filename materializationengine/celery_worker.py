@@ -90,24 +90,24 @@ def create_celery(app=None):
         }
         celery.conf.result_backend_transport_options = {
             "master_name": app.config["MASTER_NAME"]
-
-        celery.conf.worker_autoshutdown_enabled = app.config.get(
-            "CELERY_WORKER_AUTOSHUTDOWN_ENABLED", False
-        )
-        celery.conf.worker_autoshutdown_max_tasks = app.config.get(
-            "CELERY_WORKER_AUTOSHUTDOWN_MAX_TASKS", 1
-        )
-        celery.conf.worker_autoshutdown_delay_seconds = app.config.get(
-            "CELERY_WORKER_AUTOSHUTDOWN_DELAY_SECONDS", 2
-        )
-
-        if celery.conf.worker_autoshutdown_enabled:
-            celery_logger.info(
-                "Worker auto-shutdown enabled: max_tasks=%s delay=%ss",
-                celery.conf.worker_autoshutdown_max_tasks,
-                celery.conf.worker_autoshutdown_delay_seconds,
-            )
         }
+
+    celery.conf.worker_autoshutdown_enabled = app.config.get(
+        "CELERY_WORKER_AUTOSHUTDOWN_ENABLED", False
+    )
+    celery.conf.worker_autoshutdown_max_tasks = app.config.get(
+        "CELERY_WORKER_AUTOSHUTDOWN_MAX_TASKS", 1
+    )
+    celery.conf.worker_autoshutdown_delay_seconds = app.config.get(
+        "CELERY_WORKER_AUTOSHUTDOWN_DELAY_SECONDS", 2
+    )
+
+    if celery.conf.worker_autoshutdown_enabled:
+        celery_logger.info(
+            "Worker auto-shutdown enabled: max_tasks=%s delay=%ss",
+            celery.conf.worker_autoshutdown_max_tasks,
+            celery.conf.worker_autoshutdown_delay_seconds,
+        )
     # Configure Celery and related loggers
     log_level = app.config["LOGGING_LEVEL"]
     celery_logger.setLevel(log_level)
