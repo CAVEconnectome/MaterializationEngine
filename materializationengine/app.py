@@ -52,7 +52,7 @@ def create_app(config_name: str = None):
         instance_relative_config=True,
         template_folder="../templates",
     )
-    CORS(app, expose_headers=["WWW-Authenticate", "column_names"])
+    CORS(app, expose_headers=["WWW-Authenticate", "column_names"], send_wildcard=True)
     
     app.json_encoder = AEEncoder
     app.config["RESTX_JSON"] = {"cls": AEEncoder}
