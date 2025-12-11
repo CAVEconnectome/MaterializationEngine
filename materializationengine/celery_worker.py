@@ -178,6 +178,15 @@ def create_celery(app=None):
     if os.environ.get("SLACK_WEBHOOK"):
         celery.Task.on_failure = post_to_slack_on_task_failure
     
+    # Manually trigger setup_periodic_tasks to ensure it runs with the correct configuration
+    # The signal handler may have fired before beat_schedules was set, so we call it explicitly here
+    try:
+        setup_periodic_tasks(celery)
+        celery_logger.info("Manually triggered setup_periodic_tasks after create_celery")
+    except Exception as e:
+        celery_logger.warning(f"Error manually triggering setup_periodic_tasks: {e}")
+        # Don't fail if this doesn't work - the signal handler should still work
+    
     return celery
 
 
@@ -233,8 +242,18 @@ def setup_periodic_tasks(sender, **kwargs):
     celery_logger.debug(f"beat_schedules type: {type(beat_schedules)}, length: {len(beat_schedules) if isinstance(beat_schedules, (list, dict)) else 'N/A'}")
     
     if not beat_schedules:
-        celery_logger.info("No periodic tasks configured.")
+        celery_logger.debug("No periodic tasks configured yet (beat_schedules empty). Will retry after create_celery.")
         return
+    
+    # Check if tasks from beat_schedules are already registered to avoid duplicates
+    existing_schedule = sender.conf.get("beat_schedule", {})
+    if existing_schedule:
+        # Check if any of our scheduled tasks are already registered
+        schedule_names = [s.get("name") for s in beat_schedules if isinstance(s, dict)]
+        already_registered = any(name in existing_schedule for name in schedule_names if name)
+        if already_registered:
+            celery_logger.debug("Periodic tasks already registered in beat_schedule, skipping duplicate registration.")
+            return
     try:
         schedules = CeleryBeatSchema(many=True).load(beat_schedules)
     except ValidationError as validation_error:
