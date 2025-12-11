@@ -66,10 +66,39 @@ def _auto_shutdown_handler(sender=None, **kwargs):
     _shutdown_requested = True
     delay = celery.conf.get("worker_autoshutdown_delay_seconds", 2)
     celery_logger.info(
-        "Auto-shutdown triggered after %s tasks; terminating in %ss",
+        "Auto-shutdown triggered after %s tasks; stopping consumer and terminating in %ss",
         _task_execution_count,
         delay,
     )
+    
+    # Immediately stop accepting new tasks by canceling the consumer
+    # This prevents the worker from picking up new tasks during the shutdown delay
+    try:
+        # Get queue name from config or use default
+        queue_name = celery.conf.get("task_default_queue") or celery.conf.get("task_routes", {}).get("*", {}).get("queue", "celery")
+        # Get worker hostname from the task sender or use current worker's hostname
+        worker_hostname = None
+        if hasattr(sender, 'hostname'):
+            worker_hostname = sender.hostname
+        elif hasattr(celery, 'control'):
+            # Try to get hostname from current worker
+            try:
+                from celery import current_app
+                inspect = current_app.control.inspect()
+                active_workers = inspect.active() if inspect else {}
+                if active_workers:
+                    worker_hostname = list(active_workers.keys())[0]
+            except Exception:
+                pass
+        
+        if worker_hostname and queue_name:
+            celery_logger.info("Canceling consumer for queue '%s' on worker '%s'", queue_name, worker_hostname)
+            celery.control.cancel_consumer(queue_name, destination=[worker_hostname])
+        else:
+            celery_logger.warning("Could not determine worker hostname or queue name for consumer cancellation")
+    except Exception as exc:
+        celery_logger.warning("Failed to cancel consumer during shutdown: %s", exc)
+    
     shutdown_thread = threading.Thread(
         target=_request_worker_shutdown,
         args=(delay, _task_execution_count),
