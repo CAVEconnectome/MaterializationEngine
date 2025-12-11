@@ -189,14 +189,22 @@ def configure_app(app: Flask) -> Flask:
     if "MATERIALIZATION_ENGINE_SETTINGS" in os.environ.keys():
         app.config.from_envvar("MATERIALIZATION_ENGINE_SETTINGS")
     # instance-folders configuration
+    # Store BEAT_SCHEDULES before loading config file to see if it gets overwritten
+    beat_schedules_before = app.config.get("BEAT_SCHEDULES", "NOT_SET")
     app.config.from_pyfile("config.cfg", silent=True)
-
+    beat_schedules_after = app.config.get("BEAT_SCHEDULES", "NOT_SET")
+    
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(app.config["LOGGING_LEVEL"])
     app.logger.removeHandler(default_handler)
     app.logger.addHandler(handler)
     app.logger.setLevel(app.config["LOGGING_LEVEL"])
     app.logger.propagate = False
+    
+    # Log BEAT_SCHEDULES loading status (debug level)
+    app.logger.debug(f"BEAT_SCHEDULES before config.cfg: {beat_schedules_before}")
+    app.logger.debug(f"BEAT_SCHEDULES after config.cfg: {beat_schedules_after}")
+    app.logger.debug(f"BEAT_SCHEDULES type: {type(beat_schedules_after)}, length: {len(beat_schedules_after) if isinstance(beat_schedules_after, (list, dict)) else 'N/A'}")
     app.logger.debug(app.config)
     app.app_context().push()
     return app
