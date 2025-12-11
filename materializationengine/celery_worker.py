@@ -54,8 +54,8 @@ def create_celery(app=None):
     
     # Debug: Check if BEAT_SCHEDULES is in app.config
     beat_schedules = app.config.get("BEAT_SCHEDULES", [])
-    celery_logger.info(f"BEAT_SCHEDULES from app.config: {beat_schedules}")
-    celery_logger.info(f"BEAT_SCHEDULES type: {type(beat_schedules)}, length: {len(beat_schedules) if isinstance(beat_schedules, (list, dict)) else 'N/A'}")
+    celery_logger.debug(f"BEAT_SCHEDULES from app.config: {beat_schedules}")
+    celery_logger.debug(f"BEAT_SCHEDULES type: {type(beat_schedules)}, length: {len(beat_schedules) if isinstance(beat_schedules, (list, dict)) else 'N/A'}")
     
     celery.conf.update(
         {
@@ -84,11 +84,11 @@ def create_celery(app=None):
     # Use BEAT_SCHEDULES from app.config if beat_schedules is empty or missing
     if not celery.conf.get("beat_schedules") and app.config.get("BEAT_SCHEDULES"):
         celery.conf.beat_schedules = app.config["BEAT_SCHEDULES"]
-        celery_logger.info(f"Restored beat_schedules from BEAT_SCHEDULES: {len(app.config['BEAT_SCHEDULES'])} schedules")
+        celery_logger.debug(f"Restored beat_schedules from BEAT_SCHEDULES: {len(app.config['BEAT_SCHEDULES'])} schedules")
     
     # Debug: Verify beat_schedules is in celery.conf after update
-    celery_logger.info(f"beat_schedules in celery.conf after update: {celery.conf.get('beat_schedules', 'NOT FOUND')}")
-    celery_logger.info(f"BEAT_SCHEDULES in celery.conf after update: {celery.conf.get('BEAT_SCHEDULES', 'NOT FOUND')}")
+    celery_logger.debug(f"beat_schedules in celery.conf after update: {celery.conf.get('beat_schedules', 'NOT FOUND')}")
+    celery_logger.debug(f"BEAT_SCHEDULES in celery.conf after update: {celery.conf.get('BEAT_SCHEDULES', 'NOT FOUND')}")
     TaskBase = celery.Task
 
     class ContextTask(TaskBase):
@@ -101,15 +101,6 @@ def create_celery(app=None):
     celery.Task = ContextTask
     if os.environ.get("SLACK_WEBHOOK"):
         celery.Task.on_failure = post_to_slack_on_task_failure
-    
-    # Manually trigger setup_periodic_tasks to ensure it runs with the correct configuration
-    # This is a fallback in case the signal handler doesn't fire or fires before beat_schedules is set
-    try:
-        setup_periodic_tasks(celery)
-        celery_logger.info("Manually triggered setup_periodic_tasks after create_celery")
-    except Exception as e:
-        celery_logger.warning(f"Error manually triggering setup_periodic_tasks: {e}")
-        # Don't fail if this doesn't work - the signal handler should still work
     
     return celery
 
@@ -159,11 +150,11 @@ def setup_periodic_tasks(sender, **kwargs):
         # Fallback: try to get from BEAT_SCHEDULES (uppercase) in celery.conf
         beat_schedules = celery.conf.get("BEAT_SCHEDULES", [])
         if beat_schedules:
-            celery_logger.info(f"Found BEAT_SCHEDULES (uppercase), converting to beat_schedules")
+            celery_logger.debug(f"Found BEAT_SCHEDULES (uppercase), converting to beat_schedules")
             celery.conf.beat_schedules = beat_schedules
     
-    celery_logger.info(f"beat_schedules from celery.conf: {beat_schedules}")
-    celery_logger.info(f"beat_schedules type: {type(beat_schedules)}, length: {len(beat_schedules) if isinstance(beat_schedules, (list, dict)) else 'N/A'}")
+    celery_logger.debug(f"beat_schedules from celery.conf: {beat_schedules}")
+    celery_logger.debug(f"beat_schedules type: {type(beat_schedules)}, length: {len(beat_schedules) if isinstance(beat_schedules, (list, dict)) else 'N/A'}")
     
     if not beat_schedules:
         celery_logger.info("No periodic tasks configured.")

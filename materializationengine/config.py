@@ -201,10 +201,10 @@ def configure_app(app: Flask) -> Flask:
     app.logger.setLevel(app.config["LOGGING_LEVEL"])
     app.logger.propagate = False
     
-    # Log BEAT_SCHEDULES loading status
-    app.logger.info(f"BEAT_SCHEDULES before config.cfg: {beat_schedules_before}")
-    app.logger.info(f"BEAT_SCHEDULES after config.cfg: {beat_schedules_after}")
-    app.logger.info(f"BEAT_SCHEDULES type: {type(beat_schedules_after)}, length: {len(beat_schedules_after) if isinstance(beat_schedules_after, (list, dict)) else 'N/A'}")
+    # Log BEAT_SCHEDULES loading status (debug level)
+    app.logger.debug(f"BEAT_SCHEDULES before config.cfg: {beat_schedules_before}")
+    app.logger.debug(f"BEAT_SCHEDULES after config.cfg: {beat_schedules_after}")
+    app.logger.debug(f"BEAT_SCHEDULES type: {type(beat_schedules_after)}, length: {len(beat_schedules_after) if isinstance(beat_schedules_after, (list, dict)) else 'N/A'}")
     app.logger.debug(app.config)
     app.app_context().push()
     return app
