@@ -488,12 +488,26 @@ def check_if_task_is_running(task_name: str, worker_name_prefix: str) -> bool:
     inspector = celery.control.inspect()
     active_tasks_dict = inspector.active()
 
-    workflow_active_tasks = next(
-        v for k, v in active_tasks_dict.items() if worker_name_prefix in k
-    )
+    # Handle case where inspector.active() returns None (no workers available or disconnected)
+    if active_tasks_dict is None:
+        celery_logger.warning(
+            "Unable to inspect active tasks: no workers available or workers disconnected"
+        )
+        return False
 
-    for active_task in workflow_active_tasks:
-        if task_name in active_task.values():
-            celery_logger.info(f"Task {task_name} is running...")
-            return True
+    # Find active tasks from workers matching the prefix
+    matching_active_tasks = [
+        v for k, v in active_tasks_dict.items() if worker_name_prefix in k
+    ]
+
+    # If no matching workers found, return False
+    if not matching_active_tasks:
+        return False
+
+    # Check all active tasks from matching workers for the task
+    for workflow_active_tasks in matching_active_tasks:
+        for active_task in workflow_active_tasks:
+            if task_name in active_task.values():
+                celery_logger.info(f"Task {task_name} is running...")
+                return True
     return False
