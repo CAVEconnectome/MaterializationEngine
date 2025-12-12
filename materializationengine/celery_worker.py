@@ -28,6 +28,8 @@ celery_logger = get_task_logger(__name__)
 
 _task_execution_count = 0
 _shutdown_requested = False
+_last_task_time = None
+_worker_start_time = None
 
 
 def _request_worker_shutdown(delay_seconds: int, observed_count: int) -> None:
@@ -54,11 +56,12 @@ def _auto_shutdown_handler(sender=None, **kwargs):
     if max_tasks <= 0:
         return
 
-    global _task_execution_count, _shutdown_requested
+    global _task_execution_count, _shutdown_requested, _last_task_time
     if _shutdown_requested:
         return
 
     _task_execution_count += 1
+    _last_task_time = time.time()  # Update last task time
 
     if _task_execution_count < max_tasks:
         return
@@ -107,7 +110,86 @@ def _auto_shutdown_handler(sender=None, **kwargs):
     shutdown_thread.start()
 
 
+def _monitor_idle_timeout():
+    """Monitor worker idle time and shutdown if idle timeout exceeded."""
+    idle_timeout_seconds = celery.conf.get("worker_idle_timeout_seconds", 0)
+    if idle_timeout_seconds <= 0:
+        return  # Idle timeout not enabled
+    
+    check_interval = min(30, idle_timeout_seconds / 4)  # Check every 30s or 1/4 of timeout, whichever is smaller
+    
+    global _last_task_time, _worker_start_time, _shutdown_requested
+    
+    while not _shutdown_requested:
+        time.sleep(check_interval)
+        
+        if _shutdown_requested:
+            break
+            
+        current_time = time.time()
+        
+        # If we've processed at least one task, use last task time
+        # Otherwise, use worker start time
+        if _last_task_time is not None:
+            idle_duration = current_time - _last_task_time
+            reference_time = _last_task_time
+        elif _worker_start_time is not None:
+            idle_duration = current_time - _worker_start_time
+            reference_time = _worker_start_time
+        else:
+            continue  # Haven't started yet
+        
+        if idle_duration >= idle_timeout_seconds:
+            celery_logger.info(
+                "Idle timeout exceeded: worker has been idle for %.1f seconds (timeout: %d seconds). Shutting down.",
+                idle_duration,
+                idle_timeout_seconds,
+            )
+            _shutdown_requested = True
+            # Cancel consumer to stop accepting new tasks
+            try:
+                queue_name = celery.conf.get("task_default_queue") or celery.conf.get("task_routes", {}).get("*", {}).get("queue", "celery")
+                from celery import current_app
+                inspect = current_app.control.inspect()
+                active_workers = inspect.active() if inspect else {}
+                if active_workers:
+                    worker_hostname = list(active_workers.keys())[0]
+                    celery_logger.info("Canceling consumer for queue '%s' on worker '%s'", queue_name, worker_hostname)
+                    celery.control.cancel_consumer(queue_name, destination=[worker_hostname])
+            except Exception as exc:
+                celery_logger.warning("Failed to cancel consumer during idle timeout shutdown: %s", exc)
+            
+            # Shutdown after a short delay
+            delay = celery.conf.get("worker_autoshutdown_delay_seconds", 2)
+            shutdown_thread = threading.Thread(
+                target=_request_worker_shutdown,
+                args=(delay, 0),  # 0 tasks since we're shutting down due to idle timeout
+                daemon=True,
+            )
+            shutdown_thread.start()
+            break
+
+
+def _worker_ready_handler(sender=None, **kwargs):
+    """Handle worker ready signal - start idle timeout monitor if enabled."""
+    global _worker_start_time, _shutdown_requested
+    _worker_start_time = time.time()
+    
+    idle_timeout_seconds = celery.conf.get("worker_idle_timeout_seconds", 0)
+    if idle_timeout_seconds > 0:
+        celery_logger.info(
+            "Worker idle timeout enabled: %d seconds. Worker will shutdown if idle for this duration.",
+            idle_timeout_seconds,
+        )
+        monitor_thread = threading.Thread(
+            target=_monitor_idle_timeout,
+            daemon=True,
+        )
+        monitor_thread.start()
+
+
 signals.task_postrun.connect(_auto_shutdown_handler, weak=False)
+signals.worker_ready.connect(_worker_ready_handler, weak=False)
 
 
 def create_celery(app=None):
@@ -130,12 +212,21 @@ def create_celery(app=None):
     celery.conf.worker_autoshutdown_delay_seconds = app.config.get(
         "CELERY_WORKER_AUTOSHUTDOWN_DELAY_SECONDS", 2
     )
+    celery.conf.worker_idle_timeout_seconds = app.config.get(
+        "CELERY_WORKER_IDLE_TIMEOUT_SECONDS", 0
+    )
 
     if celery.conf.worker_autoshutdown_enabled:
         celery_logger.info(
             "Worker auto-shutdown enabled: max_tasks=%s delay=%ss",
             celery.conf.worker_autoshutdown_max_tasks,
             celery.conf.worker_autoshutdown_delay_seconds,
+        )
+    
+    if celery.conf.worker_idle_timeout_seconds > 0:
+        celery_logger.info(
+            "Worker idle timeout enabled: %s seconds",
+            celery.conf.worker_idle_timeout_seconds,
         )
     # Configure Celery and related loggers
     log_level = app.config["LOGGING_LEVEL"]
