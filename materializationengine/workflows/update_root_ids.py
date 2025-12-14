@@ -50,7 +50,7 @@ def expired_root_id_workflow(datastack_info: dict, **kwargs):
 
 def update_root_ids_workflow(mat_metadata: dict):
     """Celery workflow that updates expired root ids in a
-    segmentation table. Returns celery chain primitive without executing it.
+    segmentation table.
 
     Workflow:
         - Lookup supervoxel id associated with expired root id
@@ -65,23 +65,18 @@ def update_root_ids_workflow(mat_metadata: dict):
         chunked_roots (List[int]): chunks of expired root ids to lookup
 
     Returns:
-        chain: chain of celery tasks (not executed - returns signature only)
+        chain: chain of celery tasks
     """
 
-    celery_logger.info("Preparing expired root id workflow...")
-    
-    # Generate chunks synchronously (lightweight operation)
+    celery_logger.info("Setup expired root id workflow...")
     if mat_metadata.get("lookup_all_root_ids"):
         chunked_ids = generate_chunked_model_ids(mat_metadata)
     else:
         chunked_ids = get_expired_root_ids_from_pcg(mat_metadata)
 
     if not chunked_ids:
-        celery_logger.info("No expired root IDs to process")
         return fin.si()
 
-    # Build the workflow chain - don't execute it here
-    # The caller will execute it as part of a larger chain
     update_root_workflow = chain(
         chord(
             [
@@ -91,10 +86,10 @@ def update_root_ids_workflow(mat_metadata: dict):
             fin.si(),
         ),
         update_metadata.si(mat_metadata),
-    )
-    
-    # Return the chain signature - don't execute it here
-    return update_root_workflow
+    ).apply_async()
+    tasks_completed = monitor_workflow_state(update_root_workflow)
+    if tasks_completed:
+        return workflow_complete.si("update_root_ids_workflow")
 
 
 def get_expired_root_ids_from_pcg(mat_metadata: dict, expired_chunk_size: int = 100):

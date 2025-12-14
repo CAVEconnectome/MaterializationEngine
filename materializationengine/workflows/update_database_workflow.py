@@ -8,9 +8,9 @@ from materializationengine.blueprints.materialize.api import get_datastack_info
 from materializationengine.celery_init import celery
 from materializationengine.shared_tasks import (
     get_materialization_info,
+    monitor_workflow_state,
     workflow_complete,
     fin,
-    cleanup_and_shutdown,
 )
 from materializationengine.task import LockedTask
 from materializationengine.utils import get_config_param
@@ -96,27 +96,12 @@ def update_database_workflow(self, datastack_info: dict, **kwargs):
             else:
                 update_live_database_workflow.append(fin.si())
 
-        # Build the complete workflow chain
-        # The workflow functions now return task signatures (not executed)
-        # So we can chain them together and execute once
         run_update_database_workflow = chain(
-            *update_live_database_workflow,
-            workflow_complete.si("update_root_ids"),
-            cleanup_and_shutdown.si(),  # Final cleanup task to close resources
-        )
-        
-        # Execute the entire chain asynchronously
-        # All tasks in the chain will be tracked by Celery
-        # task_postrun will fire for each task, including the cleanup task
-        celery_logger.info("Executing update database workflow chain")
-        result = run_update_database_workflow.apply_async(
-            kwargs={"Datastack": datastack_info["datastack"]}
-        )
-        
-        # Return the result ID - the chain will execute asynchronously
-        # The worker will track all tasks in the chain
-        celery_logger.info(f"Workflow chain started with root task ID: {result.id}")
-        return True
+            *update_live_database_workflow, workflow_complete.si("update_root_ids")
+        ).apply_async(kwargs={"Datastack": datastack_info["datastack"]})
     except Exception as e:
         celery_logger.error(f"An error has occurred: {e}")
         raise e
+    tasks_completed = monitor_workflow_state(run_update_database_workflow)
+    if tasks_completed:
+        return True
