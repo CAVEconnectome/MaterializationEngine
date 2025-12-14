@@ -33,7 +33,11 @@ _worker_start_time = None
 
 
 def _request_worker_shutdown(delay_seconds: int, observed_count: int) -> None:
-    """Delay and then terminate the worker process."""
+    """Delay and then terminate the worker process.
+    
+    First attempts graceful shutdown via SIGTERM, then forces exit if needed.
+    In Kubernetes, the container must exit for the pod to terminate.
+    """
     # Delay slightly so task result propagation finishes
     time.sleep(max(delay_seconds, 0))
     celery_logger.info(
@@ -41,10 +45,25 @@ def _request_worker_shutdown(delay_seconds: int, observed_count: int) -> None:
         os.getpid(),
         observed_count,
     )
+    
+    # First try graceful shutdown via SIGTERM
     try:
         os.kill(os.getpid(), signal.SIGTERM)
-    except Exception as exc:  # pragma: no cover - best-effort shutdown
-        celery_logger.error("Failed to terminate worker: %s", exc)
+        # Give Celery a moment to handle the signal gracefully
+        time.sleep(3)
+    except Exception as exc:
+        celery_logger.warning("Failed to send SIGTERM: %s", exc)
+    
+    # Force exit if still running (Kubernetes requires process to exit)
+    # os._exit() bypasses Python cleanup and immediately terminates the process
+    # This ensures the container/pod terminates even if Celery's warm shutdown doesn't exit
+    celery_logger.info("Forcing process exit to ensure container termination")
+    try:
+        os._exit(0)  # Exit with success code
+    except Exception as exc:
+        # Last resort: use sys.exit() which might be caught but is better than nothing
+        celery_logger.error("Failed to force exit, using sys.exit(): %s", exc)
+        sys.exit(0)
 
 
 def _auto_shutdown_handler(sender=None, **kwargs):
