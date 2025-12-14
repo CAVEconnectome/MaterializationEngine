@@ -608,7 +608,7 @@ def set_root_id_to_none_task(
 def ingest_new_annotations_workflow(mat_metadata: dict):
     """Celery workflow to ingest new annotations. In addition, it will
     create missing segmentation data table if it does not exist.
-    Returns celery chain primitive.
+    Returns celery chain primitive without executing it.
 
     Workflow:
         - Create linked segmentation table if not exists
@@ -622,17 +622,26 @@ def ingest_new_annotations_workflow(mat_metadata: dict):
         annotation_chunks (List[int]): list of annotation primary key ids
 
     Returns:
-        chain: chain of celery tasks
+        chain: chain of celery tasks (not executed - returns signature only)
     """
-    celery_logger.info("Ingesting new annotations...")
+    celery_logger.info("Preparing ingest new annotations workflow...")
+    
+    # Skip large tables
     if mat_metadata["row_count"] >= 1_000_000:
+        celery_logger.info(f"Skipping table with {mat_metadata['row_count']} rows (>= 1,000,000)")
         return fin.si()
+    
+    # Generate chunks synchronously (lightweight operation)
     annotation_chunks = generate_chunked_model_ids(mat_metadata)
-    table_created = create_missing_segmentation_table(mat_metadata)
-    if table_created:
-        celery_logger.info(f'Table created: {mat_metadata["segmentation_table_name"]}')
-
+    
+    if not annotation_chunks:
+        celery_logger.info("No annotation chunks to process")
+        return fin.si()
+    
+    # Build the workflow chain - create table first, then process chunks
+    # The create_missing_segmentation_table task will be executed as part of the chain
     ingest_workflow = chain(
+        create_missing_segmentation_table.si(mat_metadata),
         chord(
             [
                 chain(
@@ -642,10 +651,11 @@ def ingest_new_annotations_workflow(mat_metadata: dict):
             ],
             fin.si(),
         )
-    ).apply_async()
-    tasks_completed = monitor_workflow_state(ingest_workflow)
-    if tasks_completed:
-        return fin.si()
+    )
+    
+    # Return the chain signature - don't execute it here
+    # The caller will execute it as part of a larger chain
+    return ingest_workflow
 
 
 @celery.task(name="workflow:create_missing_segmentation_table", acks_late=True)

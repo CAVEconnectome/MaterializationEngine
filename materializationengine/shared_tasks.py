@@ -115,6 +115,45 @@ def fin(self, *args, **kwargs):
 def workflow_complete(self, workflow_name):
     return f"{workflow_name} completed successfully"
 
+
+@celery.task(name="orchestration:cleanup_and_shutdown", acks_late=True, bind=True)
+def cleanup_and_shutdown(self, *args, **kwargs):
+    """Final cleanup task that ensures all resources are closed before shutdown.
+    
+    This task should be the last task in a workflow chain to ensure:
+    - Database connection pools are closed
+    - All resources are properly released
+    - The worker can safely shut down after this task completes
+    
+    Returns:
+        bool: Always returns True to indicate successful cleanup
+    """
+    celery_logger.info("Performing final cleanup before shutdown")
+    
+    # Shutdown all database connections
+    try:
+        from materializationengine.database import db_manager, dynamic_annotation_cache
+        
+        # Shutdown DatabaseConnectionManager (closes all SQLAlchemy engines and sessions)
+        try:
+            db_manager.shutdown()
+            celery_logger.info("DatabaseConnectionManager shutdown complete")
+        except Exception as e:
+            celery_logger.warning(f"Error shutting down DatabaseConnectionManager: {e}")
+        
+        # Shutdown DynamicMaterializationCache (closes all DynamicAnnotationInterface connections)
+        try:
+            dynamic_annotation_cache.shutdown()
+            celery_logger.info("DynamicMaterializationCache shutdown complete")
+        except Exception as e:
+            celery_logger.warning(f"Error shutting down DynamicMaterializationCache: {e}")
+        
+        celery_logger.info("All database connections closed - cleanup complete")
+    except Exception as e:
+        celery_logger.error(f"Error during cleanup: {e}")
+    
+    return True
+
 def get_materialization_info(
     datastack_info: dict,
     analysis_version: int = None,
