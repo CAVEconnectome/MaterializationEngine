@@ -47,8 +47,72 @@ def _request_worker_shutdown(delay_seconds: int, observed_count: int) -> None:
         celery_logger.error("Failed to terminate worker: %s", exc)
 
 
+def _has_active_workflow_tasks(completed_task_id: str, task_name: str = None) -> bool:
+    """Check if there are other active tasks that might be part of a workflow.
+    
+    When a task spawns a chain/chord, it returns immediately but the child tasks
+    continue running. This function checks if there are other active tasks that
+    might be part of the workflow.
+    
+    We add a small delay to handle the race condition where chain tasks haven't
+    started yet when the parent task completes.
+    
+    Args:
+        completed_task_id: The task ID that just completed
+        task_name: Optional task name for logging
+        
+    Returns:
+        True if there are other active tasks (likely part of a workflow), False otherwise
+    """
+    try:
+        import time
+        # Small delay to allow chain tasks to start
+        # This handles the race condition where apply_async() is called but
+        # the child tasks haven't been picked up by workers yet
+        time.sleep(0.5)
+        
+        from celery import current_app
+        inspect = current_app.control.inspect()
+        
+        # Get active tasks for all workers
+        active_tasks = inspect.active()
+        if not active_tasks:
+            return False
+        
+        # Check all workers (tasks in a chain might be on different workers)
+        total_other_tasks = 0
+        for worker_name, tasks in active_tasks.items():
+            # Filter out the task that just completed
+            other_tasks = [t for t in tasks if t.get('id') != completed_task_id]
+            total_other_tasks += len(other_tasks)
+        
+        if total_other_tasks > 0:
+            # There are other active tasks - this might be a workflow
+            celery_logger.debug(
+                "Found %d other active task(s) across workers (completed: %s, task: %s)",
+                total_other_tasks,
+                completed_task_id,
+                task_name or "unknown",
+            )
+            return True
+        
+        return False
+    except Exception as e:
+        # If we can't check, assume no other tasks (safer to count than to skip)
+        celery_logger.debug(f"Could not check for active workflow tasks: {e}")
+        return False
+
+
 def _auto_shutdown_handler(sender=None, **kwargs):
-    """Trigger worker shutdown after configurable task count when enabled."""
+    """Trigger worker shutdown after configurable task count when enabled.
+    
+    This handler uses a robust workflow detection mechanism:
+    - When a task completes, it checks if there are other active tasks on any worker
+    - If other tasks are active, it assumes this task started a workflow and skips counting
+    - Only tasks with no other active tasks are counted (workflow completion)
+    - This works for any workflow structure (chains, chords, groups) without hardcoding task names
+    - A small delay allows chain tasks to start before checking (handles race conditions)
+    """
     if not celery.conf.get("worker_autoshutdown_enabled", False):
         return
 
@@ -60,8 +124,43 @@ def _auto_shutdown_handler(sender=None, **kwargs):
     if _shutdown_requested:
         return
 
+    # Get task ID and name from kwargs (task_postrun provides task_id)
+    task_id = kwargs.get('task_id')
+    task_name = None
+    if sender:
+        if hasattr(sender, 'name'):
+            task_name = sender.name
+        elif hasattr(sender, 'task') and hasattr(sender.task, 'name'):
+            task_name = sender.task.name
+    
+    # Always update last task time when ANY task completes (workflow or child)
+    # This ensures idle timeout doesn't incorrectly trigger while workflows are running
+    _last_task_time = time.time()
+    
+    # If we have a task_id, check if there are other active tasks
+    # Tasks that spawn workflows (chains/chords) will have other tasks running
+    # We skip counting workflow starter tasks and only count when all tasks complete
+    if task_id:
+        has_other_tasks = _has_active_workflow_tasks(task_id, task_name)
+        if has_other_tasks:
+            celery_logger.debug(
+                "Skipping auto-shutdown count for %s (task_id: %s) - other tasks still active",
+                task_name or "unknown",
+                task_id,
+            )
+            # Don't count this task, but we already updated _last_task_time above
+            return
+    
+    # This task has no active children, so it's a workflow completion
     _task_execution_count += 1
-    _last_task_time = time.time()  # Update last task time
+    
+    celery_logger.debug(
+        "Task completed (no active children): %s (task_id: %s, count: %d/%d)",
+        task_name or "unknown",
+        task_id or "unknown",
+        _task_execution_count,
+        max_tasks,
+    )
 
     if _task_execution_count < max_tasks:
         return
@@ -69,8 +168,9 @@ def _auto_shutdown_handler(sender=None, **kwargs):
     _shutdown_requested = True
     delay = celery.conf.get("worker_autoshutdown_delay_seconds", 2)
     celery_logger.info(
-        "Auto-shutdown triggered after %s tasks; stopping consumer and terminating in %ss",
+        "Auto-shutdown triggered after %s tasks (last task: %s); stopping consumer and terminating in %ss",
         _task_execution_count,
+        task_name or "unknown",
         delay,
     )
     
@@ -111,7 +211,16 @@ def _auto_shutdown_handler(sender=None, **kwargs):
 
 
 def _monitor_idle_timeout():
-    """Monitor worker idle time and shutdown if idle timeout exceeded."""
+    """Monitor worker idle time and shutdown if idle timeout exceeded.
+    
+    This function checks both:
+    1. Time since last task completion
+    2. Whether there are any active tasks (to avoid shutting down during workflows)
+    
+    Only shuts down if BOTH conditions are met:
+    - Idle timeout exceeded
+    - No active tasks on any worker
+    """
     idle_timeout_seconds = celery.conf.get("worker_idle_timeout_seconds", 0)
     if idle_timeout_seconds <= 0:
         return  # Idle timeout not enabled
@@ -140,8 +249,49 @@ def _monitor_idle_timeout():
             continue  # Haven't started yet
         
         if idle_duration >= idle_timeout_seconds:
+            # Before shutting down, verify there are no active tasks
+            # This prevents shutdown during workflows where tasks are waiting for children
+            try:
+                from celery import current_app
+                inspect = current_app.control.inspect()
+                active_tasks = inspect.active()
+                
+                has_active_tasks = False
+                if active_tasks:
+                    # Check if there are any active tasks on any worker
+                    for worker_name, tasks in active_tasks.items():
+                        if tasks:
+                            has_active_tasks = True
+                            celery_logger.debug(
+                                "Idle timeout check: found %d active task(s) on worker %s, "
+                                "not shutting down yet",
+                                len(tasks),
+                                worker_name,
+                            )
+                            break
+                
+                if has_active_tasks:
+                    # There are active tasks - don't shutdown, but continue monitoring
+                    celery_logger.debug(
+                        "Idle timeout exceeded (%.1f seconds) but active tasks detected, "
+                        "continuing to monitor",
+                        idle_duration,
+                    )
+                    continue
+                
+            except Exception as exc:
+                # If we can't check for active tasks, be conservative and don't shutdown
+                celery_logger.warning(
+                    "Could not check for active tasks during idle timeout: %s. "
+                    "Not shutting down to be safe.",
+                    exc,
+                )
+                continue
+            
+            # Idle timeout exceeded AND no active tasks - safe to shutdown
             celery_logger.info(
-                "Idle timeout exceeded: worker has been idle for %.1f seconds (timeout: %d seconds). Shutting down.",
+                "Idle timeout exceeded: worker has been idle for %.1f seconds (timeout: %d seconds) "
+                "and no active tasks detected. Shutting down.",
                 idle_duration,
                 idle_timeout_seconds,
             )
