@@ -361,13 +361,25 @@ def days_till_next_month(date):
 
 @celery.on_after_configure.connect
 def setup_periodic_tasks(sender, **kwargs):
-    # remove expired task results in redis broker
-    sender.add_periodic_task(
-        crontab(hour=0, minute=0, day_of_week="*", day_of_month="*", month_of_year="*"),
-        add_backend_cleanup_task(celery),
-        name="Clean up back end results",
-    )
-
+    # Check if tasks are already registered to avoid duplicates
+    existing_schedule = sender.conf.get("beat_schedule", {})
+    cleanup_task_name = "Clean up back end results"
+    
+    # Check if cleanup task is already registered
+    cleanup_already_registered = cleanup_task_name in existing_schedule if existing_schedule else False
+    
+    # Add cleanup task only if not already registered
+    if not cleanup_already_registered:
+        # remove expired task results in redis broker
+        sender.add_periodic_task(
+            crontab(hour=0, minute=0, day_of_week="*", day_of_month="*", month_of_year="*"),
+            add_backend_cleanup_task(celery),
+            name=cleanup_task_name,
+        )
+        celery_logger.debug(f"Added cleanup task: {cleanup_task_name}")
+    else:
+        celery_logger.debug(f"Cleanup task '{cleanup_task_name}' already registered, skipping.")
+    
     # Try to get beat_schedules from celery.conf, fallback to BEAT_SCHEDULES if not found
     beat_schedules = celery.conf.get("beat_schedules")
     if not beat_schedules:
@@ -384,15 +396,6 @@ def setup_periodic_tasks(sender, **kwargs):
         celery_logger.debug("No periodic tasks configured yet (beat_schedules empty). Will retry after create_celery.")
         return
     
-    # Check if tasks from beat_schedules are already registered to avoid duplicates
-    existing_schedule = sender.conf.get("beat_schedule", {})
-    if existing_schedule:
-        # Check if any of our scheduled tasks are already registered
-        schedule_names = [s.get("name") for s in beat_schedules if isinstance(s, dict)]
-        already_registered = any(name in existing_schedule for name in schedule_names if name)
-        if already_registered:
-            celery_logger.debug("Periodic tasks already registered in beat_schedule, skipping duplicate registration.")
-            return
     try:
         schedules = CeleryBeatSchema(many=True).load(beat_schedules)
     except ValidationError as validation_error:
@@ -402,17 +405,24 @@ def setup_periodic_tasks(sender, **kwargs):
     min_databases = sender.conf.get("MIN_DATABASES")
     celery_logger.info(f"MIN_DATABASES: {min_databases}")
     for schedule in schedules:
+        task_name = schedule.get("name")
+        
+        # Check if this specific task is already registered
+        if existing_schedule and task_name and task_name in existing_schedule:
+            celery_logger.debug(f"Task '{task_name}' already registered, skipping duplicate registration.")
+            continue
+        
         try:
             task = configure_task(schedule, min_databases)
             sender.add_periodic_task(
                 create_crontab(schedule),
                 task,
-                name=schedule["name"],
+                name=task_name,
             )
-            celery_logger.info(f"Added task: {schedule['name']}")
+            celery_logger.info(f"Added task: {task_name}")
         except ConfigurationError as e:
             celery_logger.error(
-                f"Error configuring task '{schedule.get('name', 'Unknown')}': {str(e)}"
+                f"Error configuring task '{task_name or 'Unknown'}': {str(e)}"
             )
 
 
