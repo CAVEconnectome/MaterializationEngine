@@ -121,7 +121,7 @@ def remove_expired_databases(delete_threshold: int = 5, datastack: str = None) -
                 ]
 
                 dropped_dbs = []
-
+                celery_logger.info(f"Databases to delete: {databases_to_delete}")
                 if len(databases) > delete_threshold:
                     with engine.connect() as conn:
                         conn.execution_options(isolation_level="AUTOCOMMIT")
