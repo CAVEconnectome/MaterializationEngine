@@ -130,20 +130,54 @@ class DatabaseConnectionManager:
     
     def cleanup(self):
         """Cleanup any remaining sessions and dispose of engine pools."""
+        self.shutdown()
+    
+    def shutdown(self):
+        """Shutdown all database connections and dispose of all engines.
+        
+        This method:
+        1. Closes all active sessions from session factories
+        2. Removes all scoped sessions
+        3. Disposes of all engine connection pools
+        4. Clears all cached engines and session factories
+        
+        Should be called when the application is shutting down or when
+        you want to ensure all database connections are closed.
+        """
+        celery_logger.info("Shutting down DatabaseConnectionManager...")
+        
+        # First, close all active sessions from session factories
         for database_name, session_factory in list(self._session_factories.items()):
             try:
+                # Remove all scoped sessions (this closes them)
                 session_factory.remove()
+                celery_logger.debug(f"Removed scoped sessions for {database_name}")
             except Exception as e:
-                celery_logger.error(f"Error cleaning up sessions for {database_name}: {e}")
+                celery_logger.warning(f"Error removing sessions for {database_name}: {e}")
         
+        # Then dispose of all engines (this closes all connections in the pool)
         for database_name, engine in list(self._engines.items()):
             try:
+                # Log pool status before disposal
+                pool = engine.pool
+                checked_out = pool.checkedout()
+                if checked_out > 0:
+                    celery_logger.warning(
+                        f"Disposing engine for {database_name} with {checked_out} "
+                        f"checked-out connections"
+                    )
+                
+                # Dispose closes all connections in the pool
                 engine.dispose()
+                celery_logger.debug(f"Disposed engine connection pool for {database_name}")
             except Exception as e:
                 celery_logger.error(f"Error disposing engine for {database_name}: {e}")
-                
+        
+        # Clear all caches
         self._session_factories.clear()
         self._engines.clear()
+        
+        celery_logger.info("DatabaseConnectionManager shutdown complete")
     
     def log_pool_status(self, database_name: str):
         """Log current connection pool status."""
@@ -185,7 +219,77 @@ class DynamicMaterializationCache:
         return self._clients[database]
 
     def invalidate_cache(self):
+        """Invalidate the cache by clearing all client references.
+        
+        Note: This does NOT close database connections. Use shutdown() for that.
+        """
         self._clients = {}
+    
+    def shutdown(self):
+        """Shutdown all database connections and clear the cache.
+        
+        This method:
+        1. Closes all cached sessions in DynamicAnnotationInterface clients
+        2. Disposes of underlying database engines if available
+        3. Clears all cached clients
+        
+        Should be called when the application is shutting down or when
+        you want to ensure all database connections are closed.
+        """
+        celery_logger.info("Shutting down DynamicMaterializationCache...")
+        
+        for database, client in list(self._clients.items()):
+            try:
+                # Close the cached session if it exists
+                if hasattr(client, 'database'):
+                    # Close the session
+                    if hasattr(client.database, 'close_session'):
+                        try:
+                            client.database.close_session()
+                            celery_logger.debug(f"Closed session for {database}")
+                        except Exception as e:
+                            celery_logger.warning(
+                                f"Error closing session for {database}: {e}"
+                            )
+                    
+                    # Dispose of the engine if it exists
+                    if hasattr(client.database, 'engine'):
+                        try:
+                            engine = client.database.engine
+                            if engine:
+                                pool = engine.pool
+                                checked_out = pool.checkedout()
+                                if checked_out > 0:
+                                    celery_logger.warning(
+                                        f"Disposing engine for {database} with "
+                                        f"{checked_out} checked-out connections"
+                                    )
+                                engine.dispose()
+                                celery_logger.debug(f"Disposed engine for {database}")
+                        except Exception as e:
+                            celery_logger.warning(
+                                f"Error disposing engine for {database}: {e}"
+                            )
+                    
+                    # Also try to close any cached session directly
+                    if hasattr(client.database, '_cached_session'):
+                        try:
+                            cached_session = client.database._cached_session
+                            if cached_session:
+                                cached_session.close()
+                                celery_logger.debug(f"Closed cached session for {database}")
+                        except Exception as e:
+                            celery_logger.warning(
+                                f"Error closing cached session for {database}: {e}"
+                            )
+                
+            except Exception as e:
+                celery_logger.error(f"Error shutting down client for {database}: {e}")
+        
+        # Clear all clients
+        self._clients.clear()
+        
+        celery_logger.info("DynamicMaterializationCache shutdown complete")
 
 
 dynamic_annotation_cache = DynamicMaterializationCache()
