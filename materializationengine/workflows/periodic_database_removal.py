@@ -47,7 +47,11 @@ def get_valid_versions(session):
     return [str(version) for version in valid_versions]
 
 
-@celery.task(name="workflow:remove_expired_databases")
+@celery.task(name="workflow:remove_expired_databases",
+             bind=True,
+             acks_late=True,
+             autoretry_for=(Exception,),
+             max_retries=3)
 def remove_expired_databases(delete_threshold: int = 5, datastack: str = None) -> str:
     """Remove expired databases and clean up their metadata.
     
