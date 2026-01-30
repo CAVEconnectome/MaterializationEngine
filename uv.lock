@@ -757,7 +757,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/40/b5/476da64a201aaf428
 
 [[package]]
 name = "emannotationschemas"
-version = "5.24.12"
+version = "5.24.13"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "flask-cors" },
@@ -769,7 +769,7 @@ dependencies = [
     { name = "shapely" },
     { name = "sqlalchemy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8d/60/2ccf0c3aa7d47f2fbda5d02ba023df5d88788ec1c579d7597702fca982f6/emannotationschemas-5.24.12.tar.gz", hash = "sha256:bd36cf0db1570e5098e3701c714ca1be20bb1de777f7624a9d37f0c805d3a5d0", size = 38327, upload-time = "2025-08-29T16:59:05.613Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/45/59/b6309623ab64f46686ca41eea57bc2fa7ec7711f072f8a372359483e5f43/emannotationschemas-5.24.13.tar.gz", hash = "sha256:d42542701c4c9551142941cbcf13f4f2b24d4b7201ee3074c7168470519902a9", size = 38762, upload-time = "2026-01-30T15:08:09.245Z" }
 
 [[package]]
 name = "executing"
@@ -1550,7 +1550,7 @@ wheels = [
 
 [[package]]
 name = "materializationengine"
-version = "5.13.2"
+version = "5.14.3"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -1621,7 +1621,7 @@ requires-dist = [
     { name = "cloud-volume", specifier = ">=8.5.4" },
     { name = "cryptography", specifier = ">=44.0.2" },
     { name = "dynamicannotationdb", specifier = ">=5.13.1" },
-    { name = "emannotationschemas", specifier = ">=5.24.12" },
+    { name = "emannotationschemas", specifier = ">=5.24.13" },
     { name = "flask", specifier = ">=2.0.2,<3.0" },
     { name = "flask-accepts" },
     { name = "flask-admin" },
