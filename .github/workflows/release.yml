@@ -58,6 +58,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
       - name: Install bumpversion
         run: pip install bumpversion
       - name: Validate version consistency
@@ -78,6 +80,15 @@ jobs:
       - name: Bump version with bumpversion
         run: |
           bumpversion ${{ inputs.part || github.event.inputs.part }}
+      - name: Sync uv.lock
+        run: uv sync
+      - name: Stage uv.lock changes
+        run: git add uv.lock
+      - name: Commit uv.lock if changed
+        run: |
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update uv.lock after version bump"
+          fi
       - name: Get version
         id: get-version
         run: |
