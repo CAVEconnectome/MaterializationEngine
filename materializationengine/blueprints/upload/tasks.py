@@ -178,6 +178,7 @@ def process_csv(
     reference_table: str = None,
     ignored_columns: List[str] = None,
     chunk_size: int = 10000,
+    id_counter_start: int = 0,
 ) -> Dict[str, Any]:
     """Process CSV file in chunks using GCSCsvProcessor"""
     try:
@@ -198,6 +199,7 @@ def process_csv(
             reference_table,
             column_mapping=column_mapping,
             ignored_columns=ignored_columns,
+            id_counter_start=id_counter_start,
         )
 
         bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
@@ -243,10 +245,16 @@ def process_csv(
             chunk_upload_callback=progress_callback,
         )
 
+        last_assigned_id = schema_processor._id_counter
+        update_job_status(
+            job_id_for_status,
+            {"last_assigned_id": last_assigned_id},
+        )
         return {
             "status": "completed_csv_processing",
             "output_path": f"{bucket_name}/{destination_blob_name}",
             "job_id_for_status": job_id_for_status,
+            "last_assigned_id": last_assigned_id,
         }
     except Exception as e:
         celery_logger.error(
