@@ -28,6 +28,7 @@ class SchemaProcessor:
         reference_table: str = None,
         column_mapping: Dict[str, str] = None,
         ignored_columns: List[str] = None,
+        id_counter_start: int = 0,
     ):
         """
         Initialize processor with schema name and optional column mapping
@@ -50,7 +51,7 @@ class SchemaProcessor:
         self.reverse_mapping = {v: k for k, v in self.column_mapping.items()}
         self.ignored_columns = set(ignored_columns or [])
         self.generate_ids = "id" not in self.column_mapping
-        self._id_counter = 0
+        self._id_counter = id_counter_start
 
         if self.is_reference and reference_table is None:
             raise ValueError(
