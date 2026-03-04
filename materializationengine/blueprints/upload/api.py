@@ -297,25 +297,29 @@ def create_storage_service():
 @upload_bp.route("/generate-presigned-url/<string:datastack_name>", methods=["POST"])
 @auth_requires_permission("edit", table_arg="datastack_name")
 def generate_presigned_url(datastack_name: str):
-    data = request.json
-    filename = data["filename"]
-    content_type = data["contentType"]
-    bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
-    blob = bucket.blob(filename)
-    origin = request.headers.get("Origin") or current_app.config.get(
-        "LOCAL_SERVER_URL", "http://localhost:5000"
-    )
-
     try:
+        data = request.json
+        if not data:
+            return jsonify({"status": "error", "message": "Request body must be JSON"}), 400
+        filename = data["filename"]
+        content_type = data["contentType"]
+        bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
+        if not bucket_name:
+            return jsonify({"status": "error", "message": "Upload bucket is not configured"}), 500
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(filename)
+        origin = request.headers.get("Origin") or current_app.config.get(
+            "LOCAL_SERVER_URL", "http://localhost:5000"
+        )
         resumable_url = blob.create_resumable_upload_session(
             content_type=content_type,
-            origin=origin,  # Allow cross-origin requests for uploads
-            timeout=3600,  # Set the session timeout to 1 hour
+            origin=origin,
+            timeout=3600,
         )
-
         return jsonify({"resumableUrl": resumable_url, "origin": origin})
+    except KeyError as e:
+        return jsonify({"status": "error", "message": f"Missing required field: {e}"}), 400
     except google_exceptions.Forbidden as e:
         current_app.logger.error(
             f"GCS Forbidden error generating presigned URL: {str(e)}"
