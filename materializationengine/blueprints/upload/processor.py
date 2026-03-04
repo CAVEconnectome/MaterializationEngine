@@ -237,19 +237,13 @@ class SchemaProcessor:
                 csv_col = self._get_mapped_column(field_name)
                 if csv_col in chunk.columns and csv_col not in self.ignored_columns:
                     if isinstance(field, mm.fields.Int):
-                        processed_data[field_name] = (
-                            chunk[csv_col].fillna(0).astype(int)
-                        )
+                        processed_data[field_name] = chunk[csv_col].astype("Int64")
                     elif isinstance(field, mm.fields.Float):
-                        processed_data[field_name] = (
-                            chunk[csv_col].fillna(0.0).astype(float)
-                        )
+                        processed_data[field_name] = chunk[csv_col].astype(float)
                     elif isinstance(field, mm.fields.Bool):
-                        processed_data[field_name] = (
-                            chunk[csv_col].fillna(False).astype(bool)
-                        )
+                        processed_data[field_name] = chunk[csv_col].astype("boolean")
                     else:
-                        processed_data[field_name] = chunk[csv_col].fillna("")
+                        processed_data[field_name] = chunk[csv_col]
 
         df = pd.DataFrame(processed_data)
 
