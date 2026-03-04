@@ -221,18 +221,16 @@ class SchemaProcessor:
 
         for field_name, coordinate_cols in self.spatial_points:
             if all(col in chunk.columns for col in coordinate_cols):
-                coordinates = chunk[coordinate_cols].astype(float).values
-                points = [Point(coords) for coords in coordinates]
                 processed_data[f"{field_name}_position"] = [
-                    create_wkt_element(point) if not any(pd.isna(coords)) else ""
-                    for point, coords in zip(points, coordinates)
+                    self.process_spatial_point(row, coordinate_cols)
+                    for _, row in chunk.iterrows()
                 ]
             else:
                 if field_name in self.required_spatial_points:
                     raise ValueError(
                         f"Missing coordinates for required spatial point: {field_name}"
                     )
-                processed_data[f"{field_name}_position"] = [""] * chunk_size
+                processed_data[f"{field_name}_position"] = [None] * chunk_size
 
         for field_name, field in self.schema._declared_fields.items():
             if not isinstance(field, mm.fields.Nested):
