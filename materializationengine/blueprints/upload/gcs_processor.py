@@ -145,7 +145,7 @@ class GCSCsvProcessor:
         except Exception as e:
             raise ValueError(
                 f"Failed to process and upload file to GCS using blob.open: {str(e)}"
-            )
+            ) from e
 
     def _download_in_chunks(self, blob: storage.Blob) -> Iterator[pd.DataFrame]:
         """
