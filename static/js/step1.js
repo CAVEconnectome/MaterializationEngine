@@ -226,7 +226,12 @@ document.addEventListener("alpine:init", () => {
         if (!response.ok) {
             const errorText = await response.text();
             console.error(`Failed response (${response.status}):`, errorText);
-            throw new Error(`Failed to get upload URL (${response.status})`);
+            let errorMessage = `HTTP ${response.status}`;
+            try {
+                const errorData = JSON.parse(errorText);
+                if (errorData.message) errorMessage = errorData.message;
+            } catch {}
+            throw new Error(`Failed to get upload URL: ${errorMessage}`);
         }
 
         const data = await response.json();
