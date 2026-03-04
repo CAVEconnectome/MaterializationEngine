@@ -255,6 +255,6 @@ class SchemaProcessor:
 
         for col in self.column_order:
             if col not in df.columns:
-                df[col] = [""] * chunk_size
+                df[col] = [None] * chunk_size
 
         return df[self.column_order]
