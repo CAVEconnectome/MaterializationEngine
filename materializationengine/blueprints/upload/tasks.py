@@ -1008,17 +1008,26 @@ def transfer_table_using_pg_dump(
         with subprocess.Popen(
             pg_dump_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=pg_env
         ) as dump_proc:
-            result = subprocess.run(
-                psql_cmd,
-                stdin=dump_proc.stdout,
-                capture_output=True,
-                text=True,
-                timeout=1200,
-                env=pg_env,
-            )
-            celery_logger.info(f"psql output: {result.stdout}")
-            if result.stderr:
-                celery_logger.warning(f"psql stderr: {result.stderr}")
+            try:
+                result = subprocess.run(
+                    psql_cmd,
+                    stdin=dump_proc.stdout,
+                    capture_output=True,
+                    text=True,
+                    timeout=1200,
+                    env=pg_env,
+                )
+                celery_logger.info(f"psql output: {result.stdout}")
+                if result.stderr:
+                    celery_logger.warning(f"psql stderr: {result.stderr}")
+            except Exception:
+                # Close stdout before killing so pg_dump doesn't block on
+                # a full pipe buffer, then kill to ensure it exits before
+                # Popen.__exit__ calls wait() — preventing a deadlock when
+                # pg_dump suppresses SIGPIPE (as libpq does).
+                dump_proc.stdout.close()
+                dump_proc.kill()
+                raise
     except subprocess.CalledProcessError as e:
         celery_logger.error(f"pg_dump/psql error: {e}")
         if job_id:
