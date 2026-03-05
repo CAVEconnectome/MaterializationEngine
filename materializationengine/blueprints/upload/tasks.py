@@ -601,6 +601,7 @@ def upload_to_database(
                 "active_workflow_part": "spatial_lookup",
                 "total_rows": total_rows_from_csv,
                 "processed_rows": processed_rows_from_csv,
+                "spatial_lookup_config": spatial_lookup_config,
             },
         )
 
@@ -714,7 +715,7 @@ def monitor_spatial_workflow_completion(
             },
             "job_id_for_status": job_id_for_status,
         }
-    elif current_workflow_status in {CHUNK_STATUS_ERROR, "failed"}:
+    elif current_workflow_status in {CHUNK_STATUS_ERROR, CHUNK_STATUS_FAILED_PERMANENT, "failed"}:
         err_msg = (
             f"Spatial workflow '{workflow_to_monitor}' has terminally FAILED with status "
             f"'{current_workflow_status}'. Last Error recorded: {workflow_data.last_error}"
