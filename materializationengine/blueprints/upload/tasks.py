@@ -11,7 +11,7 @@ from celery.result import AsyncResult
 from celery.utils.log import get_task_logger
 from flask import current_app
 from redis import Redis
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from dynamicannotationdb.key_utils import build_segmentation_table_name
 
 from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
@@ -788,21 +788,23 @@ def transfer_to_production(
 
         needs_segmentation_table = staging_db_client.schema.is_segmentation_table_required(schema_type)
 
-        production_table_exists = False
+        production_engine = db_manager.get_engine(production_schema_name)
+        staging_engine = db_manager.get_engine(staging_schema_name)
+
+        metadata_exists = False
         try:
             production_db_client.database.get_table_metadata(table_name_to_transfer)
-            production_table_exists = True
-            celery_logger.info(
-                f"Annotation table '{table_name_to_transfer}' already exists in production schema '{production_schema_name}'."
-            )
-        except Exception: 
-            production_table_exists = False
-            celery_logger.info(
-                f"Annotation table '{table_name_to_transfer}' does not exist in production schema '{production_schema_name}'. Will create."
-            )
+            metadata_exists = True
+        except Exception:
+            pass
 
-        if not production_table_exists:
-            celery_logger.info(f"Creating annotation table '{table_name_to_transfer}' in production schema '{production_schema_name}'")
+        physical_table_exists = inspect(production_engine).has_table(table_name_to_transfer)
+
+        if not metadata_exists:
+            # Fresh table — create both metadata record and physical table
+            celery_logger.info(
+                f"Creating annotation table '{table_name_to_transfer}' in production schema '{production_schema_name}'"
+            )
             production_db_client.annotation.create_table(
                 table_name=table_name_to_transfer,
                 schema_type=schema_type,
@@ -814,13 +816,26 @@ def transfer_to_production(
                 table_metadata=table_metadata_from_staging.get("table_metadata"),
                 flat_segmentation_source=table_metadata_from_staging.get("flat_segmentation_source"),
                 write_permission=table_metadata_from_staging.get("write_permission", "PRIVATE"),
-                read_permission=table_metadata_from_staging.get("read_permission", "PRIVATE"),  
+                read_permission=table_metadata_from_staging.get("read_permission", "PRIVATE"),
                 notice_text=table_metadata_from_staging.get("notice_text"),
             )
+        elif not physical_table_exists:
+            # Orphaned metadata from a previous failed run — recreate only the physical table
+            celery_logger.warning(
+                f"Metadata record exists for '{table_name_to_transfer}' in production but physical "
+                f"table is missing (likely from a previous failed transfer). Recreating physical table."
+            )
+            model = production_db_client.schema.create_annotation_model(
+                table_name_to_transfer, schema_type
+            )
+            model.__table__.create(production_engine, checkfirst=True)
+        else:
+            celery_logger.info(
+                f"Annotation table '{table_name_to_transfer}' already exists in production schema '{production_schema_name}'."
+            )
 
-        
-        production_engine = db_manager.get_engine(production_schema_name)
-        db_url_obj = production_engine.url 
+
+        db_url_obj = production_engine.url
         
    
         db_connection_info_for_cli = get_db_connection_info(db_url_obj)
@@ -829,12 +844,13 @@ def transfer_to_production(
         celery_logger.info(f"Transferring data for annotation table '{table_name_to_transfer}'")
         annotation_rows_transferred = transfer_table_using_pg_dump(
             table_name=table_name_to_transfer,
-            source_db=staging_schema_name,   
-            target_db=production_schema_name,  
-            db_info=db_connection_info_for_cli, 
+            source_db=staging_schema_name,
+            target_db=production_schema_name,
+            db_info=db_connection_info_for_cli,
             drop_indices=True,
             rebuild_indices=True,
             engine=production_engine,
+            source_engine=staging_engine,
             model_creator=lambda: production_db_client.schema.create_annotation_model(
                 table_name_to_transfer, schema_type
             ),
@@ -883,6 +899,7 @@ def transfer_to_production(
                     drop_indices=True,
                     rebuild_indices=True,
                     engine=production_engine,
+                    source_engine=staging_engine,
                     model_creator=lambda: create_segmentation_model(mat_metadata_for_segmentation_table),
                 )
                 segmentation_transfer_results = {
@@ -946,6 +963,7 @@ def transfer_table_using_pg_dump(
     drop_indices: bool = True,
     rebuild_indices: bool = True,
     engine=None,
+    source_engine=None,
     model_creator=None,
     job_id: str = None,
 ) -> int:
@@ -959,7 +977,8 @@ def transfer_table_using_pg_dump(
         db_info: Dictionary with database connection information
         drop_indices: Whether to drop indices before transfer
         rebuild_indices: Whether to rebuild indices after transfer
-        engine: SQLAlchemy engine (required if drop_indices or rebuild_indices is True)
+        engine: SQLAlchemy engine for the target DB (required if drop_indices or rebuild_indices is True)
+        source_engine: SQLAlchemy engine for the source DB (used for row count validation)
         model_creator: Function that returns the SQLAlchemy model (required if rebuild_indices is True)
 
     Returns:
@@ -976,6 +995,15 @@ def transfer_table_using_pg_dump(
     if drop_indices:
         celery_logger.info(f"Dropping indexes on {table_name}")
         index_cache.drop_table_indices(table_name, engine)
+
+    # Count source rows before transfer for post-transfer validation
+    source_row_count = None
+    if source_engine is not None:
+        with source_engine.connect() as conn:
+            source_row_count = conn.execute(
+                text(f"SELECT COUNT(*) FROM {table_name}")
+            ).scalar()
+        celery_logger.info(f"Source row count for {table_name}: {source_row_count}")
 
     with engine.begin() as conn:
         conn.execute(text(f"TRUNCATE TABLE {table_name}"))
@@ -997,6 +1025,7 @@ def transfer_table_using_pg_dump(
         f'--port={db_info["port"]}',
         f'--username={db_info["user"]}',
         f"--dbname={target_db}",
+        "--single-transaction",  # makes the entire COPY import atomic; rolls back on failure
     ]
 
     pg_env = os.environ.copy()
@@ -1060,6 +1089,13 @@ def transfer_table_using_pg_dump(
 
     with engine.connect() as conn:
         row_count = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar()
+
+    celery_logger.info(f"Destination row count for {table_name}: {row_count}")
+    if source_row_count is not None and row_count != source_row_count:
+        raise RuntimeError(
+            f"Row count mismatch after transfer of '{table_name}': "
+            f"source had {source_row_count} rows but destination has {row_count} rows"
+        )
 
     if rebuild_indices:
         celery_logger.info(f"Rebuilding indexes on {table_name}")
