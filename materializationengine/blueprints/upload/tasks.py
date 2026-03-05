@@ -11,7 +11,7 @@ from celery.result import AsyncResult
 from celery.utils.log import get_task_logger
 from flask import current_app
 from redis import Redis
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 from dynamicannotationdb.key_utils import build_segmentation_table_name
 
 from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
@@ -798,7 +798,10 @@ def transfer_to_production(
         except Exception:
             pass
 
-        physical_table_exists = inspect(production_engine).has_table(table_name_to_transfer)
+        with production_engine.connect() as conn:
+            physical_table_exists = production_engine.dialect.has_table(
+                conn, table_name_to_transfer
+            )
 
         if not metadata_exists:
             # Fresh table — create both metadata record and physical table
