@@ -5,7 +5,7 @@ from typing import Dict, List, Any
 import numpy as np
 import pandas as pd
 from celery import Task, chain, chord
-from celery.exceptions import MaxRetriesExceededError
+from celery.exceptions import MaxRetriesExceededError, Retry
 from celery.utils.log import get_task_logger
 from cloudvolume.lib import Vec
 from geoalchemy2 import Geometry
@@ -496,6 +496,8 @@ def process_table_in_chunks(
 
         return f"Dispatched batch of {len(chunk_indices_to_process)} chunks for {annotation_table_name} (workflow {workflow_name})."
 
+    except Retry:
+        raise
     except Exception as e:
         celery_logger.error(
             f"Critical error in process_table_in_chunks dispatcher for {workflow_name} (table {annotation_table_name}): {str(e)}",
