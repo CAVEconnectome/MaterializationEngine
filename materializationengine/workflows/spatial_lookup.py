@@ -224,9 +224,7 @@ def update_workflow_status(database, table_name, status):
     name="workflow:process_table_in_chunks",
     bind=True,
     acks_late=True,
-    autoretry_for=(Exception,),
-    max_retries=3,
-    retry_backoff=True,
+    max_retries=480,  # 480 × 30s = 4 hours of polling headroom
 )
 def process_table_in_chunks(
     self,
@@ -509,7 +507,9 @@ def process_table_in_chunks(
             last_error=f"Dispatcher critical error: {str(e)}",
         )
 
-        raise self.retry(exc=e, countdown=int(2**self.request.retries))
+        # Cap backoff at 5 minutes regardless of how many polling retries have occurred
+        error_backoff = min(300, int(2 ** min(self.request.retries, 8)))
+        raise self.retry(exc=e, countdown=error_backoff)
 
 
 @celery.task(
