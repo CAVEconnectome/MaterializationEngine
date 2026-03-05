@@ -538,7 +538,9 @@ def upload_to_database(
                 },
             )
 
-            raise
+            raise RuntimeError(
+                f"gcloud sql import csv failed: {e.stderr or str(e)}"
+            ) from e
         except subprocess.TimeoutExpired as e:
             celery_logger.error(f"Subprocess timed out: {e}")
             update_job_status(
