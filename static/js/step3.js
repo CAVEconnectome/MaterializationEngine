@@ -12,7 +12,7 @@ document.addEventListener("alpine:init", () => {
       voxel_resolution_nm_y: 1,
       voxel_resolution_nm_z: 1,
       write_permission: "PRIVATE",
-      read_permission: "PRIVATE",
+      read_permission: "PUBLIC",
       validationErrors: {},
       isReferenceSchema: false,
       metadataSaved: false,
@@ -129,7 +129,14 @@ document.addEventListener("alpine:init", () => {
         });
 
         if (!response.ok) {
-          throw new Error("Failed to save metadata");
+          let errorMessage = "Failed to save metadata";
+          try {
+            const errorData = await response.json();
+            if (errorData.message) {
+              errorMessage = errorData.message;
+            }
+          } catch (_) {}
+          throw new Error(errorMessage);
         }
 
         const data = await response.json();
