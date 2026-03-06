@@ -53,6 +53,9 @@ document.addEventListener("alpine:init", () => {
     saveState() {
       const stateToSave = { ...this.state };
       delete stateToSave.validationErrors;
+      delete stateToSave.stagingConflict;
+      delete stateToSave.isReferenceSchema;
+      delete stateToSave.metadataSaved;
       localStorage.setItem("metadataStore", JSON.stringify(stateToSave));
     },
 
