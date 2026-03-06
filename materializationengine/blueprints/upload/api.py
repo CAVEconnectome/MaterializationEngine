@@ -48,7 +48,7 @@ from materializationengine.blueprints.upload.tasks import (
     get_job_status,
     process_and_upload,
 )
-from materializationengine.database import db_manager
+from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.info_client import get_datastack_info, get_datastacks
 from materializationengine.utils import get_config_param
 from materializationengine import __version__
@@ -554,6 +554,33 @@ def save_metadata():
                     }
                 ),
                 400,
+            )
+
+        # Check whether the table name already exists in production before
+        # allowing the user to proceed with the upload.
+        table_name = data["table_name"]
+        datastack_name = data["datastack_name"]
+        try:
+            datastack_info = get_datastack_info(datastack_name)
+            production_db_name = datastack_info["aligned_volume"]["name"]
+            production_db_client = dynamic_annotation_cache.get_db(production_db_name)
+            existing_meta = production_db_client.database.get_table_metadata(table_name)
+            if existing_meta:
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": f"Table '{table_name}' already exists in production. "
+                                       f"Choose a different name.",
+                        }
+                    ),
+                    409,
+                )
+        except Exception as check_err:
+            # If the existence check itself fails, log and continue — don't block
+            # the upload on an inability to query production.
+            current_app.logger.warning(
+                f"Could not check production for existing table '{table_name}': {check_err}"
             )
 
         success, result = storage.save_metadata(
