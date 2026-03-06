@@ -359,6 +359,7 @@ def upload_to_database(
             },
         )
         db_client = dynamic_annotation_cache.get_db(staging_database)
+        force_overwrite = file_metadata["metadata"].get("force_overwrite", False)
 
         try:
             db_client.annotation.create_table(
@@ -377,6 +378,21 @@ def upload_to_database(
             )
         except Exception as e:
             celery_logger.error(f"Error creating table: {str(e)}")
+
+        # If the user confirmed overwrite, clear any data left from a previous run
+        # before importing so we don't accumulate duplicate IDs.
+        if force_overwrite:
+            try:
+                with db_client.database.engine.begin() as conn:
+                    # CASCADE truncates any FK-dependent tables (e.g. the segmentation table)
+                    conn.execute(text(f"TRUNCATE TABLE {table_name} CASCADE"))
+                celery_logger.info(
+                    f"force_overwrite=True: truncated staging data for '{table_name}' (CASCADE)"
+                )
+            except Exception as trunc_err:
+                celery_logger.warning(
+                    f"Could not truncate staging table '{table_name}' for overwrite: {trunc_err}"
+                )
 
         update_job_status(
             job_id_for_status,

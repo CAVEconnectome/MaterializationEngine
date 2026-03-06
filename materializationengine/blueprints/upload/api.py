@@ -560,6 +560,7 @@ def save_metadata():
         # allowing the user to proceed with the upload.
         table_name = data["table_name"]
         datastack_name = data["datastack_name"]
+        force_overwrite = data.get("force_overwrite", False)
         try:
             datastack_info = get_datastack_info(datastack_name)
             production_db_name = datastack_info["aligned_volume"]["name"]
@@ -577,11 +578,50 @@ def save_metadata():
                     409,
                 )
         except Exception as check_err:
-            # If the existence check itself fails, log and continue — don't block
-            # the upload on an inability to query production.
             current_app.logger.warning(
                 f"Could not check production for existing table '{table_name}': {check_err}"
             )
+
+        # Check whether the table already exists in staging (from a previous failed run).
+        # If so and the user has not explicitly requested an overwrite, surface the conflict
+        # so the frontend can ask for confirmation before wiping any existing staging data.
+        if not force_overwrite:
+            try:
+                staging_db_name = current_app.config.get("STAGING_DATABASE_NAME")
+                if staging_db_name:
+                    staging_db_client = dynamic_annotation_cache.get_db(staging_db_name)
+                    staging_meta = staging_db_client.database.get_table_metadata(table_name)
+                    if staging_meta:
+                        # Count existing rows so the UI can show a meaningful message.
+                        staging_engine = db_manager.get_engine(staging_db_name)
+                        try:
+                            from sqlalchemy import text as _text
+                            with staging_engine.connect() as conn:
+                                row_count = conn.execute(
+                                    _text(f"SELECT COUNT(*) FROM {table_name}")
+                                ).scalar()
+                        except Exception:
+                            row_count = None
+                        return (
+                            jsonify(
+                                {
+                                    "status": "staging_conflict",
+                                    "staging_exists": True,
+                                    "row_count": row_count,
+                                    "message": (
+                                        f"Table '{table_name}' already exists in staging"
+                                        + (f" with {row_count:,} rows" if row_count is not None else "")
+                                        + " from a previous run. "
+                                        + "Do you want to clear it and restart the upload?"
+                                    ),
+                                }
+                            ),
+                            409,
+                        )
+            except Exception as check_err:
+                current_app.logger.warning(
+                    f"Could not check staging for existing table '{table_name}': {check_err}"
+                )
 
         success, result = storage.save_metadata(
             filename=data["table_name"], metadata=data
