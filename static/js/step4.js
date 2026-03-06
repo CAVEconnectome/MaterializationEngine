@@ -156,12 +156,14 @@ document.addEventListener("alpine:init", () => {
         if (!response.ok) {
           let errorText = "Failed to start processing.";
           try {
-            const errorData = await response.json();
-            errorText =
-              errorData.message || errorData.error || JSON.stringify(errorData);
-          } catch (e) {
-            errorText = (await response.text()) || errorText;
-          }
+            const rawText = await response.text();
+            try {
+              const errorData = JSON.parse(rawText);
+              errorText = errorData.message || errorData.error || rawText;
+            } catch (_) {
+              errorText = rawText || errorText;
+            }
+          } catch (_) {}
           throw new Error(`Server error (${response.status}): ${errorText}`);
         }
 
