@@ -671,6 +671,10 @@ class RedisCheckpointManager:
         longer than stale_threshold_seconds as FAILED_RETRYABLE so the dispatcher
         can re-dispatch them.
 
+        Also recovers chunks in PROCESSING_SUBTASKS that have no timestamp entry
+        (e.g. from before timestamp tracking was deployed, or from a failed write)
+        — these are treated as immediately stale since their age is unknown.
+
         Returns the number of chunks recovered.
         """
         ts_key = self._get_processing_subtasks_timestamps_key(table_name)
@@ -678,14 +682,36 @@ class RedisCheckpointManager:
         chunk_statuses_key = self._get_chunk_statuses_key(table_name)
         recovered = 0
         try:
-            all_entries = REDIS_CLIENT.hgetall(ts_key)
-            if not all_entries:
-                return 0
+            all_timestamps = REDIS_CLIENT.hgetall(ts_key)
+            all_statuses = REDIS_CLIENT.hgetall(chunk_statuses_key)
 
             now = datetime.datetime.now(datetime.timezone.utc)
             cutoff = now - datetime.timedelta(seconds=stale_threshold_seconds)
 
-            for chunk_idx_bytes, ts_bytes in all_entries.items():
+            # First pass: recover chunks in PROCESSING_SUBTASKS with no timestamp entry.
+            # These have unknown age (e.g. entered before timestamp tracking was deployed)
+            # and should be treated as immediately stale.
+            for chunk_idx_bytes, status_bytes in all_statuses.items():
+                if status_bytes.decode("utf-8") != CHUNK_STATUS_PROCESSING_SUBTASKS:
+                    continue
+                if chunk_idx_bytes in all_timestamps:
+                    continue  # Has a timestamp — handled in second pass
+                chunk_idx_str = chunk_idx_bytes.decode("utf-8")
+                try:
+                    celery_logger.warning(
+                        f"Chunk {chunk_idx_str} for '{table_name}' is in PROCESSING_SUBTASKS "
+                        f"with no timestamp recorded (unknown age). Marking FAILED_RETRYABLE."
+                    )
+                    REDIS_CLIENT.hset(chunk_statuses_key, chunk_idx_str, CHUNK_STATUS_FAILED_RETRYABLE)
+                    REDIS_CLIENT.sadd(retryable_set_key, chunk_idx_str)
+                    recovered += 1
+                except Exception as e_inner:
+                    celery_logger.error(
+                        f"Error recovering timestamp-less chunk {chunk_idx_str} for {table_name}: {e_inner}"
+                    )
+
+            # Second pass: recover chunks whose timestamp has exceeded the stale threshold.
+            for chunk_idx_bytes, ts_bytes in all_timestamps.items():
                 chunk_idx_str = chunk_idx_bytes.decode("utf-8")
                 try:
                     entered_at = datetime.datetime.fromisoformat(ts_bytes.decode("utf-8"))
