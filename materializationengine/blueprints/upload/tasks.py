@@ -2,7 +2,7 @@ import json
 import os
 import subprocess
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import shlex
 
 import pandas as pd
@@ -754,18 +754,25 @@ def transfer_to_production(
         table_name_to_transfer = monitor_result["table_name"]
         materialization_time_stamp_str = monitor_result["materialization_time_stamp"]
         spatial_workflow_status = monitor_result.get("spatial_workflow_final_status", "UNKNOWN")
-       
+        job_id_for_ui = monitor_result.get("job_id_for_status")
+
         try:
             materialization_time_stamp_dt = datetime.fromisoformat(materialization_time_stamp_str)
         except ValueError:
             materialization_time_stamp_dt = datetime.strptime(materialization_time_stamp_str, '%Y-%m-%d %H:%M:%S.%f')
-          
+
+        if job_id_for_ui:
+            update_job_status(job_id_for_ui, {
+                "status": "processing",
+                "phase": "Preparing Transfer to Production",
+                "progress": 0,
+            })
 
         celery_logger.info(
             f"Executing transfer_to_production for table: '{table_name_to_transfer}'. "
             f"Spatial workflow final status: '{spatial_workflow_status}'."
         )
-        if "workflow_details" in monitor_result: 
+        if "workflow_details" in monitor_result:
             celery_logger.info(f"Spatial workflow details: {monitor_result['workflow_details']}")
 
         staging_schema_name = get_config_param("STAGING_DATABASE_NAME")
@@ -790,6 +797,13 @@ def transfer_to_production(
 
         production_engine = db_manager.get_engine(production_schema_name)
         staging_engine = db_manager.get_engine(staging_schema_name)
+
+        if job_id_for_ui:
+            update_job_status(job_id_for_ui, {
+                "status": "processing",
+                "phase": "Creating Annotation Table in Production",
+                "progress": 5,
+            })
 
         # get_table_metadata returns None (no exception) when the table is not found,
         # so we must check the return value rather than relying on exception handling.
@@ -845,6 +859,13 @@ def transfer_to_production(
         db_connection_info_for_cli = get_db_connection_info(db_url_obj)
 
 
+        if job_id_for_ui:
+            update_job_status(job_id_for_ui, {
+                "status": "processing",
+                "phase": "Transferring Annotation Data",
+                "progress": 10,
+            })
+
         celery_logger.info(f"Transferring data for annotation table '{table_name_to_transfer}'")
         annotation_rows_transferred = transfer_table_using_pg_dump(
             table_name=table_name_to_transfer,
@@ -858,8 +879,15 @@ def transfer_to_production(
             model_creator=lambda: production_db_client.schema.create_annotation_model(
                 table_name_to_transfer, schema_type
             ),
-            job_id=monitor_result.get("job_id_for_status"),
+            job_id=job_id_for_ui,
+            table_label="Annotation Table",
         )
+        if job_id_for_ui:
+            update_job_status(job_id_for_ui, {
+                "status": "processing",
+                "phase": f"Annotation Data Transferred ({annotation_rows_transferred:,} rows)",
+                "progress": 70,
+            })
 
         segmentation_transfer_results = None
         if transfer_segmentation and needs_segmentation_table:
@@ -877,7 +905,14 @@ def transfer_to_production(
 
             if staging_segmentation_exists:
                 celery_logger.info(f"Preparing to transfer segmentation table '{segmentation_table_name}'")
-                
+
+                if job_id_for_ui:
+                    update_job_status(job_id_for_ui, {
+                        "status": "processing",
+                        "phase": "Creating Segmentation Table in Production",
+                        "progress": 80,
+                    })
+
                 mat_metadata_for_segmentation_table = {
                     "annotation_table_name": table_name_to_transfer,
                     "segmentation_table_name": segmentation_table_name,
@@ -891,9 +926,15 @@ def transfer_to_production(
                     "voxel_resolution_z": table_metadata_from_staging.get("voxel_resolution_z", 1.0),
                 }
 
- 
                 create_missing_segmentation_table(mat_metadata_for_segmentation_table)
-                
+
+                if job_id_for_ui:
+                    update_job_status(job_id_for_ui, {
+                        "status": "processing",
+                        "phase": "Transferring Segmentation Data",
+                        "progress": 85,
+                    })
+
                 celery_logger.info(f"Transferring data for segmentation table '{segmentation_table_name}'")
                 segmentation_rows_transferred = transfer_table_using_pg_dump(
                     table_name=segmentation_table_name,
@@ -905,6 +946,8 @@ def transfer_to_production(
                     engine=production_engine,
                     source_engine=staging_engine,
                     model_creator=lambda: create_segmentation_model(mat_metadata_for_segmentation_table),
+                    job_id=job_id_for_ui,
+                    table_label="Segmentation Table",
                 )
                 segmentation_transfer_results = {
                     "name": segmentation_table_name,
@@ -919,6 +962,13 @@ def transfer_to_production(
                     "rows_transferred": 0,
                 }
 
+
+        if job_id_for_ui:
+            update_job_status(job_id_for_ui, {
+                "status": "done",
+                "phase": "Transfer Complete",
+                "progress": 100,
+            })
 
         return {
             "status": "success",
@@ -982,7 +1032,8 @@ def transfer_table_using_pg_dump(
     engine=None,
     source_engine=None,
     model_creator=None,
-    job_id: str = None,
+    job_id: Optional[str] = None,
+    table_label: Optional[str] = None,
 ) -> int:
     """
     Transfer a table using pg_dump and psql.
@@ -1009,8 +1060,12 @@ def transfer_table_using_pg_dump(
     if rebuild_indices and model_creator is None:
         raise ValueError("model_creator is required when rebuild_indices is True")
 
+    label = table_label or table_name
+
     if drop_indices:
         celery_logger.info(f"Dropping indexes on {table_name}")
+        if job_id:
+            update_job_status(job_id, {"status": "processing", "phase": f"Dropping Indices: {label}"})
         index_cache.drop_table_indices(table_name, engine)
 
     # Count source rows before transfer for post-transfer validation
@@ -1024,6 +1079,9 @@ def transfer_table_using_pg_dump(
 
     with engine.begin() as conn:
         conn.execute(text(f"TRUNCATE TABLE {table_name}"))
+
+    if job_id:
+        update_job_status(job_id, {"status": "processing", "phase": f"Copying Data: {label}"})
 
     # Build pg_dump and psql commands
     pg_dump_cmd = [
@@ -1121,6 +1179,9 @@ def transfer_table_using_pg_dump(
             )
         raise
 
+    if job_id:
+        update_job_status(job_id, {"status": "processing", "phase": f"Verifying Row Count: {label}"})
+
     with engine.connect() as conn:
         row_count = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar()
 
@@ -1133,6 +1194,8 @@ def transfer_table_using_pg_dump(
 
     if rebuild_indices:
         celery_logger.info(f"Rebuilding indexes on {table_name}")
+        if job_id:
+            update_job_status(job_id, {"status": "processing", "phase": f"Rebuilding Indices: {label}"})
         model = model_creator()
         indices = index_cache.add_indices_sql_commands(table_name, model, engine)
         for index in indices:
