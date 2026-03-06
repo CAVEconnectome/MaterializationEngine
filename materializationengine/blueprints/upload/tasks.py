@@ -891,7 +891,7 @@ def transfer_to_production(
                 }
 
  
-                create_missing_segmentation_table(mat_metadata_for_segmentation_table, db_client=production_db_client)
+                create_missing_segmentation_table(mat_metadata_for_segmentation_table)
                 
                 celery_logger.info(f"Transferring data for segmentation table '{segmentation_table_name}'")
                 segmentation_rows_transferred = transfer_table_using_pg_dump(
