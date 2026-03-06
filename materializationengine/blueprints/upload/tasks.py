@@ -13,6 +13,7 @@ from flask import current_app
 from redis import Redis
 from sqlalchemy import text
 from dynamicannotationdb.key_utils import build_segmentation_table_name
+from dynamicannotationdb.models import SegmentationMetadata
 
 from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
 from materializationengine.blueprints.upload.processor import SchemaProcessor
@@ -949,6 +950,22 @@ def transfer_to_production(
                     job_id=job_id_for_ui,
                     table_label="Segmentation Table",
                 )
+
+                # Record the materialization timestamp used for spatial root ID lookup.
+                # This is set AFTER transfer so it accurately reflects the state of the data.
+                # Also handles the case where the metadata record pre-existed (e.g. retry).
+                with db_manager.session_scope(production_schema_name) as session:
+                    seg_meta = (
+                        session.query(SegmentationMetadata)
+                        .filter(SegmentationMetadata.table_name == segmentation_table_name)
+                        .one()
+                    )
+                    seg_meta.last_updated = materialization_time_stamp_dt
+                celery_logger.info(
+                    f"Set last_updated={materialization_time_stamp_dt} on segmentation "
+                    f"metadata for '{segmentation_table_name}'"
+                )
+
                 segmentation_transfer_results = {
                     "name": segmentation_table_name,
                     "success": True,
