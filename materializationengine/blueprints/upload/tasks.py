@@ -880,11 +880,11 @@ def transfer_to_production(
                 mat_metadata_for_segmentation_table = {
                     "annotation_table_name": table_name_to_transfer,
                     "segmentation_table_name": segmentation_table_name,
-                    "schema_type": schema_type,
-                    "database": production_schema_name, 
-                    "aligned_volume": production_schema_name, 
+                    "schema": schema_type,  # create_segmentation_model reads "schema", not "schema_type"
+                    "database": production_schema_name,
+                    "aligned_volume": production_schema_name,
                     "pcg_table_name": pcg_table_name,
-                    "last_updated": materialization_time_stamp_dt, 
+                    "last_updated": materialization_time_stamp_dt,
                     "voxel_resolution_x": table_metadata_from_staging.get("voxel_resolution_x", 1.0),
                     "voxel_resolution_y": table_metadata_from_staging.get("voxel_resolution_y", 1.0),
                     "voxel_resolution_z": table_metadata_from_staging.get("voxel_resolution_z", 1.0),
