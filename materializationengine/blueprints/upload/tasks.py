@@ -791,12 +791,13 @@ def transfer_to_production(
         production_engine = db_manager.get_engine(production_schema_name)
         staging_engine = db_manager.get_engine(staging_schema_name)
 
-        metadata_exists = False
+        # get_table_metadata returns None (no exception) when the table is not found,
+        # so we must check the return value rather than relying on exception handling.
         try:
-            production_db_client.database.get_table_metadata(table_name_to_transfer)
-            metadata_exists = True
+            _meta = production_db_client.database.get_table_metadata(table_name_to_transfer)
+            metadata_exists = bool(_meta)
         except Exception:
-            pass
+            metadata_exists = False
 
         with production_engine.connect() as conn:
             physical_table_exists = production_engine.dialect.has_table(
@@ -934,6 +935,19 @@ def transfer_to_production(
 
     except Exception as e:
         celery_logger.error(f"Error during transfer_to_production for table '{monitor_result.get('table_name', 'UNKNOWN')}': {str(e)}", exc_info=True)
+        job_id_for_ui = monitor_result.get("job_id_for_status")
+        if job_id_for_ui:
+            try:
+                update_job_status(
+                    job_id_for_ui,
+                    {
+                        "status": "error",
+                        "phase": "Transfer to Production Failed",
+                        "error": str(e),
+                    },
+                )
+            except Exception as update_err:
+                celery_logger.error(f"Failed to update job status after transfer error: {update_err}")
         raise
 
 def get_db_connection_info(db_url):
