@@ -438,6 +438,17 @@ def process_table_in_chunks(
                 full_chain.apply_async()
                 return f"All chunks processed for {annotation_table_name}. Finalizing."
             else:
+                # Before sleeping, check whether any PROCESSING_SUBTASKS chunks have
+                # been stuck long enough to be considered lost and should be retried.
+                recovered = checkpoint_manager.recover_stale_processing_subtasks(
+                    workflow_name, stale_threshold_seconds=600
+                )
+                if recovered:
+                    celery_logger.info(
+                        f"Recovered {recovered} stale PROCESSING_SUBTASKS chunk(s) for {workflow_name}. "
+                        f"Retrying dispatcher immediately to re-dispatch them."
+                    )
+                    raise self.retry(countdown=0)
                 celery_logger.info(
                     f"No chunks returned by get_chunks_to_process for {workflow_name}, but scan may not be exhausted or non-terminal chunks exist. Retrying dispatcher."
                 )

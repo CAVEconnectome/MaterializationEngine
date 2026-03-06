@@ -115,6 +115,9 @@ class RedisCheckpointManager:
     def _get_retryable_chunks_set_key(self, table_name: str) -> str:
         return f"{self.workflow_prefix}{table_name}:failed_retryable_chunks"
 
+    def _get_processing_subtasks_timestamps_key(self, table_name: str) -> str:
+        return f"{self.workflow_prefix}{table_name}:processing_subtasks_timestamps"
+
     def get_bbox_hash(self, bbox: Union[np.ndarray, List]) -> str:
         """Generate hash for bounding box."""
         bbox_list = bbox.tolist() if isinstance(bbox, np.ndarray) else bbox
@@ -288,13 +291,15 @@ class RedisCheckpointManager:
         return None
 
     def reset_chunk_statuses_and_details(self, table_name: str):
-        """Deletes chunk_statuses, chunk_failed_details, and failed_retryable_set keys for the table."""
+        """Deletes chunk_statuses, chunk_failed_details, failed_retryable_set, and processing_subtasks_timestamps keys for the table."""
         chunk_statuses_key = self._get_chunk_statuses_key(table_name)
         chunk_failed_details_key = self._get_chunk_failed_details_key(table_name)
         retryable_set_key = self._get_retryable_chunks_set_key(table_name)
+        processing_subtasks_ts_key = self._get_processing_subtasks_timestamps_key(table_name)
         try:
             REDIS_CLIENT.delete(
-                chunk_statuses_key, chunk_failed_details_key, retryable_set_key
+                chunk_statuses_key, chunk_failed_details_key, retryable_set_key,
+                processing_subtasks_ts_key,
             )
             celery_logger.info(
                 f"Reset chunk statuses, details, and retryable set for table: {table_name}"
@@ -342,10 +347,23 @@ class RedisCheckpointManager:
                         old_status_bytes.decode("utf-8") if old_status_bytes else None
                     )
 
+                    processing_subtasks_ts_key = self._get_processing_subtasks_timestamps_key(table_name)
                     pipe.multi()
 
                     pipe.hset(chunk_statuses_key, str(chunk_index), status)
                     pipe.expire(chunk_statuses_key, self.expiry_time)
+
+                    # Track when chunks enter PROCESSING_SUBTASKS for stale-chunk recovery
+                    if status == CHUNK_STATUS_PROCESSING_SUBTASKS:
+                        pipe.hset(
+                            processing_subtasks_ts_key,
+                            str(chunk_index),
+                            datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        )
+                        pipe.expire(processing_subtasks_ts_key, self.expiry_time)
+                    else:
+                        # Chunk left PROCESSING_SUBTASKS — remove its timestamp entry
+                        pipe.hdel(processing_subtasks_ts_key, str(chunk_index))
 
                     current_time_iso = datetime.datetime.now(
                         datetime.timezone.utc
@@ -644,6 +662,65 @@ class RedisCheckpointManager:
                 new_pending_cursor = current_scan_idx_for_pending
 
         return chunks_to_process, None, new_pending_cursor
+
+    def recover_stale_processing_subtasks(
+        self, table_name: str, stale_threshold_seconds: int = 600
+    ) -> int:
+        """
+        Scans chunks in PROCESSING_SUBTASKS and marks any that have been there
+        longer than stale_threshold_seconds as FAILED_RETRYABLE so the dispatcher
+        can re-dispatch them.
+
+        Returns the number of chunks recovered.
+        """
+        ts_key = self._get_processing_subtasks_timestamps_key(table_name)
+        retryable_set_key = self._get_retryable_chunks_set_key(table_name)
+        chunk_statuses_key = self._get_chunk_statuses_key(table_name)
+        recovered = 0
+        try:
+            all_entries = REDIS_CLIENT.hgetall(ts_key)
+            if not all_entries:
+                return 0
+
+            now = datetime.datetime.now(datetime.timezone.utc)
+            cutoff = now - datetime.timedelta(seconds=stale_threshold_seconds)
+
+            for chunk_idx_bytes, ts_bytes in all_entries.items():
+                chunk_idx_str = chunk_idx_bytes.decode("utf-8")
+                try:
+                    entered_at = datetime.datetime.fromisoformat(ts_bytes.decode("utf-8"))
+                    if entered_at > cutoff:
+                        continue  # Still within the grace period
+
+                    # Verify the chunk is still in PROCESSING_SUBTASKS (not already resolved)
+                    current_status_bytes = REDIS_CLIENT.hget(chunk_statuses_key, chunk_idx_str)
+                    if current_status_bytes is None:
+                        REDIS_CLIENT.hdel(ts_key, chunk_idx_str)
+                        continue
+                    current_status = current_status_bytes.decode("utf-8")
+                    if current_status != CHUNK_STATUS_PROCESSING_SUBTASKS:
+                        REDIS_CLIENT.hdel(ts_key, chunk_idx_str)
+                        continue
+
+                    age_seconds = (now - entered_at).total_seconds()
+                    celery_logger.warning(
+                        f"Chunk {chunk_idx_str} for '{table_name}' has been in "
+                        f"PROCESSING_SUBTASKS for {age_seconds:.0f}s (threshold {stale_threshold_seconds}s). "
+                        f"Marking FAILED_RETRYABLE for re-dispatch."
+                    )
+                    REDIS_CLIENT.hset(chunk_statuses_key, chunk_idx_str, CHUNK_STATUS_FAILED_RETRYABLE)
+                    REDIS_CLIENT.sadd(retryable_set_key, chunk_idx_str)
+                    REDIS_CLIENT.hdel(ts_key, chunk_idx_str)
+                    recovered += 1
+                except Exception as e_inner:
+                    celery_logger.error(
+                        f"Error processing stale-chunk entry {chunk_idx_str} for {table_name}: {e_inner}"
+                    )
+        except Exception as e:
+            celery_logger.error(
+                f"Error in recover_stale_processing_subtasks for {table_name}: {e}"
+            )
+        return recovered
 
     def get_all_chunk_statuses(self, table_name: str) -> Optional[Dict[str, str]]:
         """Gets all chunk statuses for a table."""
