@@ -1040,6 +1040,7 @@ def transfer_table_using_pg_dump(
         celery_logger.info(f"Running pg_dump command: {shlex.join(pg_dump_cmd)}")
         celery_logger.info(f"Running psql command: {shlex.join(psql_cmd)}")
 
+        pg_dump_stderr = ""
         with subprocess.Popen(
             pg_dump_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=pg_env
         ) as dump_proc:
@@ -1052,9 +1053,10 @@ def transfer_table_using_pg_dump(
                     timeout=1200,
                     env=pg_env,
                 )
-                celery_logger.info(f"psql output: {result.stdout}")
-                if result.stderr:
-                    celery_logger.warning(f"psql stderr: {result.stderr}")
+                # Drain pg_dump stderr and wait for it to exit cleanly
+                dump_proc.stdout.close()
+                pg_dump_stderr = dump_proc.stderr.read().decode("utf-8", errors="replace")
+                dump_proc.wait()
             except Exception:
                 # Close stdout before killing so pg_dump doesn't block on
                 # a full pipe buffer, then kill to ensure it exits before
@@ -1063,6 +1065,21 @@ def transfer_table_using_pg_dump(
                 dump_proc.stdout.close()
                 dump_proc.kill()
                 raise
+
+        if dump_proc.returncode != 0:
+            raise RuntimeError(
+                f"pg_dump exited with code {dump_proc.returncode}: {pg_dump_stderr}"
+            )
+        if pg_dump_stderr:
+            celery_logger.warning(f"pg_dump stderr: {pg_dump_stderr}")
+
+        celery_logger.info(f"psql output: {result.stdout}")
+        if result.stderr:
+            celery_logger.warning(f"psql stderr: {result.stderr}")
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"psql exited with code {result.returncode}: {result.stderr}"
+            )
     except subprocess.CalledProcessError as e:
         celery_logger.error(f"pg_dump/psql error: {e}")
         if job_id:
