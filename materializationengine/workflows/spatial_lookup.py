@@ -1,4 +1,5 @@
 import datetime
+import threading
 import time
 from typing import Dict, List, Any
 
@@ -62,6 +63,106 @@ celery_logger = get_task_logger(__name__)
 
 
 MAX_CHUNK_WORKFLOW_ATTEMPTS = 10
+
+# ---------------------------------------------------------------------------
+# Worker self-isolation: when a pod's Cloud SQL proxy is down, repeated
+# ConnectionErrors are tracked per-worker-process.  After the threshold is
+# reached the worker cancels its own queue consumer so healthy pods handle
+# the backlog instead.  A background thread polls for recovery and re-enables
+# the consumer once the database is reachable again.
+# ---------------------------------------------------------------------------
+_infra_lock = threading.Lock()
+_consecutive_infra_failures: int = 0
+_worker_isolated: bool = False
+_INFRA_ISOLATION_THRESHOLD: int = 5    # consecutive failures before isolation
+_RECOVERY_POLL_INTERVAL: int = 60      # seconds between DB recovery probes
+
+
+def _on_connection_error(database_name: str, task_self: Task) -> None:
+    """Record a DB ConnectionError and isolate this worker if the threshold is exceeded."""
+    global _consecutive_infra_failures, _worker_isolated
+
+    with _infra_lock:
+        _consecutive_infra_failures += 1
+        count = _consecutive_infra_failures
+        already_isolated = _worker_isolated
+
+    celery_logger.warning(
+        f"DB connection failure #{count} for '{database_name}' on this worker "
+        f"(hostname={task_self.request.hostname})."
+    )
+
+    if count >= _INFRA_ISOLATION_THRESHOLD and not already_isolated:
+        with _infra_lock:
+            _worker_isolated = True
+        hostname = task_self.request.hostname
+        celery_logger.critical(
+            f"Worker {hostname}: {count} consecutive DB connection failures for "
+            f"'{database_name}'. Pausing queue consumption so healthy pods can "
+            f"handle the work. (Cloud SQL proxy down?)"
+        )
+        try:
+            task_self.app.control.cancel_consumer(
+                "celery", destination=[hostname], reply=False
+            )
+            celery_logger.warning(f"Worker {hostname}: queue consumer paused.")
+        except Exception as cancel_err:
+            celery_logger.error(
+                f"Worker {hostname}: could not pause consumer: {cancel_err}"
+            )
+        threading.Thread(
+            target=_db_recovery_watcher,
+            args=(database_name, hostname, task_self.app),
+            daemon=True,
+        ).start()
+
+
+def _db_recovery_watcher(database_name: str, hostname: str, app) -> None:
+    """Background thread: poll DB until it becomes available, then re-enable consumer."""
+    global _consecutive_infra_failures, _worker_isolated
+
+    celery_logger.info(
+        f"[DBRecovery/{hostname}] Monitoring '{database_name}' for connectivity..."
+    )
+    while True:
+        time.sleep(_RECOVERY_POLL_INTERVAL)
+        try:
+            db_manager.get_engine(database_name)
+            celery_logger.info(
+                f"[DBRecovery/{hostname}] DB '{database_name}' is reachable again. "
+                f"Re-enabling queue consumer."
+            )
+            with _infra_lock:
+                _consecutive_infra_failures = 0
+                _worker_isolated = False
+            try:
+                app.control.add_consumer(
+                    "celery", destination=[hostname], reply=False
+                )
+                celery_logger.info(f"[DBRecovery/{hostname}] Queue consumer re-enabled.")
+            except Exception as add_err:
+                celery_logger.error(
+                    f"[DBRecovery/{hostname}] Failed to re-add consumer: {add_err}"
+                )
+            return
+        except ConnectionError:
+            celery_logger.info(
+                f"[DBRecovery/{hostname}] DB '{database_name}' still unreachable. "
+                f"Retrying in {_RECOVERY_POLL_INTERVAL}s."
+            )
+        except Exception as probe_err:
+            celery_logger.warning(
+                f"[DBRecovery/{hostname}] Unexpected error probing DB: {probe_err}. "
+                f"Retrying in {_RECOVERY_POLL_INTERVAL}s."
+            )
+
+
+def _reset_infra_failure_count() -> None:
+    """Reset consecutive failure counter after a successful DB operation."""
+    global _consecutive_infra_failures
+    with _infra_lock:
+        if _consecutive_infra_failures > 0:
+            _consecutive_infra_failures = 0
 
 
 class ChunkProcessingError(Exception):
@@ -249,9 +350,14 @@ def process_table_in_chunks(
     5. If no chunks remain, it triggers index rebuilding and final completion.
     """
     checkpoint_manager = RedisCheckpointManager(database_name)
-    engine = db_manager.get_engine(database_name)
 
     try:
+        # NOTE: engine acquisition is inside the try so that ConnectionError from
+        # a broken SQL proxy is caught and retried rather than failing the task
+        # permanently (which would stall the entire workflow).
+        engine = db_manager.get_engine(database_name)
+        _reset_infra_failure_count()
+
         workflow_data = checkpoint_manager.get_workflow_data(workflow_name)
         if not workflow_data:
             celery_logger.error(
@@ -504,6 +610,17 @@ def process_table_in_chunks(
             task_chord.apply_async()
 
         return f"Dispatched batch of {len(chunk_indices_to_process)} chunks for {annotation_table_name} (workflow {workflow_name})."
+
+    except ConnectionError as e:
+        # SQL proxy / infra failure.  Retry indefinitely with a long countdown so
+        # a healthy pod picks up the work.  Do NOT mark the workflow as failed —
+        # this is a transient infrastructure issue, not a data problem.
+        celery_logger.warning(
+            f"DB connection error in process_table_in_chunks for {workflow_name}: {e}. "
+            f"Retrying in 5 minutes."
+        )
+        _on_connection_error(database_name, self)
+        raise self.retry(exc=e, countdown=300, max_retries=None)
 
     except Retry:
         raise
@@ -762,6 +879,28 @@ def process_chunk(
         )
 
         raise
+
+    except ConnectionError as e:
+        # SQL proxy / infra failure — NOT a data error.
+        # Reset chunk to PENDING so the attempt budget is NOT consumed; a healthy
+        # pod will re-pick it up after the countdown.
+        celery_logger.warning(
+            f"{log_prefix} DB connection error (SQL proxy down?): {e}. "
+            f"Resetting chunk to PENDING and retrying in 5 minutes."
+        )
+        try:
+            checkpoint_manager.set_chunk_status(
+                workflow_name,
+                chunk_idx,
+                CHUNK_STATUS_PENDING,
+                {"message": f"Connection error — will retry: {str(e)[:300]}"},
+            )
+        except Exception as status_err:
+            celery_logger.warning(
+                f"{log_prefix} Could not reset chunk status to PENDING: {status_err}"
+            )
+        _on_connection_error(database_name, self)
+        raise self.retry(exc=e, countdown=300, max_retries=None)
 
     except (OperationalError, DisconnectionError) as e:
         celery_logger.warning(
@@ -1391,6 +1530,15 @@ def process_and_insert_sub_batch(
             f"{log_prefix} Non-retryable ChunkDataValidationError: {e}", exc_info=False
         )
         raise
+
+    except ConnectionError as e:
+        # SQL proxy / infra failure — retry indefinitely with a long countdown so
+        # a healthy pod picks up the sub-batch instead.
+        celery_logger.warning(
+            f"{log_prefix} DB connection error: {e}. Retrying in 5 minutes."
+        )
+        _on_connection_error(database_name, self)
+        raise self.retry(exc=e, countdown=300, max_retries=None)
 
     except (OperationalError, DisconnectionError) as e:
         celery_logger.warning(
