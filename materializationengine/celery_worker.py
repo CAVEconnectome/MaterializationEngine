@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict
 import redis
 from celery.app.builtins import add_backend_cleanup_task
 from celery.schedules import crontab
-from celery.signals import after_setup_logger
+from celery.signals import after_setup_logger, worker_process_init
 from celery.utils.log import get_task_logger
 from dateutil import relativedelta
 from marshmallow import ValidationError
@@ -111,6 +111,38 @@ def celery_loggers(logger, *args, **kwargs):
     Add stdout handler for Celery logger output.
     """
     logger.addHandler(logging.StreamHandler(sys.stdout))
+
+
+@worker_process_init.connect
+def configure_http_connection_pools(sender=None, **kwargs):
+    """
+    Increase urllib3/requests HTTP connection pool sizes for each forked worker process.
+
+    The default pool_maxsize=10 per host is exhausted during parallel CloudVolume
+    supervoxel lookups (scattered_points makes many concurrent requests to
+    storage.googleapis.com).  Each discarded connection requires a new TCP+TLS
+    handshake on the next request, adding latency to every supervoxel lookup.
+
+    We patch HTTPAdapter.__init__ so every Session created in this process
+    (including sessions created internally by cloud-files/cloudvolume) uses the
+    larger pool.  Explicit callers that pass their own pool_maxsize are unaffected.
+
+    Tune with the GCS_CONNECTION_POOL_SIZE environment variable (default: 128).
+    """
+    from requests.adapters import HTTPAdapter
+
+    pool_size = int(os.environ.get("GCS_CONNECTION_POOL_SIZE", "128"))
+    _orig_init = HTTPAdapter.__init__
+
+    def _patched_init(self, pool_connections=pool_size, pool_maxsize=pool_size, **kw):
+        _orig_init(self, pool_connections=pool_connections, pool_maxsize=pool_maxsize, **kw)
+
+    HTTPAdapter.__init__ = _patched_init
+    celery_logger.info(
+        f"[worker_process_init] HTTP connection pool defaults set to "
+        f"pool_connections={pool_size}, pool_maxsize={pool_size} "
+        f"(GCS_CONNECTION_POOL_SIZE={pool_size})."
+    )
     
 
 def days_till_next_month(date):
