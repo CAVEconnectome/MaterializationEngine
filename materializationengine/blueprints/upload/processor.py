@@ -60,6 +60,7 @@ class SchemaProcessor:
 
         self.spatial_points = self._get_spatial_point_fields()
         self.required_spatial_points = self._get_required_fields()
+        self.dropped_rows = 0  # cumulative count of rows dropped due to invalid/missing required fields
 
         table_metadata = (
             {"reference_table": reference_table} if self.is_reference else None
@@ -184,10 +185,16 @@ class SchemaProcessor:
             else:
                 # Handle separate x,y,z columns
                 coords = [float(row[col]) for col in coordinate_cols]
-                
+
             if len(coords) != 3:
                 raise ValueError(f"Expected 3 coordinates, got {len(coords)}")
-                
+
+            # NaN coordinates cannot be stored as a valid PointZ — Shapely/GEOS drops
+            # the Z dimension for all-NaN points, producing a 2D WKB that PostgreSQL
+            # rejects on a PointZ column.  Treat missing coordinates as NULL instead.
+            if any(np.isnan(c) for c in coords):
+                return None
+
             point = Point(coords)
             return create_wkt_element(point)
             
@@ -251,5 +258,23 @@ class SchemaProcessor:
         for col in self.column_order:
             if col not in df.columns:
                 df[col] = [None] * chunk_size
+
+        # Drop rows where any required spatial point is NULL (missing or NaN coordinates).
+        # These rows cannot be meaningfully stored and would cause DB errors.
+        required_position_cols = [
+            f"{field_name}_position"
+            for field_name in self.required_spatial_points
+            if f"{field_name}_position" in df.columns
+        ]
+        if required_position_cols:
+            invalid_mask = df[required_position_cols].isnull().any(axis=1)
+            n_dropped = int(invalid_mask.sum())
+            if n_dropped:
+                logger.warning(
+                    f"Dropping {n_dropped} row(s) with missing required spatial coordinates "
+                    f"(columns: {required_position_cols})"
+                )
+                self.dropped_rows += n_dropped
+                df = df[~invalid_mask]
 
         return df[self.column_order]

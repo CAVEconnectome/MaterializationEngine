@@ -247,15 +247,27 @@ def process_csv(
         )
 
         last_assigned_id = schema_processor._id_counter
-        update_job_status(
-            job_id_for_status,
-            {"last_assigned_id": last_assigned_id},
-        )
+        dropped_rows = schema_processor.dropped_rows
+
+        status_update: Dict[str, Any] = {"last_assigned_id": last_assigned_id}
+        if dropped_rows:
+            celery_logger.warning(
+                f"CSV processing dropped {dropped_rows} row(s) with missing required "
+                f"spatial coordinates for job {job_id_for_status}."
+            )
+            status_update["dropped_rows"] = dropped_rows
+            status_update["warning"] = (
+                f"{dropped_rows:,} row(s) were skipped because their required spatial "
+                f"coordinates were missing or invalid."
+            )
+        update_job_status(job_id_for_status, status_update)
+
         return {
             "status": "completed_csv_processing",
             "output_path": f"{bucket_name}/{destination_blob_name}",
             "job_id_for_status": job_id_for_status,
             "last_assigned_id": last_assigned_id,
+            "dropped_rows": dropped_rows,
         }
     except Exception as e:
         celery_logger.error(
@@ -748,6 +760,33 @@ def monitor_spatial_workflow_completion(
         )
         raise Exception(err_msg)
     else:
+        # Refresh the Redis key TTL and update progress details.
+        # Without this, long spatial lookups (>1 hour) cause the key to expire,
+        # making the status endpoint return 404 and breaking the UI poller.
+        try:
+            update_job_status(
+                job_id_for_status,
+                {
+                    "status": "processing",
+                    "phase": (
+                        f"Spatial Lookup: {current_workflow_status} "
+                        f"({workflow_data.completed_chunks}/{workflow_data.total_chunks} chunks)"
+                    ),
+                    "progress": round(workflow_data.progress, 2),
+                    "active_workflow_part": "spatial_lookup",
+                    "spatial_lookup_config": {
+                        "table_name": workflow_to_monitor,
+                        "database_name": db_for_monitor,
+                        "datastack_name": datastack_info.get("datastack", ""),
+                    },
+                    "total_rows": workflow_data.total_chunks,
+                    "processed_rows": workflow_data.completed_chunks,
+                },
+            )
+        except Exception as status_err:
+            celery_logger.warning(
+                f"{log_prefix} Failed to refresh job status during retry: {status_err}"
+            )
 
         celery_logger.info(
             f"{log_prefix} Workflow '{workflow_to_monitor}' status is '{current_workflow_status}'. "

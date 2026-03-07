@@ -742,19 +742,26 @@ def start_csv_processing():
 @auth_required
 def check_processing_status(job_id):
     """Get processing job status"""
-    status = get_job_status(job_id)
-    if not status:
-        return jsonify({"status": "error", "message": "Job not found"}), 404
+    try:
+        status = get_job_status(job_id)
+        if not status:
+            return jsonify({"status": "error", "message": "Job not found"}), 404
 
-    if _check_authorization(status):
-        return jsonify({"status": "error", "message": "Forbidden"}), 403
+        if _check_authorization(status):
+            return jsonify({"status": "error", "message": "Forbidden"}), 403
 
-    _set_item_type(status)
+        _set_item_type(status)
 
-    if status.get("active_workflow_part") == "spatial_lookup":
-        _handle_spatial_lookup(status, job_id)
+        if status.get("active_workflow_part") == "spatial_lookup":
+            _handle_spatial_lookup(status, job_id)
 
-    return jsonify(status)
+        return jsonify(status)
+    except Exception as e:
+        current_app.logger.error(
+            f"Unexpected error in check_processing_status for job {job_id}: {e}",
+            exc_info=True,
+        )
+        return jsonify({"status": "error", "message": "Internal error fetching job status"}), 500
 
 
 def _check_authorization(status):
