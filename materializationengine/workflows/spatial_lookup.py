@@ -444,6 +444,23 @@ def process_table_in_chunks(
             celery_logger.info(
                 f"Chunking strategy for {annotation_table_name} (workflow: {workflow_name}): {chunking.total_chunks} chunks. Params stored."
             )
+
+            if initial_run:
+                # Store the dispatch parameters so spatial_workflow_failed can
+                # re-dispatch this task for recovery if a chord failure occurs.
+                checkpoint_manager.set_dispatch_params(
+                    workflow_name,
+                    {
+                        "datastack_info": datastack_info,
+                        "mat_metadata": mat_metadata,
+                        "workflow_name": workflow_name,
+                        "annotation_table_name": annotation_table_name,
+                        "database_name": database_name,
+                        "chunk_scale_factor": chunk_scale_factor,
+                        "supervoxel_batch_size": supervoxel_batch_size,
+                        "batch_size_for_dispatch": batch_size_for_dispatch,
+                    },
+                )
         else:
             celery_logger.info(
                 f"Using existing chunking strategy for {annotation_table_name} (workflow: {workflow_name}) from checkpoint."
@@ -544,14 +561,20 @@ def process_table_in_chunks(
                 full_chain.apply_async()
                 return f"All chunks processed for {annotation_table_name}. Finalizing."
             else:
-                # Before sleeping, check whether any PROCESSING_SUBTASKS chunks have
-                # been stuck long enough to be considered lost and should be retried.
-                recovered = checkpoint_manager.recover_stale_processing_subtasks(
+                # Before sleeping, check whether any chunks stuck in PROCESSING or
+                # PROCESSING_SUBTASKS state have been there long enough to be treated
+                # as lost (pod killed, broker blip, etc.) and should be retried.
+                recovered_subtasks = checkpoint_manager.recover_stale_processing_subtasks(
                     workflow_name, stale_threshold_seconds=600
                 )
+                recovered_processing = checkpoint_manager.recover_stale_processing_chunks(
+                    workflow_name, stale_threshold_seconds=600
+                )
+                recovered = recovered_subtasks + recovered_processing
                 if recovered:
                     celery_logger.info(
-                        f"Recovered {recovered} stale PROCESSING_SUBTASKS chunk(s) for {workflow_name}. "
+                        f"Recovered {recovered} stale chunk(s) for {workflow_name} "
+                        f"({recovered_subtasks} PROCESSING_SUBTASKS, {recovered_processing} PROCESSING). "
                         f"Retrying dispatcher immediately to re-dispatch them."
                     )
                     raise self.retry(countdown=0)
@@ -1788,6 +1811,72 @@ def spatial_workflow_failed(
 
     if workflow_name and database_name:
         checkpoint_manager = RedisCheckpointManager(database_name)
+
+        # --- Recovery attempt for chord failures ---
+        # A chord failure (first arg is a UUID string, no Exception) means one
+        # process_chunk task raised unexpectedly, killing the batch chord.  This is
+        # usually caused by pod preemption or a transient broker/DB blip, not a
+        # genuine data error.  Try to recover by resetting any stuck PROCESSING
+        # chunks and re-dispatching the dispatcher task (up to MAX_RECOVERY_ATTEMPTS).
+        MAX_RECOVERY_ATTEMPTS = 3
+        is_chord_failure = isinstance(request_obj_uuid_or_exc, str) and not custom_message
+        # Don't try to recover the final completion chain (its workflow_name has a
+        # different prefix); only recover the chunk-processing loop.
+        is_completion_chain = workflow_name.startswith("spatial_lookup_completion_")
+        if is_chord_failure and not is_completion_chain:
+            try:
+                workflow_data = checkpoint_manager.get_workflow_data(workflow_name)
+                recovery_count = (workflow_data.recovery_attempts if workflow_data else 0)
+                if recovery_count < MAX_RECOVERY_ATTEMPTS:
+                    # Reset any chunks stuck in PROCESSING to FAILED_RETRYABLE.
+                    recovered = checkpoint_manager.recover_stale_processing_chunks(
+                        workflow_name, stale_threshold_seconds=0  # treat ALL PROCESSING as stale
+                    )
+                    if recovered:
+                        celery_logger.warning(
+                            f"{log_message_prefix} Chord failure recovery: reset {recovered} "
+                            f"PROCESSING chunk(s) to FAILED_RETRYABLE."
+                        )
+                    # Increment recovery_attempts counter and set status back to processing_chunks.
+                    checkpoint_manager.update_workflow(
+                        table_name=workflow_name,
+                        status="processing_chunks",
+                        last_error=f"[recovery {recovery_count + 1}/{MAX_RECOVERY_ATTEMPTS}] {error_info}",
+                        recovery_attempts=recovery_count + 1,
+                    )
+                    # Re-dispatch the dispatcher task using the stored params.
+                    dispatch_params = checkpoint_manager.get_dispatch_params(workflow_name)
+                    if dispatch_params:
+                        process_table_in_chunks.apply_async(
+                            kwargs={
+                                **dispatch_params,
+                                "prioritize_failed_chunks": True,
+                                "initial_run": False,
+                            },
+                        )
+                        celery_logger.warning(
+                            f"{log_message_prefix} Chord failure recovery attempt "
+                            f"{recovery_count + 1}/{MAX_RECOVERY_ATTEMPTS}: re-dispatched "
+                            f"process_table_in_chunks. Failed task UUID: {request_obj_uuid_or_exc}"
+                        )
+                        return  # Do NOT mark FAILED_PERMANENT — recovery dispatched.
+                    else:
+                        celery_logger.error(
+                            f"{log_message_prefix} No dispatch params found for recovery. "
+                            f"Cannot re-dispatch. Marking FAILED_PERMANENT."
+                        )
+                else:
+                    celery_logger.error(
+                        f"{log_message_prefix} Chord failure recovery exhausted "
+                        f"({recovery_count}/{MAX_RECOVERY_ATTEMPTS} attempts). Marking FAILED_PERMANENT."
+                    )
+            except Exception as e_recovery:
+                celery_logger.error(
+                    f"{log_message_prefix} Error during chord failure recovery: {e_recovery}. "
+                    f"Falling through to FAILED_PERMANENT.",
+                    exc_info=True,
+                )
+
         try:
             checkpoint_manager.update_workflow(
                 table_name=workflow_name, status=final_status, last_error=error_info

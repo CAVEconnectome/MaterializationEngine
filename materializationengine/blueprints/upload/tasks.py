@@ -657,7 +657,7 @@ def upload_to_database(
         raise
 
 @celery.task(
-    name="process:monitor_spatial_workflow_completion", bind=True, max_retries=None
+    name="orchestration:monitor_spatial_workflow_completion", bind=True, max_retries=None
 )
 def monitor_spatial_workflow_completion(
     self,

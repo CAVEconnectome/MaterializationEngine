@@ -85,6 +85,7 @@ class WorkflowData:
     chunking_parameters: Optional[dict] = None
     current_pending_scan_cursor: Optional[int] = 0
     submitted_chunks: int = 0
+    recovery_attempts: int = 0
 
     @property
     def progress(self) -> float:
@@ -117,6 +118,12 @@ class RedisCheckpointManager:
 
     def _get_processing_subtasks_timestamps_key(self, table_name: str) -> str:
         return f"{self.workflow_prefix}{table_name}:processing_subtasks_timestamps"
+
+    def _get_processing_timestamps_key(self, table_name: str) -> str:
+        return f"{self.workflow_prefix}{table_name}:processing_timestamps"
+
+    def _get_dispatch_params_key(self, table_name: str) -> str:
+        return f"{self.workflow_prefix}{table_name}:dispatch_params"
 
     def get_bbox_hash(self, bbox: Union[np.ndarray, List]) -> str:
         """Generate hash for bounding box."""
@@ -291,15 +298,16 @@ class RedisCheckpointManager:
         return None
 
     def reset_chunk_statuses_and_details(self, table_name: str):
-        """Deletes chunk_statuses, chunk_failed_details, failed_retryable_set, and processing_subtasks_timestamps keys for the table."""
+        """Deletes chunk_statuses, chunk_failed_details, failed_retryable_set, and stale-recovery timestamp keys for the table."""
         chunk_statuses_key = self._get_chunk_statuses_key(table_name)
         chunk_failed_details_key = self._get_chunk_failed_details_key(table_name)
         retryable_set_key = self._get_retryable_chunks_set_key(table_name)
         processing_subtasks_ts_key = self._get_processing_subtasks_timestamps_key(table_name)
+        processing_ts_key = self._get_processing_timestamps_key(table_name)
         try:
             REDIS_CLIENT.delete(
                 chunk_statuses_key, chunk_failed_details_key, retryable_set_key,
-                processing_subtasks_ts_key,
+                processing_subtasks_ts_key, processing_ts_key,
             )
             celery_logger.info(
                 f"Reset chunk statuses, details, and retryable set for table: {table_name}"
@@ -348,17 +356,27 @@ class RedisCheckpointManager:
                     )
 
                     processing_subtasks_ts_key = self._get_processing_subtasks_timestamps_key(table_name)
+                    processing_ts_key = self._get_processing_timestamps_key(table_name)
                     pipe.multi()
 
                     pipe.hset(chunk_statuses_key, str(chunk_index), status)
                     pipe.expire(chunk_statuses_key, self.expiry_time)
+
+                    # Track when chunks enter PROCESSING for stale-chunk recovery
+                    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    if status == CHUNK_STATUS_PROCESSING:
+                        pipe.hset(processing_ts_key, str(chunk_index), now_iso)
+                        pipe.expire(processing_ts_key, self.expiry_time)
+                    else:
+                        # Chunk left PROCESSING — remove its timestamp entry
+                        pipe.hdel(processing_ts_key, str(chunk_index))
 
                     # Track when chunks enter PROCESSING_SUBTASKS for stale-chunk recovery
                     if status == CHUNK_STATUS_PROCESSING_SUBTASKS:
                         pipe.hset(
                             processing_subtasks_ts_key,
                             str(chunk_index),
-                            datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            now_iso,
                         )
                         pipe.expire(processing_subtasks_ts_key, self.expiry_time)
                     else:
@@ -747,6 +765,106 @@ class RedisCheckpointManager:
                 f"Error in recover_stale_processing_subtasks for {table_name}: {e}"
             )
         return recovered
+
+    def recover_stale_processing_chunks(
+        self, table_name: str, stale_threshold_seconds: int = 600
+    ) -> int:
+        """
+        Scans chunks in PROCESSING state and marks any that have been there
+        longer than stale_threshold_seconds as FAILED_RETRYABLE so the dispatcher
+        can re-dispatch them.
+
+        Also recovers chunks in PROCESSING that have no timestamp entry (e.g. from
+        before timestamp tracking was deployed) — treated as immediately stale.
+
+        Returns the number of chunks recovered.
+        """
+        ts_key = self._get_processing_timestamps_key(table_name)
+        chunk_statuses_key = self._get_chunk_statuses_key(table_name)
+        retryable_set_key = self._get_retryable_chunks_set_key(table_name)
+        recovered = 0
+        try:
+            all_timestamps = REDIS_CLIENT.hgetall(ts_key)
+            all_statuses = REDIS_CLIENT.hgetall(chunk_statuses_key)
+
+            now = datetime.datetime.now(datetime.timezone.utc)
+            cutoff = now - datetime.timedelta(seconds=stale_threshold_seconds)
+
+            # First pass: recover PROCESSING chunks with no timestamp (unknown age → stale).
+            for chunk_idx_bytes, status_bytes in all_statuses.items():
+                if status_bytes.decode("utf-8") != CHUNK_STATUS_PROCESSING:
+                    continue
+                if chunk_idx_bytes in all_timestamps:
+                    continue
+                chunk_idx_str = chunk_idx_bytes.decode("utf-8")
+                try:
+                    celery_logger.warning(
+                        f"Chunk {chunk_idx_str} for '{table_name}' is in PROCESSING "
+                        f"with no timestamp recorded (unknown age). Marking FAILED_RETRYABLE."
+                    )
+                    REDIS_CLIENT.hset(chunk_statuses_key, chunk_idx_str, CHUNK_STATUS_FAILED_RETRYABLE)
+                    REDIS_CLIENT.sadd(retryable_set_key, chunk_idx_str)
+                    recovered += 1
+                except Exception as e_inner:
+                    celery_logger.error(
+                        f"Error recovering no-timestamp PROCESSING chunk {chunk_idx_str} for {table_name}: {e_inner}"
+                    )
+
+            # Second pass: recover PROCESSING chunks whose timestamp is past the cutoff.
+            for chunk_idx_bytes, ts_bytes in all_timestamps.items():
+                chunk_idx_str = chunk_idx_bytes.decode("utf-8")
+                try:
+                    entered_at = datetime.datetime.fromisoformat(ts_bytes.decode("utf-8"))
+                    if entered_at > cutoff:
+                        continue
+
+                    current_status_bytes = REDIS_CLIENT.hget(chunk_statuses_key, chunk_idx_str)
+                    if current_status_bytes is None:
+                        REDIS_CLIENT.hdel(ts_key, chunk_idx_str)
+                        continue
+                    current_status = current_status_bytes.decode("utf-8")
+                    if current_status != CHUNK_STATUS_PROCESSING:
+                        REDIS_CLIENT.hdel(ts_key, chunk_idx_str)
+                        continue
+
+                    age_seconds = (now - entered_at).total_seconds()
+                    celery_logger.warning(
+                        f"Chunk {chunk_idx_str} for '{table_name}' has been in "
+                        f"PROCESSING for {age_seconds:.0f}s (threshold {stale_threshold_seconds}s). "
+                        f"Marking FAILED_RETRYABLE for re-dispatch."
+                    )
+                    REDIS_CLIENT.hset(chunk_statuses_key, chunk_idx_str, CHUNK_STATUS_FAILED_RETRYABLE)
+                    REDIS_CLIENT.sadd(retryable_set_key, chunk_idx_str)
+                    REDIS_CLIENT.hdel(ts_key, chunk_idx_str)
+                    recovered += 1
+                except Exception as e_inner:
+                    celery_logger.error(
+                        f"Error processing stale-processing entry {chunk_idx_str} for {table_name}: {e_inner}"
+                    )
+        except Exception as e:
+            celery_logger.error(
+                f"Error in recover_stale_processing_chunks for {table_name}: {e}"
+            )
+        return recovered
+
+    def set_dispatch_params(self, table_name: str, params: dict) -> None:
+        """Store the parameters needed to re-dispatch process_table_in_chunks for recovery."""
+        key = self._get_dispatch_params_key(table_name)
+        try:
+            REDIS_CLIENT.set(key, json.dumps(params), ex=self.expiry_time)
+        except Exception as e:
+            celery_logger.error(f"Error storing dispatch params for {table_name}: {e}")
+
+    def get_dispatch_params(self, table_name: str) -> Optional[dict]:
+        """Retrieve stored dispatch parameters for process_table_in_chunks."""
+        key = self._get_dispatch_params_key(table_name)
+        try:
+            data = REDIS_CLIENT.get(key)
+            if data:
+                return json.loads(data)
+        except Exception as e:
+            celery_logger.error(f"Error retrieving dispatch params for {table_name}: {e}")
+        return None
 
     def get_all_chunk_statuses(self, table_name: str) -> Optional[Dict[str, str]]:
         """Gets all chunk statuses for a table."""
