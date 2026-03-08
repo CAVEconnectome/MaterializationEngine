@@ -26,6 +26,7 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
     CHUNK_STATUS_FAILED_PERMANENT,
     CHUNK_STATUS_FAILED_RETRYABLE,
     CHUNK_STATUS_PROCESSING,
+    CHUNK_STATUS_PENDING,
     CHUNK_STATUS_PROCESSING_SUBTASKS,
     CHUNK_STATUS_ERROR,
     RedisCheckpointManager,
