@@ -683,6 +683,7 @@ def create_missing_segmentation_table(mat_metadata: dict) -> bool:
                 "valid": True,
                 "created": creation_time,
                 "pcg_table_name": mat_metadata.get("pcg_table_name"),
+                "last_updated": mat_metadata.get("last_updated"),
             }
 
             seg_metadata = SegmentationMetadata(**metadata_dict)

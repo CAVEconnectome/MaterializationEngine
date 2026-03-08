@@ -12,10 +12,11 @@ document.addEventListener("alpine:init", () => {
       voxel_resolution_nm_y: 1,
       voxel_resolution_nm_z: 1,
       write_permission: "PRIVATE",
-      read_permission: "PRIVATE",
+      read_permission: "PUBLIC",
       validationErrors: {},
       isReferenceSchema: false,
       metadataSaved: false,
+      stagingConflict: null,  // { message, row_count } when staging table exists
     },
 
     init() {
@@ -52,6 +53,9 @@ document.addEventListener("alpine:init", () => {
     saveState() {
       const stateToSave = { ...this.state };
       delete stateToSave.validationErrors;
+      delete stateToSave.stagingConflict;
+      delete stateToSave.isReferenceSchema;
+      delete stateToSave.metadataSaved;
       localStorage.setItem("metadataStore", JSON.stringify(stateToSave));
     },
 
@@ -101,35 +105,52 @@ document.addEventListener("alpine:init", () => {
       return Object.keys(errors).length === 0;
     },
 
-    async saveMetadata() {
+    _buildPayload(forceOverwrite = false) {
+      return {
+        schema_type: this.state.schema_type,
+        datastack_name: this.state.datastack_name,
+        table_name: this.state.table_name,
+        description: this.state.description,
+        notice_text: this.state.notice_text,
+        reference_table: this.state.reference_table,
+        flat_segmentation_source: this.state.flat_segmentation_source,
+        voxel_resolution_nm_x: parseFloat(this.state.voxel_resolution_nm_x),
+        voxel_resolution_nm_y: parseFloat(this.state.voxel_resolution_nm_y),
+        voxel_resolution_nm_z: parseFloat(this.state.voxel_resolution_nm_z),
+        write_permission: this.state.write_permission,
+        read_permission: this.state.read_permission,
+        ...(forceOverwrite ? { force_overwrite: true } : {}),
+      };
+    },
+
+    async saveMetadata(forceOverwrite = false) {
       if (!this.validateForm()) {
         return false;
       }
 
+      this.state.stagingConflict = null;
+
       try {
         const response = await fetch("/materialize/upload/api/save-metadata", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            schema_type: this.state.schema_type,
-            datastack_name: this.state.datastack_name,
-            table_name: this.state.table_name,
-            description: this.state.description,
-            notice_text: this.state.notice_text,
-            reference_table: this.state.reference_table,
-            flat_segmentation_source: this.state.flat_segmentation_source,
-            voxel_resolution_nm_x: parseFloat(this.state.voxel_resolution_nm_x),
-            voxel_resolution_nm_y: parseFloat(this.state.voxel_resolution_nm_y),
-            voxel_resolution_nm_z: parseFloat(this.state.voxel_resolution_nm_z),
-            write_permission: this.state.write_permission,
-            read_permission: this.state.read_permission,
-          }),
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(this._buildPayload(forceOverwrite)),
         });
 
         if (!response.ok) {
-          throw new Error("Failed to save metadata");
+          let errorData = {};
+          try { errorData = await response.json(); } catch (_) {}
+
+          // Staging conflict: table exists from a previous run — ask user to confirm overwrite
+          if (response.status === 409 && errorData.staging_exists) {
+            this.state.stagingConflict = {
+              message: errorData.message,
+              row_count: errorData.row_count,
+            };
+            return false;
+          }
+
+          throw new Error(errorData.message || "Failed to save metadata");
         }
 
         const data = await response.json();
@@ -141,6 +162,11 @@ document.addEventListener("alpine:init", () => {
         this.state.validationErrors.general = error.message;
         return false;
       }
+    },
+
+    async confirmOverwrite() {
+      this.state.stagingConflict = null;
+      return await this.saveMetadata(true);
     },
 
     isValid() {

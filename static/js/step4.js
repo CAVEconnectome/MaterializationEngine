@@ -124,9 +124,22 @@ document.addEventListener("alpine:init", () => {
           JSON.parse(schemaStoreData);
         const metadataFromStore = JSON.parse(metadataStoreData); 
 
+        // Explicitly pick only the fields the backend schema expects,
+        // excluding UI-only state (validationErrors, metadataSaved, stagingConflict, etc.)
         const metadataPayload = {
-          ...metadataFromStore,
           schema_type: metadataFromStore.schema_type || selectedSchema,
+          datastack_name: metadataFromStore.datastack_name,
+          table_name: metadataFromStore.table_name,
+          description: metadataFromStore.description,
+          notice_text: metadataFromStore.notice_text,
+          reference_table: metadataFromStore.reference_table,
+          flat_segmentation_source: metadataFromStore.flat_segmentation_source,
+          voxel_resolution_nm_x: metadataFromStore.voxel_resolution_nm_x,
+          voxel_resolution_nm_y: metadataFromStore.voxel_resolution_nm_y,
+          voxel_resolution_nm_z: metadataFromStore.voxel_resolution_nm_z,
+          write_permission: metadataFromStore.write_permission,
+          read_permission: metadataFromStore.read_permission,
+          ...(metadataFromStore.force_overwrite ? { force_overwrite: true } : {}),
         };
        
         if (!this.state.inputFile) {
@@ -156,12 +169,14 @@ document.addEventListener("alpine:init", () => {
         if (!response.ok) {
           let errorText = "Failed to start processing.";
           try {
-            const errorData = await response.json();
-            errorText =
-              errorData.message || errorData.error || JSON.stringify(errorData);
-          } catch (e) {
-            errorText = (await response.text()) || errorText;
-          }
+            const rawText = await response.text();
+            try {
+              const errorData = JSON.parse(rawText);
+              errorText = errorData.message || errorData.error || rawText;
+            } catch (_) {
+              errorText = rawText || errorText;
+            }
+          } catch (_) {}
           throw new Error(`Server error (${response.status}): ${errorText}`);
         }
 

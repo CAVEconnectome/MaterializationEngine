@@ -1,6 +1,11 @@
 import cloudvolume
 import os
 
+# Number of parallel threads CloudVolume uses internally for fetching data.
+# Matches the GCS connection pool size so all threads can make concurrent requests
+# without exhausting the pool.  Tune with CLOUDVOLUME_PARALLEL env var.
+_CV_PARALLEL = int(os.environ.get("CLOUDVOLUME_PARALLEL", "32"))
+
 
 class CloudVolumeGateway:
     """A class to manage cloudvolume clients and cache them for reuse."""
@@ -58,6 +63,7 @@ class CloudVolumeGateway:
             green_threads=use_green_threads,
             lru_bytes=self._lru_bytes,
             lru_encoding='crackle',
+            parallel=_CV_PARALLEL,
         )
 
         self._cv_clients[seg_source_key] = cv_client

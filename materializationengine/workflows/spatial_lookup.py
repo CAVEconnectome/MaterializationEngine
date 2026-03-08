@@ -1,11 +1,12 @@
 import datetime
+import threading
 import time
 from typing import Dict, List, Any
 
 import numpy as np
 import pandas as pd
 from celery import Task, chain, chord
-from celery.exceptions import MaxRetriesExceededError
+from celery.exceptions import MaxRetriesExceededError, Retry
 from celery.utils.log import get_task_logger
 from cloudvolume.lib import Vec
 from geoalchemy2 import Geometry
@@ -25,6 +26,7 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
     CHUNK_STATUS_FAILED_PERMANENT,
     CHUNK_STATUS_FAILED_RETRYABLE,
     CHUNK_STATUS_PROCESSING,
+    CHUNK_STATUS_PENDING,
     CHUNK_STATUS_PROCESSING_SUBTASKS,
     CHUNK_STATUS_ERROR,
     RedisCheckpointManager,
@@ -62,6 +64,106 @@ celery_logger = get_task_logger(__name__)
 
 
 MAX_CHUNK_WORKFLOW_ATTEMPTS = 10
+
+# ---------------------------------------------------------------------------
+# Worker self-isolation: when a pod's Cloud SQL proxy is down, repeated
+# ConnectionErrors are tracked per-worker-process.  After the threshold is
+# reached the worker cancels its own queue consumer so healthy pods handle
+# the backlog instead.  A background thread polls for recovery and re-enables
+# the consumer once the database is reachable again.
+# ---------------------------------------------------------------------------
+_infra_lock = threading.Lock()
+_consecutive_infra_failures: int = 0
+_worker_isolated: bool = False
+_INFRA_ISOLATION_THRESHOLD: int = 5    # consecutive failures before isolation
+_RECOVERY_POLL_INTERVAL: int = 60      # seconds between DB recovery probes
+
+
+def _on_connection_error(database_name: str, task_self: Task) -> None:
+    """Record a DB ConnectionError and isolate this worker if the threshold is exceeded."""
+    global _consecutive_infra_failures, _worker_isolated
+
+    with _infra_lock:
+        _consecutive_infra_failures += 1
+        count = _consecutive_infra_failures
+        already_isolated = _worker_isolated
+
+    celery_logger.warning(
+        f"DB connection failure #{count} for '{database_name}' on this worker "
+        f"(hostname={task_self.request.hostname})."
+    )
+
+    if count >= _INFRA_ISOLATION_THRESHOLD and not already_isolated:
+        with _infra_lock:
+            _worker_isolated = True
+        hostname = task_self.request.hostname
+        celery_logger.critical(
+            f"Worker {hostname}: {count} consecutive DB connection failures for "
+            f"'{database_name}'. Pausing queue consumption so healthy pods can "
+            f"handle the work. (Cloud SQL proxy down?)"
+        )
+        try:
+            task_self.app.control.cancel_consumer(
+                "celery", destination=[hostname], reply=False
+            )
+            celery_logger.warning(f"Worker {hostname}: queue consumer paused.")
+        except Exception as cancel_err:
+            celery_logger.error(
+                f"Worker {hostname}: could not pause consumer: {cancel_err}"
+            )
+        threading.Thread(
+            target=_db_recovery_watcher,
+            args=(database_name, hostname, task_self.app),
+            daemon=True,
+        ).start()
+
+
+def _db_recovery_watcher(database_name: str, hostname: str, app) -> None:
+    """Background thread: poll DB until it becomes available, then re-enable consumer."""
+    global _consecutive_infra_failures, _worker_isolated
+
+    celery_logger.info(
+        f"[DBRecovery/{hostname}] Monitoring '{database_name}' for connectivity..."
+    )
+    while True:
+        time.sleep(_RECOVERY_POLL_INTERVAL)
+        try:
+            db_manager.get_engine(database_name)
+            celery_logger.info(
+                f"[DBRecovery/{hostname}] DB '{database_name}' is reachable again. "
+                f"Re-enabling queue consumer."
+            )
+            with _infra_lock:
+                _consecutive_infra_failures = 0
+                _worker_isolated = False
+            try:
+                app.control.add_consumer(
+                    "celery", destination=[hostname], reply=False
+                )
+                celery_logger.info(f"[DBRecovery/{hostname}] Queue consumer re-enabled.")
+            except Exception as add_err:
+                celery_logger.error(
+                    f"[DBRecovery/{hostname}] Failed to re-add consumer: {add_err}"
+                )
+            return
+        except ConnectionError:
+            celery_logger.info(
+                f"[DBRecovery/{hostname}] DB '{database_name}' still unreachable. "
+                f"Retrying in {_RECOVERY_POLL_INTERVAL}s."
+            )
+        except Exception as probe_err:
+            celery_logger.warning(
+                f"[DBRecovery/{hostname}] Unexpected error probing DB: {probe_err}. "
+                f"Retrying in {_RECOVERY_POLL_INTERVAL}s."
+            )
+
+
+def _reset_infra_failure_count() -> None:
+    """Reset consecutive failure counter after a successful DB operation."""
+    global _consecutive_infra_failures
+    with _infra_lock:
+        if _consecutive_infra_failures > 0:
+            _consecutive_infra_failures = 0
 
 
 class ChunkProcessingError(Exception):
@@ -224,9 +326,7 @@ def update_workflow_status(database, table_name, status):
     name="workflow:process_table_in_chunks",
     bind=True,
     acks_late=True,
-    autoretry_for=(Exception,),
-    max_retries=3,
-    retry_backoff=True,
+    max_retries=480,  # 480 × 30s = 4 hours of polling headroom
 )
 def process_table_in_chunks(
     self,
@@ -251,9 +351,14 @@ def process_table_in_chunks(
     5. If no chunks remain, it triggers index rebuilding and final completion.
     """
     checkpoint_manager = RedisCheckpointManager(database_name)
-    engine = db_manager.get_engine(database_name)
 
     try:
+        # NOTE: engine acquisition is inside the try so that ConnectionError from
+        # a broken SQL proxy is caught and retried rather than failing the task
+        # permanently (which would stall the entire workflow).
+        engine = db_manager.get_engine(database_name)
+        _reset_infra_failure_count()
+
         workflow_data = checkpoint_manager.get_workflow_data(workflow_name)
         if not workflow_data:
             celery_logger.error(
@@ -340,6 +445,23 @@ def process_table_in_chunks(
             celery_logger.info(
                 f"Chunking strategy for {annotation_table_name} (workflow: {workflow_name}): {chunking.total_chunks} chunks. Params stored."
             )
+
+            if initial_run:
+                # Store the dispatch parameters so spatial_workflow_failed can
+                # re-dispatch this task for recovery if a chord failure occurs.
+                checkpoint_manager.set_dispatch_params(
+                    workflow_name,
+                    {
+                        "datastack_info": datastack_info,
+                        "mat_metadata": mat_metadata,
+                        "workflow_name": workflow_name,
+                        "annotation_table_name": annotation_table_name,
+                        "database_name": database_name,
+                        "chunk_scale_factor": chunk_scale_factor,
+                        "supervoxel_batch_size": supervoxel_batch_size,
+                        "batch_size_for_dispatch": batch_size_for_dispatch,
+                    },
+                )
         else:
             celery_logger.info(
                 f"Using existing chunking strategy for {annotation_table_name} (workflow: {workflow_name}) from checkpoint."
@@ -440,6 +562,23 @@ def process_table_in_chunks(
                 full_chain.apply_async()
                 return f"All chunks processed for {annotation_table_name}. Finalizing."
             else:
+                # Before sleeping, check whether any chunks stuck in PROCESSING or
+                # PROCESSING_SUBTASKS state have been there long enough to be treated
+                # as lost (pod killed, broker blip, etc.) and should be retried.
+                recovered_subtasks = checkpoint_manager.recover_stale_processing_subtasks(
+                    workflow_name, stale_threshold_seconds=600
+                )
+                recovered_processing = checkpoint_manager.recover_stale_processing_chunks(
+                    workflow_name, stale_threshold_seconds=600
+                )
+                recovered = recovered_subtasks + recovered_processing
+                if recovered:
+                    celery_logger.info(
+                        f"Recovered {recovered} stale chunk(s) for {workflow_name} "
+                        f"({recovered_subtasks} PROCESSING_SUBTASKS, {recovered_processing} PROCESSING). "
+                        f"Retrying dispatcher immediately to re-dispatch them."
+                    )
+                    raise self.retry(countdown=0)
                 celery_logger.info(
                     f"No chunks returned by get_chunks_to_process for {workflow_name}, but scan may not be exhausted or non-terminal chunks exist. Retrying dispatcher."
                 )
@@ -496,6 +635,19 @@ def process_table_in_chunks(
 
         return f"Dispatched batch of {len(chunk_indices_to_process)} chunks for {annotation_table_name} (workflow {workflow_name})."
 
+    except ConnectionError as e:
+        # SQL proxy / infra failure.  Retry indefinitely with a long countdown so
+        # a healthy pod picks up the work.  Do NOT mark the workflow as failed —
+        # this is a transient infrastructure issue, not a data problem.
+        celery_logger.warning(
+            f"DB connection error in process_table_in_chunks for {workflow_name}: {e}. "
+            f"Retrying in 5 minutes."
+        )
+        _on_connection_error(database_name, self)
+        raise self.retry(exc=e, countdown=300, max_retries=None)
+
+    except Retry:
+        raise
     except Exception as e:
         celery_logger.error(
             f"Critical error in process_table_in_chunks dispatcher for {workflow_name} (table {annotation_table_name}): {str(e)}",
@@ -507,7 +659,9 @@ def process_table_in_chunks(
             last_error=f"Dispatcher critical error: {str(e)}",
         )
 
-        raise self.retry(exc=e, countdown=int(2**self.request.retries))
+        # Cap backoff at 5 minutes regardless of how many polling retries have occurred
+        error_backoff = min(300, int(2 ** min(self.request.retries, 8)))
+        raise self.retry(exc=e, countdown=error_backoff)
 
 
 @celery.task(
@@ -749,6 +903,28 @@ def process_chunk(
         )
 
         raise
+
+    except ConnectionError as e:
+        # SQL proxy / infra failure — NOT a data error.
+        # Reset chunk to PENDING so the attempt budget is NOT consumed; a healthy
+        # pod will re-pick it up after the countdown.
+        celery_logger.warning(
+            f"{log_prefix} DB connection error (SQL proxy down?): {e}. "
+            f"Resetting chunk to PENDING and retrying in 5 minutes."
+        )
+        try:
+            checkpoint_manager.set_chunk_status(
+                workflow_name,
+                chunk_idx,
+                CHUNK_STATUS_PENDING,
+                {"message": f"Connection error — will retry: {str(e)[:300]}"},
+            )
+        except Exception as status_err:
+            celery_logger.warning(
+                f"{log_prefix} Could not reset chunk status to PENDING: {status_err}"
+            )
+        _on_connection_error(database_name, self)
+        raise self.retry(exc=e, countdown=300, max_retries=None)
 
     except (OperationalError, DisconnectionError) as e:
         celery_logger.warning(
@@ -1379,6 +1555,15 @@ def process_and_insert_sub_batch(
         )
         raise
 
+    except ConnectionError as e:
+        # SQL proxy / infra failure — retry indefinitely with a long countdown so
+        # a healthy pod picks up the sub-batch instead.
+        celery_logger.warning(
+            f"{log_prefix} DB connection error: {e}. Retrying in 5 minutes."
+        )
+        _on_connection_error(database_name, self)
+        raise self.retry(exc=e, countdown=300, max_retries=None)
+
     except (OperationalError, DisconnectionError) as e:
         celery_logger.warning(
             f"{log_prefix} Transient DB/network error: {e}. Celery will retry."
@@ -1627,6 +1812,72 @@ def spatial_workflow_failed(
 
     if workflow_name and database_name:
         checkpoint_manager = RedisCheckpointManager(database_name)
+
+        # --- Recovery attempt for chord failures ---
+        # A chord failure (first arg is a UUID string, no Exception) means one
+        # process_chunk task raised unexpectedly, killing the batch chord.  This is
+        # usually caused by pod preemption or a transient broker/DB blip, not a
+        # genuine data error.  Try to recover by resetting any stuck PROCESSING
+        # chunks and re-dispatching the dispatcher task (up to MAX_RECOVERY_ATTEMPTS).
+        MAX_RECOVERY_ATTEMPTS = 3
+        is_chord_failure = isinstance(request_obj_uuid_or_exc, str) and not custom_message
+        # Don't try to recover the final completion chain (its workflow_name has a
+        # different prefix); only recover the chunk-processing loop.
+        is_completion_chain = workflow_name.startswith("spatial_lookup_completion_")
+        if is_chord_failure and not is_completion_chain:
+            try:
+                workflow_data = checkpoint_manager.get_workflow_data(workflow_name)
+                recovery_count = (workflow_data.recovery_attempts if workflow_data else 0)
+                if recovery_count < MAX_RECOVERY_ATTEMPTS:
+                    # Reset any chunks stuck in PROCESSING to FAILED_RETRYABLE.
+                    recovered = checkpoint_manager.recover_stale_processing_chunks(
+                        workflow_name, stale_threshold_seconds=0  # treat ALL PROCESSING as stale
+                    )
+                    if recovered:
+                        celery_logger.warning(
+                            f"{log_message_prefix} Chord failure recovery: reset {recovered} "
+                            f"PROCESSING chunk(s) to FAILED_RETRYABLE."
+                        )
+                    # Increment recovery_attempts counter and set status back to processing_chunks.
+                    checkpoint_manager.update_workflow(
+                        table_name=workflow_name,
+                        status="processing_chunks",
+                        last_error=f"[recovery {recovery_count + 1}/{MAX_RECOVERY_ATTEMPTS}] {error_info}",
+                        recovery_attempts=recovery_count + 1,
+                    )
+                    # Re-dispatch the dispatcher task using the stored params.
+                    dispatch_params = checkpoint_manager.get_dispatch_params(workflow_name)
+                    if dispatch_params:
+                        process_table_in_chunks.apply_async(
+                            kwargs={
+                                **dispatch_params,
+                                "prioritize_failed_chunks": True,
+                                "initial_run": False,
+                            },
+                        )
+                        celery_logger.warning(
+                            f"{log_message_prefix} Chord failure recovery attempt "
+                            f"{recovery_count + 1}/{MAX_RECOVERY_ATTEMPTS}: re-dispatched "
+                            f"process_table_in_chunks. Failed task UUID: {request_obj_uuid_or_exc}"
+                        )
+                        return  # Do NOT mark FAILED_PERMANENT — recovery dispatched.
+                    else:
+                        celery_logger.error(
+                            f"{log_message_prefix} No dispatch params found for recovery. "
+                            f"Cannot re-dispatch. Marking FAILED_PERMANENT."
+                        )
+                else:
+                    celery_logger.error(
+                        f"{log_message_prefix} Chord failure recovery exhausted "
+                        f"({recovery_count}/{MAX_RECOVERY_ATTEMPTS} attempts). Marking FAILED_PERMANENT."
+                    )
+            except Exception as e_recovery:
+                celery_logger.error(
+                    f"{log_message_prefix} Error during chord failure recovery: {e_recovery}. "
+                    f"Falling through to FAILED_PERMANENT.",
+                    exc_info=True,
+                )
+
         try:
             checkpoint_manager.update_workflow(
                 table_name=workflow_name, status=final_status, last_error=error_info

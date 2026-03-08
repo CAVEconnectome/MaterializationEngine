@@ -28,6 +28,7 @@ class SchemaProcessor:
         reference_table: str = None,
         column_mapping: Dict[str, str] = None,
         ignored_columns: List[str] = None,
+        id_counter_start: int = 0,
     ):
         """
         Initialize processor with schema name and optional column mapping
@@ -50,7 +51,7 @@ class SchemaProcessor:
         self.reverse_mapping = {v: k for k, v in self.column_mapping.items()}
         self.ignored_columns = set(ignored_columns or [])
         self.generate_ids = "id" not in self.column_mapping
-        self._id_counter = 0
+        self._id_counter = id_counter_start
 
         if self.is_reference and reference_table is None:
             raise ValueError(
@@ -59,6 +60,7 @@ class SchemaProcessor:
 
         self.spatial_points = self._get_spatial_point_fields()
         self.required_spatial_points = self._get_required_fields()
+        self.dropped_rows = 0  # cumulative count of rows dropped due to invalid/missing required fields
 
         table_metadata = (
             {"reference_table": reference_table} if self.is_reference else None
@@ -183,10 +185,16 @@ class SchemaProcessor:
             else:
                 # Handle separate x,y,z columns
                 coords = [float(row[col]) for col in coordinate_cols]
-                
+
             if len(coords) != 3:
                 raise ValueError(f"Expected 3 coordinates, got {len(coords)}")
-                
+
+            # NaN coordinates cannot be stored as a valid PointZ — Shapely/GEOS drops
+            # the Z dimension for all-NaN points, producing a 2D WKB that PostgreSQL
+            # rejects on a PointZ column.  Treat missing coordinates as NULL instead.
+            if any(np.isnan(c) for c in coords):
+                return None
+
             point = Point(coords)
             return create_wkt_element(point)
             
@@ -221,42 +229,52 @@ class SchemaProcessor:
 
         for field_name, coordinate_cols in self.spatial_points:
             if all(col in chunk.columns for col in coordinate_cols):
-                coordinates = chunk[coordinate_cols].astype(float).values
-                points = [Point(coords) for coords in coordinates]
                 processed_data[f"{field_name}_position"] = [
-                    create_wkt_element(point) if not any(pd.isna(coords)) else ""
-                    for point, coords in zip(points, coordinates)
+                    self.process_spatial_point(row, coordinate_cols)
+                    for _, row in chunk.iterrows()
                 ]
             else:
                 if field_name in self.required_spatial_points:
                     raise ValueError(
                         f"Missing coordinates for required spatial point: {field_name}"
                     )
-                processed_data[f"{field_name}_position"] = [""] * chunk_size
+                processed_data[f"{field_name}_position"] = [None] * chunk_size
 
         for field_name, field in self.schema._declared_fields.items():
             if not isinstance(field, mm.fields.Nested):
                 csv_col = self._get_mapped_column(field_name)
                 if csv_col in chunk.columns and csv_col not in self.ignored_columns:
                     if isinstance(field, mm.fields.Int):
-                        processed_data[field_name] = (
-                            chunk[csv_col].fillna(0).astype(int)
-                        )
+                        processed_data[field_name] = chunk[csv_col].astype("Int64")
                     elif isinstance(field, mm.fields.Float):
-                        processed_data[field_name] = (
-                            chunk[csv_col].fillna(0.0).astype(float)
-                        )
+                        processed_data[field_name] = chunk[csv_col].astype(float)
                     elif isinstance(field, mm.fields.Bool):
-                        processed_data[field_name] = (
-                            chunk[csv_col].fillna(False).astype(bool)
-                        )
+                        processed_data[field_name] = chunk[csv_col].astype("boolean")
                     else:
-                        processed_data[field_name] = chunk[csv_col].fillna("")
+                        processed_data[field_name] = chunk[csv_col]
 
         df = pd.DataFrame(processed_data)
 
         for col in self.column_order:
             if col not in df.columns:
-                df[col] = [""] * chunk_size
+                df[col] = [None] * chunk_size
+
+        # Drop rows where any required spatial point is NULL (missing or NaN coordinates).
+        # These rows cannot be meaningfully stored and would cause DB errors.
+        required_position_cols = [
+            f"{field_name}_position"
+            for field_name in self.required_spatial_points
+            if f"{field_name}_position" in df.columns
+        ]
+        if required_position_cols:
+            invalid_mask = df[required_position_cols].isnull().any(axis=1)
+            n_dropped = int(invalid_mask.sum())
+            if n_dropped:
+                logger.warning(
+                    f"Dropping {n_dropped} row(s) with missing required spatial coordinates "
+                    f"(columns: {required_position_cols})"
+                )
+                self.dropped_rows += n_dropped
+                df = df[~invalid_mask]
 
         return df[self.column_order]

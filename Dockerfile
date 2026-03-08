@@ -1,5 +1,13 @@
 FROM tiangolo/uwsgi-nginx-flask:python3.12 AS builder
-RUN apt-get update && apt-get install -y gcc
+RUN apt-get update && apt-get install -y gcc curl ca-certificates gnupg lsb-release \
+  && install -d /usr/share/postgresql-common/pgdg \
+  && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+       -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+  && sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+       https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+       > /etc/apt/sources.list.d/pgdg.list' \
+  && apt-get update \
+  && apt-get install -y postgresql-client-18
 RUN pip install uv
 # Enable bytecode compilation
 ENV UV_COMPILE_BYTECODE=1

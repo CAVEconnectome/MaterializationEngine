@@ -325,6 +325,9 @@ function startPollingForJob(jobId) {
   if (runningJobsData.activePollers[jobId]) return;
 
   console.log(`[RunningUploads] Starting polling for job: ${jobId}`);
+  let consecutiveFailures = 0;
+  const MAX_CONSECUTIVE_FAILURES = 3;
+
   runningJobsData.activePollers[jobId] = setInterval(async () => {
     try {
       const response = await fetch(
@@ -344,23 +347,39 @@ function startPollingForJob(jobId) {
           stopPollingForJob(jobId);
           return;
         }
+        if (response.status === 401) {
+          updateJobInState(jobId, {
+            status: "error",
+            error: "Session expired. Please refresh the page to continue monitoring.",
+            phase: "Session Expired",
+          });
+          stopPollingForJob(jobId);
+          return;
+        }
         throw new Error(
           `Failed to get status for ${jobId} (${response.status})`
         );
       }
       const data = await response.json();
+      consecutiveFailures = 0;
       updateJobInState(jobId, data);
       if (!isJobActive(data.status)) {
         stopPollingForJob(jobId);
       }
     } catch (error) {
-      console.error(`[RunningUploads] Error polling for job ${jobId}:`, error);
-      updateJobInState(jobId, {
-        status: "error",
-        error: "Polling failed. Could not retrieve latest status.",
-        phase: "Polling Error",
-      });
-      stopPollingForJob(jobId);
+      consecutiveFailures++;
+      console.error(
+        `[RunningUploads] Error polling for job ${jobId} (failure ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}):`,
+        error
+      );
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        updateJobInState(jobId, {
+          status: "error",
+          error: "Polling failed. Could not retrieve latest status.",
+          phase: "Polling Error",
+        });
+        stopPollingForJob(jobId);
+      }
     }
   }, 5000);
 }

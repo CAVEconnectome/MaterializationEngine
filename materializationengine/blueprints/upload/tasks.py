@@ -2,7 +2,7 @@ import json
 import os
 import subprocess
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import shlex
 
 import pandas as pd
@@ -13,6 +13,7 @@ from flask import current_app
 from redis import Redis
 from sqlalchemy import text
 from dynamicannotationdb.key_utils import build_segmentation_table_name
+from dynamicannotationdb.models import SegmentationMetadata
 
 from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
 from materializationengine.blueprints.upload.processor import SchemaProcessor
@@ -178,6 +179,7 @@ def process_csv(
     reference_table: str = None,
     ignored_columns: List[str] = None,
     chunk_size: int = 10000,
+    id_counter_start: int = 0,
 ) -> Dict[str, Any]:
     """Process CSV file in chunks using GCSCsvProcessor"""
     try:
@@ -198,6 +200,7 @@ def process_csv(
             reference_table,
             column_mapping=column_mapping,
             ignored_columns=ignored_columns,
+            id_counter_start=id_counter_start,
         )
 
         bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
@@ -243,10 +246,28 @@ def process_csv(
             chunk_upload_callback=progress_callback,
         )
 
+        last_assigned_id = schema_processor._id_counter
+        dropped_rows = schema_processor.dropped_rows
+
+        status_update: Dict[str, Any] = {"last_assigned_id": last_assigned_id}
+        if dropped_rows:
+            celery_logger.warning(
+                f"CSV processing dropped {dropped_rows} row(s) with missing required "
+                f"spatial coordinates for job {job_id_for_status}."
+            )
+            status_update["dropped_rows"] = dropped_rows
+            status_update["warning"] = (
+                f"{dropped_rows:,} row(s) were skipped because their required spatial "
+                f"coordinates were missing or invalid."
+            )
+        update_job_status(job_id_for_status, status_update)
+
         return {
             "status": "completed_csv_processing",
             "output_path": f"{bucket_name}/{destination_blob_name}",
             "job_id_for_status": job_id_for_status,
+            "last_assigned_id": last_assigned_id,
+            "dropped_rows": dropped_rows,
         }
     except Exception as e:
         celery_logger.error(
@@ -350,6 +371,7 @@ def upload_to_database(
             },
         )
         db_client = dynamic_annotation_cache.get_db(staging_database)
+        force_overwrite = file_metadata["metadata"].get("force_overwrite", False)
 
         try:
             db_client.annotation.create_table(
@@ -368,6 +390,21 @@ def upload_to_database(
             )
         except Exception as e:
             celery_logger.error(f"Error creating table: {str(e)}")
+
+        # If the user confirmed overwrite, clear any data left from a previous run
+        # before importing so we don't accumulate duplicate IDs.
+        if force_overwrite:
+            try:
+                with db_client.database.engine.begin() as conn:
+                    # CASCADE truncates any FK-dependent tables (e.g. the segmentation table)
+                    conn.execute(text(f"TRUNCATE TABLE {table_name} CASCADE"))
+                celery_logger.info(
+                    f"force_overwrite=True: truncated staging data for '{table_name}' (CASCADE)"
+                )
+            except Exception as trunc_err:
+                celery_logger.warning(
+                    f"Could not truncate staging table '{table_name}' for overwrite: {trunc_err}"
+                )
 
         update_job_status(
             job_id_for_status,
@@ -530,7 +567,9 @@ def upload_to_database(
                 },
             )
 
-            raise
+            raise RuntimeError(
+                f"gcloud sql import csv failed: {e.stderr or str(e)}"
+            ) from e
         except subprocess.TimeoutExpired as e:
             celery_logger.error(f"Subprocess timed out: {e}")
             update_job_status(
@@ -591,6 +630,7 @@ def upload_to_database(
                 "active_workflow_part": "spatial_lookup",
                 "total_rows": total_rows_from_csv,
                 "processed_rows": processed_rows_from_csv,
+                "spatial_lookup_config": spatial_lookup_config,
             },
         )
 
@@ -617,7 +657,7 @@ def upload_to_database(
         raise
 
 @celery.task(
-    name="process:monitor_spatial_workflow_completion", bind=True, max_retries=None
+    name="orchestration:monitor_spatial_workflow_completion", bind=True, max_retries=None
 )
 def monitor_spatial_workflow_completion(
     self,
@@ -704,7 +744,7 @@ def monitor_spatial_workflow_completion(
             },
             "job_id_for_status": job_id_for_status,
         }
-    elif current_workflow_status in {CHUNK_STATUS_ERROR, "failed"}:
+    elif current_workflow_status in {CHUNK_STATUS_ERROR, CHUNK_STATUS_FAILED_PERMANENT, "failed"}:
         err_msg = (
             f"Spatial workflow '{workflow_to_monitor}' has terminally FAILED with status "
             f"'{current_workflow_status}'. Last Error recorded: {workflow_data.last_error}"
@@ -720,6 +760,33 @@ def monitor_spatial_workflow_completion(
         )
         raise Exception(err_msg)
     else:
+        # Refresh the Redis key TTL and update progress details.
+        # Without this, long spatial lookups (>1 hour) cause the key to expire,
+        # making the status endpoint return 404 and breaking the UI poller.
+        try:
+            update_job_status(
+                job_id_for_status,
+                {
+                    "status": "processing",
+                    "phase": (
+                        f"Spatial Lookup: {current_workflow_status} "
+                        f"({workflow_data.completed_chunks}/{workflow_data.total_chunks} chunks)"
+                    ),
+                    "progress": round(workflow_data.progress, 2),
+                    "active_workflow_part": "spatial_lookup",
+                    "spatial_lookup_config": {
+                        "table_name": workflow_to_monitor,
+                        "database_name": db_for_monitor,
+                        "datastack_name": datastack_info.get("datastack", ""),
+                    },
+                    "total_rows": workflow_data.total_chunks,
+                    "processed_rows": workflow_data.completed_chunks,
+                },
+            )
+        except Exception as status_err:
+            celery_logger.warning(
+                f"{log_prefix} Failed to refresh job status during retry: {status_err}"
+            )
 
         celery_logger.info(
             f"{log_prefix} Workflow '{workflow_to_monitor}' status is '{current_workflow_status}'. "
@@ -743,18 +810,25 @@ def transfer_to_production(
         table_name_to_transfer = monitor_result["table_name"]
         materialization_time_stamp_str = monitor_result["materialization_time_stamp"]
         spatial_workflow_status = monitor_result.get("spatial_workflow_final_status", "UNKNOWN")
-       
+        job_id_for_ui = monitor_result.get("job_id_for_status")
+
         try:
             materialization_time_stamp_dt = datetime.fromisoformat(materialization_time_stamp_str)
         except ValueError:
             materialization_time_stamp_dt = datetime.strptime(materialization_time_stamp_str, '%Y-%m-%d %H:%M:%S.%f')
-          
+
+        if job_id_for_ui:
+            update_job_status(job_id_for_ui, {
+                "status": "processing",
+                "phase": "Preparing Transfer to Production",
+                "progress": 0,
+            })
 
         celery_logger.info(
             f"Executing transfer_to_production for table: '{table_name_to_transfer}'. "
             f"Spatial workflow final status: '{spatial_workflow_status}'."
         )
-        if "workflow_details" in monitor_result: 
+        if "workflow_details" in monitor_result:
             celery_logger.info(f"Spatial workflow details: {monitor_result['workflow_details']}")
 
         staging_schema_name = get_config_param("STAGING_DATABASE_NAME")
@@ -777,21 +851,34 @@ def transfer_to_production(
 
         needs_segmentation_table = staging_db_client.schema.is_segmentation_table_required(schema_type)
 
-        production_table_exists = False
+        production_engine = db_manager.get_engine(production_schema_name)
+        staging_engine = db_manager.get_engine(staging_schema_name)
+
+        if job_id_for_ui:
+            update_job_status(job_id_for_ui, {
+                "status": "processing",
+                "phase": "Creating Annotation Table in Production",
+                "progress": 5,
+            })
+
+        # get_table_metadata returns None (no exception) when the table is not found,
+        # so we must check the return value rather than relying on exception handling.
         try:
-            production_db_client.database.get_table_metadata(table_name_to_transfer)
-            production_table_exists = True
-            celery_logger.info(
-                f"Annotation table '{table_name_to_transfer}' already exists in production schema '{production_schema_name}'."
-            )
-        except Exception: 
-            production_table_exists = False
-            celery_logger.info(
-                f"Annotation table '{table_name_to_transfer}' does not exist in production schema '{production_schema_name}'. Will create."
+            _meta = production_db_client.database.get_table_metadata(table_name_to_transfer)
+            metadata_exists = bool(_meta)
+        except Exception:
+            metadata_exists = False
+
+        with production_engine.connect() as conn:
+            physical_table_exists = production_engine.dialect.has_table(
+                conn, table_name_to_transfer
             )
 
-        if not production_table_exists:
-            celery_logger.info(f"Creating annotation table '{table_name_to_transfer}' in production schema '{production_schema_name}'")
+        if not metadata_exists:
+            # Fresh table — create both metadata record and physical table
+            celery_logger.info(
+                f"Creating annotation table '{table_name_to_transfer}' in production schema '{production_schema_name}'"
+            )
             production_db_client.annotation.create_table(
                 table_name=table_name_to_transfer,
                 schema_type=schema_type,
@@ -803,32 +890,60 @@ def transfer_to_production(
                 table_metadata=table_metadata_from_staging.get("table_metadata"),
                 flat_segmentation_source=table_metadata_from_staging.get("flat_segmentation_source"),
                 write_permission=table_metadata_from_staging.get("write_permission", "PRIVATE"),
-                read_permission=table_metadata_from_staging.get("read_permission", "PRIVATE"),  
+                read_permission=table_metadata_from_staging.get("read_permission", "PRIVATE"),
                 notice_text=table_metadata_from_staging.get("notice_text"),
             )
+        elif not physical_table_exists:
+            # Orphaned metadata from a previous failed run — recreate only the physical table
+            celery_logger.warning(
+                f"Metadata record exists for '{table_name_to_transfer}' in production but physical "
+                f"table is missing (likely from a previous failed transfer). Recreating physical table."
+            )
+            model = production_db_client.schema.create_annotation_model(
+                table_name_to_transfer, schema_type
+            )
+            model.__table__.create(production_engine, checkfirst=True)
+        else:
+            celery_logger.info(
+                f"Annotation table '{table_name_to_transfer}' already exists in production schema '{production_schema_name}'."
+            )
 
-        
-        production_engine = db_manager.get_engine(production_schema_name)
-        db_url_obj = production_engine.url 
+
+        db_url_obj = production_engine.url
         
    
         db_connection_info_for_cli = get_db_connection_info(db_url_obj)
 
 
+        if job_id_for_ui:
+            update_job_status(job_id_for_ui, {
+                "status": "processing",
+                "phase": "Transferring Annotation Data",
+                "progress": 10,
+            })
+
         celery_logger.info(f"Transferring data for annotation table '{table_name_to_transfer}'")
         annotation_rows_transferred = transfer_table_using_pg_dump(
             table_name=table_name_to_transfer,
-            source_db=staging_schema_name,   
-            target_db=production_schema_name,  
-            db_info=db_connection_info_for_cli, 
+            source_db=staging_schema_name,
+            target_db=production_schema_name,
+            db_info=db_connection_info_for_cli,
             drop_indices=True,
             rebuild_indices=True,
             engine=production_engine,
+            source_engine=staging_engine,
             model_creator=lambda: production_db_client.schema.create_annotation_model(
                 table_name_to_transfer, schema_type
             ),
-            job_id=monitor_result.get("job_id_for_status"),
+            job_id=job_id_for_ui,
+            table_label="Annotation Table",
         )
+        if job_id_for_ui:
+            update_job_status(job_id_for_ui, {
+                "status": "processing",
+                "phase": f"Annotation Data Transferred ({annotation_rows_transferred:,} rows)",
+                "progress": 70,
+            })
 
         segmentation_transfer_results = None
         if transfer_segmentation and needs_segmentation_table:
@@ -846,23 +961,36 @@ def transfer_to_production(
 
             if staging_segmentation_exists:
                 celery_logger.info(f"Preparing to transfer segmentation table '{segmentation_table_name}'")
-                
+
+                if job_id_for_ui:
+                    update_job_status(job_id_for_ui, {
+                        "status": "processing",
+                        "phase": "Creating Segmentation Table in Production",
+                        "progress": 80,
+                    })
+
                 mat_metadata_for_segmentation_table = {
                     "annotation_table_name": table_name_to_transfer,
                     "segmentation_table_name": segmentation_table_name,
-                    "schema_type": schema_type,
-                    "database": production_schema_name, 
-                    "aligned_volume": production_schema_name, 
+                    "schema": schema_type,  # create_segmentation_model reads "schema", not "schema_type"
+                    "database": production_schema_name,
+                    "aligned_volume": production_schema_name,
                     "pcg_table_name": pcg_table_name,
-                    "last_updated": materialization_time_stamp_dt, 
+                    "last_updated": materialization_time_stamp_dt,
                     "voxel_resolution_x": table_metadata_from_staging.get("voxel_resolution_x", 1.0),
                     "voxel_resolution_y": table_metadata_from_staging.get("voxel_resolution_y", 1.0),
                     "voxel_resolution_z": table_metadata_from_staging.get("voxel_resolution_z", 1.0),
                 }
 
- 
-                create_missing_segmentation_table(mat_metadata_for_segmentation_table, db_client=production_db_client)
-                
+                create_missing_segmentation_table(mat_metadata_for_segmentation_table)
+
+                if job_id_for_ui:
+                    update_job_status(job_id_for_ui, {
+                        "status": "processing",
+                        "phase": "Transferring Segmentation Data",
+                        "progress": 85,
+                    })
+
                 celery_logger.info(f"Transferring data for segmentation table '{segmentation_table_name}'")
                 segmentation_rows_transferred = transfer_table_using_pg_dump(
                     table_name=segmentation_table_name,
@@ -872,8 +1000,27 @@ def transfer_to_production(
                     drop_indices=True,
                     rebuild_indices=True,
                     engine=production_engine,
+                    source_engine=staging_engine,
                     model_creator=lambda: create_segmentation_model(mat_metadata_for_segmentation_table),
+                    job_id=job_id_for_ui,
+                    table_label="Segmentation Table",
                 )
+
+                # Record the materialization timestamp used for spatial root ID lookup.
+                # This is set AFTER transfer so it accurately reflects the state of the data.
+                # Also handles the case where the metadata record pre-existed (e.g. retry).
+                with db_manager.session_scope(production_schema_name) as session:
+                    seg_meta = (
+                        session.query(SegmentationMetadata)
+                        .filter(SegmentationMetadata.table_name == segmentation_table_name)
+                        .one()
+                    )
+                    seg_meta.last_updated = materialization_time_stamp_dt
+                celery_logger.info(
+                    f"Set last_updated={materialization_time_stamp_dt} on segmentation "
+                    f"metadata for '{segmentation_table_name}'"
+                )
+
                 segmentation_transfer_results = {
                     "name": segmentation_table_name,
                     "success": True,
@@ -887,6 +1034,13 @@ def transfer_to_production(
                     "rows_transferred": 0,
                 }
 
+
+        if job_id_for_ui:
+            update_job_status(job_id_for_ui, {
+                "status": "done",
+                "phase": "Transfer Complete",
+                "progress": 100,
+            })
 
         return {
             "status": "success",
@@ -903,6 +1057,19 @@ def transfer_to_production(
 
     except Exception as e:
         celery_logger.error(f"Error during transfer_to_production for table '{monitor_result.get('table_name', 'UNKNOWN')}': {str(e)}", exc_info=True)
+        job_id_for_ui = monitor_result.get("job_id_for_status")
+        if job_id_for_ui:
+            try:
+                update_job_status(
+                    job_id_for_ui,
+                    {
+                        "status": "error",
+                        "phase": "Transfer to Production Failed",
+                        "error": str(e),
+                    },
+                )
+            except Exception as update_err:
+                celery_logger.error(f"Failed to update job status after transfer error: {update_err}")
         raise
 
 def get_db_connection_info(db_url):
@@ -935,8 +1102,10 @@ def transfer_table_using_pg_dump(
     drop_indices: bool = True,
     rebuild_indices: bool = True,
     engine=None,
+    source_engine=None,
     model_creator=None,
-    job_id: str = None,
+    job_id: Optional[str] = None,
+    table_label: Optional[str] = None,
 ) -> int:
     """
     Transfer a table using pg_dump and psql.
@@ -948,7 +1117,8 @@ def transfer_table_using_pg_dump(
         db_info: Dictionary with database connection information
         drop_indices: Whether to drop indices before transfer
         rebuild_indices: Whether to rebuild indices after transfer
-        engine: SQLAlchemy engine (required if drop_indices or rebuild_indices is True)
+        engine: SQLAlchemy engine for the target DB (required if drop_indices or rebuild_indices is True)
+        source_engine: SQLAlchemy engine for the source DB (used for row count validation)
         model_creator: Function that returns the SQLAlchemy model (required if rebuild_indices is True)
 
     Returns:
@@ -962,12 +1132,28 @@ def transfer_table_using_pg_dump(
     if rebuild_indices and model_creator is None:
         raise ValueError("model_creator is required when rebuild_indices is True")
 
+    label = table_label or table_name
+
     if drop_indices:
         celery_logger.info(f"Dropping indexes on {table_name}")
+        if job_id:
+            update_job_status(job_id, {"status": "processing", "phase": f"Dropping Indices: {label}"})
         index_cache.drop_table_indices(table_name, engine)
+
+    # Count source rows before transfer for post-transfer validation
+    source_row_count = None
+    if source_engine is not None:
+        with source_engine.connect() as conn:
+            source_row_count = conn.execute(
+                text(f"SELECT COUNT(*) FROM {table_name}")
+            ).scalar()
+        celery_logger.info(f"Source row count for {table_name}: {source_row_count}")
 
     with engine.begin() as conn:
         conn.execute(text(f"TRUNCATE TABLE {table_name}"))
+
+    if job_id:
+        update_job_status(job_id, {"status": "processing", "phase": f"Copying Data: {label}"})
 
     # Build pg_dump and psql commands
     pg_dump_cmd = [
@@ -986,6 +1172,7 @@ def transfer_table_using_pg_dump(
         f'--port={db_info["port"]}',
         f'--username={db_info["user"]}',
         f"--dbname={target_db}",
+        "--single-transaction",  # makes the entire COPY import atomic; rolls back on failure
     ]
 
     pg_env = os.environ.copy()
@@ -997,20 +1184,46 @@ def transfer_table_using_pg_dump(
         celery_logger.info(f"Running pg_dump command: {shlex.join(pg_dump_cmd)}")
         celery_logger.info(f"Running psql command: {shlex.join(psql_cmd)}")
 
+        pg_dump_stderr = ""
         with subprocess.Popen(
             pg_dump_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=pg_env
         ) as dump_proc:
-            result = subprocess.run(
-                psql_cmd,
-                stdin=dump_proc.stdout,
-                capture_output=True,
-                text=True,
-                timeout=1200,
-                env=pg_env,
+            try:
+                result = subprocess.run(
+                    psql_cmd,
+                    stdin=dump_proc.stdout,
+                    capture_output=True,
+                    text=True,
+                    timeout=1200,
+                    env=pg_env,
+                )
+                # Drain pg_dump stderr and wait for it to exit cleanly
+                dump_proc.stdout.close()
+                pg_dump_stderr = dump_proc.stderr.read().decode("utf-8", errors="replace")
+                dump_proc.wait()
+            except Exception:
+                # Close stdout before killing so pg_dump doesn't block on
+                # a full pipe buffer, then kill to ensure it exits before
+                # Popen.__exit__ calls wait() — preventing a deadlock when
+                # pg_dump suppresses SIGPIPE (as libpq does).
+                dump_proc.stdout.close()
+                dump_proc.kill()
+                raise
+
+        if dump_proc.returncode != 0:
+            raise RuntimeError(
+                f"pg_dump exited with code {dump_proc.returncode}: {pg_dump_stderr}"
             )
-            celery_logger.info(f"psql output: {result.stdout}")
-            if result.stderr:
-                celery_logger.warning(f"psql stderr: {result.stderr}")
+        if pg_dump_stderr:
+            celery_logger.warning(f"pg_dump stderr: {pg_dump_stderr}")
+
+        celery_logger.info(f"psql output: {result.stdout}")
+        if result.stderr:
+            celery_logger.warning(f"psql stderr: {result.stderr}")
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"psql exited with code {result.returncode}: {result.stderr}"
+            )
     except subprocess.CalledProcessError as e:
         celery_logger.error(f"pg_dump/psql error: {e}")
         if job_id:
@@ -1038,11 +1251,23 @@ def transfer_table_using_pg_dump(
             )
         raise
 
+    if job_id:
+        update_job_status(job_id, {"status": "processing", "phase": f"Verifying Row Count: {label}"})
+
     with engine.connect() as conn:
         row_count = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar()
 
+    celery_logger.info(f"Destination row count for {table_name}: {row_count}")
+    if source_row_count is not None and row_count != source_row_count:
+        raise RuntimeError(
+            f"Row count mismatch after transfer of '{table_name}': "
+            f"source had {source_row_count} rows but destination has {row_count} rows"
+        )
+
     if rebuild_indices:
         celery_logger.info(f"Rebuilding indexes on {table_name}")
+        if job_id:
+            update_job_status(job_id, {"status": "processing", "phase": f"Rebuilding Indices: {label}"})
         model = model_creator()
         indices = index_cache.add_indices_sql_commands(table_name, model, engine)
         for index in indices:

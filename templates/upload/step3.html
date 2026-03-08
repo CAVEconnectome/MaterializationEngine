@@ -6,6 +6,22 @@
             <div x-show="$store.metadata.state.validationErrors.general" class="alert alert-danger"
                 x-text="$store.metadata.state.validationErrors.general" x-cloak></div>
 
+            <!-- Staging Conflict: table exists from a previous run -->
+            <div x-show="$store.metadata.state.stagingConflict" class="alert alert-warning" x-cloak>
+                <strong>Existing Staging Data Found</strong>
+                <p x-text="$store.metadata.state.stagingConflict?.message" class="mb-2"></p>
+                <div class="d-flex gap-2">
+                    <button type="button" class="btn btn-danger btn-sm"
+                        @click="$store.metadata.confirmOverwrite()">
+                        Clear staging data and restart upload
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm"
+                        @click="$store.metadata.state.stagingConflict = null">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+
             <form class="needs-validation" @submit.prevent>
                 <!-- Datastack Name -->
                 <div class="form-group mb-3">
