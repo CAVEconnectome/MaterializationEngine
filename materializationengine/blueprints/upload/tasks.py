@@ -68,7 +68,7 @@ def get_job_status(job_id: str) -> Dict[str, Any]:
     return json.loads(status) if status else None
 
 
-@celery.task(name="process:process_and_upload", bind=True)
+@celery.task(name="orchestration:process_and_upload", bind=True)
 def process_and_upload(
     self,
     file_path: str,
@@ -169,7 +169,7 @@ def get_chain_status(job_id: str) -> Dict[str, Any]:
         }
 
 
-@celery.task(name="process:process_csv", bind=True)
+@celery.task(name="orchestration:process_csv", bind=True)
 def process_csv(
     self,
     file_path: str,
