@@ -494,6 +494,22 @@ def process_table_in_chunks(
             full_chain.apply_async()
             return f"No chunks to process for {annotation_table_name}. Finalizing."
 
+        # Recover stale chunks on EVERY conductor invocation so that preempted
+        # sub-batch workers are detected within 600s regardless of whether there
+        # are still pending chunks in the queue to dispatch.
+        recovered_subtasks = checkpoint_manager.recover_stale_processing_subtasks(
+            workflow_name, stale_threshold_seconds=600
+        )
+        recovered_processing = checkpoint_manager.recover_stale_processing_chunks(
+            workflow_name, stale_threshold_seconds=600
+        )
+        recovered = recovered_subtasks + recovered_processing
+        if recovered:
+            celery_logger.info(
+                f"Recovered {recovered} stale chunk(s) for {workflow_name} "
+                f"({recovered_subtasks} PROCESSING_SUBTASKS, {recovered_processing} PROCESSING)."
+            )
+
         chunk_indices_to_process, new_failed_cursor, new_pending_cursor = (
             checkpoint_manager.get_chunks_to_process(
                 table_name=workflow_name,
@@ -561,27 +577,10 @@ def process_table_in_chunks(
                 full_chain.apply_async()
                 return f"All chunks processed for {annotation_table_name}. Finalizing."
             else:
-                # Before sleeping, check whether any chunks stuck in PROCESSING or
-                # PROCESSING_SUBTASKS state have been there long enough to be treated
-                # as lost (pod killed, broker blip, etc.) and should be retried.
-                recovered_subtasks = checkpoint_manager.recover_stale_processing_subtasks(
-                    workflow_name, stale_threshold_seconds=600
-                )
-                recovered_processing = checkpoint_manager.recover_stale_processing_chunks(
-                    workflow_name, stale_threshold_seconds=600
-                )
-                recovered = recovered_subtasks + recovered_processing
-                if recovered:
-                    celery_logger.info(
-                        f"Recovered {recovered} stale chunk(s) for {workflow_name} "
-                        f"({recovered_subtasks} PROCESSING_SUBTASKS, {recovered_processing} PROCESSING). "
-                        f"Retrying dispatcher immediately to re-dispatch them."
-                    )
-                    raise self.retry(countdown=0)
                 celery_logger.info(
                     f"No chunks returned by get_chunks_to_process for {workflow_name}, but scan may not be exhausted or non-terminal chunks exist. Retrying dispatcher."
                 )
-                raise self.retry(countdown=30)
+                raise self.retry(countdown=30 if not recovered else 0)
 
         processing_tasks = []
         for chunk_idx_to_process in chunk_indices_to_process:
