@@ -32,7 +32,7 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
     RedisCheckpointManager,
 )
 from materializationengine.celery_init import celery
-from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
+from materializationengine.kvdb_gateway import kvdb_cache
 from materializationengine.cloudvolume_gateway import cloudvolume_cache
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.index_manager import index_cache
@@ -55,7 +55,6 @@ from materializationengine.workflows.chunking import (
 )
 from materializationengine.workflows.ingest_new_annotations import (
     create_missing_segmentation_table,
-    get_root_ids,
 )
 
 Base = declarative_base()
@@ -1125,7 +1124,7 @@ def get_root_ids_from_supervoxels(
     """
     start_time = time.time()
 
-    pcg_table_name = mat_metadata.get("pcg_table_name")
+    pcg_table_name: str = mat_metadata["pcg_table_name"]
     database = mat_metadata.get("database")
 
     try:
@@ -1158,6 +1157,7 @@ def get_root_ids_from_supervoxels(
     supervoxel_col_names = [
         col for col in supervoxel_df.columns if col.endswith("supervoxel_id")
     ]
+
 
     root_id_col_names = [
         col.replace("supervoxel_id", "root_id") for col in supervoxel_col_names
@@ -1193,7 +1193,7 @@ def get_root_ids_from_supervoxels(
                 if existing_value and existing_value > 0:
                     root_ids_df.at[idx, root_col] = existing_value
 
-    cg_client = chunkedgraph_cache.init_pcg(pcg_table_name)
+    cg_client = kvdb_cache.get_client(pcg_table_name)
 
     for sv_col in supervoxel_col_names:
         root_col = sv_col.replace("supervoxel_id", "root_id")
@@ -1212,8 +1212,11 @@ def get_root_ids_from_supervoxels(
 
         if not supervoxels_to_lookup.empty:
             try:
-                root_ids = get_root_ids(
-                    cg_client, supervoxels_to_lookup, materialization_time_stamp
+                root_ids = np.squeeze(
+                    cg_client.root_ext.get_roots(
+                        supervoxels_to_lookup.to_numpy(),
+                        time_stamp=materialization_time_stamp,
+                    )
                 )
 
                 root_ids_df.loc[sv_mask, root_col] = root_ids
