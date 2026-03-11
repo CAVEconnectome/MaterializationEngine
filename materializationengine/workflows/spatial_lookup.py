@@ -1414,7 +1414,7 @@ def insert_segmentation_data(
 
 
 @celery.task(
-    name="workflow:process_and_insert_sub_batch",
+    name="process:process_and_insert_sub_batch",
     bind=True,
     acks_late=True,
     autoretry_for=(OperationalError, DisconnectionError, ChunkDataValidationError),
