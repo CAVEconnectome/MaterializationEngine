@@ -16,5 +16,6 @@ celery = Celery(
         "materializationengine.views",
         "materializationengine.monitor",
         "materializationengine.blueprints.upload.tasks",
+        "materializationengine.blueprints.upload.parallel_csv_tasks",
     ]
 )

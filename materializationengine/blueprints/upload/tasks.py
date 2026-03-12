@@ -16,6 +16,10 @@ from dynamicannotationdb.key_utils import build_segmentation_table_name
 from dynamicannotationdb.models import SegmentationMetadata
 
 from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
+from materializationengine.blueprints.upload.parallel_csv_tasks import (
+    conduct_csv_upload,
+    prepare_csv_upload,
+)
 from materializationengine.blueprints.upload.processor import SchemaProcessor
 from materializationengine.celery_init import celery
 from materializationengine.database import db_manager, dynamic_annotation_cache
@@ -26,7 +30,6 @@ from materializationengine.workflows.ingest_new_annotations import (
     create_missing_segmentation_table,
     create_segmentation_model,
 )
-from materializationengine.workflows.spatial_lookup import run_spatial_lookup_workflow
 from materializationengine.blueprints.upload.checkpoint_manager import (
     CHUNK_STATUS_COMPLETED,
     CHUNK_STATUS_FAILED_PERMANENT,
@@ -85,7 +88,6 @@ def process_and_upload(
     materialization_time_stamp = datetime.utcnow()
 
     chunk_scale_factor = current_app.config.get("CHUNK_SCALE_FACTOR", 2)
-    sql_instance_name = current_app.config.get("SQL_INSTANCE_NAME")
     supervoxel_batch_size = current_app.config.get("SUPERVOXEL_BATCH_SIZE", 50)
     table_name = file_metadata["metadata"]["table_name"]
     schema_type = file_metadata["metadata"]["schema_type"]
@@ -94,37 +96,35 @@ def process_and_upload(
     ignored_columns = file_metadata.get("ignored_columns")
     main_job_id = f"{datastack_name}_{table_name}_{materialization_time_stamp.strftime('%Y%m%d_%H%M%S')}"
 
+    # The parallel upload pipeline is:
+    #   prepare_csv_upload  — splits CSV into segment blobs, creates table,
+    #                         initialises Redis checkpoint; returns prepare_result
+    #   conduct_csv_upload  — retrying conductor; fans out chunk tasks; when all
+    #                         chunks complete it fires finalize_csv_upload which
+    #                         rebuilds indices and then dispatches the rest of the
+    #                         workflow (spatial lookup → monitor → transfer).
+    #
+    # The spatial-lookup parameters are embedded in prepare_result so that
+    # finalize_csv_upload can dispatch the downstream chain without needing
+    # them passed through the conductor chain.
+
     workflow = chain(
-        process_csv.si(
+        prepare_csv_upload.si(  # type: ignore[attr-defined]
             file_path=file_path,
             schema_type=schema_type,
             column_mapping=column_mapping,
             job_id_for_status=main_job_id,
-            reference_table=reference_table,
-            ignored_columns=ignored_columns,
-        ),
-        upload_to_database.s(
-            sql_instance_name=sql_instance_name,
             file_metadata=file_metadata,
             datastack_info=datastack_info,
-            job_id=main_job_id,
+            reference_table=reference_table,
+            ignored_columns=ignored_columns,
+            spatial_lookup_params={
+                "chunk_scale_factor": chunk_scale_factor,
+                "supervoxel_batch_size": supervoxel_batch_size,
+                "materialization_time_stamp": str(materialization_time_stamp),
+            },
         ),
-        run_spatial_lookup_workflow.si(
-            datastack_info=datastack_info,
-            table_name=table_name,
-            chunk_scale_factor=chunk_scale_factor,
-            supervoxel_batch_size=supervoxel_batch_size,
-            use_staging_database=True,
-        ),
-        monitor_spatial_workflow_completion.s(
-            datastack_info=datastack_info,
-            table_name_for_transfer=table_name,
-            materialization_time_stamp=str(materialization_time_stamp),
-            job_id_for_status=main_job_id,
-        ),
-        transfer_to_production.s(
-            transfer_segmentation=True,
-        ),
+        conduct_csv_upload.s(),  # type: ignore[attr-defined]
     )
 
     result = workflow.apply_async()
