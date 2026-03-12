@@ -414,9 +414,10 @@ def table_view(datastack_name, id: int):
         table = session.query(AnalysisTable).filter(AnalysisTable.id == id).first()
         if table is None:
             abort(404, "table not found")
-        
+        table_name = table.table_name
+
     with request_db_session(aligned_volume_name) as db:
-        check_read_permission(db, table.table_name)
+        check_read_permission(db, table_name)
    
     # mapping = {
     #     "synapse": url_for(
