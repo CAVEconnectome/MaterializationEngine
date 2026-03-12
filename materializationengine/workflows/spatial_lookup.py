@@ -336,7 +336,7 @@ def process_table_in_chunks(
     database_name: str,
     chunk_scale_factor: int,
     supervoxel_batch_size: int,
-    batch_size_for_dispatch: int = 10,
+    batch_size_for_dispatch: int = 50,
     prioritize_failed_chunks: bool = True,
     initial_run: bool = False,
 ):
@@ -904,25 +904,37 @@ def process_chunk(
 
     except ConnectionError as e:
         # SQL proxy / infra failure — NOT a data error.
-        # Reset chunk to PENDING so the attempt budget is NOT consumed; a healthy
-        # pod will re-pick it up after the countdown.
-        celery_logger.warning(
-            f"{log_prefix} DB connection error (SQL proxy down?): {e}. "
-            f"Resetting chunk to PENDING and retrying in 5 minutes."
-        )
-        try:
-            checkpoint_manager.set_chunk_status(
-                workflow_name,
-                chunk_idx,
-                CHUNK_STATUS_PENDING,
-                {"message": f"Connection error — will retry: {str(e)[:300]}"},
-            )
-        except Exception as status_err:
-            celery_logger.warning(
-                f"{log_prefix} Could not reset chunk status to PENDING: {status_err}"
-            )
+        # Use a finite retry limit (5 × 300 s = 25 min max) so the outer chord
+        # eventually completes rather than blocking the conductor indefinitely.
+        # On exhaustion, mark FAILED_RETRYABLE and return normally so the chord
+        # body (next conductor invocation) can fire and stale detection re-queues
+        # the chunk.
         _on_connection_error(database_name, self)
-        raise self.retry(exc=e, countdown=300, max_retries=None)
+        try:
+            celery_logger.warning(
+                f"{log_prefix} DB connection error (SQL proxy down?): {e}. "
+                f"Retrying in 5 minutes (attempt {self.request.retries + 1}/5)."
+            )
+            raise self.retry(exc=e, countdown=300, max_retries=5)
+        except MaxRetriesExceededError:
+            celery_logger.error(
+                f"{log_prefix} Max connection-error retries exceeded on process_chunk. "
+                f"Marking chunk FAILED_RETRYABLE so conductor can re-dispatch."
+            )
+            error_payload = {
+                "error_message": f"Connection error retries exhausted in process_chunk: {str(e)}",
+                "error_type": type(e).__name__,
+                "attempt_count": workflow_attempt_count + 1,
+                "celery_task_id": self.request.id,
+            }
+            checkpoint_manager.set_chunk_status(
+                workflow_name, chunk_idx, CHUNK_STATUS_FAILED_RETRYABLE, error_payload
+            )
+            return {
+                "status": "failed_connection_error_retries_exhausted",
+                "chunk_idx": chunk_idx,
+                "marked_retryable_in_checkpoint": True,
+            }
 
     except (OperationalError, DisconnectionError) as e:
         celery_logger.warning(
