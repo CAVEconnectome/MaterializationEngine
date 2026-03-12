@@ -116,20 +116,31 @@ def celery_loggers(logger, *args, **kwargs):
 @worker_process_init.connect
 def configure_http_connection_pools(sender=None, **kwargs):
     """
-    Increase urllib3/requests HTTP connection pool sizes for each forked worker process.
+    Increase GCS urllib3 connection pool sizes for each forked worker process.
 
-    The default pool_maxsize=10 per host is exhausted during parallel CloudVolume
-    supervoxel lookups (scattered_points makes many concurrent requests to
-    storage.googleapis.com).  Each discarded connection requires a new TCP+TLS
-    handshake on the next request, adding latency to every supervoxel lookup.
+    CloudVolume uses cloud-files with use_https=True, which converts gs:// paths to
+    https://storage.googleapis.com/... and routes them through HttpInterface.
+    HttpInterface holds a class-level HTTPAdapter (created at import time with the
+    default pool_maxsize=10) that is shared across ALL instances and sessions.
+    With CLOUDVOLUME_PARALLEL concurrent threads all funnelling through that one
+    adapter, the pool fills immediately → discarded connections → TCP+TLS handshake
+    on every request.
 
-    We patch HTTPAdapter.__init__ so every Session created in this process
-    (including sessions created internally by cloud-files/cloudvolume) uses the
-    larger pool.  Explicit callers that pass their own pool_maxsize are unaffected.
+    Three-part fix (all run once per forked worker process):
+    1. Patch HTTPAdapter.__init__ so any new Session/AuthorizedSession created after
+       this hook uses pool_maxsize=GCS_CONNECTION_POOL_SIZE (default: 128).
+    2. Replace HttpInterface.adaptor (the shared class-level adapter) with a fresh
+       HTTPAdapter that has the larger pool.  This is the critical fix for use_https
+       paths because the old adapter was created before the patch could apply.
+    3. Reset cloud-files' GC_POOL and invalidate cloudvolume_cache so any gs://
+       connections inherited from the parent process are discarded; fresh ones pick
+       up the patched HTTPAdapter.
 
-    Tune with the GCS_CONNECTION_POOL_SIZE environment variable (default: 128).
+    Tune with GCS_CONNECTION_POOL_SIZE environment variable (default: 128).
     """
     from requests.adapters import HTTPAdapter
+    import cloudfiles.interfaces as cf_interfaces
+    from materializationengine.cloudvolume_gateway import cloudvolume_cache
 
     pool_size = int(os.environ.get("GCS_CONNECTION_POOL_SIZE", "128"))
     _orig_init = HTTPAdapter.__init__
@@ -138,10 +149,29 @@ def configure_http_connection_pools(sender=None, **kwargs):
         _orig_init(self, pool_connections=pool_connections, pool_maxsize=pool_maxsize, **kw)
 
     HTTPAdapter.__init__ = _patched_init
+
+    # Replace the class-level adapter shared by all HttpInterface instances.
+    # This is the primary fix for use_https=True (https://storage.googleapis.com)
+    # paths: the old class-level adapter has pool_maxsize=10 and cannot be patched
+    # retroactively via HTTPAdapter.__init__.
+    cf_interfaces.HttpInterface.adaptor = HTTPAdapter(
+        pool_connections=pool_size, pool_maxsize=pool_size
+    )
+
+    # For gs:// paths (non-use_https): discard GCS bucket connections inherited
+    # from the parent process.  reset_connection_pools() replaces the global
+    # GC_POOL with fresh empty queues; the next gs:// request creates a new
+    # google.cloud.storage.Client → AuthorizedSession → patched HTTPAdapter.
+    cf_interfaces.reset_connection_pools()
+
+    # Clear any CloudVolume client objects that hold references to old connections.
+    # They are re-populated lazily on first use in this worker process.
+    cloudvolume_cache.invalidate_cache()
+
     celery_logger.info(
-        f"[worker_process_init] HTTP connection pool defaults set to "
-        f"pool_connections={pool_size}, pool_maxsize={pool_size} "
-        f"(GCS_CONNECTION_POOL_SIZE={pool_size})."
+        f"[worker_process_init] GCS connection pool reset: "
+        f"HTTPAdapter defaults patched to pool_maxsize={pool_size}, "
+        f"HttpInterface.adaptor replaced, GC_POOL reset, cloudvolume_cache invalidated."
     )
     
 
