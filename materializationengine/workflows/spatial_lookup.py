@@ -32,7 +32,7 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
     RedisCheckpointManager,
 )
 from materializationengine.celery_init import celery
-from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
+from materializationengine.kvdb_gateway import kvdb_cache
 from materializationengine.cloudvolume_gateway import cloudvolume_cache
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.index_manager import index_cache
@@ -55,7 +55,6 @@ from materializationengine.workflows.chunking import (
 )
 from materializationengine.workflows.ingest_new_annotations import (
     create_missing_segmentation_table,
-    get_root_ids,
 )
 
 Base = declarative_base()
@@ -337,7 +336,7 @@ def process_table_in_chunks(
     database_name: str,
     chunk_scale_factor: int,
     supervoxel_batch_size: int,
-    batch_size_for_dispatch: int = 10,
+    batch_size_for_dispatch: int = 50,
     prioritize_failed_chunks: bool = True,
     initial_run: bool = False,
 ):
@@ -495,6 +494,22 @@ def process_table_in_chunks(
             full_chain.apply_async()
             return f"No chunks to process for {annotation_table_name}. Finalizing."
 
+        # Recover stale chunks on EVERY conductor invocation so that preempted
+        # sub-batch workers are detected within 600s regardless of whether there
+        # are still pending chunks in the queue to dispatch.
+        recovered_subtasks = checkpoint_manager.recover_stale_processing_subtasks(
+            workflow_name, stale_threshold_seconds=600
+        )
+        recovered_processing = checkpoint_manager.recover_stale_processing_chunks(
+            workflow_name, stale_threshold_seconds=600
+        )
+        recovered = recovered_subtasks + recovered_processing
+        if recovered:
+            celery_logger.info(
+                f"Recovered {recovered} stale chunk(s) for {workflow_name} "
+                f"({recovered_subtasks} PROCESSING_SUBTASKS, {recovered_processing} PROCESSING)."
+            )
+
         chunk_indices_to_process, new_failed_cursor, new_pending_cursor = (
             checkpoint_manager.get_chunks_to_process(
                 table_name=workflow_name,
@@ -562,27 +577,10 @@ def process_table_in_chunks(
                 full_chain.apply_async()
                 return f"All chunks processed for {annotation_table_name}. Finalizing."
             else:
-                # Before sleeping, check whether any chunks stuck in PROCESSING or
-                # PROCESSING_SUBTASKS state have been there long enough to be treated
-                # as lost (pod killed, broker blip, etc.) and should be retried.
-                recovered_subtasks = checkpoint_manager.recover_stale_processing_subtasks(
-                    workflow_name, stale_threshold_seconds=600
-                )
-                recovered_processing = checkpoint_manager.recover_stale_processing_chunks(
-                    workflow_name, stale_threshold_seconds=600
-                )
-                recovered = recovered_subtasks + recovered_processing
-                if recovered:
-                    celery_logger.info(
-                        f"Recovered {recovered} stale chunk(s) for {workflow_name} "
-                        f"({recovered_subtasks} PROCESSING_SUBTASKS, {recovered_processing} PROCESSING). "
-                        f"Retrying dispatcher immediately to re-dispatch them."
-                    )
-                    raise self.retry(countdown=0)
                 celery_logger.info(
                     f"No chunks returned by get_chunks_to_process for {workflow_name}, but scan may not be exhausted or non-terminal chunks exist. Retrying dispatcher."
                 )
-                raise self.retry(countdown=30)
+                raise self.retry(countdown=30 if not recovered else 0)
 
         processing_tasks = []
         for chunk_idx_to_process in chunk_indices_to_process:
@@ -906,25 +904,37 @@ def process_chunk(
 
     except ConnectionError as e:
         # SQL proxy / infra failure — NOT a data error.
-        # Reset chunk to PENDING so the attempt budget is NOT consumed; a healthy
-        # pod will re-pick it up after the countdown.
-        celery_logger.warning(
-            f"{log_prefix} DB connection error (SQL proxy down?): {e}. "
-            f"Resetting chunk to PENDING and retrying in 5 minutes."
-        )
-        try:
-            checkpoint_manager.set_chunk_status(
-                workflow_name,
-                chunk_idx,
-                CHUNK_STATUS_PENDING,
-                {"message": f"Connection error — will retry: {str(e)[:300]}"},
-            )
-        except Exception as status_err:
-            celery_logger.warning(
-                f"{log_prefix} Could not reset chunk status to PENDING: {status_err}"
-            )
+        # Use a finite retry limit (5 × 300 s = 25 min max) so the outer chord
+        # eventually completes rather than blocking the conductor indefinitely.
+        # On exhaustion, mark FAILED_RETRYABLE and return normally so the chord
+        # body (next conductor invocation) can fire and stale detection re-queues
+        # the chunk.
         _on_connection_error(database_name, self)
-        raise self.retry(exc=e, countdown=300, max_retries=None)
+        try:
+            celery_logger.warning(
+                f"{log_prefix} DB connection error (SQL proxy down?): {e}. "
+                f"Retrying in 5 minutes (attempt {self.request.retries + 1}/5)."
+            )
+            raise self.retry(exc=e, countdown=300, max_retries=5)
+        except MaxRetriesExceededError:
+            celery_logger.error(
+                f"{log_prefix} Max connection-error retries exceeded on process_chunk. "
+                f"Marking chunk FAILED_RETRYABLE so conductor can re-dispatch."
+            )
+            error_payload = {
+                "error_message": f"Connection error retries exhausted in process_chunk: {str(e)}",
+                "error_type": type(e).__name__,
+                "attempt_count": workflow_attempt_count + 1,
+                "celery_task_id": self.request.id,
+            }
+            checkpoint_manager.set_chunk_status(
+                workflow_name, chunk_idx, CHUNK_STATUS_FAILED_RETRYABLE, error_payload
+            )
+            return {
+                "status": "failed_connection_error_retries_exhausted",
+                "chunk_idx": chunk_idx,
+                "marked_retryable_in_checkpoint": True,
+            }
 
     except (OperationalError, DisconnectionError) as e:
         celery_logger.warning(
@@ -1125,7 +1135,7 @@ def get_root_ids_from_supervoxels(
     """
     start_time = time.time()
 
-    pcg_table_name = mat_metadata.get("pcg_table_name")
+    pcg_table_name: str = mat_metadata["pcg_table_name"]
     database = mat_metadata.get("database")
 
     try:
@@ -1158,6 +1168,7 @@ def get_root_ids_from_supervoxels(
     supervoxel_col_names = [
         col for col in supervoxel_df.columns if col.endswith("supervoxel_id")
     ]
+
 
     root_id_col_names = [
         col.replace("supervoxel_id", "root_id") for col in supervoxel_col_names
@@ -1193,7 +1204,7 @@ def get_root_ids_from_supervoxels(
                 if existing_value and existing_value > 0:
                     root_ids_df.at[idx, root_col] = existing_value
 
-    cg_client = chunkedgraph_cache.init_pcg(pcg_table_name)
+    cg_client = kvdb_cache.get_client(pcg_table_name)
 
     for sv_col in supervoxel_col_names:
         root_col = sv_col.replace("supervoxel_id", "root_id")
@@ -1212,8 +1223,11 @@ def get_root_ids_from_supervoxels(
 
         if not supervoxels_to_lookup.empty:
             try:
-                root_ids = get_root_ids(
-                    cg_client, supervoxels_to_lookup, materialization_time_stamp
+                root_ids = np.squeeze(
+                    cg_client.root_ext.get_roots(
+                        supervoxels_to_lookup.to_numpy(),
+                        time_stamp=materialization_time_stamp,
+                    )
                 )
 
                 root_ids_df.loc[sv_mask, root_col] = root_ids
@@ -1411,7 +1425,7 @@ def insert_segmentation_data(
 
 
 @celery.task(
-    name="workflow:process_and_insert_sub_batch",
+    name="process:process_and_insert_sub_batch",
     bind=True,
     acks_late=True,
     autoretry_for=(OperationalError, DisconnectionError, ChunkDataValidationError),

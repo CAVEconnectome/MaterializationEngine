@@ -43,6 +43,7 @@ dependencies = [
     "Flask-Limiter[redis]",
     "cryptography>=44.0.2",
     "uwsgi>=2.0.30",
+    "kvdbclient[extensions]",
 ]
 authors = [
     { name = "Forrest Collman", email = "forrestc@alleninstitute.org" },
