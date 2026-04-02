@@ -10,12 +10,15 @@ from celery import chain
 from celery.result import AsyncResult
 from celery.utils.log import get_task_logger
 from flask import current_app
-from redis import Redis
 from sqlalchemy import text
 from dynamicannotationdb.key_utils import build_segmentation_table_name
 from dynamicannotationdb.models import SegmentationMetadata
 
 from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
+from materializationengine.blueprints.upload.job_status import (
+    get_job_status,
+    update_job_status,
+)
 from materializationengine.blueprints.upload.parallel_csv_tasks import (
     conduct_csv_upload,
     prepare_csv_upload,
@@ -40,35 +43,6 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
     RedisCheckpointManager,
 )
 celery_logger = get_task_logger(__name__)
-
-# Redis client for storing job status
-REDIS_CLIENT = Redis(
-    host=get_config_param("REDIS_HOST"),
-    port=get_config_param("REDIS_PORT"),
-    password=get_config_param("REDIS_PASSWORD"),
-    db=0,
-)
-
-
-def update_job_status(job_id: str, status: Dict[str, Any]) -> None:
-    """Update job status in Redis"""
-    status["last_updated"] = datetime.now(timezone.utc).isoformat()
-    existing_status = get_job_status(job_id)
-    if existing_status:
-        if "user_id" in existing_status and "user_id" not in status:
-            status["user_id"] = existing_status["user_id"]
-        if "datastack_name" in existing_status and "datastack_name" not in status:
-            status["datastack_name"] = existing_status["datastack_name"]
-
-    REDIS_CLIENT.set(
-        f"csv_processing:{job_id}", json.dumps(status), ex=3600  # Expires in 1 hour
-    )
-
-
-def get_job_status(job_id: str) -> Dict[str, Any]:
-    """Get job status from Redis"""
-    status = REDIS_CLIENT.get(f"csv_processing:{job_id}")
-    return json.loads(status) if status else None
 
 
 @celery.task(name="orchestration:process_and_upload", bind=True)

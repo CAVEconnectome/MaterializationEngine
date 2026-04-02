@@ -33,8 +33,8 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
     CHUNK_STATUS_PROCESSING,
     RedisCheckpointManager,
 )
+from materializationengine.blueprints.upload.job_status import update_job_status
 from materializationengine.blueprints.upload.processor import SchemaProcessor
-from materializationengine.blueprints.upload.tasks import update_job_status
 from materializationengine.celery_init import celery
 from materializationengine.database import dynamic_annotation_cache, db_manager
 from materializationengine.index_manager import index_cache

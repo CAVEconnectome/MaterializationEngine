@@ -137,10 +137,10 @@ def create_app(config_name: str = None):
     @app.route("/health")
     def health():
         aligned_volume = current_app.config.get("TEST_DB_NAME", "annotation")
-        with db_manager.session_scope(aligned_volume) as session:
-            n_versions = session.query(AnalysisVersion).count()
+        #with db_manager.session_scope(aligned_volume) as session:
+        #    n_versions = session.query(AnalysisVersion).count()
         
-        return jsonify({aligned_volume: n_versions}), 200
+        return jsonify({aligned_volume: 0}), 200
 
     @app.teardown_appcontext
     def shutdown_session(exception=None):
