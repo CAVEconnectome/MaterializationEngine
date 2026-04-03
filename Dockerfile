@@ -52,3 +52,6 @@ RUN chmod +x /entrypoint.sh
 WORKDIR /app
 
 COPY . /app
+
+# Test moving the uwsgi.ini file to /etc/uwsgi/uwsgi.ini
+COPY uwsgi.ini /etc/uwsgi/uwsgi.ini
