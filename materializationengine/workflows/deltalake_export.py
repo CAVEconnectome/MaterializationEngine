@@ -36,18 +36,51 @@ class DeltaLakeOutputSpec:
 
 
 def discover_default_output_specs(
-    table_name: str, engine: Engine
+    table_name: str,
+    segmentation_table_name: str | None,
+    engine: Engine,
 ) -> list[DeltaLakeOutputSpec]:
-    """Derive one output spec per indexed column on *table_name*.
+    """Derive one output spec per indexed column on the exported table(s).
+
+    When the table is unmerged (separate annotation and segmentation
+    tables), indexes from both tables are inspected so that segmentation
+    columns (e.g. root-id columns) are also considered for partitioning.
 
     For non-spatial (B-tree) indexes, each indexed column becomes the
     partition column and z-order column.  For spatial (GiST) indexes,
     emit a spec that partitions on a Morton code derived from the decoded
     coordinates and z-orders on the individual coordinate columns.
-    Bloom filters are not set by default.
+    Bounding-box columns (names starting with ``bb_``) are skipped for
+    spatial indexes.  Timestamp columns are also skipped.
     """
     inspector = inspect(engine)
-    indexes = inspector.get_indexes(table_name)
+
+    # Gather indexes from all tables that will be part of the export.
+    table_names = [table_name]
+    if segmentation_table_name is not None:
+        table_names.append(segmentation_table_name)
+
+    indexes: list[dict] = []
+    for tbl in table_names:
+        indexes.extend(inspector.get_indexes(tbl))
+
+    # Build a set of timestamp column names so we can skip them.
+    # Inspect columns from all participating tables.
+    _timestamp_types = {
+        "TIMESTAMP",
+        "TIMESTAMP WITHOUT TIME ZONE",
+        "TIMESTAMP WITH TIME ZONE",
+        "TIMESTAMPTZ",
+    }
+    timestamp_columns: set[str] = set()
+    for tbl in table_names:
+        for c in inspector.get_columns(tbl):
+            try:
+                type_str = str(c["type"]).upper()
+            except Exception:
+                continue
+            if type_str in _timestamp_types:
+                timestamp_columns.add(c["name"])
 
     specs: list[DeltaLakeOutputSpec] = []
     for idx in indexes:
@@ -56,12 +89,21 @@ def discover_default_output_specs(
             continue
         col = column_names[0]
 
+        # Skip timestamp columns — they are typically metadata
+        # (created, deleted) and don't benefit from partitioning.
+        if col in timestamp_columns:
+            continue
+
         # NOTE: we may want to expand on different approaches in the future, e.g.
         # partitioning on one column and z-ordering on another, but for now we keep it
         # simple and just use the first column of each index for everything. This
         # helps us get going with zero-config defaults and we can iterate from there.
         dialect_options = idx.get("dialect_options", {})
         if "gist" in (dialect_options or {}).values():
+            # Skip bounding-box spatial columns — they are frequently
+            # all-null and produce degenerate partitions.
+            if col.startswith("bb_"):
+                continue
             # Spatial index — partition on Morton code, z-order on coordinates
             specs.append(
                 DeltaLakeOutputSpec(
@@ -404,24 +446,64 @@ def decode_geometry_columns(
 
     for col in geometry_columns:
         wkb_data = table[col].to_list()
-        points = shapely.from_wkb(wkb_data)
-        coords = shapely.get_coordinates(points, include_z=True)
+        n_rows = len(wkb_data)
 
-        x = coords[:, 0].astype(np.int32)
-        y = coords[:, 1].astype(np.int32)
-        z = coords[:, 2].astype(np.int32)
+        # Build a boolean mask of non-null geometries.
+        valid_mask = np.array([v is not None for v in wkb_data], dtype=bool)
+        n_valid = int(valid_mask.sum())
 
-        new_cols = [
-            pl.Series(f"{col}_x", x, dtype=pl.Int32),
-            pl.Series(f"{col}_y", y, dtype=pl.Int32),
-            pl.Series(f"{col}_z", z, dtype=pl.Int32),
-        ]
+        if n_valid == 0:
+            # All nulls — emit null columns and skip decoding.
+            new_cols = [
+                pl.Series(f"{col}_x", [None] * n_rows, dtype=pl.Int32),
+                pl.Series(f"{col}_y", [None] * n_rows, dtype=pl.Int32),
+                pl.Series(f"{col}_z", [None] * n_rows, dtype=pl.Int32),
+            ]
+            if col in morton_set:
+                new_cols.append(
+                    pl.Series(f"{col}_morton", [None] * n_rows, dtype=pl.Int64)
+                )
+        else:
+            # Decode only non-null geometries, then scatter back.
+            valid_wkb = [wkb_data[i] for i in range(n_rows) if valid_mask[i]]
+            points = shapely.from_wkb(valid_wkb)
+            coords = shapely.get_coordinates(points, include_z=True)
 
-        if col in morton_set:
-            morton = morton_encode_3d(
-                x.astype(np.uint64), y.astype(np.uint64), z.astype(np.uint64)
-            )
-            new_cols.append(pl.Series(f"{col}_morton", morton, dtype=pl.Int64))
+            if n_valid == n_rows:
+                # Fast path — no nulls to scatter.
+                x = coords[:, 0].astype(np.int32)
+                y = coords[:, 1].astype(np.int32)
+                z = coords[:, 2].astype(np.int32)
+            else:
+                # Scatter decoded coords into full-length nullable arrays.
+                x_full = np.full(n_rows, None, dtype=object)
+                y_full = np.full(n_rows, None, dtype=object)
+                z_full = np.full(n_rows, None, dtype=object)
+                x_full[valid_mask] = coords[:, 0].astype(np.int32)
+                y_full[valid_mask] = coords[:, 1].astype(np.int32)
+                z_full[valid_mask] = coords[:, 2].astype(np.int32)
+                x, y, z = x_full, y_full, z_full
+
+            new_cols = [
+                pl.Series(f"{col}_x", x, dtype=pl.Int32),
+                pl.Series(f"{col}_y", y, dtype=pl.Int32),
+                pl.Series(f"{col}_z", z, dtype=pl.Int32),
+            ]
+
+            if col in morton_set:
+                if n_valid == n_rows:
+                    morton = morton_encode_3d(
+                        x.astype(np.uint64),
+                        y.astype(np.uint64),
+                        z.astype(np.uint64),
+                    )
+                else:
+                    morton = np.full(n_rows, None, dtype=object)
+                    valid_x = coords[:, 0].astype(np.uint64)
+                    valid_y = coords[:, 1].astype(np.uint64)
+                    valid_z = coords[:, 2].astype(np.uint64)
+                    morton[valid_mask] = morton_encode_3d(valid_x, valid_y, valid_z)
+                new_cols.append(pl.Series(f"{col}_morton", morton, dtype=pl.Int64))
 
         table = table.with_columns(new_cols).drop(col)
 
@@ -633,12 +715,19 @@ def optimize_deltalake(
     else:
         dt.optimize.compact(writer_properties=writer_properties)
 
-    dt.vacuum(
-        dry_run=False,
-        retention_hours=0,
-        enforce_retention_duration=False,
-        full=True,
-    )
+    try:
+        dt.vacuum(
+            dry_run=False,
+            retention_hours=0,
+            enforce_retention_duration=False,
+            full=True,
+        )
+    except Exception as exc:
+        # delta-rs can fail on tables with all-null columns due to
+        # "unmasked nulls for non-nullable StructArray" in the
+        # transaction log stats.  Log and continue — the data is
+        # already written and optimized; vacuum just cleans up old files.
+        celery_logger.warning("vacuum failed for %s: %s", uri, exc)
 
 
 # ===========================================================================
@@ -750,7 +839,9 @@ def write_deltalake_table(
     if output_specs is not None:
         resolved_specs = [DeltaLakeOutputSpec(**s) for s in output_specs]
     else:
-        resolved_specs = discover_default_output_specs(table_name, engine)
+        resolved_specs = discover_default_output_specs(
+            table_name, segmentation_table_name, engine
+        )
 
     if not resolved_specs:
         celery_logger.warning(
