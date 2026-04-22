@@ -179,7 +179,7 @@ def discover_default_output_specs(
         specs.append(
             DeltaLakeOutputSpec(
                 partition_by=pk_col,
-                partition_strategy="uniform_range",
+                partition_strategy="percentile_range",
                 n_partitions="auto",
                 zorder_columns=[pk_col],
                 bloom_filter_columns=[],
@@ -217,7 +217,7 @@ def discover_default_output_specs(
             specs.append(
                 DeltaLakeOutputSpec(
                     partition_by=col,
-                    partition_strategy="uniform_range",
+                    partition_strategy="percentile_range",
                     n_partitions="auto",
                     zorder_columns=[col],
                     bloom_filter_columns=[],
@@ -308,11 +308,17 @@ def compute_partition_boundaries(
     table_name: str,
     column_name: str,
     n_partitions: int,
+    sample_percent: float | None = None,
 ) -> list:
     """Query Postgres for approximate percentile boundaries.
 
     Returns a sorted list of ``n_partitions - 1`` boundary values that
     split *column_name* into roughly equal-sized partitions.
+
+    If *sample_percent* is set (0–100), a ``TABLESAMPLE SYSTEM`` clause
+    is appended so that only a random page-level sample of the table is
+    scanned.  This makes the query fast even on very large tables, at the
+    cost of slightly approximate boundaries.
     """
     if n_partitions <= 1:
         return []
@@ -320,10 +326,14 @@ def compute_partition_boundaries(
     fractions = [i / n_partitions for i in range(1, n_partitions)]
     fractions_sql = ", ".join(str(f) for f in fractions)
 
+    from_clause = f'"{table_name}"'
+    if sample_percent is not None:
+        from_clause += f" TABLESAMPLE SYSTEM({sample_percent})"
+
     query = (
         f"SELECT percentile_disc(ARRAY[{fractions_sql}]) "
         f'WITHIN GROUP (ORDER BY "{column_name}") '
-        f'FROM "{table_name}"'
+        f"FROM {from_clause}"
     )
 
     row = _adbc_fetchone(connection_string, query)
@@ -332,6 +342,98 @@ def compute_partition_boundaries(
     # containing a Postgres array → Python list.
     boundaries = list(row[0])
     return boundaries
+
+
+_DEFAULT_SAMPLE_ROWS = 500_000
+
+
+def _estimate_sample_percent(
+    connection_string: str,
+    table_name: str,
+    target_rows: int = _DEFAULT_SAMPLE_ROWS,
+) -> float | None:
+    """Compute a TABLESAMPLE SYSTEM percentage for *target_rows*.
+
+    Returns ``None`` if the table is small enough that a full scan is
+    faster than sampling overhead (i.e. ``reltuples <= target_rows``).
+    """
+    row = _adbc_fetchone(
+        connection_string,
+        f"SELECT reltuples FROM pg_class WHERE relname = '{table_name}'",
+    )
+    if row is None or row[0] <= 0:
+        return None
+    reltuples = float(row[0])
+    if reltuples <= target_rows:
+        return None  # Table is small — scan the whole thing.
+    return min(target_rows / reltuples * 100, 100.0)
+
+
+def _compute_sampled_percentile_bounds(
+    connection_string: str,
+    table_name: str,
+    column_partitions: dict[str, int],
+    target_sample_rows: int = _DEFAULT_SAMPLE_ROWS,
+) -> dict[str, list]:
+    """Compute percentile boundaries for multiple columns in one query.
+
+    Groups all columns into a single ``SELECT`` with one
+    ``percentile_disc`` aggregate per column, optionally sampling via
+    ``TABLESAMPLE SYSTEM``.  This avoids repeated scans of the same
+    table.
+
+    Parameters
+    ----------
+    column_partitions
+        Mapping of ``{column_name: n_partitions}``.  Columns with
+        ``n_partitions <= 1`` are skipped (returned as empty lists).
+    target_sample_rows
+        Desired sample size.  If the table has fewer rows, the full
+        table is scanned instead.
+
+    Returns
+    -------
+    dict[str, list]
+        Mapping of ``{column_name: [breakpoints]}``.
+    """
+    # Separate trivial columns (no partitioning needed).
+    results: dict[str, list] = {}
+    nontrivial: dict[str, int] = {}
+    for col, n in column_partitions.items():
+        if n <= 1:
+            results[col] = []
+        else:
+            nontrivial[col] = n
+
+    if not nontrivial:
+        return results
+
+    sample_percent = _estimate_sample_percent(
+        connection_string, table_name, target_sample_rows
+    )
+
+    from_clause = f'"{table_name}"'
+    if sample_percent is not None:
+        from_clause += f" TABLESAMPLE SYSTEM({sample_percent})"
+
+    # Build one percentile_disc aggregate per column.
+    agg_parts = []
+    col_order = list(nontrivial.keys())
+    for col in col_order:
+        n = nontrivial[col]
+        fractions = [i / n for i in range(1, n)]
+        fractions_sql = ", ".join(str(f) for f in fractions)
+        agg_parts.append(
+            f'percentile_disc(ARRAY[{fractions_sql}]) WITHIN GROUP (ORDER BY "{col}")'
+        )
+
+    query = f"SELECT {', '.join(agg_parts)} FROM {from_clause}"
+    row = _adbc_fetchone(connection_string, query)
+
+    for i, col in enumerate(col_order):
+        results[col] = list(row[i])
+
+    return results
 
 
 def _parse_box3d(box3d_str: str) -> tuple[float, float, float, float, float, float]:
@@ -409,14 +511,20 @@ def resolve_bounds(
 
     Dispatches on ``spec.partition_strategy``:
 
-    * ``percentile_range`` → :func:`compute_partition_boundaries` (list of
-      N-1 breakpoints stored directly).
+    * ``percentile_range`` → :func:`compute_partition_boundaries` with
+      optional sampling (list of N-1 breakpoints stored directly).
     * ``uniform_range`` → :func:`compute_uniform_range_bounds` followed
       by ``np.linspace`` to produce the same N-1 interior breakpoints.
     * ``hash`` / ``None`` → no-op (hash partitioning doesn't use bounds).
 
     If ``spec.bounds`` is already non-``None`` (user-supplied), this
     function is a no-op regardless of strategy.
+
+    .. note::
+
+       Prefer :func:`resolve_all_bounds` when resolving multiple specs —
+       it batches percentile queries per physical table into a single SQL
+       statement, avoiding repeated scans.
     """
     if spec.bounds is not None:
         return
@@ -427,11 +535,13 @@ def resolve_bounds(
     n = spec.n_partitions if isinstance(spec.n_partitions, int) else 1
 
     if spec.partition_strategy == "percentile_range":
+        sample_percent = _estimate_sample_percent(connection_string, boundary_table)
         spec.bounds = compute_partition_boundaries(
             connection_string,
             boundary_table,
             spec.partition_by,
             n,
+            sample_percent=sample_percent,
         )
 
     elif spec.partition_strategy == "uniform_range":
@@ -445,6 +555,56 @@ def resolve_bounds(
             spec.bounds = []
         else:
             spec.bounds = np.linspace(col_min, col_max, n + 1)[1:-1].tolist()
+
+
+def resolve_all_bounds(
+    specs: list[DeltaLakeOutputSpec],
+    connection_string: str,
+    default_table: str,
+) -> None:
+    """Resolve bounds for all *specs* in place, batching per physical table.
+
+    ``percentile_range`` specs that share the same ``source_table`` are
+    grouped into a single SQL query with one ``percentile_disc`` aggregate
+    per column, optionally using ``TABLESAMPLE SYSTEM`` for large tables.
+
+    ``uniform_range`` and other strategies are resolved individually via
+    :func:`resolve_bounds`.
+    """
+    from collections import defaultdict
+
+    # Separate percentile specs (batchable) from others.
+    percentile_groups: dict[str, list[DeltaLakeOutputSpec]] = defaultdict(list)
+    other_specs: list[DeltaLakeOutputSpec] = []
+
+    for spec in specs:
+        if spec.bounds is not None:
+            continue
+        if spec.partition_by is None or spec.partition_strategy in (None, "hash"):
+            continue
+        if spec.partition_strategy == "percentile_range":
+            table = spec.source_table or default_table
+            percentile_groups[table].append(spec)
+        else:
+            other_specs.append(spec)
+
+    # Batch percentile queries per physical table.
+    for table, group in percentile_groups.items():
+        column_partitions = {}
+        for spec in group:
+            n = spec.n_partitions if isinstance(spec.n_partitions, int) else 1
+            column_partitions[spec.partition_by] = n
+
+        bounds_map = _compute_sampled_percentile_bounds(
+            connection_string, table, column_partitions
+        )
+
+        for spec in group:
+            spec.bounds = bounds_map.get(spec.partition_by, [])
+
+    # Resolve remaining specs individually.
+    for spec in other_specs:
+        resolve_bounds(spec, connection_string, default_table)
 
 
 def assign_partition(
@@ -514,7 +674,10 @@ def stream_table_to_arrow(
 
     If *row_limit* is set, a SQL ``LIMIT`` clause is appended so that at
     most that many rows are streamed.  Useful for local testing; does not
-    affect partition calculations upstream.
+    affect partition calculations upstream.  When the source is a JOIN,
+    the LIMIT is pushed into a subquery on the annotation table so that
+    Postgres can use a nested-loop / index plan instead of hash-joining
+    the full tables before truncating.
     """
     if drop_columns:
         columns = _resolve_select_columns(connection_string, source, drop_columns)
@@ -522,9 +685,21 @@ def stream_table_to_arrow(
     else:
         select_clause = "*"
 
-    query = f"SELECT {select_clause} FROM {source.from_clause}"
-    if row_limit is not None:
-        query += f" LIMIT {int(row_limit)}"
+    if row_limit is not None and source.segmentation_table is not None:
+        # Push LIMIT into a subquery on the annotation table so Postgres
+        # can nested-loop into the segmentation table's PK index instead
+        # of hash-joining hundreds of millions of rows first.
+        anno = source.annotation_table
+        seg = source.segmentation_table
+        from_clause = (
+            f'(SELECT * FROM "{anno}" LIMIT {int(row_limit)}) "{anno}" '
+            f'JOIN "{seg}" USING (id)'
+        )
+        query = f"SELECT {select_clause} FROM {from_clause}"
+    else:
+        query = f"SELECT {select_clause} FROM {source.from_clause}"
+        if row_limit is not None:
+            query += f" LIMIT {int(row_limit)}"
 
     with pg_dbapi.connect(connection_string) as conn:
         with conn.cursor() as cur:
@@ -1182,7 +1357,7 @@ def write_deltalake_table(
                 bytes_per_row=bytes_per_row,
             )
 
-        resolve_bounds(spec, connection_string, table_name)
+    resolve_all_bounds(resolved_specs, connection_string, table_name)
 
     # --- Stream and write ---
     celery_logger.info(

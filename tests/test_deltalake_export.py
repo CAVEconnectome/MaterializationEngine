@@ -77,7 +77,7 @@ class TestDiscoverDefaultOutputSpecs:
         assert specs[0].source_table == "synapse"
         # Second spec is from the index.
         assert specs[1].partition_by == "pre_pt_root_id"
-        assert specs[1].partition_strategy == "uniform_range"
+        assert specs[1].partition_strategy == "percentile_range"
         assert specs[1].n_partitions == "auto"
         assert specs[1].zorder_columns == ["pre_pt_root_id"]
         assert specs[1].bloom_filter_columns == []
