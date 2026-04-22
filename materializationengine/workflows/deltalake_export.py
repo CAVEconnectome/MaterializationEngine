@@ -61,22 +61,12 @@ class DeltaLakeOutputSpec:
     bounds: list | None = None
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def _adbc_fetchone(connection_string: str, query: str):
     """Execute *query* via ADBC and return a single row (or ``None``)."""
     with pg_dbapi.connect(connection_string) as conn:
         with conn.cursor() as cur:
             cur.execute(query)
             return cur.fetchone()
-
-
-# ---------------------------------------------------------------------------
-# 3.3  discover_default_output_specs
-# ---------------------------------------------------------------------------
 
 
 def discover_default_output_specs(
@@ -204,10 +194,6 @@ def discover_default_output_specs(
     return specs
 
 
-# ---------------------------------------------------------------------------
-# 3.4  resolve_n_partitions
-# ---------------------------------------------------------------------------
-
 # Fallback estimate when pg_class stats are unavailable.
 _DEFAULT_BYTES_PER_ROW = 200
 
@@ -263,12 +249,7 @@ def resolve_n_partitions(
     return n
 
 
-# ---------------------------------------------------------------------------
-# 3.5  compute_bucket_boundaries
-# ---------------------------------------------------------------------------
-
-
-def compute_bucket_boundaries(
+def compute_partition_boundaries(
     connection_string: str,
     table_name: str,
     column_name: str,
@@ -277,7 +258,7 @@ def compute_bucket_boundaries(
     """Query Postgres for approximate percentile boundaries.
 
     Returns a sorted list of ``n_partitions - 1`` boundary values that
-    split *column_name* into roughly equal-sized buckets.
+    split *column_name* into roughly equal-sized partitions.
     """
     if n_partitions <= 1:
         return []
@@ -330,7 +311,7 @@ def compute_uniform_range_bounds(
     For regular columns, queries ``MIN``/``MAX`` directly (no sampling).
 
     Returns a ``(min_val, max_val)`` tuple suitable for
-    :func:`assign_bucket`.
+    :func:`assign_partition`.
     """
     if source_geometry_column is not None:
         col = source_geometry_column
@@ -348,7 +329,7 @@ def compute_uniform_range_bounds(
 
         # Morton-encode the bounding-box corners.  The actual min/max
         # Morton values in the data may not correspond to opposite
-        # corners, but assign_bucket clips out-of-range
+        # corners, but assign_partition clips out-of-range
         # values so slightly wider bounds are safe.
         corners = morton_encode_3d(
             np.array([x_min, x_max], dtype=np.uint64),
@@ -365,11 +346,6 @@ def compute_uniform_range_bounds(
         return float(row[0]), float(row[1])
 
 
-# ---------------------------------------------------------------------------
-# 3.5b  resolve_bounds
-# ---------------------------------------------------------------------------
-
-
 def resolve_bounds(
     spec: DeltaLakeOutputSpec,
     connection_string: str,
@@ -379,11 +355,11 @@ def resolve_bounds(
 
     Dispatches on ``spec.partition_strategy``:
 
-    * ``percentile_range`` → :func:`compute_bucket_boundaries` (list of
+    * ``percentile_range`` → :func:`compute_partition_boundaries` (list of
       N-1 breakpoints stored directly).
     * ``uniform_range`` → :func:`compute_uniform_range_bounds` followed
       by ``np.linspace`` to produce the same N-1 interior breakpoints.
-    * ``hash`` / ``None`` → no-op (hash bucketing doesn't use bounds).
+    * ``hash`` / ``None`` → no-op (hash partitioning doesn't use bounds).
 
     If ``spec.bounds`` is already non-``None`` (user-supplied), this
     function is a no-op regardless of strategy.
@@ -397,7 +373,7 @@ def resolve_bounds(
     n = spec.n_partitions if isinstance(spec.n_partitions, int) else 1
 
     if spec.partition_strategy == "percentile_range":
-        spec.bounds = compute_bucket_boundaries(
+        spec.bounds = compute_partition_boundaries(
             connection_string,
             boundary_table,
             spec.partition_by,
@@ -417,12 +393,7 @@ def resolve_bounds(
             spec.bounds = np.linspace(col_min, col_max, n + 1)[1:-1].tolist()
 
 
-# ---------------------------------------------------------------------------
-# 3.6  assign_bucket (unified breakpoint-based bucketing)
-# ---------------------------------------------------------------------------
-
-
-def assign_bucket(
+def assign_partition(
     table: pl.DataFrame,
     column_name: str,
     breakpoints: list,
@@ -443,46 +414,31 @@ def assign_bucket(
     col = table[column_name]
     sorted_breaks = sorted(breakpoints)
 
-    bucket_series = col.cast(pl.Float64).cut(
+    partition_series = col.cast(pl.Float64).cut(
         breaks=[float(b) for b in sorted_breaks],
         labels=[str(i) for i in range(len(sorted_breaks) + 1)],
     )
     return table.with_columns(
-        bucket_series.cast(pl.Utf8).cast(pl.Int32).alias(partition_col)
+        partition_series.cast(pl.Utf8).cast(pl.Int32).alias(partition_col)
     )
 
 
-# ---------------------------------------------------------------------------
-# 3.8  assign_hash_bucket
-# ---------------------------------------------------------------------------
-
-
-def assign_hash_bucket(
+def assign_hash_partition(
     table: pl.DataFrame,
     column_name: str,
     n_partitions: int,
 ) -> pl.DataFrame:
-    """Add a ``{column_name}_partition`` column using hash bucketing.
+    """Add a ``{column_name}_partition`` column using hash partitioning.
 
-    ``hash(value) % n_partitions`` distributes rows across buckets.
+    ``hash(value) % n_partitions`` distributes rows across partitions.
     """
     partition_col = f"{column_name}_partition"
 
     if n_partitions <= 1:
         return table.with_columns(pl.lit(0).cast(pl.Int32).alias(partition_col))
 
-    bucket_expr = (pl.col(column_name).hash() % n_partitions).cast(pl.Int32)
-    return table.with_columns(bucket_expr.alias(partition_col))
-
-
-# ===========================================================================
-# Section 5 — Core Streaming Writer
-# ===========================================================================
-
-
-# ---------------------------------------------------------------------------
-# 5.1  stream_table_to_arrow
-# ---------------------------------------------------------------------------
+    partition_expr = (pl.col(column_name).hash() % n_partitions).cast(pl.Int32)
+    return table.with_columns(partition_expr.alias(partition_col))
 
 
 def stream_table_to_arrow(
@@ -504,11 +460,6 @@ def stream_table_to_arrow(
             reader = cur.fetch_record_batch()
             for batch in reader:
                 yield batch
-
-
-# ---------------------------------------------------------------------------
-# 5.3  decode_geometry_columns  (+ Morton code helpers)
-# ---------------------------------------------------------------------------
 
 
 # TODO see if this is already implemented somewhere easy to import to reduce footprint
@@ -645,11 +596,6 @@ def decode_geometry_columns(
     return table
 
 
-# ---------------------------------------------------------------------------
-# 5.4  Buffered write loop
-# ---------------------------------------------------------------------------
-
-
 def _flush_buffer(
     buffer: list[pa.RecordBatch],
     output_specs: list[DeltaLakeOutputSpec],
@@ -676,12 +622,12 @@ def _flush_buffer(
             part_col = spec.partition_by
 
             if spec.bounds is not None:
-                write_df = assign_bucket(write_df, part_col, spec.bounds)
+                write_df = assign_partition(write_df, part_col, spec.bounds)
                 partition_by = [f"{part_col}_partition"]
 
             elif spec.partition_strategy == "hash":
                 n = spec.n_partitions if isinstance(spec.n_partitions, int) else 1
-                write_df = assign_hash_bucket(write_df, part_col, n)
+                write_df = assign_hash_partition(write_df, part_col, n)
                 partition_by = [f"{part_col}_partition"]
 
         # Build the URI for this particular Delta Lake.
@@ -774,11 +720,6 @@ def export_table_to_deltalake(
         )
 
 
-# ===========================================================================
-# Section 7 — Delta Lake Optimization
-# ===========================================================================
-
-
 def optimize_deltalake(
     uri: str,
     zorder_columns: list[str] | None = None,
@@ -838,11 +779,6 @@ def optimize_deltalake(
         # transaction log stats.  Log and continue — the data is
         # already written and optimized; vacuum just cleans up old files.
         celery_logger.warning("vacuum failed for %s: %s", uri, exc)
-
-
-# ===========================================================================
-# Section 8 — Celery Task
-# ===========================================================================
 
 
 def _build_frozen_db_connection_string(
