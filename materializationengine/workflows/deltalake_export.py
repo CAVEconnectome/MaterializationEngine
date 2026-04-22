@@ -658,15 +658,12 @@ def assign_hash_partition(
 def stream_table_to_arrow(
     connection_string: str,
     source: TableSource,
-    chunk_size: int = 1_000_000,
     row_limit: int | None = None,
     drop_columns: list[str] | None = None,
 ):
     """Stream a table from a frozen Postgres DB as Arrow RecordBatches.
 
-    Yields :class:`pyarrow.RecordBatch` objects.  The driver determines
-    batch sizing; *chunk_size* is reserved for future use (e.g. setting
-    an ADBC batch-size hint).
+    Yields :class:`pyarrow.RecordBatch` objects.
 
     If *drop_columns* is set, those columns are excluded from the SQL
     ``SELECT`` so they never leave Postgres.  This reduces data over the
@@ -924,7 +921,6 @@ def export_table_to_deltalake(
     source: TableSource,
     output_specs: list[DeltaLakeOutputSpec],
     output_uri_base: str,
-    chunk_size: int = 1_000_000,
     flush_threshold_bytes: int = 2 * 1024 * 1024 * 1024,
     total_rows: int | None = None,
     progress_callback: Callable[[int, int | None], None] | None = None,
@@ -980,7 +976,6 @@ def export_table_to_deltalake(
     for batch in stream_table_to_arrow(
         connection_string,
         source,
-        chunk_size,
         row_limit=row_limit,
         drop_columns=_DEFAULT_DROP_COLUMNS,
     ):
@@ -1280,7 +1275,6 @@ def write_deltalake_table(
     flush_threshold = get_config_param(
         "DELTALAKE_FLUSH_THRESHOLD_BYTES", 2 * 1024 * 1024 * 1024
     )
-    chunk_size = get_config_param("DELTALAKE_CHUNK_SIZE", 1_000_000)
     target_partition_size_mb = get_config_param(
         "DELTALAKE_TARGET_PARTITION_SIZE_MB", 256
     )
@@ -1403,7 +1397,6 @@ def write_deltalake_table(
             source=source,
             output_specs=resolved_specs,
             output_uri_base=output_uri_base,
-            chunk_size=chunk_size,
             flush_threshold_bytes=flush_threshold,
             total_rows=row_count,
             progress_callback=_progress,

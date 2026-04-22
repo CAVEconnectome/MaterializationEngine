@@ -70,7 +70,6 @@ class BaseConfig:
     DELTALAKE_TARGET_PARTITION_SIZE_MB = int(
         os.environ.get("DELTALAKE_TARGET_PARTITION_SIZE_MB", 256)
     )
-    DELTALAKE_CHUNK_SIZE = int(os.environ.get("DELTALAKE_CHUNK_SIZE", 1_000_000))
 
     if os.environ.get("DAF_CREDENTIALS", None) is not None:
         with open(os.environ.get("DAF_CREDENTIALS"), "r") as f:
