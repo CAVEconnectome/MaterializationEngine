@@ -795,10 +795,62 @@ def morton_encode_3d(x: np.ndarray, y: np.ndarray, z: np.ndarray) -> np.ndarray:
     ).astype(np.int64)
 
 
+def add_morton_column(
+    table: pl.DataFrame,
+    geometry_col: str,
+) -> pl.DataFrame:
+    """Add a ``{geometry_col}_morton`` column from decoded coordinate columns.
+
+    Reads ``{geometry_col}_x``, ``{geometry_col}_y``, ``{geometry_col}_z``
+    (Int32) and bit-interleaves them into a 63-bit Morton code (Int64).
+    Null rows in the coordinate columns produce null Morton values.
+
+    .. warning::
+
+       Morton encoding currently assumes coordinates are non-negative and
+       fit in 21 bits (< 2 097 152).  Negative values will wrap to large
+       unsigned values and be silently truncated.  Values exceeding 21 bits
+       will also be truncated.  Both cases degrade spatial locality of the
+       resulting Morton codes but do not cause errors.
+    """
+    # TODO: normalise coordinates before Morton encoding so that negative
+    #  and/or large-range values are handled correctly.  This requires
+    #  global coordinate bounds (min/max per axis across the full table)
+    #  so the shift + coarsen step is consistent across streaming flushes.
+    col = geometry_col
+    x_series = table[f"{col}_x"]
+    y_series = table[f"{col}_y"]
+    z_series = table[f"{col}_z"]
+    n_rows = len(table)
+
+    valid_mask = (
+        x_series.is_not_null() & y_series.is_not_null() & z_series.is_not_null()
+    ).to_numpy()
+    n_valid = int(valid_mask.sum())
+
+    if n_valid == 0:
+        morton_series = pl.Series(f"{col}_morton", [None] * n_rows, dtype=pl.Int64)
+    elif n_valid == n_rows:
+        morton = morton_encode_3d(
+            x_series.to_numpy().astype(np.uint64),
+            y_series.to_numpy().astype(np.uint64),
+            z_series.to_numpy().astype(np.uint64),
+        )
+        morton_series = pl.Series(f"{col}_morton", morton, dtype=pl.Int64)
+    else:
+        valid_x = x_series.drop_nulls().to_numpy().astype(np.uint64)
+        valid_y = y_series.drop_nulls().to_numpy().astype(np.uint64)
+        valid_z = z_series.drop_nulls().to_numpy().astype(np.uint64)
+        morton_full = np.full(n_rows, None, dtype=object)
+        morton_full[valid_mask] = morton_encode_3d(valid_x, valid_y, valid_z)
+        morton_series = pl.Series(f"{col}_morton", morton_full.tolist(), dtype=pl.Int64)
+
+    return table.with_columns(morton_series)
+
+
 def decode_geometry_columns(
     table: pl.DataFrame,
     geometry_columns: list[str],
-    morton_columns: list[str] | None = None,
 ) -> pl.DataFrame:
     """Replace WKB geometry columns with decoded coordinate columns.
 
@@ -808,30 +860,9 @@ def decode_geometry_columns(
       ``{col}_x``, ``{col}_y``, ``{col}_z``.
     * Drop the original binary column.
 
-    If the column also appears in *morton_columns*, compute a Morton code
-    column ``{col}_morton`` (Int64) via bit-interleaving of coordinates.
-
-    .. warning::
-
-       Morton encoding currently assumes coordinates are non-negative and
-       fit in 21 bits (< 2 097 152).  Negative values (possible if the
-       column stores signed Int32 in the DB) will wrap to large unsigned
-       values and be silently truncated.  Values exceeding 21 bits will
-       also be truncated.  Both cases degrade spatial locality of the
-       resulting Morton codes but do not cause errors.
+    To also compute Morton codes from the decoded coordinates, call
+    :func:`add_morton_column` separately.
     """
-    # TODO: normalise coordinates before Morton encoding so that negative
-    #  and/or large-range values are handled correctly.  This requires
-    #  global coordinate bounds (min/max per axis across the full table)
-    #  so the shift + coarsen step is consistent across streaming flushes.
-    #  Options:
-    #    A. Pre-query ST_X/ST_Y/ST_Z min/max from Postgres (needs PostGIS).
-    #    B. Pre-scan a small sample batch to estimate bounds.
-    #    C. Accept caller-supplied bounds via export_table_to_deltalake.
-    #  Until then, Morton codes are only fully correct for non-negative
-    #  coordinates that fit in 21 bits.
-    morton_set = set(morton_columns or [])
-
     for col in geometry_columns:
         wkb_series = table[col]
         n_rows = len(wkb_series)
@@ -848,10 +879,6 @@ def decode_geometry_columns(
                 pl.Series(f"{col}_y", [None] * n_rows, dtype=pl.Int32),
                 pl.Series(f"{col}_z", [None] * n_rows, dtype=pl.Int32),
             ]
-            if col in morton_set:
-                new_cols.append(
-                    pl.Series(f"{col}_morton", [None] * n_rows, dtype=pl.Int64)
-                )
         else:
             # Decode only non-null geometries, then scatter back.
             # drop_nulls() preserves order, matching the True positions in valid_mask.
@@ -884,24 +911,6 @@ def decode_geometry_columns(
                 pl.Series(f"{col}_y", y, dtype=pl.Int32),
                 pl.Series(f"{col}_z", z, dtype=pl.Int32),
             ]
-
-            if col in morton_set:
-                if n_valid == n_rows:
-                    morton = morton_encode_3d(
-                        np.asarray(x, dtype=np.uint64),
-                        np.asarray(y, dtype=np.uint64),
-                        np.asarray(z, dtype=np.uint64),
-                    )
-                else:
-                    morton_full = np.full(n_rows, None, dtype=object)
-                    valid_x = coords[:, 0].astype(np.uint64)
-                    valid_y = coords[:, 1].astype(np.uint64)
-                    valid_z = coords[:, 2].astype(np.uint64)
-                    morton_full[valid_mask] = morton_encode_3d(
-                        valid_x, valid_y, valid_z
-                    )
-                    morton = morton_full.tolist()
-                new_cols.append(pl.Series(f"{col}_morton", morton, dtype=pl.Int64))
 
         table = table.with_columns(new_cols).drop(col)
 
@@ -936,7 +945,6 @@ def _flush_buffer(
     output_specs: list[DeltaLakeOutputSpec],
     output_uri_base: str,
     geometry_columns: list[str],
-    morton_columns: list[str],
 ) -> None:
     """Convert accumulated batches to Polars, decode geometry, assign
     partitions, and append to each target Delta Lake."""
@@ -952,12 +960,17 @@ def _flush_buffer(
 
     df = pl.from_arrow(arrow_table)
 
-    # Decode geometry columns (and Morton codes) once for all specs.
+    # Decode geometry columns (WKB → x/y/z) once for all specs.
     if geometry_columns:
-        df = decode_geometry_columns(df, geometry_columns, morton_columns)
+        df = decode_geometry_columns(df, geometry_columns)
 
     for spec in output_specs:
         write_df = df
+
+        # Compute Morton code if this spec partitions on a spatial column.
+        if spec.source_geometry_column is not None:
+            write_df = add_morton_column(write_df, spec.source_geometry_column)
+
         partition_by: list[str] | None = None
 
         if spec.partition_by is not None and spec.partition_strategy is not None:
@@ -1023,7 +1036,7 @@ def export_table_to_deltalake(
     """
     if row_limit is not None and total_rows is not None:
         total_rows = min(total_rows, row_limit)
-    # Collect geometry columns that need decoding and Morton codes.
+    # Collect geometry columns that need WKB → x/y/z decoding.
     geometry_columns = sorted(
         {
             spec.source_geometry_column
@@ -1031,11 +1044,6 @@ def export_table_to_deltalake(
             if spec.source_geometry_column is not None
         }
     )
-    morton_columns = [
-        spec.source_geometry_column
-        for spec in output_specs
-        if spec.source_geometry_column is not None
-    ]
 
     buffer: list[pa.RecordBatch] = []
     buffer_bytes = 0
@@ -1060,7 +1068,6 @@ def export_table_to_deltalake(
                 output_specs,
                 output_uri_base,
                 geometry_columns,
-                morton_columns,
             )
             buffer = []
             buffer_bytes = 0
@@ -1072,7 +1079,6 @@ def export_table_to_deltalake(
             output_specs,
             output_uri_base,
             geometry_columns,
-            morton_columns,
         )
 
     # Optimize each Delta Lake: z-order, bloom filters, and vacuum.

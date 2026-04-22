@@ -19,6 +19,7 @@ from materializationengine.workflows.deltalake_export import (
     _compute_sampled_percentile_bounds,
     _flush_buffer,
     _validate_identifier,
+    add_morton_column,
     assign_hash_partition,
     assign_partition,
     compute_partition_boundaries,
@@ -437,8 +438,8 @@ class TestFlushBufferPartitionConsistency:
         batch1 = pa.RecordBatch.from_pydict({"val": list(range(0, 21))})
         batch2 = pa.RecordBatch.from_pydict({"val": list(range(80, 100))})
 
-        _flush_buffer([batch1], [spec], "/tmp/test", [], [])
-        _flush_buffer([batch2], [spec], "/tmp/test", [], [])
+        _flush_buffer([batch1], [spec], "/tmp/test", [])
+        _flush_buffer([batch2], [spec], "/tmp/test", [])
 
         assert mock_write.call_count == 2
         written1 = pl.from_arrow(mock_write.call_args_list[0][0][1])
@@ -460,8 +461,8 @@ class TestFlushBufferPartitionConsistency:
         batch1 = pa.RecordBatch.from_pydict({"val": list(range(0, 11))})
         batch2 = pa.RecordBatch.from_pydict({"val": list(range(80, 100))})
 
-        _flush_buffer([batch1], [spec], "/tmp/test", [], [])
-        _flush_buffer([batch2], [spec], "/tmp/test", [], [])
+        _flush_buffer([batch1], [spec], "/tmp/test", [])
+        _flush_buffer([batch2], [spec], "/tmp/test", [])
 
         assert mock_write.call_count == 2
         written1 = pl.from_arrow(mock_write.call_args_list[0][0][1])
@@ -508,22 +509,15 @@ class TestDecodeGeometryColumns:
         assert result["pt_y"].to_list() == [20, 50, 80]
         assert result["pt_z"].to_list() == [30, 60, 90]
 
-    def test_morton_code_produced_when_requested(self):
+    def test_no_morton_code_produced(self):
         coords = [(100, 200, 300)]
         geom = _make_wkb_series(coords, "pt")
         df = pl.DataFrame({"pt": geom})
 
-        result = decode_geometry_columns(df, ["pt"], morton_columns=["pt"])
+        result = decode_geometry_columns(df, ["pt"])
 
-        assert "pt_morton" in result.columns
-        assert result["pt_morton"].dtype == pl.Int64
-        # Verify Morton code matches manual computation
-        expected = morton_encode_3d(
-            np.array([100], dtype=np.uint64),
-            np.array([200], dtype=np.uint64),
-            np.array([300], dtype=np.uint64),
-        )
-        assert result["pt_morton"].to_list() == expected.tolist()
+        assert "pt_morton" not in result.columns
+        assert "pt_x" in result.columns
 
     def test_multiple_geometry_columns(self):
         coords_a = [(1, 2, 3)]
@@ -536,14 +530,11 @@ class TestDecodeGeometryColumns:
             }
         )
 
-        result = decode_geometry_columns(
-            df, ["pre_pt", "post_pt"], morton_columns=["pre_pt"]
-        )
+        result = decode_geometry_columns(df, ["pre_pt", "post_pt"])
 
-        # pre_pt decoded with Morton
+        # Both decoded to x/y/z, no Morton columns
         assert "pre_pt_x" in result.columns
-        assert "pre_pt_morton" in result.columns
-        # post_pt decoded without Morton
+        assert "pre_pt_morton" not in result.columns
         assert "post_pt_x" in result.columns
         assert "post_pt_morton" not in result.columns
         # Originals dropped
@@ -559,6 +550,71 @@ class TestDecodeGeometryColumns:
 
         assert result["id"].to_list() == [42]
         assert result["name"].to_list() == ["synapse"]
+
+
+# ---------------------------------------------------------------------------
+# add_morton_column
+# ---------------------------------------------------------------------------
+
+
+class TestAddMortonColumn:
+    """add_morton_column should add a Morton code column from decoded x/y/z."""
+
+    def test_basic_morton_encoding(self):
+        df = pl.DataFrame(
+            {"pt_x": [100], "pt_y": [200], "pt_z": [300]},
+            schema={"pt_x": pl.Int32, "pt_y": pl.Int32, "pt_z": pl.Int32},
+        )
+
+        result = add_morton_column(df, "pt")
+
+        assert "pt_morton" in result.columns
+        assert result["pt_morton"].dtype == pl.Int64
+        expected = morton_encode_3d(
+            np.array([100], dtype=np.uint64),
+            np.array([200], dtype=np.uint64),
+            np.array([300], dtype=np.uint64),
+        )
+        assert result["pt_morton"].to_list() == expected.tolist()
+
+    def test_all_nulls(self):
+        df = pl.DataFrame(
+            {"pt_x": [None, None], "pt_y": [None, None], "pt_z": [None, None]},
+            schema={"pt_x": pl.Int32, "pt_y": pl.Int32, "pt_z": pl.Int32},
+        )
+
+        result = add_morton_column(df, "pt")
+
+        assert result["pt_morton"].to_list() == [None, None]
+        assert result["pt_morton"].dtype == pl.Int64
+
+    def test_partial_nulls(self):
+        df = pl.DataFrame(
+            {"pt_x": [10, None, 30], "pt_y": [20, None, 60], "pt_z": [30, None, 90]},
+            schema={"pt_x": pl.Int32, "pt_y": pl.Int32, "pt_z": pl.Int32},
+        )
+
+        result = add_morton_column(df, "pt")
+
+        assert result["pt_morton"][1] is None
+        assert result["pt_morton"][0] is not None
+        assert result["pt_morton"][2] is not None
+
+    def test_preserves_existing_columns(self):
+        df = pl.DataFrame(
+            {"id": [1], "pt_x": [10], "pt_y": [20], "pt_z": [30]},
+            schema={
+                "id": pl.Int64,
+                "pt_x": pl.Int32,
+                "pt_y": pl.Int32,
+                "pt_z": pl.Int32,
+            },
+        )
+
+        result = add_morton_column(df, "pt")
+
+        assert result["id"].to_list() == [1]
+        assert result["pt_x"].to_list() == [10]
 
 
 # ---------------------------------------------------------------------------
