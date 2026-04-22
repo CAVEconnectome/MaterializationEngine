@@ -15,6 +15,7 @@ import shapely
 from materializationengine.workflows.deltalake_export import (
     _DEFAULT_BYTES_PER_ROW,
     DeltaLakeOutputSpec,
+    TableSource,
     _flush_buffer,
     assign_hash_bucket,
     assign_percentile_range_bucket,
@@ -38,11 +39,15 @@ class TestDiscoverDefaultOutputSpecs:
     """discover_default_output_specs should return one spec per
     non-spatial indexed column."""
 
-    def _make_engine(self, indexes):
+    def _make_engine(self, indexes, columns=None, pk_columns=None):
         """Return a mock engine whose inspector returns *indexes*."""
         engine = MagicMock()
         inspector = MagicMock()
         inspector.get_indexes.return_value = indexes
+        inspector.get_columns.return_value = columns or []
+        inspector.get_pk_constraint.return_value = {
+            "constrained_columns": pk_columns or [],
+        }
         with patch(
             "materializationengine.workflows.deltalake_export.inspect",
             return_value=inspector,
@@ -58,20 +63,26 @@ class TestDiscoverDefaultOutputSpecs:
                 "dialect_options": {},
             }
         ]
-        engine, inspector = self._make_engine(indexes)
+        engine, inspector = self._make_engine(indexes, pk_columns=["id"])
+        source = TableSource(annotation_table="synapse")
         with patch(
             "materializationengine.workflows.deltalake_export.inspect",
             return_value=inspector,
         ):
-            specs = discover_default_output_specs("synapse", engine)
+            specs = discover_default_output_specs(source, engine)
 
-        assert len(specs) == 1
-        assert specs[0].partition_by == "pre_pt_root_id"
-        assert specs[0].partition_strategy == "percentile_range"
-        assert specs[0].n_partitions == "auto"
-        assert specs[0].zorder_columns == ["pre_pt_root_id"]
-        assert specs[0].bloom_filter_columns == []
-        assert specs[0].source_geometry_column is None
+        assert len(specs) == 2
+        # First spec is the PK id column.
+        assert specs[0].partition_by == "id"
+        assert specs[0].source_table == "synapse"
+        # Second spec is from the index.
+        assert specs[1].partition_by == "pre_pt_root_id"
+        assert specs[1].partition_strategy == "percentile_range"
+        assert specs[1].n_partitions == "auto"
+        assert specs[1].zorder_columns == ["pre_pt_root_id"]
+        assert specs[1].bloom_filter_columns == []
+        assert specs[1].source_geometry_column is None
+        assert specs[1].source_table == "synapse"
 
     def test_spatial_index_produces_morton_spec(self):
         indexes = [
@@ -83,11 +94,12 @@ class TestDiscoverDefaultOutputSpecs:
             }
         ]
         engine, inspector = self._make_engine(indexes)
+        source = TableSource(annotation_table="synapse")
         with patch(
             "materializationengine.workflows.deltalake_export.inspect",
             return_value=inspector,
         ):
-            specs = discover_default_output_specs("synapse", engine)
+            specs = discover_default_output_specs(source, engine)
 
         assert len(specs) == 1
         assert specs[0].partition_by == "pt_position_morton"
@@ -120,15 +132,17 @@ class TestDiscoverDefaultOutputSpecs:
                 "dialect_options": {"postgresql_using": "gist"},
             },
         ]
-        engine, inspector = self._make_engine(indexes)
+        engine, inspector = self._make_engine(indexes, pk_columns=["id"])
+        source = TableSource(annotation_table="synapse")
         with patch(
             "materializationengine.workflows.deltalake_export.inspect",
             return_value=inspector,
         ):
-            specs = discover_default_output_specs("synapse", engine)
+            specs = discover_default_output_specs(source, engine)
 
-        assert len(specs) == 3
+        assert len(specs) == 4
         assert {s.partition_by for s in specs} == {
+            "id",
             "pre_pt_root_id",
             "post_pt_root_id",
             "pt_position_morton",
@@ -136,11 +150,12 @@ class TestDiscoverDefaultOutputSpecs:
 
     def test_no_indexes(self):
         engine, inspector = self._make_engine([])
+        source = TableSource(annotation_table="empty_table")
         with patch(
             "materializationengine.workflows.deltalake_export.inspect",
             return_value=inspector,
         ):
-            specs = discover_default_output_specs("empty_table", engine)
+            specs = discover_default_output_specs(source, engine)
 
         assert specs == []
 
@@ -164,7 +179,8 @@ class TestEstimateBytesPerRow:
         mock_dbapi.connect.return_value.__enter__ = lambda s: mock_conn
         mock_dbapi.connect.return_value.__exit__ = MagicMock(return_value=False)
 
-        result = estimate_bytes_per_row("postgresql://localhost/test", "my_table")
+        source = TableSource(annotation_table="my_table")
+        result = estimate_bytes_per_row("postgresql://localhost/test", source)
         assert result == 81
 
     @patch("materializationengine.workflows.deltalake_export.pg_dbapi")
@@ -177,7 +193,8 @@ class TestEstimateBytesPerRow:
         mock_dbapi.connect.return_value.__enter__ = lambda s: mock_conn
         mock_dbapi.connect.return_value.__exit__ = MagicMock(return_value=False)
 
-        result = estimate_bytes_per_row("postgresql://localhost/test", "missing")
+        source = TableSource(annotation_table="missing")
+        result = estimate_bytes_per_row("postgresql://localhost/test", source)
         assert result == _DEFAULT_BYTES_PER_ROW
 
     @patch("materializationengine.workflows.deltalake_export.pg_dbapi")
@@ -190,7 +207,8 @@ class TestEstimateBytesPerRow:
         mock_dbapi.connect.return_value.__enter__ = lambda s: mock_conn
         mock_dbapi.connect.return_value.__exit__ = MagicMock(return_value=False)
 
-        result = estimate_bytes_per_row("postgresql://localhost/test", "empty")
+        source = TableSource(annotation_table="empty")
+        result = estimate_bytes_per_row("postgresql://localhost/test", source)
         assert result == _DEFAULT_BYTES_PER_ROW
 
 
@@ -670,7 +688,7 @@ class TestExportTableToDeltalake:
 
         export_table_to_deltalake(
             connection_string="unused",
-            annotation_table_name="synapse",
+            source=TableSource(annotation_table="synapse"),
             output_specs=[spec],
             output_uri_base="gs://bucket/test",
             boundaries=boundaries,
@@ -708,7 +726,7 @@ class TestExportTableToDeltalake:
 
         export_table_to_deltalake(
             connection_string="unused",
-            annotation_table_name="test_table",
+            source=TableSource(annotation_table="test_table"),
             output_specs=[spec],
             output_uri_base="gs://bucket/test",
             flush_threshold_bytes=10 * 1024 * 1024 * 1024,
@@ -737,7 +755,7 @@ class TestExportTableToDeltalake:
 
         export_table_to_deltalake(
             connection_string="unused",
-            annotation_table_name="t",
+            source=TableSource(annotation_table="t"),
             output_specs=[spec],
             output_uri_base="/tmp/test",
             boundaries={"val": [50]},
@@ -832,7 +850,7 @@ class TestOptimizeDeltalake:
 
         export_table_to_deltalake(
             connection_string="unused",
-            annotation_table_name="t",
+            source=TableSource(annotation_table="t"),
             output_specs=[spec],
             output_uri_base="/tmp/test",
         )
@@ -842,3 +860,112 @@ class TestOptimizeDeltalake:
         # Should have called z_order (not compact) since zorder_columns is set
         mock_dt.optimize.z_order.assert_called_once()
         mock_dt.vacuum.assert_called_once()
+
+
+# ===========================================================================
+# TableSource and column provenance tests
+# ===========================================================================
+
+
+class TestTableSource:
+    """TableSource.from_clause and table_names properties."""
+
+    def test_merged_single_table(self):
+        source = TableSource(annotation_table="synapse", is_merged=True)
+        assert source.from_clause == '"synapse"'
+        assert source.table_names == ["synapse"]
+
+    def test_unmerged_with_segmentation(self):
+        source = TableSource(
+            annotation_table="synapse",
+            segmentation_table="synapse__seg",
+            is_merged=False,
+        )
+        assert '"synapse"' in source.from_clause
+        assert "JOIN" in source.from_clause
+        assert '"synapse__seg"' in source.from_clause
+        assert source.table_names == ["synapse", "synapse__seg"]
+
+    def test_no_segmentation_table(self):
+        source = TableSource(
+            annotation_table="synapse",
+            segmentation_table=None,
+            is_merged=False,
+        )
+        assert source.from_clause == '"synapse"'
+        assert source.table_names == ["synapse"]
+
+
+class TestDiscoverDefaultOutputSpecsProvenance:
+    """discover_default_output_specs should set source_table to the
+    physical table that owns each index."""
+
+    def test_segmentation_index_provenance(self):
+        """Indexes from the segmentation table should have source_table
+        set to the segmentation table name."""
+        anno_indexes = [
+            {
+                "name": "ix_pt_position",
+                "column_names": ["pt_position"],
+                "unique": False,
+                "dialect_options": {"postgresql_using": "gist"},
+            }
+        ]
+        seg_indexes = [
+            {
+                "name": "ix_pre_pt_root_id",
+                "column_names": ["pre_pt_root_id"],
+                "unique": False,
+                "dialect_options": {},
+            }
+        ]
+
+        inspector = MagicMock()
+        # Return different indexes per table.
+        inspector.get_indexes.side_effect = lambda tbl: (
+            anno_indexes if tbl == "synapse" else seg_indexes
+        )
+        inspector.get_columns.return_value = []
+        inspector.get_pk_constraint.return_value = {
+            "constrained_columns": [],
+        }
+
+        source = TableSource(
+            annotation_table="synapse",
+            segmentation_table="synapse__seg",
+            is_merged=False,
+        )
+        with patch(
+            "materializationengine.workflows.deltalake_export.inspect",
+            return_value=inspector,
+        ):
+            specs = discover_default_output_specs(source, MagicMock())
+
+        assert len(specs) == 2
+        # The spatial spec should come from the annotation table.
+        spatial = [s for s in specs if s.source_geometry_column is not None][0]
+        assert spatial.source_table == "synapse"
+        # The root_id spec should come from the segmentation table.
+        root_id = [s for s in specs if s.partition_by == "pre_pt_root_id"][0]
+        assert root_id.source_table == "synapse__seg"
+
+
+class TestEstimateBytesPerRowMultiTable:
+    """estimate_bytes_per_row sums pg_class stats across physical tables."""
+
+    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
+    def test_sums_pages_across_tables(self, mock_fetchone):
+        # anno: 500 pages, 100k rows; seg: 300 pages, 100k rows
+        # total: 800 pages * 8192 / 100k = 65 bytes/row
+        mock_fetchone.side_effect = [
+            (500, 100_000.0),  # annotation table
+            (300, 100_000.0),  # segmentation table
+        ]
+        source = TableSource(
+            annotation_table="anno",
+            segmentation_table="seg",
+            is_merged=False,
+        )
+        result = estimate_bytes_per_row("postgresql://localhost/test", source)
+        assert result == 65
+        assert mock_fetchone.call_count == 2

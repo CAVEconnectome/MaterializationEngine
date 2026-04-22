@@ -19,6 +19,35 @@ celery_logger = logging.getLogger(__name__)
 
 
 @dataclass
+class TableSource:
+    """Encapsulates the (possibly joined) table identity for a frozen DB export.
+
+    Provides a unified ``from_clause`` for SQL queries that need the full
+    joined result set (streaming, etc.) and a ``table_names`` list for
+    inspecting physical tables (indexes, ``pg_class`` stats, etc.).
+    """
+
+    annotation_table: str
+    segmentation_table: str | None = None
+    is_merged: bool = True
+
+    @property
+    def from_clause(self) -> str:
+        """SQL FROM fragment: single table or JOIN."""
+        if self.is_merged or self.segmentation_table is None:
+            return f'"{self.annotation_table}"'
+        return f'"{self.annotation_table}" JOIN "{self.segmentation_table}" USING (id)'
+
+    @property
+    def table_names(self) -> list[str]:
+        """Physical table names for inspection (indexes, pg_class, etc.)."""
+        names = [self.annotation_table]
+        if self.segmentation_table is not None and not self.is_merged:
+            names.append(self.segmentation_table)
+        return names
+
+
+@dataclass
 class DeltaLakeOutputSpec:
     partition_by: str | None = None
     partition_strategy: Literal["percentile_range", "uniform_range", "hash"] | None = (
@@ -28,6 +57,20 @@ class DeltaLakeOutputSpec:
     zorder_columns: list[str] = field(default_factory=list)
     bloom_filter_columns: list[str] = field(default_factory=list)
     source_geometry_column: str | None = None
+    source_table: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _adbc_fetchone(connection_string: str, query: str):
+    """Execute *query* via ADBC and return a single row (or ``None``)."""
+    with pg_dbapi.connect(connection_string) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            return cur.fetchone()
 
 
 # ---------------------------------------------------------------------------
@@ -36,15 +79,17 @@ class DeltaLakeOutputSpec:
 
 
 def discover_default_output_specs(
-    table_name: str,
-    segmentation_table_name: str | None,
+    source: TableSource,
     engine: Engine,
 ) -> list[DeltaLakeOutputSpec]:
     """Derive one output spec per indexed column on the exported table(s).
 
-    When the table is unmerged (separate annotation and segmentation
-    tables), indexes from both tables are inspected so that segmentation
-    columns (e.g. root-id columns) are also considered for partitioning.
+    Indexes from all physical tables in *source* are inspected so that
+    segmentation columns (e.g. root-id columns) are also considered for
+    partitioning.  Each emitted spec records which physical table its
+    partition column came from (``source_table``), so that downstream
+    pre-queries (e.g. percentile boundaries) can target the correct table
+    without an unnecessary JOIN.
 
     For non-spatial (B-tree) indexes, each indexed column becomes the
     partition column and z-order column.  For spatial (GiST) indexes,
@@ -55,17 +100,7 @@ def discover_default_output_specs(
     """
     inspector = inspect(engine)
 
-    # Gather indexes from all tables that will be part of the export.
-    table_names = [table_name]
-    if segmentation_table_name is not None:
-        table_names.append(segmentation_table_name)
-
-    indexes: list[dict] = []
-    for tbl in table_names:
-        indexes.extend(inspector.get_indexes(tbl))
-
-    # Build a set of timestamp column names so we can skip them.
-    # Inspect columns from all participating tables.
+    # Gather indexes from all physical tables, tracking provenance.
     _timestamp_types = {
         "TIMESTAMP",
         "TIMESTAMP WITHOUT TIME ZONE",
@@ -73,7 +108,12 @@ def discover_default_output_specs(
         "TIMESTAMPTZ",
     }
     timestamp_columns: set[str] = set()
-    for tbl in table_names:
+    # List of (index_dict, owning_table_name) tuples.
+    indexed_entries: list[tuple[dict, str]] = []
+
+    for tbl in source.table_names:
+        indexed_entries.extend((idx, tbl) for idx in inspector.get_indexes(tbl))
+
         for c in inspector.get_columns(tbl):
             try:
                 type_str = str(c["type"]).upper()
@@ -83,7 +123,26 @@ def discover_default_output_specs(
                 timestamp_columns.add(c["name"])
 
     specs: list[DeltaLakeOutputSpec] = []
-    for idx in indexes:
+
+    # Always include a spec for the primary key ``id`` column.
+    # get_indexes() excludes the implicit PK index, but partitioning by
+    # ``id`` is useful as a baseline output (e.g. for row-level lookups).
+    pk = inspector.get_pk_constraint(source.annotation_table)
+    pk_columns = pk.get("constrained_columns", []) if pk else []
+    if pk_columns:
+        pk_col = pk_columns[0]
+        specs.append(
+            DeltaLakeOutputSpec(
+                partition_by=pk_col,
+                partition_strategy="uniform_range",
+                n_partitions="auto",
+                zorder_columns=[pk_col],
+                bloom_filter_columns=[],
+                source_table=source.annotation_table,
+            )
+        )
+
+    for idx, owning_table in indexed_entries:
         column_names = idx.get("column_names", [])
         if not column_names:
             continue
@@ -94,35 +153,40 @@ def discover_default_output_specs(
         if col in timestamp_columns:
             continue
 
-        # NOTE: we may want to expand on different approaches in the future, e.g.
-        # partitioning on one column and z-ordering on another, but for now we keep it
-        # simple and just use the first column of each index for everything. This
-        # helps us get going with zero-config defaults and we can iterate from there.
         dialect_options = idx.get("dialect_options", {})
         if "gist" in (dialect_options or {}).values():
-            # Skip bounding-box spatial columns — they are frequently
-            # all-null and produce degenerate partitions.
+            # Skip bounding-box spatial columns for now
             if col.startswith("bb_"):
                 continue
+
+            # TODO just for testing! remove!
+            if col.startswith("pre_") or col.startswith("post_"):
+                continue
+
             # Spatial index — partition on Morton code, z-order on coordinates
+            # NOTE: using the uniform range approach here as the percentile approach
+            # won't work without some extra tooling, as the morton column doesn't
+            # exist in the db
             specs.append(
                 DeltaLakeOutputSpec(
                     partition_by=f"{col}_morton",
-                    partition_strategy="percentile_range",
+                    partition_strategy="uniform_range", 
                     n_partitions="auto",
                     zorder_columns=[f"{col}_x", f"{col}_y", f"{col}_z"],
                     bloom_filter_columns=[],
                     source_geometry_column=col,
+                    source_table=owning_table,
                 )
             )
         else:
             specs.append(
                 DeltaLakeOutputSpec(
                     partition_by=col,
-                    partition_strategy="percentile_range",
+                    partition_strategy="uniform_range",
                     n_partitions="auto",
                     zorder_columns=[col],
                     bloom_filter_columns=[],
+                    source_table=owning_table,
                 )
             )
 
@@ -139,30 +203,30 @@ _DEFAULT_BYTES_PER_ROW = 200
 
 def estimate_bytes_per_row(
     connection_string: str,
-    table_name: str,
+    source: TableSource,
 ) -> int:
     """Estimate per-row byte size from Postgres catalog statistics.
 
-    Uses ``pg_class.relpages`` and ``pg_class.reltuples`` to derive an
-    on-disk average row width.  Falls back to ``_DEFAULT_BYTES_PER_ROW``
-    if the table has no stats (e.g. never analyzed) or zero rows.
+    Sums ``pg_class.relpages`` and ``pg_class.reltuples`` across all
+    physical tables in *source* (to account for join-widened rows) and
+    derives an on-disk average row width.  Falls back to
+    ``_DEFAULT_BYTES_PER_ROW`` if no table has stats.
     """
-    query = f"SELECT relpages, reltuples FROM pg_class WHERE relname = '{table_name}'"
+    total_pages = 0
+    total_tuples = 0.0
 
-    with pg_dbapi.connect(connection_string) as conn:
-        with conn.cursor() as cur:
-            cur.execute(query)
-            row = cur.fetchone()
+    for tbl in source.table_names:
+        query = f"SELECT relpages, reltuples FROM pg_class WHERE relname = '{tbl}'"
+        row = _adbc_fetchone(connection_string, query)
+        if row is not None and row[0] > 0 and row[1] > 0:
+            total_pages += row[0]
+            total_tuples = max(total_tuples, row[1])  # rows are shared via JOIN
 
-    if row is None:
-        return _DEFAULT_BYTES_PER_ROW
-
-    relpages, reltuples = row[0], row[1]
-    if reltuples <= 0 or relpages <= 0:
+    if total_tuples <= 0 or total_pages <= 0:
         return _DEFAULT_BYTES_PER_ROW
 
     # Each page is 8 KiB in Postgres.
-    return int(relpages * 8192 / reltuples)
+    return int(total_pages * 8192 / total_tuples)
 
 
 def resolve_n_partitions(
@@ -216,15 +280,78 @@ def compute_bucket_boundaries(
         f'FROM "{table_name}"'
     )
 
-    with pg_dbapi.connect(connection_string) as conn:
-        with conn.cursor() as cur:
-            cur.execute(query)
-            row = cur.fetchone()
+    row = _adbc_fetchone(connection_string, query)
 
     # percentile_disc with an array argument returns a single-element row
     # containing a Postgres array → Python list.
     boundaries = list(row[0])
     return boundaries
+
+
+def _parse_box3d(box3d_str: str) -> tuple[float, float, float, float, float, float]:
+    """Parse a PostGIS ``BOX3D(xmin ymin zmin, xmax ymax zmax)`` string.
+
+    Returns ``(x_min, y_min, z_min, x_max, y_max, z_max)``.
+    """
+    # Strip the "BOX3D(" prefix and ")" suffix.
+    inner = box3d_str.strip().removeprefix("BOX3D(").removesuffix(")")
+    lo, hi = inner.split(",")
+    x_min, y_min, z_min = (float(v) for v in lo.split())
+    x_max, y_max, z_max = (float(v) for v in hi.split())
+    return x_min, y_min, z_min, x_max, y_max, z_max
+
+
+def compute_uniform_range_bounds(
+    connection_string: str,
+    table_name: str,
+    column_name: str,
+    source_geometry_column: str | None = None,
+    sample_pages: int = 1000,
+) -> tuple[float, float]:
+    """Query Postgres for the min/max range of a partition column.
+
+    For geometry-derived Morton columns (*source_geometry_column* is set),
+    uses ``ST_3DExtent`` with ``TABLESAMPLE SYSTEM`` to approximate the
+    3-D bounding box from a page-level sample, then Morton-encodes the
+    corners.  *sample_pages* controls how many 8 KiB pages are sampled
+    (default 1000 ≈ 8 MB of heap data).
+
+    For regular columns, queries ``MIN``/``MAX`` directly (no sampling).
+
+    Returns a ``(min_val, max_val)`` tuple suitable for
+    :func:`assign_uniform_range_bucket`.
+    """
+    if source_geometry_column is not None:
+        col = source_geometry_column
+        query = (
+            f"SELECT ST_XMin(bbox), ST_YMin(bbox), ST_ZMin(bbox), "
+            f"ST_XMax(bbox), ST_YMax(bbox), ST_ZMax(bbox) FROM ("
+            f'SELECT ST_3DExtent("{col}") AS bbox '
+            f'FROM "{table_name}" TABLESAMPLE SYSTEM ('
+            f"{sample_pages}.0 / ("
+            f"SELECT relpages FROM pg_class WHERE relname = '{table_name}'"
+            f") * 100)) sub"
+        )
+        row = _adbc_fetchone(connection_string, query)
+        x_min, y_min, z_min, x_max, y_max, z_max = (float(v) for v in row)
+
+        # Morton-encode the bounding-box corners.  The actual min/max
+        # Morton values in the data may not correspond to opposite
+        # corners, but assign_uniform_range_bucket clips out-of-range
+        # values so slightly wider bounds are safe.
+        corners = morton_encode_3d(
+            np.array([x_min, x_max], dtype=np.uint64),
+            np.array([y_min, y_max], dtype=np.uint64),
+            np.array([z_min, z_max], dtype=np.uint64),
+        )
+        return float(corners.min()), float(corners.max())
+    else:
+        query = (
+            f'SELECT MIN("{column_name}")::float, MAX("{column_name}")::float '
+            f'FROM "{table_name}"'
+        )
+        row = _adbc_fetchone(connection_string, query)
+        return float(row[0]), float(row[1])
 
 
 # ---------------------------------------------------------------------------
@@ -327,30 +454,9 @@ def assign_hash_bucket(
 # ---------------------------------------------------------------------------
 
 
-def _build_stream_query(
-    annotation_table_name: str,
-    segmentation_table_name: str | None,
-    is_merged: bool,
-) -> str:
-    """Construct the SQL query for streaming a table from a frozen DB.
-
-    Three cases:
-    1. Merged table or no segmentation table → ``SELECT * FROM annotation``
-    2. Unmerged with segmentation → ``SELECT * FROM anno JOIN seg USING (id)``
-    """
-    if is_merged or segmentation_table_name is None:
-        return f'SELECT * FROM "{annotation_table_name}"'
-    return (
-        f'SELECT * FROM "{annotation_table_name}" '
-        f'JOIN "{segmentation_table_name}" USING (id)'
-    )
-
-
 def stream_table_to_arrow(
     connection_string: str,
-    annotation_table_name: str,
-    segmentation_table_name: str | None = None,
-    is_merged: bool = True,
+    source: TableSource,
     chunk_size: int = 1_000_000,
 ):
     """Stream a table from a frozen Postgres DB as Arrow RecordBatches.
@@ -359,9 +465,7 @@ def stream_table_to_arrow(
     batch sizing; *chunk_size* is reserved for future use (e.g. setting
     an ADBC batch-size hint).
     """
-    query = _build_stream_query(
-        annotation_table_name, segmentation_table_name, is_merged
-    )
+    query = f"SELECT * FROM {source.from_clause}"
 
     with pg_dbapi.connect(connection_string) as conn:
         with conn.cursor() as cur:
@@ -574,11 +678,9 @@ def _flush_buffer(
 
 def export_table_to_deltalake(
     connection_string: str,
-    annotation_table_name: str,
+    source: TableSource,
     output_specs: list[DeltaLakeOutputSpec],
     output_uri_base: str,
-    segmentation_table_name: str | None = None,
-    is_merged: bool = True,
     chunk_size: int = 1_000_000,
     flush_threshold_bytes: int = 2 * 1024 * 1024 * 1024,
     boundaries: dict[str, list] | None = None,
@@ -620,9 +722,7 @@ def export_table_to_deltalake(
 
     for batch in stream_table_to_arrow(
         connection_string,
-        annotation_table_name,
-        segmentation_table_name,
-        is_merged,
+        source,
         chunk_size,
     ):
         buffer.append(batch)
@@ -835,13 +935,17 @@ def write_deltalake_table(
     is_merged = not has_seg_table and engine.dialect.has_table(engine, table_name)
     segmentation_table_name = seg_table_name if has_seg_table else None
 
+    source = TableSource(
+        annotation_table=table_name,
+        segmentation_table=segmentation_table_name,
+        is_merged=is_merged,
+    )
+
     # --- Resolve output specs ---
     if output_specs is not None:
         resolved_specs = [DeltaLakeOutputSpec(**s) for s in output_specs]
     else:
-        resolved_specs = discover_default_output_specs(
-            table_name, segmentation_table_name, engine
-        )
+        resolved_specs = discover_default_output_specs(source, engine)
 
     if not resolved_specs:
         celery_logger.warning(
@@ -870,7 +974,7 @@ def write_deltalake_table(
             )
 
     # --- Estimate bytes per row and resolve partition counts ---
-    bytes_per_row = estimate_bytes_per_row(connection_string, table_name)
+    bytes_per_row = estimate_bytes_per_row(connection_string, source)
 
     boundaries: dict[str, list] = {}
     uniform_ranges: dict[str, tuple[float, float]] = {}
@@ -885,11 +989,20 @@ def write_deltalake_table(
             )
 
         if spec.partition_by and spec.partition_strategy == "percentile_range":
+            boundary_table = spec.source_table or table_name
             boundaries[spec.partition_by] = compute_bucket_boundaries(
                 connection_string,
-                table_name,
+                boundary_table,
                 spec.partition_by,
                 spec.n_partitions,
+            )
+        elif spec.partition_by and spec.partition_strategy == "uniform_range":
+            boundary_table = spec.source_table or table_name
+            uniform_ranges[spec.partition_by] = compute_uniform_range_bounds(
+                connection_string,
+                boundary_table,
+                spec.partition_by,
+                source_geometry_column=spec.source_geometry_column,
             )
 
     # --- Stream and write ---
@@ -903,11 +1016,9 @@ def write_deltalake_table(
 
     export_table_to_deltalake(
         connection_string=connection_string,
-        annotation_table_name=table_name,
+        source=source,
         output_specs=resolved_specs,
         output_uri_base=output_uri_base,
-        segmentation_table_name=segmentation_table_name,
-        is_merged=is_merged,
         chunk_size=chunk_size,
         flush_threshold_bytes=flush_threshold,
         boundaries=boundaries,
