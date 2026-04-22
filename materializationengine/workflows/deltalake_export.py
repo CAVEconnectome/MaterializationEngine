@@ -28,6 +28,9 @@ _pg_dialect.ischema_names["geometry"] = BYTEA
 
 celery_logger = logging.getLogger(__name__)
 
+# Columns to drop from every Delta Lake export by default.
+_DEFAULT_DROP_COLUMNS = ["created", "deleted", "superceded_id"]
+
 
 @dataclass
 class TableSource:
@@ -80,6 +83,44 @@ def _adbc_fetchone(connection_string: str, query: str):
         with conn.cursor() as cur:
             cur.execute(query)
             return cur.fetchone()
+
+
+def _adbc_fetchall(connection_string: str, query: str) -> list:
+    """Execute *query* via ADBC and return all rows."""
+    with pg_dbapi.connect(connection_string) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            return cur.fetchall()
+
+
+def _resolve_select_columns(
+    connection_string: str,
+    source: TableSource,
+    drop_columns: list[str],
+) -> list[str]:
+    """Query column names from the source table(s) and exclude *drop_columns*.
+
+    Returns the ordered list of column names to SELECT.  Columns present
+    in *drop_columns* but absent from the table are silently ignored.
+    When the source is a JOIN, columns from both tables are included
+    (de-duplicated, preserving order).
+    """
+    drop_set = set(drop_columns)
+    seen: set[str] = set()
+    columns: list[str] = []
+
+    for tbl in source.table_names:
+        query = (
+            f"SELECT column_name FROM information_schema.columns "
+            f"WHERE table_name = '{tbl}' ORDER BY ordinal_position"
+        )
+        rows = _adbc_fetchall(connection_string, query)
+        for (col_name,) in rows:
+            if col_name not in drop_set and col_name not in seen:
+                columns.append(col_name)
+                seen.add(col_name)
+
+    return columns
 
 
 def discover_default_output_specs(
@@ -459,6 +500,7 @@ def stream_table_to_arrow(
     source: TableSource,
     chunk_size: int = 1_000_000,
     row_limit: int | None = None,
+    drop_columns: list[str] | None = None,
 ):
     """Stream a table from a frozen Postgres DB as Arrow RecordBatches.
 
@@ -466,11 +508,21 @@ def stream_table_to_arrow(
     batch sizing; *chunk_size* is reserved for future use (e.g. setting
     an ADBC batch-size hint).
 
+    If *drop_columns* is set, those columns are excluded from the SQL
+    ``SELECT`` so they never leave Postgres.  This reduces data over the
+    wire and lowers memory pressure in the streaming buffer.
+
     If *row_limit* is set, a SQL ``LIMIT`` clause is appended so that at
     most that many rows are streamed.  Useful for local testing; does not
     affect partition calculations upstream.
     """
-    query = f"SELECT * FROM {source.from_clause}"
+    if drop_columns:
+        columns = _resolve_select_columns(connection_string, source, drop_columns)
+        select_clause = ", ".join(f'"{c}"' for c in columns)
+    else:
+        select_clause = "*"
+
+    query = f"SELECT {select_clause} FROM {source.from_clause}"
     if row_limit is not None:
         query += f" LIMIT {int(row_limit)}"
 
@@ -755,6 +807,7 @@ def export_table_to_deltalake(
         source,
         chunk_size,
         row_limit=row_limit,
+        drop_columns=_DEFAULT_DROP_COLUMNS,
     ):
         buffer.append(batch)
         buffer_bytes += batch.nbytes
