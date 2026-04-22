@@ -17,9 +17,9 @@ from materializationengine.workflows.deltalake_export import (
     DeltaLakeOutputSpec,
     TableSource,
     _flush_buffer,
-    assign_bucket,
-    assign_hash_bucket,
-    compute_bucket_boundaries,
+    assign_hash_partition,
+    assign_partition,
+    compute_partition_boundaries,
     decode_geometry_columns,
     discover_default_output_specs,
     estimate_bytes_per_row,
@@ -250,16 +250,16 @@ class TestResolveNPartitions:
 
 
 # ---------------------------------------------------------------------------
-# 4.3  compute_bucket_boundaries
+# 4.3  compute_partition_boundaries
 # ---------------------------------------------------------------------------
 
 
 class TestComputeBucketBoundaries:
-    """compute_bucket_boundaries queries Postgres for percentiles."""
+    """compute_partition_boundaries queries Postgres for percentiles."""
 
     def test_single_partition_returns_empty(self):
         # No DB call needed for n_partitions <= 1
-        assert compute_bucket_boundaries("unused", "t", "c", 1) == []
+        assert compute_partition_boundaries("unused", "t", "c", 1) == []
 
     @patch("materializationengine.workflows.deltalake_export.pg_dbapi")
     def test_four_partitions(self, mock_dbapi):
@@ -272,7 +272,7 @@ class TestComputeBucketBoundaries:
         mock_dbapi.connect.return_value.__enter__ = lambda s: mock_conn
         mock_dbapi.connect.return_value.__exit__ = MagicMock(return_value=False)
 
-        boundaries = compute_bucket_boundaries(
+        boundaries = compute_partition_boundaries(
             "postgresql://localhost/test", "my_table", "root_id", 4
         )
         assert boundaries == [10, 20, 30]
@@ -285,7 +285,7 @@ class TestComputeBucketBoundaries:
 
 
 # ---------------------------------------------------------------------------
-# 4.4  assign_bucket
+# 4.4  assign_partition
 # ---------------------------------------------------------------------------
 
 
@@ -295,7 +295,7 @@ class TestAssignBucket:
     def test_basic_distribution(self):
         # 100 rows with values 0..99, breakpoints at 25, 50, 75 → 4 buckets
         df = pl.DataFrame({"val": list(range(100))})
-        result = assign_bucket(df, "val", [25, 50, 75])
+        result = assign_partition(df, "val", [25, 50, 75])
 
         assert "val_partition" in result.columns
         counts = result.group_by("val_partition").len().sort("val_partition")
@@ -307,7 +307,7 @@ class TestAssignBucket:
     def test_contiguous_ranges(self):
         # Verify that values within each bucket are contiguous
         df = pl.DataFrame({"val": list(range(100))})
-        result = assign_bucket(df, "val", [25, 50, 75])
+        result = assign_partition(df, "val", [25, 50, 75])
 
         for bucket in result["val_partition"].unique().sort().to_list():
             bucket_vals = (
@@ -318,19 +318,19 @@ class TestAssignBucket:
 
     def test_single_boundary(self):
         df = pl.DataFrame({"val": list(range(10))})
-        result = assign_bucket(df, "val", [5])
+        result = assign_partition(df, "val", [5])
         assert result["val_partition"].unique().sort().to_list() == [0, 1]
 
     def test_empty_breakpoints(self):
         df = pl.DataFrame({"val": list(range(10))})
-        result = assign_bucket(df, "val", [])
+        result = assign_partition(df, "val", [])
         assert result["val_partition"].unique().to_list() == [0]
 
     def test_linspace_breakpoints(self):
         # Simulate what resolve_bounds does for uniform_range: linspace
         breakpoints = np.linspace(0, 99, 5)[1:-1].tolist()  # 3 interior edges
         df = pl.DataFrame({"val": list(range(100))})
-        result = assign_bucket(df, "val", breakpoints)
+        result = assign_partition(df, "val", breakpoints)
 
         assert "val_partition" in result.columns
         partitions = result["val_partition"].unique().sort().to_list()
@@ -338,7 +338,7 @@ class TestAssignBucket:
 
 
 # ---------------------------------------------------------------------------
-# assign_hash_bucket (supplementary — not in task list but included for
+# assign_hash_partition (supplementary — not in task list but included for
 # completeness since the function was implemented)
 # ---------------------------------------------------------------------------
 
@@ -349,13 +349,13 @@ class TestAssignHashBucket:
     def test_all_buckets_assigned(self):
         # With enough distinct values, all buckets should be populated
         df = pl.DataFrame({"val": list(range(1000))})
-        result = assign_hash_bucket(df, "val", 4)
+        result = assign_hash_partition(df, "val", 4)
         partitions = result["val_partition"].unique().sort().to_list()
         assert partitions == [0, 1, 2, 3]
 
     def test_single_partition(self):
         df = pl.DataFrame({"val": list(range(10))})
-        result = assign_hash_bucket(df, "val", 1)
+        result = assign_hash_partition(df, "val", 1)
         assert result["val_partition"].unique().to_list() == [0]
 
 
@@ -375,11 +375,11 @@ class TestCrossBufferPartitionConsistency:
 
         # Buffer 1: values 0–20 (all below first breakpoint → bucket 0)
         df1 = pl.DataFrame({"val": list(range(0, 21))})
-        result1 = assign_bucket(df1, "val", breakpoints)
+        result1 = assign_partition(df1, "val", breakpoints)
 
         # Buffer 2: values 80–99 (all above last breakpoint → bucket 3)
         df2 = pl.DataFrame({"val": list(range(80, 100))})
-        result2 = assign_bucket(df2, "val", breakpoints)
+        result2 = assign_partition(df2, "val", breakpoints)
 
         assert result1["val_partition"].unique().to_list() == [0]
         assert result2["val_partition"].unique().to_list() == [3]
@@ -391,11 +391,11 @@ class TestCrossBufferPartitionConsistency:
 
         # Buffer 1: values 0–10 (all in first bin → bucket 0)
         df1 = pl.DataFrame({"val": list(range(0, 11))})
-        result1 = assign_bucket(df1, "val", breakpoints)
+        result1 = assign_partition(df1, "val", breakpoints)
 
         # Buffer 2: values 80–99 (all in last bin → bucket 3)
         df2 = pl.DataFrame({"val": list(range(80, 100))})
-        result2 = assign_bucket(df2, "val", breakpoints)
+        result2 = assign_partition(df2, "val", breakpoints)
 
         assert result1["val_partition"].unique().to_list() == [0]
         assert result2["val_partition"].unique().to_list() == [3]
@@ -407,7 +407,7 @@ class TestCrossBufferPartitionConsistency:
         breakpoints = np.linspace(0.0, 100.0, 5)[1:-1].tolist()
 
         df = pl.DataFrame({"val": list(range(76, 100))})
-        result = assign_bucket(df, "val", breakpoints)
+        result = assign_partition(df, "val", breakpoints)
         assert result["val_partition"].unique().to_list() == [3]
 
 
@@ -849,7 +849,7 @@ class TestTableSource:
     """TableSource.from_clause and table_names properties."""
 
     def test_merged_single_table(self):
-        source = TableSource(annotation_table="synapse", is_merged=True)
+        source = TableSource(annotation_table="synapse")
         assert source.from_clause == '"synapse"'
         assert source.table_names == ["synapse"]
 
@@ -857,7 +857,6 @@ class TestTableSource:
         source = TableSource(
             annotation_table="synapse",
             segmentation_table="synapse__seg",
-            is_merged=False,
         )
         assert '"synapse"' in source.from_clause
         assert "JOIN" in source.from_clause
@@ -868,7 +867,6 @@ class TestTableSource:
         source = TableSource(
             annotation_table="synapse",
             segmentation_table=None,
-            is_merged=False,
         )
         assert source.from_clause == '"synapse"'
         assert source.table_names == ["synapse"]
@@ -911,7 +909,6 @@ class TestDiscoverDefaultOutputSpecsProvenance:
         source = TableSource(
             annotation_table="synapse",
             segmentation_table="synapse__seg",
-            is_merged=False,
         )
         with patch(
             "materializationengine.workflows.deltalake_export.inspect",
@@ -942,7 +939,6 @@ class TestEstimateBytesPerRowMultiTable:
         source = TableSource(
             annotation_table="anno",
             segmentation_table="seg",
-            is_merged=False,
         )
         result = estimate_bytes_per_row("postgresql://localhost/test", source)
         assert result == 65
