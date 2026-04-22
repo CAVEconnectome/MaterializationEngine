@@ -58,6 +58,7 @@ class DeltaLakeOutputSpec:
     bloom_filter_columns: list[str] = field(default_factory=list)
     source_geometry_column: str | None = None
     source_table: str | None = None
+    bounds: list | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -93,10 +94,10 @@ def discover_default_output_specs(
 
     For non-spatial (B-tree) indexes, each indexed column becomes the
     partition column and z-order column.  For spatial (GiST) indexes,
-    emit a spec that partitions on a Morton code derived from the decoded
-    coordinates and z-orders on the individual coordinate columns.
-    Bounding-box columns (names starting with ``bb_``) are skipped for
-    spatial indexes.  Timestamp columns are also skipped.
+    at most **one** column is selected using the prefix priority
+    ``ctr > post > pre > pt > bb``.  The chosen column is partitioned
+    on a Morton code derived from its decoded coordinates, with z-ordering
+    on the individual coordinate columns.  Timestamp columns are skipped.
     """
     inspector = inspect(engine)
 
@@ -142,6 +143,18 @@ def discover_default_output_specs(
             )
         )
 
+    # Spatial column prefix priority (lower index = higher priority).
+    _spatial_prefix_priority = ["ctr", "post", "pre", "pt", "bb"]
+
+    def _spatial_col_rank(col_name: str) -> int:
+        for i, prefix in enumerate(_spatial_prefix_priority):
+            if col_name.startswith(prefix):
+                return i
+        return len(_spatial_prefix_priority)
+
+    # Collect spatial (GiST) candidates; pick at most one after the loop.
+    spatial_candidates: list[tuple[str, str]] = []  # (column_name, owning_table)
+
     for idx, owning_table in indexed_entries:
         column_names = idx.get("column_names", [])
         if not column_names:
@@ -155,29 +168,7 @@ def discover_default_output_specs(
 
         dialect_options = idx.get("dialect_options", {})
         if "gist" in (dialect_options or {}).values():
-            # Skip bounding-box spatial columns for now
-            if col.startswith("bb_"):
-                continue
-
-            # TODO just for testing! remove!
-            if col.startswith("pre_") or col.startswith("post_"):
-                continue
-
-            # Spatial index — partition on Morton code, z-order on coordinates
-            # NOTE: using the uniform range approach here as the percentile approach
-            # won't work without some extra tooling, as the morton column doesn't
-            # exist in the db
-            specs.append(
-                DeltaLakeOutputSpec(
-                    partition_by=f"{col}_morton",
-                    partition_strategy="uniform_range", 
-                    n_partitions="auto",
-                    zorder_columns=[f"{col}_x", f"{col}_y", f"{col}_z"],
-                    bloom_filter_columns=[],
-                    source_geometry_column=col,
-                    source_table=owning_table,
-                )
-            )
+            spatial_candidates.append((col, owning_table))
         else:
             specs.append(
                 DeltaLakeOutputSpec(
@@ -189,6 +180,26 @@ def discover_default_output_specs(
                     source_table=owning_table,
                 )
             )
+
+    # Select at most one spatial column, preferring ctr > post > pre > pt > bb.
+    if spatial_candidates:
+        spatial_candidates.sort(key=lambda c: _spatial_col_rank(c[0]))
+        col, owning_table = spatial_candidates[0]
+        # Spatial index — partition on Morton code, z-order on coordinates
+        # NOTE: using the uniform range approach here as the percentile approach
+        # won't work without some extra tooling, as the morton column doesn't
+        # exist in the db
+        specs.append(
+            DeltaLakeOutputSpec(
+                partition_by=f"{col}_morton",
+                partition_strategy="uniform_range",
+                n_partitions="auto",
+                zorder_columns=[f"{col}_x", f"{col}_y", f"{col}_z"],
+                bloom_filter_columns=[],
+                source_geometry_column=col,
+                source_table=owning_table,
+            )
+        )
 
     return specs
 
@@ -319,7 +330,7 @@ def compute_uniform_range_bounds(
     For regular columns, queries ``MIN``/``MAX`` directly (no sampling).
 
     Returns a ``(min_val, max_val)`` tuple suitable for
-    :func:`assign_uniform_range_bucket`.
+    :func:`assign_bucket`.
     """
     if source_geometry_column is not None:
         col = source_geometry_column
@@ -337,7 +348,7 @@ def compute_uniform_range_bounds(
 
         # Morton-encode the bounding-box corners.  The actual min/max
         # Morton values in the data may not correspond to opposite
-        # corners, but assign_uniform_range_bucket clips out-of-range
+        # corners, but assign_bucket clips out-of-range
         # values so slightly wider bounds are safe.
         corners = morton_encode_3d(
             np.array([x_min, x_max], dtype=np.uint64),
@@ -355,70 +366,90 @@ def compute_uniform_range_bounds(
 
 
 # ---------------------------------------------------------------------------
-# 3.6  assign_percentile_range_bucket
+# 3.5b  resolve_bounds
 # ---------------------------------------------------------------------------
 
 
-def assign_percentile_range_bucket(
+def resolve_bounds(
+    spec: DeltaLakeOutputSpec,
+    connection_string: str,
+    table_name: str,
+) -> None:
+    """Populate ``spec.bounds`` in place if not already set.
+
+    Dispatches on ``spec.partition_strategy``:
+
+    * ``percentile_range`` → :func:`compute_bucket_boundaries` (list of
+      N-1 breakpoints stored directly).
+    * ``uniform_range`` → :func:`compute_uniform_range_bounds` followed
+      by ``np.linspace`` to produce the same N-1 interior breakpoints.
+    * ``hash`` / ``None`` → no-op (hash bucketing doesn't use bounds).
+
+    If ``spec.bounds`` is already non-``None`` (user-supplied), this
+    function is a no-op regardless of strategy.
+    """
+    if spec.bounds is not None:
+        return
+    if spec.partition_by is None or spec.partition_strategy in (None, "hash"):
+        return
+
+    boundary_table = spec.source_table or table_name
+    n = spec.n_partitions if isinstance(spec.n_partitions, int) else 1
+
+    if spec.partition_strategy == "percentile_range":
+        spec.bounds = compute_bucket_boundaries(
+            connection_string,
+            boundary_table,
+            spec.partition_by,
+            n,
+        )
+
+    elif spec.partition_strategy == "uniform_range":
+        col_min, col_max = compute_uniform_range_bounds(
+            connection_string,
+            boundary_table,
+            spec.partition_by,
+            source_geometry_column=spec.source_geometry_column,
+        )
+        if n <= 1 or col_min == col_max:
+            spec.bounds = []
+        else:
+            spec.bounds = np.linspace(col_min, col_max, n + 1)[1:-1].tolist()
+
+
+# ---------------------------------------------------------------------------
+# 3.6  assign_bucket (unified breakpoint-based bucketing)
+# ---------------------------------------------------------------------------
+
+
+def assign_bucket(
     table: pl.DataFrame,
     column_name: str,
-    boundaries: list,
+    breakpoints: list,
 ) -> pl.DataFrame:
-    """Add a ``{column_name}_partition`` column using percentile boundaries.
+    """Add a ``{column_name}_partition`` column using pre-computed breakpoints.
 
-    Rows are assigned to the bucket whose upper boundary they fall into
-    (or below), preserving natural ordering within each bucket.
+    Works for any strategy that produces breakpoints (percentile-range,
+    uniform-range, or user-supplied).  Rows are assigned to bins defined by
+    ``pl.cut`` over the sorted *breakpoints*.
+
+    If *breakpoints* is empty, all rows land in partition 0.
     """
     partition_col = f"{column_name}_partition"
 
-    col = table[column_name]
-    # Build bucket labels 0 .. len(boundaries)
-    # Each row gets the index of the first boundary >= its value,
-    # or len(boundaries) if it exceeds all boundaries.
-    breakpoints = sorted(boundaries)
+    if not breakpoints:
+        return table.with_columns(pl.lit(0).cast(pl.Int32).alias(partition_col))
 
-    # Use Polars cut for numeric columns.
-    # cut() expects the breakpoints as floats and produces a categorical.
+    col = table[column_name]
+    sorted_breaks = sorted(breakpoints)
+
     bucket_series = col.cast(pl.Float64).cut(
-        breaks=[float(b) for b in breakpoints],
-        labels=[str(i) for i in range(len(breakpoints) + 1)],
+        breaks=[float(b) for b in sorted_breaks],
+        labels=[str(i) for i in range(len(sorted_breaks) + 1)],
     )
-    # Convert category labels to integers for partition directory names.
     return table.with_columns(
         bucket_series.cast(pl.Utf8).cast(pl.Int32).alias(partition_col)
     )
-
-
-# ---------------------------------------------------------------------------
-# 3.7  assign_uniform_range_bucket
-# ---------------------------------------------------------------------------
-
-
-def assign_uniform_range_bucket(
-    table: pl.DataFrame,
-    column_name: str,
-    min_val: float,
-    max_val: float,
-    n_partitions: int,
-) -> pl.DataFrame:
-    """Add a ``{column_name}_partition`` column using equal-width bins.
-
-    The ``[min_val, max_val]`` range is divided into *n_partitions*
-    equal-width bins and each row is assigned to the bin it falls into.
-    """
-    partition_col = f"{column_name}_partition"
-
-    if n_partitions <= 1 or min_val == max_val:
-        return table.with_columns(pl.lit(0).cast(pl.Int32).alias(partition_col))
-
-    bin_width = (max_val - min_val) / n_partitions
-    bucket_expr = (
-        ((pl.col(column_name).cast(pl.Float64) - min_val) / bin_width)
-        .floor()
-        .cast(pl.Int32)
-        .clip(0, n_partitions - 1)
-    )
-    return table.with_columns(bucket_expr.alias(partition_col))
 
 
 # ---------------------------------------------------------------------------
@@ -625,8 +656,6 @@ def _flush_buffer(
     output_uri_base: str,
     geometry_columns: list[str],
     morton_columns: list[str],
-    boundaries: dict[str, list],
-    uniform_ranges: dict[str, tuple[float, float]],
 ) -> None:
     """Convert accumulated batches to Polars, decode geometry, assign
     partitions, and append to each target Delta Lake."""
@@ -646,22 +675,13 @@ def _flush_buffer(
         if spec.partition_by is not None and spec.partition_strategy is not None:
             part_col = spec.partition_by
 
-            if spec.partition_strategy == "percentile_range":
-                bnd = boundaries[part_col]
-                write_df = assign_percentile_range_bucket(write_df, part_col, bnd)
+            if spec.bounds is not None:
+                write_df = assign_bucket(write_df, part_col, spec.bounds)
                 partition_by = [f"{part_col}_partition"]
 
             elif spec.partition_strategy == "hash":
                 n = spec.n_partitions if isinstance(spec.n_partitions, int) else 1
                 write_df = assign_hash_bucket(write_df, part_col, n)
-                partition_by = [f"{part_col}_partition"]
-
-            elif spec.partition_strategy == "uniform_range":
-                col_min, col_max = uniform_ranges[part_col]
-                n = spec.n_partitions if isinstance(spec.n_partitions, int) else 1
-                write_df = assign_uniform_range_bucket(
-                    write_df, part_col, col_min, col_max, n
-                )
                 partition_by = [f"{part_col}_partition"]
 
         # Build the URI for this particular Delta Lake.
@@ -683,8 +703,6 @@ def export_table_to_deltalake(
     output_uri_base: str,
     chunk_size: int = 1_000_000,
     flush_threshold_bytes: int = 2 * 1024 * 1024 * 1024,
-    boundaries: dict[str, list] | None = None,
-    uniform_ranges: dict[str, tuple[float, float]] | None = None,
 ) -> None:
     """Stream a table from Postgres and write to one or more Delta Lakes.
 
@@ -695,13 +713,9 @@ def export_table_to_deltalake(
     3. On each flush: decodes geometry, assigns partition buckets, and
        appends to each target Delta Lake.
 
-    *boundaries* is a dict mapping partition column names to their
-    pre-computed percentile boundary lists (from
-    :func:`compute_bucket_boundaries`).
-
-    *uniform_ranges* is a dict mapping partition column names to
-    ``(min, max)`` tuples for uniform-range bucketing.  Must be
-    pre-computed globally so bin edges are consistent across flushes.
+    Partition bounds must be pre-resolved on each spec's ``bounds`` field
+    (via :func:`resolve_bounds`) before calling this function, so that bin
+    edges are consistent across flushes.
     """
     # Collect geometry columns that need decoding and Morton codes.
     geometry_columns = sorted(
@@ -735,8 +749,6 @@ def export_table_to_deltalake(
                 output_uri_base,
                 geometry_columns,
                 morton_columns,
-                boundaries or {},
-                uniform_ranges or {},
             )
             buffer = []
             buffer_bytes = 0
@@ -749,8 +761,6 @@ def export_table_to_deltalake(
             output_uri_base,
             geometry_columns,
             morton_columns,
-            boundaries or {},
-            uniform_ranges or {},
         )
 
     # Optimize each Delta Lake: z-order, bloom filters, and vacuum.
@@ -973,11 +983,8 @@ def write_deltalake_table(
                 f"Delete the existing Delta Lake before re-exporting."
             )
 
-    # --- Estimate bytes per row and resolve partition counts ---
+    # --- Estimate bytes per row and resolve partition counts / bounds ---
     bytes_per_row = estimate_bytes_per_row(connection_string, source)
-
-    boundaries: dict[str, list] = {}
-    uniform_ranges: dict[str, tuple[float, float]] = {}
 
     for spec in resolved_specs:
         if spec.n_partitions == "auto":
@@ -988,22 +995,7 @@ def write_deltalake_table(
                 bytes_per_row=bytes_per_row,
             )
 
-        if spec.partition_by and spec.partition_strategy == "percentile_range":
-            boundary_table = spec.source_table or table_name
-            boundaries[spec.partition_by] = compute_bucket_boundaries(
-                connection_string,
-                boundary_table,
-                spec.partition_by,
-                spec.n_partitions,
-            )
-        elif spec.partition_by and spec.partition_strategy == "uniform_range":
-            boundary_table = spec.source_table or table_name
-            uniform_ranges[spec.partition_by] = compute_uniform_range_bounds(
-                connection_string,
-                boundary_table,
-                spec.partition_by,
-                source_geometry_column=spec.source_geometry_column,
-            )
+        resolve_bounds(spec, connection_string, table_name)
 
     # --- Stream and write ---
     celery_logger.info(
@@ -1021,8 +1013,6 @@ def write_deltalake_table(
         output_uri_base=output_uri_base,
         chunk_size=chunk_size,
         flush_threshold_bytes=flush_threshold,
-        boundaries=boundaries,
-        uniform_ranges=uniform_ranges,
     )
 
     celery_logger.info(

@@ -17,9 +17,8 @@ from materializationengine.workflows.deltalake_export import (
     DeltaLakeOutputSpec,
     TableSource,
     _flush_buffer,
+    assign_bucket,
     assign_hash_bucket,
-    assign_percentile_range_bucket,
-    assign_uniform_range_bucket,
     compute_bucket_boundaries,
     decode_geometry_columns,
     discover_default_output_specs,
@@ -27,6 +26,7 @@ from materializationengine.workflows.deltalake_export import (
     export_table_to_deltalake,
     morton_encode_3d,
     optimize_deltalake,
+    resolve_bounds,
     resolve_n_partitions,
 )
 
@@ -77,7 +77,7 @@ class TestDiscoverDefaultOutputSpecs:
         assert specs[0].source_table == "synapse"
         # Second spec is from the index.
         assert specs[1].partition_by == "pre_pt_root_id"
-        assert specs[1].partition_strategy == "percentile_range"
+        assert specs[1].partition_strategy == "uniform_range"
         assert specs[1].n_partitions == "auto"
         assert specs[1].zorder_columns == ["pre_pt_root_id"]
         assert specs[1].bloom_filter_columns == []
@@ -103,7 +103,7 @@ class TestDiscoverDefaultOutputSpecs:
 
         assert len(specs) == 1
         assert specs[0].partition_by == "pt_position_morton"
-        assert specs[0].partition_strategy == "percentile_range"
+        assert specs[0].partition_strategy == "uniform_range"
         assert specs[0].zorder_columns == [
             "pt_position_x",
             "pt_position_y",
@@ -285,18 +285,17 @@ class TestComputeBucketBoundaries:
 
 
 # ---------------------------------------------------------------------------
-# 4.4  assign_percentile_range_bucket
+# 4.4  assign_bucket
 # ---------------------------------------------------------------------------
 
 
-class TestAssignPercentileRangeBucket:
-    """Rows should be split into roughly equal-count buckets with
-    contiguous value ranges."""
+class TestAssignBucket:
+    """Rows should be split into buckets defined by breakpoints."""
 
     def test_basic_distribution(self):
-        # 100 rows with values 0..99, boundaries at 25, 50, 75 → 4 buckets
+        # 100 rows with values 0..99, breakpoints at 25, 50, 75 → 4 buckets
         df = pl.DataFrame({"val": list(range(100))})
-        result = assign_percentile_range_bucket(df, "val", [25, 50, 75])
+        result = assign_bucket(df, "val", [25, 50, 75])
 
         assert "val_partition" in result.columns
         counts = result.group_by("val_partition").len().sort("val_partition")
@@ -308,7 +307,7 @@ class TestAssignPercentileRangeBucket:
     def test_contiguous_ranges(self):
         # Verify that values within each bucket are contiguous
         df = pl.DataFrame({"val": list(range(100))})
-        result = assign_percentile_range_bucket(df, "val", [25, 50, 75])
+        result = assign_bucket(df, "val", [25, 50, 75])
 
         for bucket in result["val_partition"].unique().sort().to_list():
             bucket_vals = (
@@ -319,43 +318,23 @@ class TestAssignPercentileRangeBucket:
 
     def test_single_boundary(self):
         df = pl.DataFrame({"val": list(range(10))})
-        result = assign_percentile_range_bucket(df, "val", [5])
+        result = assign_bucket(df, "val", [5])
         assert result["val_partition"].unique().sort().to_list() == [0, 1]
 
+    def test_empty_breakpoints(self):
+        df = pl.DataFrame({"val": list(range(10))})
+        result = assign_bucket(df, "val", [])
+        assert result["val_partition"].unique().to_list() == [0]
 
-# ---------------------------------------------------------------------------
-# 4.5  assign_uniform_range_bucket
-# ---------------------------------------------------------------------------
-
-
-class TestAssignUniformRangeBucket:
-    """Equal-width buckets spanning [min_val, max_val]."""
-
-    def test_basic_uniform(self):
+    def test_linspace_breakpoints(self):
+        # Simulate what resolve_bounds does for uniform_range: linspace
+        breakpoints = np.linspace(0, 99, 5)[1:-1].tolist()  # 3 interior edges
         df = pl.DataFrame({"val": list(range(100))})
-        result = assign_uniform_range_bucket(df, "val", 0, 99, 4)
+        result = assign_bucket(df, "val", breakpoints)
 
         assert "val_partition" in result.columns
         partitions = result["val_partition"].unique().sort().to_list()
         assert partitions == [0, 1, 2, 3]
-
-    def test_min_equals_max(self):
-        df = pl.DataFrame({"val": [5, 5, 5]})
-        result = assign_uniform_range_bucket(df, "val", 5, 5, 4)
-        assert result["val_partition"].unique().to_list() == [0]
-
-    def test_single_partition(self):
-        df = pl.DataFrame({"val": list(range(10))})
-        result = assign_uniform_range_bucket(df, "val", 0, 9, 1)
-        assert result["val_partition"].unique().to_list() == [0]
-
-    def test_boundary_values_clipped(self):
-        # Values at the max boundary should get the last bucket, not overflow
-        df = pl.DataFrame({"val": [0.0, 50.0, 100.0]})
-        result = assign_uniform_range_bucket(df, "val", 0, 100, 2)
-        partitions = result["val_partition"].to_list()
-        assert partitions[0] == 0
-        assert partitions[2] == 1  # 100.0 should be clipped to bucket 1
 
 
 # ---------------------------------------------------------------------------
@@ -391,44 +370,44 @@ class TestCrossBufferPartitionConsistency:
 
     def test_percentile_range_consistent_across_buffers(self):
         """Two non-overlapping value ranges should get distinct buckets
-        when using the same global boundaries."""
-        boundaries = [25, 50, 75]
+        when using the same global breakpoints."""
+        breakpoints = [25, 50, 75]
 
-        # Buffer 1: values 0–20 (all below first boundary → bucket 0)
+        # Buffer 1: values 0–20 (all below first breakpoint → bucket 0)
         df1 = pl.DataFrame({"val": list(range(0, 21))})
-        result1 = assign_percentile_range_bucket(df1, "val", boundaries)
+        result1 = assign_bucket(df1, "val", breakpoints)
 
-        # Buffer 2: values 80–99 (all above last boundary → bucket 3)
+        # Buffer 2: values 80–99 (all above last breakpoint → bucket 3)
         df2 = pl.DataFrame({"val": list(range(80, 100))})
-        result2 = assign_percentile_range_bucket(df2, "val", boundaries)
+        result2 = assign_bucket(df2, "val", breakpoints)
 
         assert result1["val_partition"].unique().to_list() == [0]
         assert result2["val_partition"].unique().to_list() == [3]
 
     def test_uniform_range_consistent_across_buffers(self):
         """Two non-overlapping value ranges should get distinct buckets
-        when using the same global (min, max)."""
-        global_min, global_max, n = 0.0, 100.0, 4
+        when using linspace-derived breakpoints."""
+        breakpoints = np.linspace(0.0, 100.0, 5)[1:-1].tolist()
 
         # Buffer 1: values 0–10 (all in first bin → bucket 0)
         df1 = pl.DataFrame({"val": list(range(0, 11))})
-        result1 = assign_uniform_range_bucket(df1, "val", global_min, global_max, n)
+        result1 = assign_bucket(df1, "val", breakpoints)
 
         # Buffer 2: values 80–99 (all in last bin → bucket 3)
         df2 = pl.DataFrame({"val": list(range(80, 100))})
-        result2 = assign_uniform_range_bucket(df2, "val", global_min, global_max, n)
+        result2 = assign_bucket(df2, "val", breakpoints)
 
         assert result1["val_partition"].unique().to_list() == [0]
         assert result2["val_partition"].unique().to_list() == [3]
 
     def test_uniform_range_per_buffer_would_fail(self):
-        """With global ranges, a buffer spanning only the top quarter
-        lands entirely in bucket 3 — per-buffer min/max would scatter
+        """With global breakpoints, a buffer spanning only the top quarter
+        lands entirely in bucket 3 — per-buffer breakpoints would scatter
         across all 4 buckets."""
-        global_min, global_max, n = 0.0, 100.0, 4
+        breakpoints = np.linspace(0.0, 100.0, 5)[1:-1].tolist()
 
         df = pl.DataFrame({"val": list(range(76, 100))})
-        result = assign_uniform_range_bucket(df, "val", global_min, global_max, n)
+        result = assign_bucket(df, "val", breakpoints)
         assert result["val_partition"].unique().to_list() == [3]
 
 
@@ -444,19 +423,19 @@ class TestFlushBufferPartitionConsistency:
     @patch("deltalake.write_deltalake")
     def test_percentile_range_across_flushes(self, mock_write):
         """Two flushes with non-overlapping values should land in
-        distinct partitions when using shared global boundaries."""
-        boundaries = {"val": [25, 50, 75]}
+        distinct partitions when using shared global breakpoints."""
         spec = DeltaLakeOutputSpec(
             partition_by="val",
             partition_strategy="percentile_range",
             n_partitions=4,
+            bounds=[25, 50, 75],
         )
 
         batch1 = pa.RecordBatch.from_pydict({"val": list(range(0, 21))})
         batch2 = pa.RecordBatch.from_pydict({"val": list(range(80, 100))})
 
-        _flush_buffer([batch1], [spec], "/tmp/test", [], [], boundaries, {})
-        _flush_buffer([batch2], [spec], "/tmp/test", [], [], boundaries, {})
+        _flush_buffer([batch1], [spec], "/tmp/test", [], [])
+        _flush_buffer([batch2], [spec], "/tmp/test", [], [])
 
         assert mock_write.call_count == 2
         written1 = pl.from_arrow(mock_write.call_args_list[0][0][1])
@@ -467,19 +446,19 @@ class TestFlushBufferPartitionConsistency:
     @patch("deltalake.write_deltalake")
     def test_uniform_range_across_flushes(self, mock_write):
         """Two flushes with non-overlapping values should land in
-        distinct partitions when using shared global uniform ranges."""
-        uniform_ranges = {"val": (0.0, 100.0)}
+        distinct partitions when using linspace-derived breakpoints on the spec."""
         spec = DeltaLakeOutputSpec(
             partition_by="val",
             partition_strategy="uniform_range",
             n_partitions=4,
+            bounds=np.linspace(0.0, 100.0, 5)[1:-1].tolist(),
         )
 
         batch1 = pa.RecordBatch.from_pydict({"val": list(range(0, 11))})
         batch2 = pa.RecordBatch.from_pydict({"val": list(range(80, 100))})
 
-        _flush_buffer([batch1], [spec], "/tmp/test", [], [], {}, uniform_ranges)
-        _flush_buffer([batch2], [spec], "/tmp/test", [], [], {}, uniform_ranges)
+        _flush_buffer([batch1], [spec], "/tmp/test", [], [])
+        _flush_buffer([batch2], [spec], "/tmp/test", [], [])
 
         assert mock_write.call_count == 2
         written1 = pl.from_arrow(mock_write.call_args_list[0][0][1])
@@ -683,15 +662,14 @@ class TestExportTableToDeltalake:
             partition_by="root_id",
             partition_strategy="percentile_range",
             n_partitions=2,
+            bounds=[350],
         )
-        boundaries = {"root_id": [350]}
 
         export_table_to_deltalake(
             connection_string="unused",
             source=TableSource(annotation_table="synapse"),
             output_specs=[spec],
             output_uri_base="gs://bucket/test",
-            boundaries=boundaries,
             flush_threshold_bytes=10 * 1024 * 1024 * 1024,  # huge → single flush
         )
 
@@ -751,6 +729,7 @@ class TestExportTableToDeltalake:
             partition_by="val",
             partition_strategy="percentile_range",
             n_partitions=2,
+            bounds=[50],
         )
 
         export_table_to_deltalake(
@@ -758,7 +737,6 @@ class TestExportTableToDeltalake:
             source=TableSource(annotation_table="t"),
             output_specs=[spec],
             output_uri_base="/tmp/test",
-            boundaries={"val": [50]},
             flush_threshold_bytes=1,  # tiny → flush after every batch
         )
 
