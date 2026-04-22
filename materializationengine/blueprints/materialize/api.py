@@ -891,3 +891,27 @@ class WriteDeltalakeResource(Resource):
         return {
             "message": f"Delta Lake export enqueued for {table_name} v{version}"
         }, 200
+
+    @reset_auth
+    @auth_requires_dataset_admin(table_arg="datastack_name")
+    @mat_bp.doc("Get Delta Lake export progress", security="apikey")
+    def get(self, datastack_name: str, version: int, table_name: str):
+        """Get progress of a Delta Lake export for a table.
+
+        Returns JSON with ``status``, ``rows_processed``, ``total_rows``,
+        and ``percent_complete``.  Returns 404 if no export is tracked.
+        """
+        from materializationengine.workflows.deltalake_export import (
+            get_deltalake_export_progress,
+        )
+
+        if version == -1:
+            version = get_latest_version(datastack_name)
+
+        progress = get_deltalake_export_progress(datastack_name, version, table_name)
+        if progress is None:
+            return {
+                "message": f"No export progress found for {table_name} v{version}"
+            }, 404
+
+        return progress, 200

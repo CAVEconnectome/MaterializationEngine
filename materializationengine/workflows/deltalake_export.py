@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Literal
 
 import adbc_driver_postgresql.dbapi as pg_dbapi
@@ -11,9 +14,17 @@ import polars as pl
 import pyarrow as pa
 import shapely
 from sqlalchemy import inspect
+from sqlalchemy.dialects.postgresql import BYTEA
 from sqlalchemy.engine import Engine
 
 from materializationengine.celery_init import celery
+
+# Register a minimal geometry type so SQLAlchemy's inspector doesn't warn
+# "Did not recognize type 'geometry'" during reflection.  We decode WKB
+# ourselves — all SQLAlchemy needs to know is that it's binary.
+from sqlalchemy.dialects.postgresql import dialect as _pg_dialect
+
+_pg_dialect.ischema_names["geometry"] = BYTEA
 
 celery_logger = logging.getLogger(__name__)
 
@@ -25,16 +36,18 @@ class TableSource:
     Provides a unified ``from_clause`` for SQL queries that need the full
     joined result set (streaming, etc.) and a ``table_names`` list for
     inspecting physical tables (indexes, ``pg_class`` stats, etc.).
+
+    When ``segmentation_table`` is ``None`` the table is treated as a
+    single flat table (either annotation-only or already merged).
     """
 
     annotation_table: str
     segmentation_table: str | None = None
-    is_merged: bool = True
 
     @property
     def from_clause(self) -> str:
         """SQL FROM fragment: single table or JOIN."""
-        if self.is_merged or self.segmentation_table is None:
+        if self.segmentation_table is None:
             return f'"{self.annotation_table}"'
         return f'"{self.annotation_table}" JOIN "{self.segmentation_table}" USING (id)'
 
@@ -42,7 +55,7 @@ class TableSource:
     def table_names(self) -> list[str]:
         """Physical table names for inspection (indexes, pg_class, etc.)."""
         names = [self.annotation_table]
-        if self.segmentation_table is not None and not self.is_merged:
+        if self.segmentation_table is not None:
             names.append(self.segmentation_table)
         return names
 
@@ -445,14 +458,21 @@ def stream_table_to_arrow(
     connection_string: str,
     source: TableSource,
     chunk_size: int = 1_000_000,
+    row_limit: int | None = None,
 ):
     """Stream a table from a frozen Postgres DB as Arrow RecordBatches.
 
     Yields :class:`pyarrow.RecordBatch` objects.  The driver determines
     batch sizing; *chunk_size* is reserved for future use (e.g. setting
     an ADBC batch-size hint).
+
+    If *row_limit* is set, a SQL ``LIMIT`` clause is appended so that at
+    most that many rows are streamed.  Useful for local testing; does not
+    affect partition calculations upstream.
     """
     query = f"SELECT * FROM {source.from_clause}"
+    if row_limit is not None:
+        query += f" LIMIT {int(row_limit)}"
 
     with pg_dbapi.connect(connection_string) as conn:
         with conn.cursor() as cur:
@@ -596,6 +616,29 @@ def decode_geometry_columns(
     return table
 
 
+def _strip_arrow_extension_types(table: pa.Table) -> pa.Table:
+    """Replace all Arrow extension-typed columns with their plain storage arrays.
+
+    ADBC streams PostGIS geometry columns as binary with the
+    ``arrow.opaque`` extension type.  This metadata is meaningless once
+    the data leaves Postgres — we decode WKB ourselves — and causes
+    warnings when Polars encounters an unregistered extension type.
+
+    Stripping extension wrappers here, at the Arrow ↔ Polars boundary,
+    is the correct fix: we're removing semantically void metadata before a
+    conversion where it would only cause confusion.
+    """
+    for idx, field in enumerate(table.schema):
+        if not isinstance(field.type, pa.BaseExtensionType):
+            continue
+        col = table.column(idx)
+        storage_type = field.type.storage_type
+        storage_chunks = [chunk.storage for chunk in col.chunks]
+        plain = pa.chunked_array(storage_chunks, type=storage_type)
+        table = table.set_column(idx, pa.field(field.name, storage_type), plain)
+    return table
+
+
 def _flush_buffer(
     buffer: list[pa.RecordBatch],
     output_specs: list[DeltaLakeOutputSpec],
@@ -608,6 +651,13 @@ def _flush_buffer(
     from deltalake import write_deltalake
 
     arrow_table = pa.Table.from_batches(buffer)
+
+    # Strip extension types (e.g. arrow.opaque on PostGIS columns) before
+    # Polars conversion.
+    # NOTE: I've debated whether to make this decoding happen on the Postgres side
+    # but it somehow felt more robust to have a piece of code that could handle whatever
+    arrow_table = _strip_arrow_extension_types(arrow_table)
+
     df = pl.from_arrow(arrow_table)
 
     # Decode geometry columns (and Morton codes) once for all specs.
@@ -649,6 +699,9 @@ def export_table_to_deltalake(
     output_uri_base: str,
     chunk_size: int = 1_000_000,
     flush_threshold_bytes: int = 2 * 1024 * 1024 * 1024,
+    total_rows: int | None = None,
+    progress_callback: Callable[[int, int | None], None] | None = None,
+    row_limit: int | None = None,
 ) -> None:
     """Stream a table from Postgres and write to one or more Delta Lakes.
 
@@ -662,7 +715,23 @@ def export_table_to_deltalake(
     Partition bounds must be pre-resolved on each spec's ``bounds`` field
     (via :func:`resolve_bounds`) before calling this function, so that bin
     edges are consistent across flushes.
+
+    Parameters
+    ----------
+    progress_callback
+        If provided, called after each Arrow batch with
+        ``(rows_processed_so_far, total_rows)``.  *total_rows* may be
+        ``None`` if the caller doesn't know the table size.
+    total_rows
+        Total expected row count (e.g. from ``MaterializedMetadata``).
+        Passed through to *progress_callback*.
+    row_limit
+        If set, only stream this many rows from Postgres (SQL ``LIMIT``).
+        Useful for local testing.  Does **not** affect partition
+        calculations or bounds — those still use the full table.
     """
+    if row_limit is not None and total_rows is not None:
+        total_rows = min(total_rows, row_limit)
     # Collect geometry columns that need decoding and Morton codes.
     geometry_columns = sorted(
         {
@@ -679,14 +748,20 @@ def export_table_to_deltalake(
 
     buffer: list[pa.RecordBatch] = []
     buffer_bytes = 0
+    rows_processed = 0
 
     for batch in stream_table_to_arrow(
         connection_string,
         source,
         chunk_size,
+        row_limit=row_limit,
     ):
         buffer.append(batch)
         buffer_bytes += batch.nbytes
+        rows_processed += batch.num_rows
+
+        if progress_callback is not None:
+            progress_callback(rows_processed, total_rows)
 
         if buffer_bytes >= flush_threshold_bytes:
             _flush_buffer(
@@ -779,6 +854,131 @@ def optimize_deltalake(
         # transaction log stats.  Log and continue — the data is
         # already written and optimized; vacuum just cleans up old files.
         celery_logger.warning("vacuum failed for %s: %s", uri, exc)
+
+
+def make_tqdm_progress_callback(
+    total_rows: int,
+    **tqdm_kwargs,
+) -> tuple[Callable[[int, int | None], None], Callable[[], None]]:
+    """Create a tqdm-based progress callback for :func:`export_table_to_deltalake`.
+
+    Returns ``(callback, close)`` — pass *callback* as the
+    ``progress_callback`` argument; call *close* when the export is done
+    to finalize the progress bar.
+
+    Example::
+
+        cb, close = make_tqdm_progress_callback(row_count)
+        try:
+            export_table_to_deltalake(..., total_rows=row_count, progress_callback=cb)
+        finally:
+            close()
+    """
+    from tqdm import tqdm
+
+    bar = tqdm(total=total_rows, unit="rows", **tqdm_kwargs)
+    _prev = {"rows": 0}
+
+    def _callback(rows_so_far: int, _total: int | None) -> None:
+        delta = rows_so_far - _prev["rows"]
+        if delta > 0:
+            bar.update(delta)
+        _prev["rows"] = rows_so_far
+
+    def _close() -> None:
+        bar.close()
+
+    return _callback, _close
+
+
+_DELTALAKE_PROGRESS_TTL = 86400  # 24 hours
+
+
+def deltalake_export_redis_key(datastack: str, version: int, table_name: str) -> str:
+    """Return the Redis key used to track Delta Lake export progress."""
+    return f"deltalake_export:{datastack}:v{version}:{table_name}"
+
+
+def _get_redis_client():
+    """Lazy-create a Redis client for deltalake export progress."""
+    import redis
+
+    from materializationengine.utils import get_config_param
+
+    return redis.StrictRedis(
+        host=get_config_param("REDIS_HOST"),
+        port=get_config_param("REDIS_PORT"),
+        password=get_config_param("REDIS_PASSWORD"),
+        db=0,
+    )
+
+
+def make_redis_progress_callback(
+    datastack: str,
+    version: int,
+    table_name: str,
+) -> Callable[[int, int | None], None]:
+    """Create a Redis-backed progress callback for :func:`export_table_to_deltalake`.
+
+    Writes a JSON blob to Redis on each invocation so that API consumers
+    can poll export progress.  The key expires after 24 hours.
+    """
+    client = _get_redis_client()
+    key = deltalake_export_redis_key(datastack, version, table_name)
+
+    def _callback(rows_so_far: int, total: int | None) -> None:
+        pct = (rows_so_far / total * 100) if total else None
+        payload = {
+            "status": "exporting",
+            "rows_processed": rows_so_far,
+            "total_rows": total,
+            "percent_complete": round(pct, 2) if pct is not None else None,
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+        }
+        client.set(key, json.dumps(payload), ex=_DELTALAKE_PROGRESS_TTL)
+
+    return _callback
+
+
+def set_deltalake_export_status(
+    datastack: str,
+    version: int,
+    table_name: str,
+    status: str,
+    total_rows: int | None = None,
+    rows_processed: int | None = None,
+) -> None:
+    """Write a terminal status (``complete``, ``failed``, etc.) to Redis."""
+    client = _get_redis_client()
+    key = deltalake_export_redis_key(datastack, version, table_name)
+    pct = None
+    if rows_processed is not None and total_rows:
+        pct = round(rows_processed / total_rows * 100, 2)
+    payload = {
+        "status": status,
+        "rows_processed": rows_processed,
+        "total_rows": total_rows,
+        "percent_complete": pct,
+        "last_updated": datetime.now(timezone.utc).isoformat(),
+    }
+    client.set(key, json.dumps(payload), ex=_DELTALAKE_PROGRESS_TTL)
+
+
+def get_deltalake_export_progress(
+    datastack: str,
+    version: int,
+    table_name: str,
+) -> dict | None:
+    """Read the current export progress from Redis.
+
+    Returns the progress dict, or ``None`` if no export is tracked.
+    """
+    client = _get_redis_client()
+    key = deltalake_export_redis_key(datastack, version, table_name)
+    raw = client.get(key)
+    if raw is None:
+        return None
+    return json.loads(raw)
 
 
 def _build_frozen_db_connection_string(
@@ -877,14 +1077,12 @@ def write_deltalake_table(
     # Detect segmentation table presence.
     seg_table_name = build_segmentation_table_name(table_name, pcg_table_name)
     has_seg_table = engine.dialect.has_table(engine, seg_table_name)
-    # Check if already merged (single flat table).
-    is_merged = not has_seg_table and engine.dialect.has_table(engine, table_name)
+    # If merged (no separate seg table), segmentation_table stays None.
     segmentation_table_name = seg_table_name if has_seg_table else None
 
     source = TableSource(
         annotation_table=table_name,
         segmentation_table=segmentation_table_name,
-        is_merged=is_merged,
     )
 
     # --- Resolve output specs ---
@@ -942,13 +1140,63 @@ def write_deltalake_table(
         row_count,
     )
 
-    export_table_to_deltalake(
-        connection_string=connection_string,
-        source=source,
-        output_specs=resolved_specs,
-        output_uri_base=output_uri_base,
-        chunk_size=chunk_size,
-        flush_threshold_bytes=flush_threshold,
+    def _log_progress(rows_so_far: int, total: int | None) -> None:
+        if total:
+            pct = rows_so_far / total * 100
+            celery_logger.info(
+                "Delta Lake export progress for %s (v%d): %d / %d rows (%.1f%%)",
+                table_name,
+                version,
+                rows_so_far,
+                total,
+                pct,
+            )
+        else:
+            celery_logger.info(
+                "Delta Lake export progress for %s (v%d): %d rows",
+                table_name,
+                version,
+                rows_so_far,
+            )
+
+    redis_callback = make_redis_progress_callback(datastack, version, table_name)
+
+    def _progress(rows_so_far: int, total: int | None) -> None:
+        _log_progress(rows_so_far, total)
+        redis_callback(rows_so_far, total)
+
+    set_deltalake_export_status(
+        datastack, version, table_name, "exporting", total_rows=row_count
+    )
+
+    try:
+        export_table_to_deltalake(
+            connection_string=connection_string,
+            source=source,
+            output_specs=resolved_specs,
+            output_uri_base=output_uri_base,
+            chunk_size=chunk_size,
+            flush_threshold_bytes=flush_threshold,
+            total_rows=row_count,
+            progress_callback=_progress,
+        )
+    except Exception:
+        set_deltalake_export_status(
+            datastack,
+            version,
+            table_name,
+            "failed",
+            total_rows=row_count,
+        )
+        raise
+
+    set_deltalake_export_status(
+        datastack,
+        version,
+        table_name,
+        "complete",
+        total_rows=row_count,
+        rows_processed=row_count,
     )
 
     celery_logger.info(
