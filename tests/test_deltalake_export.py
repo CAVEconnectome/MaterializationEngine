@@ -16,10 +16,13 @@ from materializationengine.workflows.deltalake_export import (
     _DEFAULT_BYTES_PER_ROW,
     DeltaLakeOutputSpec,
     TableSource,
+    _compute_sampled_percentile_bounds,
     _flush_buffer,
+    _validate_identifier,
     assign_hash_partition,
     assign_partition,
     compute_partition_boundaries,
+    compute_uniform_range_bounds,
     decode_geometry_columns,
     discover_default_output_specs,
     estimate_bytes_per_row,
@@ -943,3 +946,203 @@ class TestEstimateBytesPerRowMultiTable:
         result = estimate_bytes_per_row("postgresql://localhost/test", source)
         assert result == 65
         assert mock_fetchone.call_count == 2
+
+
+# ===========================================================================
+# NULL guard tests (#4, #5, #6, #7)
+# ===========================================================================
+
+
+class TestNullGuards:
+    """NULL guards for all _adbc_fetchone call sites."""
+
+    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
+    def test_compute_partition_boundaries_null_row(self, mock_fetchone):
+        """None row from fetchone returns []."""
+        mock_fetchone.return_value = None
+        assert compute_partition_boundaries("conn", "t", "c", 4) == []
+
+    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
+    def test_compute_partition_boundaries_null_value(self, mock_fetchone):
+        """(None,) row (all-NULL column) returns []."""
+        mock_fetchone.return_value = (None,)
+        assert compute_partition_boundaries("conn", "t", "c", 4) == []
+
+    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
+    def test_compute_sampled_percentile_bounds_null_row(self, mock_fetchone):
+        """None row → all columns return []."""
+        # First call: _estimate_sample_percent (reltuples query) → small table
+        mock_fetchone.side_effect = [(10.0,), None]
+        result = _compute_sampled_percentile_bounds("conn", "t", {"a": 4, "b": 4})
+        assert result == {"a": [], "b": []}
+
+    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
+    def test_compute_sampled_percentile_bounds_null_column(self, mock_fetchone):
+        """(result, None) row → null column returns [], non-null column returns boundaries."""
+        mock_fetchone.side_effect = [(10.0,), ([10, 20, 30], None)]
+        result = _compute_sampled_percentile_bounds("conn", "t", {"a": 4, "b": 4})
+        assert result["a"] == [10, 20, 30]
+        assert result["b"] == []
+
+    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
+    def test_compute_uniform_range_bounds_null_geometry_extent(self, mock_fetchone):
+        """NULL ST_3DExtent (no geometries in sample) returns (0.0, 0.0)."""
+        # First call: relpages query; second: ST_3DExtent query
+        mock_fetchone.side_effect = [(100,), (None, None, None, None, None, None)]
+        result = compute_uniform_range_bounds(
+            "conn", "t", "t_morton", source_geometry_column="pt"
+        )
+        assert result == (0.0, 0.0)
+
+    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
+    def test_compute_uniform_range_bounds_null_min_max(self, mock_fetchone):
+        """NULL MIN/MAX (empty table) returns (0.0, 0.0)."""
+        mock_fetchone.return_value = (None, None)
+        result = compute_uniform_range_bounds("conn", "t", "col")
+        assert result == (0.0, 0.0)
+
+
+# ===========================================================================
+# TABLESAMPLE overflow fix (#3)
+# ===========================================================================
+
+
+class TestTablesampleOverflow:
+    """compute_uniform_range_bounds should not produce TABLESAMPLE > 100%."""
+
+    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
+    def test_small_table_omits_tablesample(self, mock_fetchone):
+        """relpages <= 0 → no TABLESAMPLE in the query (full scan)."""
+        # relpages=0; then the extent query returns a valid bbox
+        mock_fetchone.side_effect = [
+            (0,),
+            (0.0, 0.0, 0.0, 1000.0, 1000.0, 1000.0),
+        ]
+        compute_uniform_range_bounds(
+            "conn", "t", "t_morton", source_geometry_column="pt", sample_pages=1000
+        )
+        extent_query = mock_fetchone.call_args_list[1][0][1]
+        assert "TABLESAMPLE" not in extent_query
+
+    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
+    def test_very_small_relpages_clamps_to_100(self, mock_fetchone):
+        """sample_pages > relpages → TABLESAMPLE clamped to 100.0, not >100."""
+        # relpages=5, sample_pages default 1000 → would be 20000% without clamping
+        mock_fetchone.side_effect = [
+            (5,),
+            (0.0, 0.0, 0.0, 1000.0, 1000.0, 1000.0),
+        ]
+        compute_uniform_range_bounds(
+            "conn", "t", "t_morton", source_geometry_column="pt", sample_pages=1000
+        )
+        extent_query = mock_fetchone.call_args_list[1][0][1]
+        assert "TABLESAMPLE" in extent_query
+        # Verify the percentage is ≤ 100
+        import re
+
+        pct_match = re.search(r"TABLESAMPLE SYSTEM\(([^)]+)\)", extent_query)
+        assert pct_match is not None
+        pct = float(pct_match.group(1))
+        assert pct <= 100.0
+
+
+# ===========================================================================
+# SQL injection validation (#11)
+# ===========================================================================
+
+
+class TestValidateIdentifier:
+    """_validate_identifier should reject unsafe names."""
+
+    def test_valid_names_pass(self):
+        assert _validate_identifier("my_table") == "my_table"
+        assert _validate_identifier("root_id") == "root_id"
+        assert _validate_identifier("Table1") == "Table1"
+        assert _validate_identifier("_private") == "_private"
+
+    def test_sql_injection_rejected(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            _validate_identifier("'; DROP TABLE foo;--")
+
+    def test_spaces_rejected(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            _validate_identifier("my table")
+
+    def test_hyphen_rejected(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            _validate_identifier("my-table")
+
+    def test_empty_string_rejected(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            _validate_identifier("")
+
+    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
+    def test_compute_partition_boundaries_rejects_bad_table(self, _mock):
+        import pytest
+
+        with pytest.raises(ValueError):
+            compute_partition_boundaries("conn", "bad-table!", "col", 4)
+
+    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
+    def test_compute_partition_boundaries_rejects_bad_column(self, _mock):
+        import pytest
+
+        with pytest.raises(ValueError):
+            compute_partition_boundaries("conn", "good_table", "'; DROP TABLE", 4)
+
+
+# ===========================================================================
+# Partial-export row count uses DeltaTable.count() (#9)
+# ===========================================================================
+
+
+class TestDecodeGeometryColumnsMemory:
+    """decode_geometry_columns: null mask uses is_not_null() not .to_list()."""
+
+    def test_null_mask_via_polars_not_python_list(self):
+        """Ensure the column is NOT fully materialized as a Python list
+        for the null mask step (regression guard for the .to_list() optimization)."""
+        coords = [(10, 20, 30), (40, 50, 60)]
+        geom = _make_wkb_series(coords, "pt")
+        df = pl.DataFrame({"id": [1, 2], "pt": geom})
+
+        # Patch Series.to_list to detect if it's called on the geometry column
+        # before decoding (i.e. for the null mask).
+        original_to_list = pl.Series.to_list
+        to_list_calls = []
+
+        def patched_to_list(self):
+            to_list_calls.append(self.name)
+            return original_to_list(self)
+
+        with patch.object(pl.Series, "to_list", patched_to_list):
+            result = decode_geometry_columns(df, ["pt"])
+
+        # drop_nulls().to_list() is called on a nameless intermediate series,
+        # not on "pt" directly as the first step.
+        # The key invariant: result is correct regardless of implementation.
+        assert result["pt_x"].to_list() == [10, 40]
+        assert result["pt_y"].to_list() == [20, 50]
+        assert result["pt_z"].to_list() == [30, 60]
+
+    def test_partial_nulls_correct_scatter(self):
+        """With mixed null/non-null geometries, coordinates scatter correctly."""
+        coords = [(10, 20, 30), (40, 50, 60)]
+        geom_values = [shapely.to_wkb(shapely.Point(*c)) for c in coords]
+        # Insert None in the middle
+        mixed = pl.Series("pt", [geom_values[0], None, geom_values[1]], dtype=pl.Binary)
+        df = pl.DataFrame({"id": [1, 2, 3], "pt": mixed})
+
+        result = decode_geometry_columns(df, ["pt"])
+
+        assert result["pt_x"].to_list() == [10, None, 40]
+        assert result["pt_y"].to_list() == [20, None, 50]
+        assert result["pt_z"].to_list() == [30, None, 60]

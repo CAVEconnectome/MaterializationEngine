@@ -884,6 +884,21 @@ class WriteDeltalakeResource(Resource):
         if request.is_json and request.json:
             output_specs = request.json.get("output_specs", None)
 
+        if output_specs is not None:
+            from materializationengine.workflows.deltalake_export import (
+                DeltaLakeOutputSpec,
+            )
+
+            if not isinstance(output_specs, list):
+                return abort(400, "output_specs must be a list")
+            for item in output_specs:
+                if not isinstance(item, dict):
+                    return abort(400, "each entry in output_specs must be an object")
+                try:
+                    DeltaLakeOutputSpec(**item)
+                except TypeError as exc:
+                    return abort(400, f"invalid output_specs entry: {exc}")
+
         write_deltalake_table.s(
             datastack_info, version, table_name, output_specs=output_specs
         ).apply_async()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -77,6 +78,20 @@ class DeltaLakeOutputSpec:
     bounds: list | None = None
 
 
+_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_$]*$")
+
+
+def _validate_identifier(name: str) -> str:
+    """Raise ``ValueError`` if *name* is not a safe SQL identifier.
+
+    Prevents SQL injection at f-string interpolation sites where identifier
+    quoting alone is insufficient (e.g. subquery table names, pg_class lookups).
+    """
+    if not _IDENTIFIER_RE.match(name):
+        raise ValueError(f"Unsafe SQL identifier: {name!r}")
+    return name
+
+
 def _adbc_fetchone(connection_string: str, query: str):
     """Execute *query* via ADBC and return a single row (or ``None``)."""
     with pg_dbapi.connect(connection_string) as conn:
@@ -110,6 +125,7 @@ def _resolve_select_columns(
     columns: list[str] = []
 
     for tbl in source.table_names:
+        _validate_identifier(tbl)
         query = (
             f"SELECT column_name FROM information_schema.columns "
             f"WHERE table_name = '{tbl}' ORDER BY ordinal_position"
@@ -267,6 +283,7 @@ def estimate_bytes_per_row(
     total_tuples = 0.0
 
     for tbl in source.table_names:
+        _validate_identifier(tbl)
         query = f"SELECT relpages, reltuples FROM pg_class WHERE relname = '{tbl}'"
         row = _adbc_fetchone(connection_string, query)
         if row is not None and row[0] > 0 and row[1] > 0:
@@ -323,6 +340,9 @@ def compute_partition_boundaries(
     if n_partitions <= 1:
         return []
 
+    _validate_identifier(table_name)
+    _validate_identifier(column_name)
+
     fractions = [i / n_partitions for i in range(1, n_partitions)]
     fractions_sql = ", ".join(str(f) for f in fractions)
 
@@ -340,6 +360,9 @@ def compute_partition_boundaries(
 
     # percentile_disc with an array argument returns a single-element row
     # containing a Postgres array → Python list.
+    # Guard against NULL result (empty table or all-NULL column).
+    if row is None or row[0] is None:
+        return []
     boundaries = list(row[0])
     return boundaries
 
@@ -357,6 +380,7 @@ def _estimate_sample_percent(
     Returns ``None`` if the table is small enough that a full scan is
     faster than sampling overhead (i.e. ``reltuples <= target_rows``).
     """
+    _validate_identifier(table_name)
     row = _adbc_fetchone(
         connection_string,
         f"SELECT reltuples FROM pg_class WHERE relname = '{table_name}'",
@@ -408,6 +432,10 @@ def _compute_sampled_percentile_bounds(
     if not nontrivial:
         return results
 
+    _validate_identifier(table_name)
+    for col in nontrivial:
+        _validate_identifier(col)
+
     sample_percent = _estimate_sample_percent(
         connection_string, table_name, target_sample_rows
     )
@@ -430,8 +458,14 @@ def _compute_sampled_percentile_bounds(
     query = f"SELECT {', '.join(agg_parts)} FROM {from_clause}"
     row = _adbc_fetchone(connection_string, query)
 
+    # Guard against NULL result (empty table or all-NULL columns).
+    if row is None:
+        for col in col_order:
+            results[col] = []
+        return results
+
     for i, col in enumerate(col_order):
-        results[col] = list(row[i])
+        results[col] = [] if row[i] is None else list(row[i])
 
     return results
 
@@ -469,18 +503,38 @@ def compute_uniform_range_bounds(
     Returns a ``(min_val, max_val)`` tuple suitable for
     :func:`assign_partition`.
     """
+    _validate_identifier(table_name)
+
     if source_geometry_column is not None:
         col = source_geometry_column
+        _validate_identifier(col)
+
+        # Pre-fetch relpages to compute a safe TABLESAMPLE percentage.
+        # This avoids the inline subquery `sample_pages / relpages * 100`
+        # overflowing 100% (or dividing by zero) for small/empty tables.
+        relpages_row = _adbc_fetchone(
+            connection_string,
+            f"SELECT relpages FROM pg_class WHERE relname = '{table_name}'",
+        )
+        relpages = relpages_row[0] if relpages_row is not None else 0
+
+        if relpages <= 0:
+            # Table is empty or has no stats — full scan (no TABLESAMPLE).
+            tablesample_clause = ""
+        else:
+            pct = min(sample_pages / relpages * 100.0, 100.0)
+            tablesample_clause = f" TABLESAMPLE SYSTEM({pct})"
+
         query = (
             f"SELECT ST_XMin(bbox), ST_YMin(bbox), ST_ZMin(bbox), "
             f"ST_XMax(bbox), ST_YMax(bbox), ST_ZMax(bbox) FROM ("
             f'SELECT ST_3DExtent("{col}") AS bbox '
-            f'FROM "{table_name}" TABLESAMPLE SYSTEM ('
-            f"{sample_pages}.0 / ("
-            f"SELECT relpages FROM pg_class WHERE relname = '{table_name}'"
-            f") * 100)) sub"
+            f'FROM "{table_name}"{tablesample_clause}) sub'
         )
         row = _adbc_fetchone(connection_string, query)
+        # Guard: ST_3DExtent returns NULL when the sample has no geometries.
+        if row is None or row[0] is None:
+            return 0.0, 0.0
         x_min, y_min, z_min, x_max, y_max, z_max = (float(v) for v in row)
 
         # Morton-encode the bounding-box corners.  The actual min/max
@@ -494,11 +548,15 @@ def compute_uniform_range_bounds(
         )
         return float(corners.min()), float(corners.max())
     else:
+        _validate_identifier(column_name)
         query = (
             f'SELECT MIN("{column_name}")::float, MAX("{column_name}")::float '
             f'FROM "{table_name}"'
         )
         row = _adbc_fetchone(connection_string, query)
+        # Guard: MIN/MAX return NULL for empty tables or all-NULL columns.
+        if row is None or row[0] is None:
+            return 0.0, 0.0
         return float(row[0]), float(row[1])
 
 
@@ -775,11 +833,12 @@ def decode_geometry_columns(
     morton_set = set(morton_columns or [])
 
     for col in geometry_columns:
-        wkb_data = table[col].to_list()
-        n_rows = len(wkb_data)
+        wkb_series = table[col]
+        n_rows = len(wkb_series)
 
-        # Build a boolean mask of non-null geometries.
-        valid_mask = np.array([v is not None for v in wkb_data], dtype=bool)
+        # Build the null mask without materializing the full column as Python
+        # objects — avoids duplicating buffered WKB data for large flushes.
+        valid_mask = wkb_series.is_not_null().to_numpy()
         n_valid = int(valid_mask.sum())
 
         if n_valid == 0:
@@ -795,7 +854,8 @@ def decode_geometry_columns(
                 )
         else:
             # Decode only non-null geometries, then scatter back.
-            valid_wkb = [wkb_data[i] for i in range(n_rows) if valid_mask[i]]
+            # drop_nulls() preserves order, matching the True positions in valid_mask.
+            valid_wkb = wkb_series.drop_nulls().to_list()
             points = shapely.from_wkb(valid_wkb)
             coords = shapely.get_coordinates(points, include_z=True)
 
@@ -806,13 +866,18 @@ def decode_geometry_columns(
                 z = coords[:, 2].astype(np.int32)
             else:
                 # Scatter decoded coords into full-length nullable arrays.
+                # Use object dtype for intermediate storage (supports None),
+                # then convert to list so Polars can construct nullable Int32
+                # series (object arrays can't be cast to Int32 directly).
                 x_full = np.full(n_rows, None, dtype=object)
                 y_full = np.full(n_rows, None, dtype=object)
                 z_full = np.full(n_rows, None, dtype=object)
                 x_full[valid_mask] = coords[:, 0].astype(np.int32)
                 y_full[valid_mask] = coords[:, 1].astype(np.int32)
                 z_full[valid_mask] = coords[:, 2].astype(np.int32)
-                x, y, z = x_full, y_full, z_full
+                x = x_full.tolist()
+                y = y_full.tolist()
+                z = z_full.tolist()
 
             new_cols = [
                 pl.Series(f"{col}_x", x, dtype=pl.Int32),
@@ -823,16 +888,19 @@ def decode_geometry_columns(
             if col in morton_set:
                 if n_valid == n_rows:
                     morton = morton_encode_3d(
-                        x.astype(np.uint64),
-                        y.astype(np.uint64),
-                        z.astype(np.uint64),
+                        np.asarray(x, dtype=np.uint64),
+                        np.asarray(y, dtype=np.uint64),
+                        np.asarray(z, dtype=np.uint64),
                     )
                 else:
-                    morton = np.full(n_rows, None, dtype=object)
+                    morton_full = np.full(n_rows, None, dtype=object)
                     valid_x = coords[:, 0].astype(np.uint64)
                     valid_y = coords[:, 1].astype(np.uint64)
                     valid_z = coords[:, 2].astype(np.uint64)
-                    morton[valid_mask] = morton_encode_3d(valid_x, valid_y, valid_z)
+                    morton_full[valid_mask] = morton_encode_3d(
+                        valid_x, valid_y, valid_z
+                    )
+                    morton = morton_full.tolist()
                 new_cols.append(pl.Series(f"{col}_morton", morton, dtype=pl.Int64))
 
         table = table.with_columns(new_cols).drop(col)
@@ -1259,6 +1327,9 @@ def write_deltalake_table(
     from materializationengine.utils import get_config_param
 
     datastack = datastack_info["datastack"]
+    # Validate table_name early to prevent SQL injection through all downstream
+    # f-string identifier interpolations in the export pipeline.
+    _validate_identifier(table_name)
     pcg_table_name = datastack_info["segmentation_source"].split("/")[-1]
     analysis_database = f"{datastack}__mat{version}"
 
@@ -1327,7 +1398,10 @@ def write_deltalake_table(
             from deltalake import DeltaTable
 
             dt = DeltaTable(uri)
-            existing_rows = dt.to_pyarrow_dataset().count_rows()
+            # count() reads row count from Delta log add-action metadata
+            # (no file scan).  It may be approximate when per-file stats are
+            # absent, but is fast and sufficient for partial-export detection.
+            existing_rows = dt.count()
         except Exception:
             existing_rows = None
 
