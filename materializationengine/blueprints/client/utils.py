@@ -87,7 +87,7 @@ def create_query_response(
     desired_resolution,
     column_names,
     return_pyarrow=True,
-    arrow_format=False,
+    arrow_format=False,  # kept for API compatibility; IPC format is always used now
     ipc_compress=True,
 ):
     accept_encoding = request.headers.get("Accept-Encoding", "")
@@ -97,35 +97,31 @@ def create_query_response(
         headers["dataframe_resolution"] = desired_resolution
     headers["column_names"] = column_names
     if return_pyarrow:
-        if arrow_format:
-            batch = pa.RecordBatch.from_pandas(df)
-            sink = pa.BufferOutputStream()
-            if ipc_compress:
-                if "lz4" in accept_encoding:
-                    compression = "LZ4_FRAME"
-                elif "zstd" in accept_encoding:
-                    compression = "ZSTD"
-                else:
-                    compression = None
+        if not arrow_format:
+            headers = add_warnings_to_headers(
+                headers,
+                [
+                    "Response is in pyarrow IPC format. If you encounter a parsing error, "
+                    "please upgrade CAVEClient to >=5.9.0 with: pip install --upgrade caveclient. "
+                    "To suppress this warning, pass arrow_format=True in your query parameters."
+                ],
+            )
+        batch = pa.RecordBatch.from_pandas(df)
+        sink = pa.BufferOutputStream()
+        if ipc_compress:
+            if "lz4" in accept_encoding:
+                compression = "LZ4_FRAME"
+            elif "zstd" in accept_encoding:
+                compression = "ZSTD"
             else:
                 compression = None
-            opt = pa.ipc.IpcWriteOptions(compression=compression)
-            with pa.ipc.new_stream(sink, batch.schema, options=opt) as writer:
-                writer.write_batch(batch)
-            response = send_file(BytesIO(sink.getvalue().to_pybytes()), "data.arrow")
-            response.headers.update(headers)
-            return after_request(response)
-        headers = add_warnings_to_headers(
-            headers,
-            [
-                "Using deprecated pyarrow serialization method, please upgrade CAVEClient>=5.9.0 with pip install --upgrade caveclient"
-            ],
-        )
-        context = pa.default_serialization_context()
-        serialized = context.serialize(df).to_buffer().to_pybytes()
-        response = Response(
-            serialized, headers=headers, mimetype="x-application/pyarrow"
-        )
+        else:
+            compression = None
+        opt = pa.ipc.IpcWriteOptions(compression=compression)
+        with pa.ipc.new_stream(sink, batch.schema, options=opt) as writer:
+            writer.write_batch(batch)
+        response = send_file(BytesIO(sink.getvalue().to_pybytes()), "data.arrow")
+        response.headers.update(headers)
         return after_request(response)
     else:
         dfjson = df.to_json(orient="records")
