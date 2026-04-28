@@ -1130,6 +1130,12 @@ def optimize_deltalake(
             column_properties={col: col_props for col in bloom_filter_columns}
         )
 
+    celery_logger.info(
+        "Optimizing Delta Lake at %s (z-order: %s, bloom filters: %s)",
+        uri,
+        zorder_columns or "none",
+        bloom_filter_columns or "none",
+    )
     if zorder_columns:
         dt.optimize.z_order(
             columns=zorder_columns,
@@ -1138,6 +1144,7 @@ def optimize_deltalake(
     else:
         dt.optimize.compact(writer_properties=writer_properties)
 
+    celery_logger.info("Vacuuming Delta Lake at %s", uri)
     try:
         dt.vacuum(
             dry_run=False,
@@ -1150,7 +1157,7 @@ def optimize_deltalake(
         # "unmasked nulls for non-nullable StructArray" in the
         # transaction log stats.  Log and continue — the data is
         # already written and optimized; vacuum just cleans up old files.
-        celery_logger.warning("vacuum failed for %s: %s", uri, exc)
+        celery_logger.warning("Vacuum failed for %s: %s", uri, exc)
 
 
 def make_tqdm_progress_callback(
@@ -1349,6 +1356,8 @@ def write_deltalake_table(
         raise ValueError("DELTALAKE_OUTPUT_BUCKET not set in app config")
     output_uri_base = f"{output_bucket}/{datastack}/v{version}/{table_name}"
 
+    celery_logger.info("Outputting Delta Lakes to: %s", output_uri_base)
+
     flush_threshold = get_config_param(
         "DELTALAKE_FLUSH_THRESHOLD_BYTES", 2 * 1024 * 1024 * 1024
     )
@@ -1379,6 +1388,14 @@ def write_deltalake_table(
     # If merged (no separate seg table), segmentation_table stays None.
     segmentation_table_name = seg_table_name if has_seg_table else None
 
+    celery_logger.info(
+        "Exporting table %s (v%d) with %d rows; segmentation table: %s",
+        table_name,
+        version,
+        row_count,
+        segmentation_table_name or "none",
+    )
+
     source = TableSource(
         annotation_table=table_name,
         segmentation_table=segmentation_table_name,
@@ -1389,6 +1406,19 @@ def write_deltalake_table(
         resolved_specs = [DeltaLakeOutputSpec(**s) for s in output_specs]
     else:
         resolved_specs = discover_default_output_specs(source, engine)
+
+    celery_logger.info(
+        "Resolved %d output specs for table %s (v%d)",
+        len(resolved_specs),
+        table_name,
+        version,
+    )
+    for spec in resolved_specs:
+        celery_logger.info(
+            "  - partition_by: %s, strategy: %s",
+            spec.partition_by,
+            spec.partition_strategy,
+        )
 
     if not resolved_specs:
         celery_logger.warning(
@@ -1418,6 +1448,21 @@ def write_deltalake_table(
                 f"This may be the result of a partial export. "
                 f"Delete the existing Delta Lake before re-exporting."
             )
+
+        if existing_rows is not None:
+            celery_logger.info(
+                "Existing Delta Lake found for table %s (v%d) at %s: "
+                "%d rows (expected %d)",
+                table_name,
+                version,
+                uri,
+                existing_rows,
+                row_count,
+            )
+            celery_logger.info(
+                "Assuming existing Delta Lake is correct and skipping export for this spec."
+            )
+
 
     # --- Estimate bytes per row and resolve partition counts / bounds ---
     bytes_per_row = estimate_bytes_per_row(connection_string, source)
