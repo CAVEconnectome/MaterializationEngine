@@ -42,8 +42,10 @@ dependencies = [
     "nglui>=3.2.1,<4",
     "Flask-Limiter[redis]",
     "cryptography>=44.0.2",
-    "uwsgi>=2.0.30",
     "kvdbclient[extensions]",
+    "adbc-driver-postgresql>=1.11.0",
+    "deltalake>=1.5.0",
+    "polars>=1.39.3",
 ]
 authors = [
     { name = "Forrest Collman", email = "forrestc@alleninstitute.org" },
@@ -55,6 +57,9 @@ classifiers = [
 ]
 
 [dependency-groups]
+deploy = [
+    "uwsgi>=2.0.30",
+]
 dev = [
     "pytest",
     "pytest-cov",

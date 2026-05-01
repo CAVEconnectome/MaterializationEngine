@@ -1,39 +1,41 @@
 import datetime
 import logging
+import os
+import subprocess
+
+import cloudfiles
 import redis
-from dynamicannotationdb.models import AnalysisTable, Base
-from flask import abort, current_app, request, jsonify
+from dynamicannotationdb.models import AnalysisTable, AnalysisVersion, Base
+from flask import abort, current_app, jsonify, request
 from flask_accepts import accepts
-from flask_restx import Namespace, Resource, inputs, reqparse, fields
+from flask_restx import Namespace, Resource, fields, inputs, reqparse
+from middle_auth_client import (
+    auth_requires_admin,
+    auth_requires_dataset_admin,
+    auth_requires_permission,
+)
+from sqlalchemy import MetaData, Table
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.exc import NoSuchTableError
+
 from materializationengine.blueprints.client.utils import get_latest_version
+from materializationengine.blueprints.materialize.schemas import (
+    AnnotationIDListSchema,
+    BadRootsSchema,
+    VirtualVersionSchema,
+)
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import (
-    dynamic_annotation_cache,
     db_manager,
+    dynamic_annotation_cache,
 )
 from materializationengine.info_client import (
     get_aligned_volumes,
     get_datastack_info,
     get_relevant_datastack_info,
 )
-from dynamicannotationdb.models import AnalysisVersion
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
-from materializationengine.blueprints.materialize.schemas import BadRootsSchema
-from middle_auth_client import auth_requires_admin, auth_requires_permission, auth_requires_dataset_admin
-from sqlalchemy import MetaData, Table
-from sqlalchemy.engine.url import make_url
-from sqlalchemy.exc import NoSuchTableError
 from materializationengine.utils import check_write_permission
-import os
-import subprocess
-import cloudfiles
-
-
-from materializationengine.blueprints.materialize.schemas import (
-    VirtualVersionSchema,
-    AnnotationIDListSchema,
-)
-
 
 __version__ = "5.18.0"
 
@@ -715,7 +717,7 @@ class TableResource(Resource):
     @mat_bp.doc("get_all_tables", security="apikey")
     def get(self, aligned_volume_name, version):
         check_aligned_volume(aligned_volume_name)
-        
+
         with db_manager.session_scope(aligned_volume_name) as session:
             response = (
                 session.query(AnalysisTable)
@@ -742,11 +744,11 @@ class AnnotationResource(Resource):
     @mat_bp.doc("get_top_materialized_annotations", security="apikey")
     def get(self, aligned_volume_name: str, version: int, tablename: str):
         check_aligned_volume(aligned_volume_name)
-        
+
         try:
             with db_manager.session_scope(aligned_volume_name) as session:
                 engine = db_manager.get_engine(aligned_volume_name)
-                
+
                 metadata = MetaData()
                 try:
                     annotation_table = Table(
@@ -755,15 +757,16 @@ class AnnotationResource(Resource):
                 except NoSuchTableError as e:
                     logging.error(f"No table exists {e}")
                     return abort(404)
-                
+
                 response = session.query(annotation_table).limit(10).all()
                 annotations = [r._asdict() for r in response]
-                
+
                 return (annotations, 200) if annotations else abort(404)
-                
+
         except Exception as e:
             logging.error(f"Error querying annotations: {e}")
             return abort(500)
+
 
 @mat_bp.route("/materialize/run/create_virtual/datastack/<string:datastack_name>")
 class CreateVirtualPublicVersionResource(Resource):
@@ -771,7 +774,7 @@ class CreateVirtualPublicVersionResource(Resource):
     @auth_requires_dataset_admin(table_arg="datastack_name")
     @mat_bp.doc("create virtual materialization", security="apikey")
     @accepts("VirtualVersionSchema", schema=VirtualVersionSchema, api=mat_bp)
-    def post(self, datastack_name:str):
+    def post(self, datastack_name: str):
         """Create a virtual version from an existing frozen version.
 
         Args:
@@ -790,8 +793,7 @@ class CreateVirtualPublicVersionResource(Resource):
         if not tables_to_include:
             return abort(400, "No tables included")
 
-        with db_manager.session_scope(aligned_volume) as session:        
-
+        with db_manager.session_scope(aligned_volume) as session:
             analysis_version = (
                 session.query(AnalysisVersion)
                 .filter(AnalysisVersion.version == target_version)
@@ -851,3 +853,80 @@ class CreateVirtualPublicVersionResource(Resource):
             analysis_version.expires_on = expiration_timestamp
 
         return f"{virtual_datastack_name} created", 200
+
+
+@mat_bp.route(
+    "/materialize/run/write_deltalake/datastack/<string:datastack_name>/version/<int(signed=True):version>/table_name/<string:table_name>/"
+)
+class WriteDeltalakeResource(Resource):
+    @reset_auth
+    @auth_requires_dataset_admin(table_arg="datastack_name")
+    @mat_bp.doc("Export a table to Delta Lake", security="apikey")
+    def post(self, datastack_name: str, version: int, table_name: str):
+        """Export a frozen materialization table to partitioned Delta Lake.
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+            version (int): materialization version (-1 for latest)
+            table_name (str): annotation table name to export
+        """
+        from materializationengine.workflows.deltalake_export import (
+            write_deltalake_table,
+        )
+
+        if version == -1:
+            version = get_latest_version(datastack_name)
+
+        datastack_info = get_datastack_info(datastack_name)
+
+        # Accept optional output_specs from JSON body.
+        output_specs = None
+        if request.is_json and request.json:
+            output_specs = request.json.get("output_specs", None)
+
+        if output_specs is not None:
+            from materializationengine.workflows.deltalake_export import (
+                DeltaLakeOutputSpec,
+            )
+
+            if not isinstance(output_specs, list):
+                return abort(400, "output_specs must be a list")
+            for item in output_specs:
+                if not isinstance(item, dict):
+                    return abort(400, "each entry in output_specs must be an object")
+                try:
+                    DeltaLakeOutputSpec(**item)
+                except TypeError as exc:
+                    return abort(400, f"invalid output_specs entry: {exc}")
+
+        write_deltalake_table.s(
+            datastack_info, version, table_name, output_specs=output_specs
+        ).apply_async()
+
+        return {
+            "message": f"Delta Lake export enqueued for {table_name} v{version}"
+        }, 200
+
+    @reset_auth
+    @auth_requires_dataset_admin(table_arg="datastack_name")
+    @mat_bp.doc("Get Delta Lake export progress", security="apikey")
+    def get(self, datastack_name: str, version: int, table_name: str):
+        """Get progress of a Delta Lake export for a table.
+
+        Returns JSON with ``status``, ``rows_processed``, ``total_rows``,
+        and ``percent_complete``.  Returns 404 if no export is tracked.
+        """
+        from materializationengine.workflows.deltalake_export import (
+            get_deltalake_export_progress,
+        )
+
+        if version == -1:
+            version = get_latest_version(datastack_name)
+
+        progress = get_deltalake_export_progress(datastack_name, version, table_name)
+        if progress is None:
+            return {
+                "message": f"No export progress found for {table_name} v{version}"
+            }, 404
+
+        return progress, 200

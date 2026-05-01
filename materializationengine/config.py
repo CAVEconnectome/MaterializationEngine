@@ -48,9 +48,9 @@ class BaseConfig:
     MERGE_TABLES = True
     AUTH_SERVICE_NAMESPACE = "datastack"
 
-    REDIS_HOST="localhost"
-    REDIS_PORT=6379
-    REDIS_PASSWORD=""
+    REDIS_HOST = "localhost"
+    REDIS_PORT = 6379
+    REDIS_PASSWORD = ""
     SESSION_TYPE = "redis"
     PERMANENT_SESSION_LIFETIME = timedelta(hours=24)
     SESSION_PREFIX = "annotation_upload_"
@@ -61,6 +61,15 @@ class BaseConfig:
 
     STAGING_DATABASE_NAME = "staging"
     MATERIALIZATION_UPLOAD_BUCKET_PATH = "test_annotation_csv_upload"
+
+    # Delta Lake export settings
+    DELTALAKE_OUTPUT_BUCKET = os.environ.get("DELTALAKE_OUTPUT_BUCKET", "")
+    DELTALAKE_FLUSH_THRESHOLD_BYTES = int(
+        os.environ.get("DELTALAKE_FLUSH_THRESHOLD_BYTES", 2 * 1024 * 1024 * 1024)
+    )
+    DELTALAKE_TARGET_PARTITION_SIZE_MB = int(
+        os.environ.get("DELTALAKE_TARGET_PARTITION_SIZE_MB", 256)
+    )
 
     if os.environ.get("DAF_CREDENTIALS", None) is not None:
         with open(os.environ.get("DAF_CREDENTIALS"), "r") as f:
@@ -150,7 +159,6 @@ class DevConfig(BaseConfig):
     CELERY_BROKER_URL = REDIS_URL
     CELERY_RESULT_BACKEND = REDIS_URL
     USE_SENTINEL = os.environ.get("USE_SENTINEL", False)
-    
 
 
 class TestConfig(BaseConfig):
@@ -193,18 +201,20 @@ def configure_app(app: Flask) -> Flask:
     beat_schedules_before = app.config.get("BEAT_SCHEDULES", "NOT_SET")
     app.config.from_pyfile("config.cfg", silent=True)
     beat_schedules_after = app.config.get("BEAT_SCHEDULES", "NOT_SET")
-    
+
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(app.config["LOGGING_LEVEL"])
     app.logger.removeHandler(default_handler)
     app.logger.addHandler(handler)
     app.logger.setLevel(app.config["LOGGING_LEVEL"])
     app.logger.propagate = False
-    
+
     # Log BEAT_SCHEDULES loading status (debug level)
     app.logger.debug(f"BEAT_SCHEDULES before config.cfg: {beat_schedules_before}")
     app.logger.debug(f"BEAT_SCHEDULES after config.cfg: {beat_schedules_after}")
-    app.logger.debug(f"BEAT_SCHEDULES type: {type(beat_schedules_after)}, length: {len(beat_schedules_after) if isinstance(beat_schedules_after, (list, dict)) else 'N/A'}")
+    app.logger.debug(
+        f"BEAT_SCHEDULES type: {type(beat_schedules_after)}, length: {len(beat_schedules_after) if isinstance(beat_schedules_after, (list, dict)) else 'N/A'}"
+    )
     app.logger.debug(app.config)
     app.app_context().push()
     return app
