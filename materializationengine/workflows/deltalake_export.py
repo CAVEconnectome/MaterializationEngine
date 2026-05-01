@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import math
 import re
 from collections.abc import Callable
@@ -14,6 +13,7 @@ import numpy as np
 import polars as pl
 import pyarrow as pa
 import shapely
+from celery.utils.log import get_task_logger
 from sqlalchemy import inspect
 from sqlalchemy.dialects.postgresql import BYTEA
 
@@ -27,7 +27,7 @@ from materializationengine.celery_init import celery
 
 _pg_dialect.ischema_names["geometry"] = BYTEA
 
-celery_logger = logging.getLogger(__name__)
+celery_logger = get_task_logger(__name__)
 
 # Columns to drop from every Delta Lake export by default.
 _DEFAULT_DROP_COLUMNS = ["created", "deleted", "superceded_id"]
@@ -1462,7 +1462,6 @@ def write_deltalake_table(
             celery_logger.info(
                 "Assuming existing Delta Lake is correct and skipping export for this spec."
             )
-
 
     # --- Estimate bytes per row and resolve partition counts / bounds ---
     bytes_per_row = estimate_bytes_per_row(connection_string, source)
