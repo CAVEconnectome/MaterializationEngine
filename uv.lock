@@ -6,13 +6,6 @@ resolution-markers = [
     "sys_platform == 'win32'",
 ]
 
-[options]
-exclude-newer = "2026-04-17T00:12:48.028475Z"
-exclude-newer-span = "P14D"
-
-[options.exclude-newer-package]
-emannotationschemas = false
-
 [[package]]
 name = "adbc-driver-manager"
 version = "1.11.0"
