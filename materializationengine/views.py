@@ -57,7 +57,7 @@ from materializationengine.schemas import (
 from materializationengine.utils import check_read_permission, get_config_param
 
 
-__version__ = "5.16.6"
+__version__ = "5.18.0"
 
 views_bp = Blueprint("views", __name__, url_prefix="/materialize/views")
 
@@ -270,8 +270,8 @@ def make_precomputed_annotation_link(datastack_name, table_name, client):
     auth_disabled = get_config_param("AUTH_DISABLED", False)
     auth_prefix = "" if auth_disabled else "middleauth+"
     
-    seg_layer = client.info.segmentation_source(format_for="neuroglancer")
-    seg_layer = seg_layer.replace("graphene://https://", "graphene://middleauth+https://")
+    seg_source = client.info.segmentation_source(format_for="neuroglancer")
+    seg_source = seg_source.replace("graphene://https://", "graphene://middleauth+https://")
 
     annotation_url = url_for(
         "api.Materialization Client2_live_table_precomputed_info",
@@ -280,8 +280,15 @@ def make_precomputed_annotation_link(datastack_name, table_name, client):
         _external=True)
     annotation_source = f"precomputed://{auth_prefix}{annotation_url}"
     annotation_source = annotation_source[:-5]
+
+    seg_sources = [seg_source]
+    datastack_info = client.info.get_datastack_info()
+    skeleton_source = datastack_info.get("skeleton_source", None)
+    if skeleton_source:
+        seg_sources.append(skeleton_source)
+
     seg_layer = nglui.statebuilder.SegmentationLayerConfig(
-        source=seg_layer, name="seg"
+        source=seg_sources, name="seg"
     )
     img_layer = nglui.statebuilder.ImageLayerConfig(
         source=client.info.image_source(), name="img"
@@ -310,8 +317,8 @@ def make_seg_prop_ng_link(datastack_name, table_name, version, client, is_view=F
     auth_disabled = get_config_param("AUTH_DISABLED", False)
     auth_prefix = "" if auth_disabled else "middleauth+"
     
-    seg_layer = client.info.segmentation_source(format_for="neuroglancer")
-    seg_layer = seg_layer.replace("graphene://https://", "graphene://middleauth+https://")
+    seg_source = client.info.segmentation_source(format_for="neuroglancer")
+    seg_source = seg_source.replace("graphene://https://", "graphene://middleauth+https://")
     
     if is_view:
         seginfo_url = url_for(
@@ -334,8 +341,14 @@ def make_seg_prop_ng_link(datastack_name, table_name, version, client, is_view=F
     # strip off the /info
     seg_info_source = seg_info_source[:-5]
 
+    seg_sources = [seg_source, seg_info_source]
+    datastack_info = client.info.get_datastack_info()
+    skeleton_source = datastack_info.get("skeleton_source", None)
+    if skeleton_source:
+        seg_sources.append(skeleton_source)
+
     seg_layer = nglui.statebuilder.SegmentationLayerConfig(
-        source=[seg_layer, seg_info_source], name="seg"
+        source=seg_sources, name="seg"
     )
     img_layer = nglui.statebuilder.ImageLayerConfig(
         source=client.info.image_source(), name="img"
