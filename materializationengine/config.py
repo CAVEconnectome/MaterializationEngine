@@ -70,6 +70,19 @@ class BaseConfig:
     DELTALAKE_TARGET_PARTITION_SIZE_MB = int(
         os.environ.get("DELTALAKE_TARGET_PARTITION_SIZE_MB", 256)
     )
+    DELTALAKE_OPTIMIZE_MAX_CONCURRENT_TASKS = int(
+        os.environ.get("DELTALAKE_OPTIMIZE_MAX_CONCURRENT_TASKS", 1)
+    )
+    DELTALAKE_OPTIMIZE_TARGET_SIZE_BYTES = (
+        int(os.environ["DELTALAKE_OPTIMIZE_TARGET_SIZE_BYTES"])
+        if "DELTALAKE_OPTIMIZE_TARGET_SIZE_BYTES" in os.environ
+        else None
+    )
+    DELTALAKE_OPTIMIZE_MAX_SPILL_SIZE_BYTES = (
+        int(os.environ["DELTALAKE_OPTIMIZE_MAX_SPILL_SIZE_BYTES"])
+        if "DELTALAKE_OPTIMIZE_MAX_SPILL_SIZE_BYTES" in os.environ
+        else None
+    )
 
     if os.environ.get("DAF_CREDENTIALS", None) is not None:
         with open(os.environ.get("DAF_CREDENTIALS"), "r") as f:
