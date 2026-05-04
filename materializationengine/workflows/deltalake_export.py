@@ -246,7 +246,7 @@ def discover_default_output_specs(
     if spatial_candidates:
         spatial_candidates.sort(key=lambda c: _spatial_col_rank(c[0]))
         col, owning_table = spatial_candidates[0]
-        # Spatial index — partition on Morton code, z-order on coordinates
+        # Spatial index — partition on Morton code, z-order on Morton column
         # NOTE: using the uniform range approach here as the percentile approach
         # won't work without some extra tooling, as the morton column doesn't
         # exist in the db
@@ -255,7 +255,7 @@ def discover_default_output_specs(
                 partition_by=f"{col}_morton",
                 partition_strategy="uniform_range",
                 n_partitions="auto",
-                zorder_columns=[f"{col}_x", f"{col}_y", f"{col}_z"],
+                zorder_columns=[f"{col}_morton"],
                 bloom_filter_columns=[],
                 source_geometry_column=col,
                 source_table=owning_table,
