@@ -1334,6 +1334,8 @@ def _build_frozen_db_connection_string(
     name="deltalake:write_deltalake_table",
     bind=True,
     acks_late=True,
+    soft_time_limit=21000,
+    time_limit=21300,
 )
 def write_deltalake_table(
     self,
@@ -1465,7 +1467,7 @@ def write_deltalake_table(
         )
         return
 
-    # --- Partial-export detection (task 8.4) ---
+    # --- Existing Delta Lake detection ---
     for spec in resolved_specs:
         lake_name = spec.partition_by or "flat"
         uri = f"{output_uri_base}/{lake_name}"
@@ -1489,17 +1491,10 @@ def write_deltalake_table(
             )
 
         if existing_rows is not None:
-            celery_logger.info(
-                "Existing Delta Lake found for table %s (v%d) at %s: "
-                "%d rows (expected %d)",
-                table_name,
-                version,
-                uri,
-                existing_rows,
-                row_count,
-            )
-            celery_logger.info(
-                "Assuming existing Delta Lake is correct and skipping export for this spec."
+            raise RuntimeError(
+                f"Delta Lake for table {table_name!r} already exists at "
+                f"{uri} with {existing_rows} rows (matches expected count). "
+                f"Delete the existing Delta Lake before re-exporting."
             )
 
     # --- Estimate bytes per row and resolve partition counts / bounds ---

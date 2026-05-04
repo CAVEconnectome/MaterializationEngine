@@ -71,7 +71,7 @@ def create_celery(app=None):
             "result_expires": 86400,  # results expire in broker after 1 day
             "redis_socket_connect_timeout": 10,
             "broker_transport_options": {
-                "visibility_timeout": 8000,
+                "visibility_timeout": 21600,
                 "socket_timeout": 20,
                 "socket_connect_timeout": 20,
             },  # timeout (s) for tasks to be sent back to broker queue
