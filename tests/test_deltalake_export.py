@@ -108,11 +108,7 @@ class TestDiscoverDefaultOutputSpecs:
         assert len(specs) == 1
         assert specs[0].partition_by == "pt_position_morton"
         assert specs[0].partition_strategy == "uniform_range"
-        assert specs[0].zorder_columns == [
-            "pt_position_x",
-            "pt_position_y",
-            "pt_position_z",
-        ]
+        assert specs[0].zorder_columns == ["pt_position_morton"]
         assert specs[0].source_geometry_column == "pt_position"
 
     def test_multiple_indexes(self):
