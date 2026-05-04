@@ -78,6 +78,9 @@ class BaseConfig:
         if "DELTALAKE_OPTIMIZE_TARGET_SIZE_BYTES" in os.environ
         else None
     )
+    # this one should help with memory during optimize if it is still a problem,
+    # but has not been tested on the mesh worker nodes. im not sure how spilling to 
+    # disk on those will work out of the box
     DELTALAKE_OPTIMIZE_MAX_SPILL_SIZE_BYTES = (
         int(os.environ["DELTALAKE_OPTIMIZE_MAX_SPILL_SIZE_BYTES"])
         if "DELTALAKE_OPTIMIZE_MAX_SPILL_SIZE_BYTES" in os.environ
