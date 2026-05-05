@@ -6,6 +6,10 @@ resolution-markers = [
     "sys_platform == 'win32'",
 ]
 
+[options]
+exclude-newer = "2026-04-14T22:09:30.878203Z"
+exclude-newer-span = "P14D"
+
 [[package]]
 name = "aiohappyeyeballs"
 version = "2.6.1"
@@ -1650,7 +1654,7 @@ wheels = [
 
 [[package]]
 name = "materializationengine"
-version = "5.16.5"
+version = "5.16.6"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },

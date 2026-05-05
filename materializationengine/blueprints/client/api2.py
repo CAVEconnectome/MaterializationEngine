@@ -3622,3 +3622,119 @@ class ViewSchemas(Resource):
             table = meta_db.database.get_view_table(view_name)
             schemas[view_name] = get_table_schema(table)
         return schemas, 200
+
+
+def _get_flat_table(meta_db, table_name):
+    """Get the SQLAlchemy Table object for an annotation table via flat model.
+
+    Args:
+        meta_db: database session from request_db_session context manager
+        table_name (str): table name
+
+    Returns:
+        sqlalchemy.Table: the table object
+    """
+    ann_md = meta_db.database.get_table_metadata(table_name)
+    schema_type = ann_md.get("schema_type")
+    reference_table = ann_md.get("reference_table")
+    table_metadata = {"reference_table": reference_table} if reference_table else None
+    model = meta_db.schema.create_flat_model(
+        table_name=table_name,
+        schema_type=schema_type,
+        table_metadata=table_metadata,
+    )
+    return model.__table__
+
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>/table/<string:table_name>/schema"
+)
+class TableSchema(Resource):
+    method_decorators = [
+        validate_datastack,
+        limit_by_category("fast_query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    @client_bp.doc("table_schema", security="apikey")
+    def get(
+        self,
+        datastack_name: str,
+        version: int,
+        table_name: str,
+        target_datastack: str = None,
+        target_version: int = None,
+    ):
+        """endpoint for getting schema about a table
+
+        Args:
+            datastack_name (str): datastack name
+            version (int): version number
+            table_name (str): table name
+
+        Returns:
+            dict: a jsonschema of the table
+        """
+
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+
+        if version == 0:
+            mat_db_name = f"{aligned_volume_name}"
+        else:
+            mat_db_name = f"{datastack_name}__mat{version}"
+        with request_db_session(mat_db_name) as meta_db:
+            table = _get_flat_table(meta_db, table_name)
+
+        return get_table_schema(table)
+
+
+@client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>/tables/schemas"
+)
+class TableSchemas(Resource):
+    method_decorators = [
+        validate_datastack,
+        limit_by_category("fast_query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+        reset_auth,
+    ]
+
+    @client_bp.doc("table_schemas", security="apikey")
+    def get(
+        self,
+        datastack_name: str,
+        version: int,
+        target_datastack: str = None,
+        target_version: int = None,
+    ):
+        """endpoint for getting table schemas
+
+        Args:
+            datastack_name (str): datastack name
+            version (int): version number
+
+        Returns:
+            dict: a dict of jsonschemas of each table
+        """
+
+        aligned_volume_name, pcg_table_name = get_relevant_datastack_info(
+            datastack_name
+        )
+
+        if version == 0:
+            mat_db_name = f"{aligned_volume_name}"
+        else:
+            mat_db_name = f"{datastack_name}__mat{version}"
+        with request_db_session(mat_db_name) as meta_db:
+            table_names = meta_db.database.get_valid_table_names()
+        if not table_names:
+            return {}, 404
+
+        schemas = {}
+        for name in table_names:
+            table = _get_flat_table(meta_db, name)
+            schemas[name] = get_table_schema(table)
+        return schemas, 200
