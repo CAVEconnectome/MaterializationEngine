@@ -38,6 +38,13 @@ document.addEventListener("alpine:init", () => {
           console.warn("[dlWizard] Failed to parse saved state:", e);
         }
       }
+      // Recompute stepStatus from currentStep so stale completions don't persist
+      for (let s = 1; s <= this.state.totalSteps; s++) {
+        if (!this.state.stepStatus[s]) {
+          this.state.stepStatus[s] = { completed: false, valid: false };
+        }
+        this.state.stepStatus[s].completed = s < this.state.currentStep;
+      }
     },
 
     saveState() {

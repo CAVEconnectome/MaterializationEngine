@@ -22,12 +22,15 @@ document.addEventListener("alpine:init", () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            output_specs: state.specs.map((s) => ({
-              ...s,
-              bloom_filter_fpp: s.bloom_filter_columns?.length
-                ? (s.bloom_filter_fpp || state.bloomFilterFpp)
-                : null,
-            })),
+            output_specs: state.specs.map((s) => {
+              const { _editable, ...spec } = s;
+              return {
+                ...spec,
+                bloom_filter_fpp: spec.bloom_filter_columns?.length
+                  ? (spec.bloom_filter_fpp || state.bloomFilterFpp)
+                  : null,
+              };
+            }),
           }),
         });
         const data = await resp.json();
