@@ -83,6 +83,9 @@ def wizard_step(step_number):
         target_partition_size_mb=get_config_param(
             "DELTALAKE_TARGET_PARTITION_SIZE_MB", 256
         ),
+        bloom_filter_fpp=get_config_param(
+            "DELTALAKE_BLOOM_FILTER_FPP", 0.001
+        ),
         output_bucket=get_config_param("DELTALAKE_OUTPUT_BUCKET", ""),
     )
 
@@ -114,6 +117,9 @@ def get_defaults():
                 get_config_param("DELTALAKE_TARGET_PARTITION_SIZE_MB", 256)
             ),
             "output_bucket": get_config_param("DELTALAKE_OUTPUT_BUCKET", ""),
+            "bloom_filter_fpp": float(
+                get_config_param("DELTALAKE_BLOOM_FILTER_FPP", 0.001)
+            ),
         }
     )
 
@@ -135,8 +141,10 @@ def discover_specs():
     from materializationengine.workflows.deltalake_export import (
         DeltaLakeOutputSpec,
         TableSource,
+        _DEFAULT_DROP_COLUMNS,
         _build_frozen_db_connection_string,
         _get_redis_client,
+        _resolve_select_columns,
         discover_default_output_specs,
         estimate_bytes_per_row,
         resolve_n_partitions,
@@ -223,9 +231,22 @@ def discover_specs():
 
     from dataclasses import asdict
 
+    # Build available columns list (base columns + computed columns from specs).
+    available_columns = _resolve_select_columns(
+        connection_string, source, _DEFAULT_DROP_COLUMNS
+    )
+    for spec in resolved_specs:
+        if spec.source_geometry_column:
+            col = spec.source_geometry_column
+            for suffix in ["_x", "_y", "_z", "_morton"]:
+                computed = f"{col}{suffix}"
+                if computed not in available_columns:
+                    available_columns.append(computed)
+
     result = {
         "row_count": row_count,
         "bytes_per_row": bytes_per_row,
+        "available_columns": available_columns,
         "specs": [asdict(s) for s in resolved_specs],
     }
 

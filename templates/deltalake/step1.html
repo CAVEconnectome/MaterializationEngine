@@ -49,11 +49,16 @@
         <div class="collapse mt-2" id="advancedOptions">
             <div class="row g-3">
                 <div class="col-md-4">
-                    <label class="form-label">Target Partition Size (MB)</label>
+                    <label class="form-label">Target File Size (MB)</label>
                     <input type="number" class="form-control" x-model.number="targetPartitionSizeMb" min="1">
                     <div class="form-text">Default from environment: {{ target_partition_size_mb }} MB</div>
                 </div>
-                <div class="col-md-8">
+                <div class="col-md-4">
+                    <label class="form-label">Bloom Filter FPP</label>
+                    <input type="number" class="form-control" x-model.number="bloomFilterFpp" step="0.0001" min="0.0001" max="1">
+                    <div class="form-text">False positive probability (default: {{ bloom_filter_fpp }})</div>
+                </div>
+                <div class="col-md-4">
                     <label class="form-label">Output Bucket</label>
                     <input type="text" class="form-control" value="{{ output_bucket }}" disabled>
                     <div class="form-text">Configured via environment (read-only)</div>

@@ -17,6 +17,8 @@ document.addEventListener("alpine:init", () => {
       // Step 2 data (populated by discovery)
       rowCount: null,
       bytesPerRow: null,
+      availableColumns: [],
+      bloomFilterFpp: 0.001,
       specs: [],
       // Export key for monitoring
       exportKey: null,
@@ -56,6 +58,8 @@ document.addEventListener("alpine:init", () => {
       this.state.targetPartitionSizeMb = 256;
       this.state.rowCount = null;
       this.state.bytesPerRow = null;
+      this.state.availableColumns = [];
+      this.state.bloomFilterFpp = 0.001;
       this.state.specs = [];
       this.state.exportKey = null;
     },

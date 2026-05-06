@@ -4,6 +4,7 @@ document.addEventListener("alpine:init", () => {
     version: Alpine.store("dlWizard").state.version || "",
     tableName: Alpine.store("dlWizard").state.tableName || "",
     targetPartitionSizeMb: Alpine.store("dlWizard").state.targetPartitionSizeMb || 256,
+    bloomFilterFpp: Alpine.store("dlWizard").state.bloomFilterFpp || 0.001,
     versions: [],
     tables: [],
     loadingVersions: false,
@@ -116,8 +117,10 @@ document.addEventListener("alpine:init", () => {
         store.state.version = parseInt(this.version);
         store.state.tableName = this.tableName;
         store.state.targetPartitionSizeMb = this.targetPartitionSizeMb;
+        store.state.bloomFilterFpp = this.bloomFilterFpp;
         store.state.rowCount = data.row_count;
         store.state.bytesPerRow = data.bytes_per_row;
+        store.state.availableColumns = data.available_columns || [];
         store.state.specs = data.specs;
         store.state.stepStatus[1].completed = true;
         store.saveState();

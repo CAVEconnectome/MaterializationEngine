@@ -74,6 +74,7 @@ class DeltaLakeOutputSpec:
     n_partitions: int | Literal["auto"] = "auto"
     zorder_columns: list[str] = field(default_factory=list)
     bloom_filter_columns: list[str] = field(default_factory=list)
+    bloom_filter_fpp: float | None = None
     source_geometry_column: str | None = None
     source_table: str | None = None
     bounds: list | None = None
@@ -1097,6 +1098,7 @@ def export_table_to_deltalake(
             uri,
             zorder_columns=spec.zorder_columns or None,
             bloom_filter_columns=spec.bloom_filter_columns or None,
+            fpp=spec.bloom_filter_fpp or 0.001,
             max_concurrent_tasks=optimize_max_concurrent_tasks,
             target_size=optimize_target_size,
             max_spill_size=optimize_max_spill_size,

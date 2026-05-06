@@ -16,13 +16,18 @@ document.addEventListener("alpine:init", () => {
       const state = store.state;
 
       try {
-        const url = `/materialize/api/v3/materialize/run/write_deltalake/datastack/${state.datastack}/version/${state.version}/table_name/${state.tableName}/`;
+        const url = `/materialize/api/v2/materialize/run/write_deltalake/datastack/${state.datastack}/version/${state.version}/table_name/${state.tableName}/`;
 
         const resp = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            output_specs: state.specs,
+            output_specs: state.specs.map((s) => ({
+              ...s,
+              bloom_filter_fpp: s.bloom_filter_columns?.length
+                ? (s.bloom_filter_fpp || state.bloomFilterFpp)
+                : null,
+            })),
           }),
         });
         const data = await resp.json();
