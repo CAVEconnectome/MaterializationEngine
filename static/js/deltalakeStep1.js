@@ -44,13 +44,13 @@ document.addEventListener("alpine:init", () => {
       this.loadingVersions = true;
       try {
         const resp = await fetch(
-          `/materialize/api/v3/aligned_volumes/${this.datastack}`
+          `/materialize/api/v3/datastack/${this.datastack}/versions`
         );
         if (!resp.ok) throw new Error("Failed to fetch versions");
         const data = await resp.json();
-        this.versions = data.sort((a, b) => b.version - a.version);
+        this.versions = data.sort((a, b) => b - a);
         if (this.versions.length > 0 && !this.version) {
-          this.version = this.versions[0].version;
+          this.version = this.versions[0];
           await this.fetchTables();
         }
       } catch (e) {
@@ -63,13 +63,26 @@ document.addEventListener("alpine:init", () => {
     async fetchTables() {
       this.loadingTables = true;
       try {
-        const resp = await fetch(
-          `/materialize/api/v3/aligned_volumes/${this.datastack}/version/${this.version}`
-        );
-        if (!resp.ok) throw new Error("Failed to fetch tables");
-        const data = await resp.json();
-        this.tables = data.sort((a, b) =>
-          a.table_name.localeCompare(b.table_name)
+        const [tablesResp, viewsResp] = await Promise.all([
+          fetch(
+            `/materialize/api/v3/datastack/${this.datastack}/version/${this.version}/tables`
+          ),
+          fetch(
+            `/materialize/api/v3/datastack/${this.datastack}/version/${this.version}/views`
+          ),
+        ]);
+        if (!tablesResp.ok) throw new Error("Failed to fetch tables");
+        const tableNames = await tablesResp.json();
+        const tables = tableNames.map((name) => ({ name, type: "table" }));
+
+        let views = [];
+        if (viewsResp.ok) {
+          const viewData = await viewsResp.json();
+          views = Object.keys(viewData).map((name) => ({ name, type: "view" }));
+        }
+
+        this.tables = [...tables, ...views].sort((a, b) =>
+          a.name.localeCompare(b.name)
         );
       } catch (e) {
         this.error = `Error loading tables: ${e.message}`;

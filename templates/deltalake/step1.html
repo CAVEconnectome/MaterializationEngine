@@ -18,8 +18,8 @@
             <label class="form-label fw-bold">Version</label>
             <select class="form-select" x-model="version" @change="onVersionChange()" :disabled="!datastack || loadingVersions">
                 <option value="">Select a version...</option>
-                <template x-for="v in versions" :key="v.version">
-                    <option :value="v.version" x-text="`v${v.version}`"></option>
+                <template x-for="v in versions" :key="v">
+                    <option :value="v" x-text="`v${v}`"></option>
                 </template>
             </select>
             <div x-show="loadingVersions" class="form-text">
@@ -31,8 +31,8 @@
             <label class="form-label fw-bold">Table</label>
             <select class="form-select" x-model="tableName" :disabled="!version || loadingTables">
                 <option value="">Select a table...</option>
-                <template x-for="t in tables" :key="t.table_name">
-                    <option :value="t.table_name" x-text="t.table_name"></option>
+                <template x-for="t in tables" :key="t.name">
+                    <option :value="t.name" x-text="`${t.name} (${t.type})`"></option>
                 </template>
             </select>
             <div x-show="loadingTables" class="form-text">
