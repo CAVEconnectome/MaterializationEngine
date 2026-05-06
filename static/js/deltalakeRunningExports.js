@@ -1,51 +1,63 @@
 document.addEventListener("alpine:init", () => {
   Alpine.data("deltalakeRunningExports", () => ({
-    exportKey: null,
-    progress: {},
+    exports: [],
+    progress: {},  // keyed by "datastack/version/tableName"
     poller: null,
-    userScrolled: false,
 
     init() {
       const store = Alpine.store("dlWizard");
-      this.exportKey = store.state.exportKey;
+      this.exports = store.state.exports || [];
 
-      if (this.exportKey) {
-        this.pollProgress();
-        this.poller = setInterval(() => this.pollProgress(), 5000);
+      if (this.exports.length > 0) {
+        this.pollAll();
+        this.poller = setInterval(() => this.pollAll(), 5000);
       }
     },
 
-    async pollProgress() {
-      if (!this.exportKey) return;
-      const { datastack, version, tableName } = this.exportKey;
-      const url = `/materialize/api/v3/materialize/run/write_deltalake/datastack/${datastack}/version/${version}/table_name/${tableName}/`;
+    exportId(exp) {
+      return `${exp.datastack}/${exp.version}/${exp.tableName}`;
+    },
+
+    getProgress(exp) {
+      return this.progress[this.exportId(exp)] || {};
+    },
+
+    async pollAll() {
+      await Promise.all(this.exports.map((exp) => this.pollOne(exp)));
+      // Stop polling if all are terminal
+      const allDone = this.exports.every((exp) => {
+        const p = this.getProgress(exp);
+        return p.status === "complete" || p.status === "failed";
+      });
+      if (allDone) this.stopPolling();
+    },
+
+    async pollOne(exp) {
+      const { datastack, version, tableName } = exp;
+      const url = `/materialize/api/v2/materialize/run/write_deltalake/datastack/${datastack}/version/${version}/table_name/${tableName}/`;
+      const key = this.exportId(exp);
 
       try {
         const resp = await fetch(url);
         if (!resp.ok) {
           if (resp.status === 404) {
-            this.progress = { status: "pending", phase: "pending" };
+            this.progress[key] = { status: "pending", phase: "pending" };
           }
           return;
         }
         const data = await resp.json();
-        this.progress = data;
-
-        // Auto-scroll log panel
-        this.$nextTick(() => {
-          const panel = this.$refs.logPanel;
-          if (panel && !this.userScrolled) {
-            panel.scrollTop = panel.scrollHeight;
-          }
-        });
-
-        // Stop polling on terminal status
-        if (data.status === "complete" || data.status === "failed") {
-          this.stopPolling();
-        }
+        this.progress[key] = data;
       } catch (e) {
         console.error("[DeltaLake] Polling error:", e);
       }
+    },
+
+    removeExport(idx) {
+      this.exports.splice(idx, 1);
+      // Persist removal
+      const store = Alpine.store("dlWizard");
+      store.state.exports = this.exports;
+      store.saveState();
     },
 
     stopPolling() {
@@ -59,20 +71,4 @@ document.addEventListener("alpine:init", () => {
       this.stopPolling();
     },
   }));
-
-  // Handle log panel scroll detection
-  document.addEventListener("scroll", (e) => {
-    if (e.target.classList && e.target.classList.contains("log-panel")) {
-      const panel = e.target;
-      const atBottom =
-        panel.scrollHeight - panel.scrollTop - panel.clientHeight < 20;
-      // Find the Alpine component — best-effort
-      const component = Alpine.$data(
-        document.querySelector("[x-data='deltalakeRunningExports']")
-      );
-      if (component) {
-        component.userScrolled = !atBottom;
-      }
-    }
-  }, true);
 });

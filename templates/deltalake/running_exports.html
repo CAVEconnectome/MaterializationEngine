@@ -57,74 +57,90 @@
         </a>
     </div>
 
-    <!-- No active export -->
-    <div x-show="!exportKey" class="text-center my-5">
+    <!-- No exports -->
+    <div x-show="exports.length === 0" class="text-center my-5">
         <i class="fas fa-folder-open fa-3x text-muted mb-3"></i>
-        <h4>No Active Export</h4>
+        <h4>No Exports</h4>
         <p class="text-muted">Start a new export from the wizard.</p>
         <a href="{{ url_for('deltalake.wizard_step', step_number=1) }}" class="btn btn-primary mt-2">
             <i class="fas fa-plus me-1"></i> Start Export
         </a>
     </div>
 
-    <!-- Export card grid (supports future N cards) -->
-    <div x-show="exportKey" class="row row-cols-1 g-4">
-        <div class="col">
-            <div class="card export-card" :class="`status-${progress.phase || progress.status || 'idle'}`">
-                <div class="card-header d-flex justify-content-between align-items-center">
-                    <strong x-text="`${exportKey?.tableName} (v${exportKey?.version})`"></strong>
-                    <span class="badge"
-                          :class="{
-                              'bg-primary': progress.status === 'exporting',
-                              'bg-success': progress.status === 'complete',
-                              'bg-danger': progress.status === 'failed',
-                              'bg-info': !progress.status
-                          }"
-                          x-text="progress.phase || progress.status || 'pending'">
-                    </span>
-                </div>
-                <div class="card-body">
-                    <!-- Progress bar -->
-                    <div class="mb-3" x-show="progress.total_rows">
-                        <div class="d-flex justify-content-between mb-1">
-                            <small x-text="`${(progress.rows_processed || 0).toLocaleString()} / ${(progress.total_rows || 0).toLocaleString()} rows`"></small>
-                            <small x-text="`${(progress.percent_complete || 0).toFixed(1)}%`"></small>
+    <!-- Export cards -->
+    <div x-show="exports.length > 0" class="row row-cols-1 g-4">
+        <template x-for="(exp, idx) in exports" :key="exportId(exp)">
+            <div class="col">
+                <div class="card export-card" :class="`status-${getProgress(exp).phase || getProgress(exp).status || 'idle'}`">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <strong x-text="`${exp.tableName} (v${exp.version})`"></strong>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="badge"
+                                  :class="{
+                                      'bg-primary': getProgress(exp).status === 'exporting',
+                                      'bg-success': getProgress(exp).status === 'complete',
+                                      'bg-danger': getProgress(exp).status === 'failed',
+                                      'bg-info': !getProgress(exp).status || getProgress(exp).status === 'pending'
+                                  }"
+                                  x-text="getProgress(exp).phase || getProgress(exp).status || 'pending'">
+                            </span>
+                            <button class="btn btn-sm btn-outline-secondary"
+                                    @click="removeExport(idx)"
+                                    title="Dismiss">
+                                <i class="fas fa-times"></i>
+                            </button>
                         </div>
-                        <div class="progress" style="height: 20px;">
-                            <div class="progress-bar"
-                                 :class="{
-                                     'bg-success': progress.status === 'complete',
-                                     'bg-danger': progress.status === 'failed',
-                                     'bg-primary progress-bar-striped progress-bar-animated': progress.status === 'exporting'
-                                 }"
-                                 :style="`width: ${progress.percent_complete || 0}%`">
+                    </div>
+                    <div class="card-body">
+                        <!-- Queued / waiting state -->
+                        <div x-show="!getProgress(exp).status || getProgress(exp).status === 'pending'" class="text-center py-3">
+                            <i class="fas fa-spinner fa-spin fa-2x text-info mb-2"></i>
+                            <p class="mb-1"><strong>Export queued</strong></p>
+                            <p class="text-muted small mb-0">Waiting for worker to pick up the task...</p>
+                            <p class="text-muted small mt-1" x-show="exp.submittedAt" x-text="'Submitted: ' + new Date(exp.submittedAt).toLocaleString()"></p>
+                        </div>
+                        <!-- Progress bar -->
+                        <div class="mb-3" x-show="getProgress(exp).total_rows">
+                            <div class="d-flex justify-content-between mb-1">
+                                <small x-text="`${(getProgress(exp).rows_processed || 0).toLocaleString()} / ${(getProgress(exp).total_rows || 0).toLocaleString()} rows`"></small>
+                                <small x-text="`${(getProgress(exp).percent_complete || 0).toFixed(1)}%`"></small>
+                            </div>
+                            <div class="progress" style="height: 20px;">
+                                <div class="progress-bar"
+                                     :class="{
+                                         'bg-success': getProgress(exp).status === 'complete',
+                                         'bg-danger': getProgress(exp).status === 'failed',
+                                         'bg-primary progress-bar-striped progress-bar-animated': getProgress(exp).status === 'exporting'
+                                     }"
+                                     :style="`width: ${getProgress(exp).percent_complete || 0}%`">
+                                </div>
                             </div>
                         </div>
-                    </div>
 
-                    <!-- Error panel -->
-                    <div x-show="progress.error" class="error-panel mb-3">
-                        <strong><i class="fas fa-exclamation-triangle me-1"></i>Error:</strong>
-                        <p class="mb-0 mt-1" x-text="progress.error"></p>
-                    </div>
-
-                    <!-- Log panel -->
-                    <div x-show="progress.log_entries && progress.log_entries.length > 0">
-                        <label class="form-label small text-muted">Log</label>
-                        <div class="log-panel" x-ref="logPanel">
-                            <template x-for="(entry, i) in (progress.log_entries || [])" :key="i">
-                                <p class="log-entry" x-text="entry"></p>
-                            </template>
+                        <!-- Error panel -->
+                        <div x-show="getProgress(exp).error" class="error-panel mb-3">
+                            <strong><i class="fas fa-exclamation-triangle me-1"></i>Error:</strong>
+                            <p class="mb-0 mt-1" x-text="getProgress(exp).error"></p>
                         </div>
-                    </div>
 
-                    <!-- Last updated -->
-                    <div class="mt-2 text-muted small" x-show="progress.last_updated">
-                        Last updated: <span x-text="progress.last_updated"></span>
+                        <!-- Log panel -->
+                        <div x-show="getProgress(exp).log_entries && getProgress(exp).log_entries.length > 0">
+                            <label class="form-label small text-muted">Log</label>
+                            <div class="log-panel">
+                                <template x-for="(entry, i) in (getProgress(exp).log_entries || [])" :key="i">
+                                    <p class="log-entry" x-text="entry"></p>
+                                </template>
+                            </div>
+                        </div>
+
+                        <!-- Last updated -->
+                        <div class="mt-2 text-muted small" x-show="getProgress(exp).last_updated">
+                            Last updated: <span x-text="getProgress(exp).last_updated"></span>
+                        </div>
                     </div>
                 </div>
             </div>
-        </div>
+        </template>
     </div>
 </div>
 {% endblock %}

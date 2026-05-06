@@ -21,7 +21,7 @@ document.addEventListener("alpine:init", () => {
       bloomFilterFpp: 0.001,
       specs: [],
       // Export key for monitoring
-      exportKey: null,
+      exports: [],
     },
 
     init() {
@@ -61,7 +61,7 @@ document.addEventListener("alpine:init", () => {
       this.state.availableColumns = [];
       this.state.bloomFilterFpp = 0.001;
       this.state.specs = [];
-      this.state.exportKey = null;
+      this.state.exports = [];
     },
 
     next() {

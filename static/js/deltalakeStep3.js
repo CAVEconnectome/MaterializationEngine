@@ -35,12 +35,16 @@ document.addEventListener("alpine:init", () => {
           throw new Error(data.message || data.error || "Export launch failed");
         }
 
-        // Store export key info for monitoring page
-        store.state.exportKey = {
+        // Add to exports list for monitoring page
+        const newExport = {
           datastack: state.datastack,
           version: state.version,
           tableName: state.tableName,
+          submittedAt: new Date().toISOString(),
         };
+        // Clear wizard form state, then add the export
+        store.clearState();
+        store.state.exports.push(newExport);
         store.saveState();
 
         // Redirect to monitoring page

@@ -13,10 +13,10 @@
                 <strong>Est. bytes/row:</strong> <span x-text="bytesPerRow"></span>
             </div>
             <div class="col-auto">
-                <strong>Global file size:</strong> <span x-text="$store.dlWizard.state.targetPartitionSizeMb + ' MB'"></span>
+                <strong>Default file size:</strong> <span x-text="$store.dlWizard.state.targetPartitionSizeMb + ' MB'"></span>
             </div>
             <div class="col-auto">
-                <strong>Global FPP:</strong> <span x-text="$store.dlWizard.state.bloomFilterFpp"></span>
+                <strong>Default FPP:</strong> <span x-text="$store.dlWizard.state.bloomFilterFpp"></span>
             </div>
         </div>
     </div>
@@ -74,7 +74,7 @@
                                 <label class="form-label small fw-semibold text-start d-block">Target File Size (MB)</label>
                                 <input type="number" class="form-control form-control-sm"
                                        x-model.number="spec.target_file_size_mb"
-                                       :placeholder="$store.dlWizard.state.targetPartitionSizeMb + ' (global)'"
+                                       :placeholder="$store.dlWizard.state.targetPartitionSizeMb + ' (default)'"
                                        min="1"
                                        @change="syncStore()">
                             </div>
@@ -134,7 +134,7 @@
                                 <label class="form-label small fw-semibold text-start d-block">Bloom Filter FPP</label>
                                 <input type="number" class="form-control form-control-sm"
                                        x-model.number="spec.bloom_filter_fpp"
-                                       :placeholder="$store.dlWizard.state.bloomFilterFpp + ' (global)'"
+                                       :placeholder="$store.dlWizard.state.bloomFilterFpp + ' (default)'"
                                        step="0.0001" min="0.0001" max="1"
                                        @change="syncStore()">
                             </div>
