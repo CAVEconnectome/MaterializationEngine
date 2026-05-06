@@ -83,9 +83,7 @@ def wizard_step(step_number):
         target_partition_size_mb=get_config_param(
             "DELTALAKE_TARGET_PARTITION_SIZE_MB", 256
         ),
-        bloom_filter_fpp=get_config_param(
-            "DELTALAKE_BLOOM_FILTER_FPP", 0.001
-        ),
+        bloom_filter_fpp=get_config_param("DELTALAKE_BLOOM_FILTER_FPP", 0.001),
         output_bucket=get_config_param("DELTALAKE_OUTPUT_BUCKET", ""),
     )
 
@@ -139,9 +137,9 @@ def discover_specs():
     from materializationengine.database import db_manager
     from materializationengine.models import MaterializedMetadata
     from materializationengine.workflows.deltalake_export import (
+        _DEFAULT_DROP_COLUMNS,
         DeltaLakeOutputSpec,
         TableSource,
-        _DEFAULT_DROP_COLUMNS,
         _build_frozen_db_connection_string,
         _get_redis_client,
         _resolve_select_columns,
