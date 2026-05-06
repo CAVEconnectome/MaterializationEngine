@@ -43,6 +43,7 @@ document.addEventListener("alpine:init", () => {
           datastack: state.datastack,
           version: state.version,
           tableName: state.tableName,
+          jobId: data.job_id,
           submittedAt: new Date().toISOString(),
         };
         // Clear wizard form state, then add the export

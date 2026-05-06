@@ -870,6 +870,8 @@ class WriteDeltalakeResource(Resource):
             version (int): materialization version (-1 for latest)
             table_name (str): annotation table name to export
         """
+        import uuid
+
         from materializationengine.workflows.deltalake_export import (
             write_deltalake_table,
         )
@@ -899,12 +901,19 @@ class WriteDeltalakeResource(Resource):
                 except TypeError as exc:
                     return abort(400, f"invalid output_specs entry: {exc}")
 
+        job_id = uuid.uuid4().hex
+
         write_deltalake_table.s(
-            datastack_info, version, table_name, output_specs=output_specs
+            datastack_info,
+            version,
+            table_name,
+            output_specs=output_specs,
+            job_id=job_id,
         ).apply_async()
 
         return {
-            "message": f"Delta Lake export enqueued for {table_name} v{version}"
+            "message": f"Delta Lake export enqueued for {table_name} v{version}",
+            "job_id": job_id,
         }, 200
 
     @reset_auth
@@ -915,6 +924,10 @@ class WriteDeltalakeResource(Resource):
 
         Returns JSON with ``status``, ``rows_processed``, ``total_rows``,
         and ``percent_complete``.  Returns 404 if no export is tracked.
+
+        Accepts optional ``job_id`` query parameter to poll a specific
+        export job (required when multiple exports of the same table
+        may exist).
         """
         from materializationengine.workflows.deltalake_export import (
             get_deltalake_export_progress,
@@ -923,7 +936,11 @@ class WriteDeltalakeResource(Resource):
         if version == -1:
             version = get_latest_version(datastack_name)
 
-        progress = get_deltalake_export_progress(datastack_name, version, table_name)
+        job_id = request.args.get("job_id", None)
+
+        progress = get_deltalake_export_progress(
+            datastack_name, version, table_name, job_id=job_id
+        )
         if progress is None:
             return {
                 "message": f"No export progress found for {table_name} v{version}"

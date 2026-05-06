@@ -15,7 +15,7 @@ document.addEventListener("alpine:init", () => {
     },
 
     exportId(exp) {
-      return `${exp.datastack}/${exp.version}/${exp.tableName}`;
+      return `${exp.datastack}/${exp.version}/${exp.tableName}/${exp.jobId || "default"}`;
     },
 
     getProgress(exp) {
@@ -33,8 +33,11 @@ document.addEventListener("alpine:init", () => {
     },
 
     async pollOne(exp) {
-      const { datastack, version, tableName } = exp;
-      const url = `/materialize/api/v2/materialize/run/write_deltalake/datastack/${datastack}/version/${version}/table_name/${tableName}/`;
+      const { datastack, version, tableName, jobId } = exp;
+      let url = `/materialize/api/v2/materialize/run/write_deltalake/datastack/${datastack}/version/${version}/table_name/${tableName}/`;
+      if (jobId) {
+        url += `?job_id=${encodeURIComponent(jobId)}`;
+      }
       const key = this.exportId(exp);
 
       try {

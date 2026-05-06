@@ -1243,14 +1243,24 @@ def make_tqdm_progress_callback(
 _DELTALAKE_PROGRESS_TTL = 86400  # 24 hours
 
 
-def deltalake_export_redis_key(datastack: str, version: int, table_name: str) -> str:
+def deltalake_export_redis_key(
+    datastack: str, version: int, table_name: str, job_id: str | None = None
+) -> str:
     """Return the Redis key used to track Delta Lake export progress."""
-    return f"deltalake_export:{datastack}:v{version}:{table_name}"
+    base = f"deltalake_export:{datastack}:v{version}:{table_name}"
+    if job_id:
+        return f"{base}:{job_id}"
+    return base
 
 
-def _deltalake_log_redis_key(datastack: str, version: int, table_name: str) -> str:
+def _deltalake_log_redis_key(
+    datastack: str, version: int, table_name: str, job_id: str | None = None
+) -> str:
     """Return the Redis key for the capped log list."""
-    return f"deltalake_log:{datastack}:v{version}:{table_name}"
+    base = f"deltalake_log:{datastack}:v{version}:{table_name}"
+    if job_id:
+        return f"{base}:{job_id}"
+    return base
 
 
 _DELTALAKE_LOG_MAX_ENTRIES = 100
@@ -1261,10 +1271,11 @@ def append_deltalake_log(
     version: int,
     table_name: str,
     message: str,
+    job_id: str | None = None,
 ) -> None:
     """Append a timestamped log entry to the capped Redis log list."""
     client = _get_redis_client()
-    key = _deltalake_log_redis_key(datastack, version, table_name)
+    key = _deltalake_log_redis_key(datastack, version, table_name, job_id=job_id)
     timestamped = f"{datetime.now(timezone.utc).strftime('%H:%M:%S')} {message}"
     client.rpush(key, timestamped)
     client.ltrim(key, -_DELTALAKE_LOG_MAX_ENTRIES, -1)
@@ -1289,6 +1300,7 @@ def make_redis_progress_callback(
     datastack: str,
     version: int,
     table_name: str,
+    job_id: str | None = None,
 ) -> Callable[[int, int | None], None]:
     """Create a Redis-backed progress callback for :func:`export_table_to_deltalake`.
 
@@ -1296,7 +1308,7 @@ def make_redis_progress_callback(
     can poll export progress.  The key expires after 24 hours.
     """
     client = _get_redis_client()
-    key = deltalake_export_redis_key(datastack, version, table_name)
+    key = deltalake_export_redis_key(datastack, version, table_name, job_id=job_id)
 
     def _callback(rows_so_far: int, total: int | None) -> None:
         pct = (rows_so_far / total * 100) if total else None
@@ -1323,10 +1335,11 @@ def set_deltalake_export_status(
     rows_processed: int | None = None,
     phase: str | None = None,
     error: str | None = None,
+    job_id: str | None = None,
 ) -> None:
     """Write a terminal status (``complete``, ``failed``, etc.) to Redis."""
     client = _get_redis_client()
-    key = deltalake_export_redis_key(datastack, version, table_name)
+    key = deltalake_export_redis_key(datastack, version, table_name, job_id=job_id)
     pct = None
     if rows_processed is not None and total_rows:
         pct = round(rows_processed / total_rows * 100, 2)
@@ -1346,6 +1359,7 @@ def get_deltalake_export_progress(
     datastack: str,
     version: int,
     table_name: str,
+    job_id: str | None = None,
 ) -> dict | None:
     """Read the current export progress from Redis.
 
@@ -1353,13 +1367,13 @@ def get_deltalake_export_progress(
     if no export is tracked.
     """
     client = _get_redis_client()
-    key = deltalake_export_redis_key(datastack, version, table_name)
+    key = deltalake_export_redis_key(datastack, version, table_name, job_id=job_id)
     raw = client.get(key)
     if raw is None:
         return None
     progress = json.loads(raw)
     # Attach log entries from the capped Redis list.
-    log_key = _deltalake_log_redis_key(datastack, version, table_name)
+    log_key = _deltalake_log_redis_key(datastack, version, table_name, job_id=job_id)
     log_entries = client.lrange(log_key, 0, -1)
     progress["log_entries"] = [
         entry.decode() if isinstance(entry, bytes) else entry
@@ -1396,6 +1410,7 @@ def write_deltalake_table(
     version: int,
     table_name: str,
     output_specs: list[dict] | None = None,
+    job_id: str | None = None,
 ) -> None:
     """Orchestrate a full Delta Lake export for one table.
 
@@ -1416,6 +1431,10 @@ def write_deltalake_table(
     output_specs
         Optional list of output spec dicts.  If ``None``, defaults are
         derived from table indexes.
+    job_id
+        Unique identifier for this export job.  Used to disambiguate
+        Redis progress keys when the same table/version is exported
+        multiple times.
     """
     from dynamicannotationdb.key_utils import build_segmentation_table_name
     from sqlalchemy import create_engine
@@ -1425,6 +1444,16 @@ def write_deltalake_table(
     from materializationengine.utils import get_config_param
 
     datastack = datastack_info["datastack"]
+
+    # --- Job-scoped helpers that bind job_id into Redis key calls ---
+    def _log(message: str) -> None:
+        append_deltalake_log(datastack, version, table_name, message, job_id=job_id)
+
+    def _set_status(**kwargs) -> None:
+        set_deltalake_export_status(
+            datastack, version, table_name, job_id=job_id, **kwargs
+        )
+
     # Validate table_name early to prevent SQL injection through all downstream
     # f-string identifier interpolations in the export pipeline.
     _validate_identifier(table_name)
@@ -1497,36 +1526,12 @@ def write_deltalake_table(
 
     # --- Resolve output specs ---
     if output_specs is not None:
-        append_deltalake_log(
-            datastack,
-            version,
-            table_name,
-            f"Resolving {len(output_specs)} user-provided output specs...",
-        )
-        set_deltalake_export_status(
-            datastack,
-            version,
-            table_name,
-            "exporting",
-            total_rows=row_count,
-            phase="resolving_specs",
-        )
+        _log(f"Resolving {len(output_specs)} user-provided output specs...")
+        _set_status(status="exporting", total_rows=row_count, phase="resolving_specs")
         resolved_specs = [DeltaLakeOutputSpec(**s) for s in output_specs]
     else:
-        append_deltalake_log(
-            datastack,
-            version,
-            table_name,
-            "Discovering output specs...",
-        )
-        set_deltalake_export_status(
-            datastack,
-            version,
-            table_name,
-            "exporting",
-            total_rows=row_count,
-            phase="discovering_specs",
-        )
+        _log("Discovering output specs...")
+        _set_status(status="exporting", total_rows=row_count, phase="discovering_specs")
         resolved_specs = discover_default_output_specs(source, engine)
 
     celery_logger.info(
@@ -1579,20 +1584,10 @@ def write_deltalake_table(
             )
 
     # --- Estimate bytes per row and resolve partition counts / bounds ---
-    append_deltalake_log(
-        datastack,
-        version,
-        table_name,
-        f"Resolved {len(resolved_specs)} output specs. Computing partition boundaries...",
+    _log(
+        f"Resolved {len(resolved_specs)} output specs. Computing partition boundaries..."
     )
-    set_deltalake_export_status(
-        datastack,
-        version,
-        table_name,
-        "exporting",
-        total_rows=row_count,
-        phase="computing_boundaries",
-    )
+    _set_status(status="exporting", total_rows=row_count, phase="computing_boundaries")
     bytes_per_row = estimate_bytes_per_row(connection_string, source)
 
     for spec in resolved_specs:
@@ -1642,51 +1637,28 @@ def write_deltalake_table(
                 rows_so_far,
             )
 
-    redis_callback = make_redis_progress_callback(datastack, version, table_name)
+    redis_callback = make_redis_progress_callback(
+        datastack, version, table_name, job_id=job_id
+    )
 
     def _progress(rows_so_far: int, total: int | None) -> None:
         _log_progress(rows_so_far, total)
         redis_callback(rows_so_far, total)
 
-    append_deltalake_log(
-        datastack,
-        version,
-        table_name,
-        f"Streaming {row_count:,} rows to Delta Lake...",
-    )
-    set_deltalake_export_status(
-        datastack,
-        version,
-        table_name,
-        "exporting",
-        total_rows=row_count,
-        phase="streaming",
-    )
+    _log(f"Streaming {row_count:,} rows to Delta Lake...")
+    _set_status(status="exporting", total_rows=row_count, phase="streaming")
 
     def _optimize_callback(spec_name: str, action: str) -> None:
-        set_deltalake_export_status(
-            datastack,
-            version,
-            table_name,
-            "exporting",
+        _set_status(
+            status="exporting",
             total_rows=row_count,
             rows_processed=row_count,
             phase="optimizing",
         )
         if action == "vacuum":
-            append_deltalake_log(
-                datastack,
-                version,
-                table_name,
-                f"Vacuuming Delta Lake '{spec_name}'...",
-            )
+            _log(f"Vacuuming Delta Lake '{spec_name}'...")
         else:
-            append_deltalake_log(
-                datastack,
-                version,
-                table_name,
-                f"Optimizing Delta Lake '{spec_name}' ({action})...",
-            )
+            _log(f"Optimizing Delta Lake '{spec_name}' ({action})...")
 
     try:
         export_table_to_deltalake(
@@ -1703,24 +1675,13 @@ def write_deltalake_table(
             optimize_max_spill_size=optimize_max_spill_size,
         )
     except Exception as e:
-        append_deltalake_log(datastack, version, table_name, f"Export failed: {e}")
-        set_deltalake_export_status(
-            datastack,
-            version,
-            table_name,
-            "failed",
-            total_rows=row_count,
-            phase="failed",
-            error=str(e),
-        )
+        _log(f"Export failed: {e}")
+        _set_status(status="failed", total_rows=row_count, phase="failed", error=str(e))
         raise
 
-    append_deltalake_log(datastack, version, table_name, "Export complete.")
-    set_deltalake_export_status(
-        datastack,
-        version,
-        table_name,
-        "complete",
+    _log("Export complete.")
+    _set_status(
+        status="complete",
         total_rows=row_count,
         rows_processed=row_count,
         phase="complete",
