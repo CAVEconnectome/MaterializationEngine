@@ -1,0 +1,81 @@
+<div class="card-body" x-data="deltalakeStep1">
+    <h4 class="card-title mb-4">
+        <i class="fas fa-database me-2"></i>Select Table & Configuration
+    </h4>
+
+    <div class="row g-3">
+        <div class="col-md-4">
+            <label class="form-label fw-bold">Datastack</label>
+            <select class="form-select" x-model="datastack" @change="onDatastackChange()">
+                <option value="">Select a datastack...</option>
+                {% for ds in datastacks %}
+                <option value="{{ ds }}">{{ ds }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label fw-bold">Version</label>
+            <select class="form-select" x-model="version" @change="onVersionChange()" :disabled="!datastack || loadingVersions">
+                <option value="">Select a version...</option>
+                <template x-for="v in versions" :key="v.version">
+                    <option :value="v.version" x-text="`v${v.version}`"></option>
+                </template>
+            </select>
+            <div x-show="loadingVersions" class="form-text">
+                <i class="fas fa-spinner fa-spin me-1"></i> Loading versions...
+            </div>
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label fw-bold">Table</label>
+            <select class="form-select" x-model="tableName" :disabled="!version || loadingTables">
+                <option value="">Select a table...</option>
+                <template x-for="t in tables" :key="t.table_name">
+                    <option :value="t.table_name" x-text="t.table_name"></option>
+                </template>
+            </select>
+            <div x-show="loadingTables" class="form-text">
+                <i class="fas fa-spinner fa-spin me-1"></i> Loading tables...
+            </div>
+        </div>
+    </div>
+
+    <!-- Advanced options (collapsible) -->
+    <div class="mt-4">
+        <a class="text-decoration-none" data-bs-toggle="collapse" href="#advancedOptions" role="button" aria-expanded="false">
+            <i class="fas fa-cog me-1"></i> Advanced Options
+        </a>
+        <div class="collapse mt-2" id="advancedOptions">
+            <div class="row g-3">
+                <div class="col-md-4">
+                    <label class="form-label">Target Partition Size (MB)</label>
+                    <input type="number" class="form-control" x-model.number="targetPartitionSizeMb" min="1">
+                    <div class="form-text">Default from environment: {{ target_partition_size_mb }} MB</div>
+                </div>
+                <div class="col-md-8">
+                    <label class="form-label">Output Bucket</label>
+                    <input type="text" class="form-control" value="{{ output_bucket }}" disabled>
+                    <div class="form-text">Configured via environment (read-only)</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Discover button -->
+    <div class="mt-4 d-flex align-items-center gap-3">
+        <button class="btn btn-primary"
+                :disabled="!datastack || !version || !tableName || discovering"
+                @click="discoverSpecs()">
+            <template x-if="!discovering">
+                <span><i class="fas fa-search me-2"></i>Discover Specs</span>
+            </template>
+            <template x-if="discovering">
+                <span><i class="fas fa-spinner fa-spin me-2"></i>Discovering...</span>
+            </template>
+        </button>
+    </div>
+
+    <!-- Error display -->
+    <div x-show="error" class="alert alert-danger mt-3" x-text="error"></div>
+</div>

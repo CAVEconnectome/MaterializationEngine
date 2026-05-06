@@ -1,0 +1,90 @@
+<div class="card-body" x-data="deltalakeStep2">
+    <h4 class="card-title mb-4">
+        <i class="fas fa-layer-group me-2"></i>Review Output Specs
+    </h4>
+
+    <!-- Table metadata -->
+    <div class="alert alert-info d-flex gap-4 mb-4">
+        <span><strong>Row count:</strong> <span x-text="rowCount?.toLocaleString()"></span></span>
+        <span><strong>Est. bytes/row:</strong> <span x-text="bytesPerRow"></span></span>
+    </div>
+
+    <!-- Spec cards -->
+    <div class="row g-3">
+        <template x-for="(spec, idx) in specs" :key="idx">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <strong x-text="`Spec: ${spec.partition_by || 'flat'}`"></strong>
+                        <button class="btn btn-sm btn-outline-danger"
+                                :disabled="specs.length <= 1"
+                                @click="removeSpec(idx)">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div class="row g-2">
+                            <div class="col-md-3">
+                                <label class="form-label small text-muted">Partition By</label>
+                                <input class="form-control form-control-sm" :value="spec.partition_by" disabled>
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label small text-muted">Strategy</label>
+                                <input class="form-control form-control-sm" :value="spec.partition_strategy" disabled>
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label small text-muted">N Partitions</label>
+                                <input type="number" class="form-control form-control-sm"
+                                       x-model.number="spec.n_partitions" min="1">
+                                <div class="form-text">Leave or override</div>
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label small text-muted">Target File Size (MB)</label>
+                                <input type="number" class="form-control form-control-sm"
+                                       x-model.number="spec.target_file_size_mb"
+                                       :placeholder="$store.dlWizard.state.targetPartitionSizeMb + ' (global)'"
+                                       min="1">
+                                <div class="form-text">Override per-spec</div>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small text-muted">Z-Order Columns</label>
+                                <input class="form-control form-control-sm" :value="(spec.zorder_columns || []).join(', ')" disabled>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label small text-muted">Bloom Filter Columns</label>
+                                <input class="form-control form-control-sm" :value="(spec.bloom_filter_columns || []).join(', ')" disabled>
+                            </div>
+                            <div class="col-md-4" x-show="spec.source_geometry_column">
+                                <label class="form-label small text-muted">Geometry Column</label>
+                                <input class="form-control form-control-sm" :value="spec.source_geometry_column" disabled>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </template>
+    </div>
+
+    <!-- Actions -->
+    <div class="mt-4 d-flex gap-3">
+        <button class="btn btn-outline-primary" @click="recalculate()" :disabled="recalculating">
+            <template x-if="!recalculating">
+                <span><i class="fas fa-calculator me-2"></i>Recalculate Partitions</span>
+            </template>
+            <template x-if="recalculating">
+                <span><i class="fas fa-spinner fa-spin me-2"></i>Recalculating...</span>
+            </template>
+        </button>
+
+        <button class="btn btn-outline-secondary" @click="$store.dlWizard.prev()">
+            <i class="fas fa-arrow-left me-2"></i>Back
+        </button>
+
+        <button class="btn btn-primary" @click="$store.dlWizard.next()">
+            Next <i class="fas fa-arrow-right ms-2"></i>
+        </button>
+    </div>
+
+    <!-- Error display -->
+    <div x-show="error" class="alert alert-danger mt-3" x-text="error"></div>
+</div>

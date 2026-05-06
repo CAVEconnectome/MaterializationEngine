@@ -77,6 +77,7 @@ class DeltaLakeOutputSpec:
     source_geometry_column: str | None = None
     source_table: str | None = None
     bounds: list | None = None
+    target_file_size_mb: int | None = None
 
 
 _IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_$]*$")
@@ -1088,6 +1089,7 @@ def export_table_to_deltalake(
         )
 
     # Optimize each Delta Lake: z-order, bloom filters, and vacuum.
+    celery_logger.info("Optimizing Delta Lakes (z-order, bloom filters, vacuum)...")
     for spec in output_specs:
         lake_name = spec.partition_by or "flat"
         uri = f"{output_uri_base}/{lake_name}"
@@ -1233,6 +1235,29 @@ def deltalake_export_redis_key(datastack: str, version: int, table_name: str) ->
     return f"deltalake_export:{datastack}:v{version}:{table_name}"
 
 
+def _deltalake_log_redis_key(datastack: str, version: int, table_name: str) -> str:
+    """Return the Redis key for the capped log list."""
+    return f"deltalake_log:{datastack}:v{version}:{table_name}"
+
+
+_DELTALAKE_LOG_MAX_ENTRIES = 100
+
+
+def append_deltalake_log(
+    datastack: str,
+    version: int,
+    table_name: str,
+    message: str,
+) -> None:
+    """Append a timestamped log entry to the capped Redis log list."""
+    client = _get_redis_client()
+    key = _deltalake_log_redis_key(datastack, version, table_name)
+    timestamped = f"{datetime.now(timezone.utc).strftime('%H:%M:%S')} {message}"
+    client.rpush(key, timestamped)
+    client.ltrim(key, -_DELTALAKE_LOG_MAX_ENTRIES, -1)
+    client.expire(key, _DELTALAKE_PROGRESS_TTL)
+
+
 def _get_redis_client():
     """Lazy-create a Redis client for deltalake export progress."""
     import redis
@@ -1264,9 +1289,11 @@ def make_redis_progress_callback(
         pct = (rows_so_far / total * 100) if total else None
         payload = {
             "status": "exporting",
+            "phase": "streaming",
             "rows_processed": rows_so_far,
             "total_rows": total,
             "percent_complete": round(pct, 2) if pct is not None else None,
+            "error": None,
             "last_updated": datetime.now(timezone.utc).isoformat(),
         }
         client.set(key, json.dumps(payload), ex=_DELTALAKE_PROGRESS_TTL)
@@ -1281,6 +1308,8 @@ def set_deltalake_export_status(
     status: str,
     total_rows: int | None = None,
     rows_processed: int | None = None,
+    phase: str | None = None,
+    error: str | None = None,
 ) -> None:
     """Write a terminal status (``complete``, ``failed``, etc.) to Redis."""
     client = _get_redis_client()
@@ -1290,9 +1319,11 @@ def set_deltalake_export_status(
         pct = round(rows_processed / total_rows * 100, 2)
     payload = {
         "status": status,
+        "phase": phase,
         "rows_processed": rows_processed,
         "total_rows": total_rows,
         "percent_complete": pct,
+        "error": error,
         "last_updated": datetime.now(timezone.utc).isoformat(),
     }
     client.set(key, json.dumps(payload), ex=_DELTALAKE_PROGRESS_TTL)
@@ -1305,14 +1336,23 @@ def get_deltalake_export_progress(
 ) -> dict | None:
     """Read the current export progress from Redis.
 
-    Returns the progress dict, or ``None`` if no export is tracked.
+    Returns the progress dict (including ``log_entries``), or ``None``
+    if no export is tracked.
     """
     client = _get_redis_client()
     key = deltalake_export_redis_key(datastack, version, table_name)
     raw = client.get(key)
     if raw is None:
         return None
-    return json.loads(raw)
+    progress = json.loads(raw)
+    # Attach log entries from the capped Redis list.
+    log_key = _deltalake_log_redis_key(datastack, version, table_name)
+    log_entries = client.lrange(log_key, 0, -1)
+    progress["log_entries"] = [
+        entry.decode() if isinstance(entry, bytes) else entry
+        for entry in (log_entries or [])
+    ]
+    return progress
 
 
 def _build_frozen_db_connection_string(
@@ -1443,6 +1483,15 @@ def write_deltalake_table(
     )
 
     # --- Resolve output specs ---
+    append_deltalake_log(datastack, version, table_name, "Discovering output specs...")
+    set_deltalake_export_status(
+        datastack,
+        version,
+        table_name,
+        "exporting",
+        total_rows=row_count,
+        phase="discovering_specs",
+    )
     if output_specs is not None:
         resolved_specs = [DeltaLakeOutputSpec(**s) for s in output_specs]
     else:
@@ -1498,14 +1547,29 @@ def write_deltalake_table(
             )
 
     # --- Estimate bytes per row and resolve partition counts / bounds ---
+    append_deltalake_log(
+        datastack,
+        version,
+        table_name,
+        f"Resolved {len(resolved_specs)} output specs. Computing partition boundaries...",
+    )
+    set_deltalake_export_status(
+        datastack,
+        version,
+        table_name,
+        "exporting",
+        total_rows=row_count,
+        phase="computing_boundaries",
+    )
     bytes_per_row = estimate_bytes_per_row(connection_string, source)
 
     for spec in resolved_specs:
         if spec.n_partitions == "auto":
+            effective_target = spec.target_file_size_mb or target_partition_size_mb
             spec.n_partitions = resolve_n_partitions(
                 "auto",
                 row_count,
-                target_file_size_mb=target_partition_size_mb,
+                target_file_size_mb=effective_target,
                 bytes_per_row=bytes_per_row,
             )
 
@@ -1552,8 +1616,19 @@ def write_deltalake_table(
         _log_progress(rows_so_far, total)
         redis_callback(rows_so_far, total)
 
+    append_deltalake_log(
+        datastack,
+        version,
+        table_name,
+        f"Streaming {row_count:,} rows to Delta Lake...",
+    )
     set_deltalake_export_status(
-        datastack, version, table_name, "exporting", total_rows=row_count
+        datastack,
+        version,
+        table_name,
+        "exporting",
+        total_rows=row_count,
+        phase="streaming",
     )
 
     try:
@@ -1569,16 +1644,20 @@ def write_deltalake_table(
             optimize_target_size=optimize_target_size,
             optimize_max_spill_size=optimize_max_spill_size,
         )
-    except Exception:
+    except Exception as e:
+        append_deltalake_log(datastack, version, table_name, f"Export failed: {e}")
         set_deltalake_export_status(
             datastack,
             version,
             table_name,
             "failed",
             total_rows=row_count,
+            phase="failed",
+            error=str(e),
         )
         raise
 
+    append_deltalake_log(datastack, version, table_name, "Export complete.")
     set_deltalake_export_status(
         datastack,
         version,
@@ -1586,6 +1665,7 @@ def write_deltalake_table(
         "complete",
         total_rows=row_count,
         rows_processed=row_count,
+        phase="complete",
     )
 
     celery_logger.info(

@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Running Exports - MaterializationEngine{% endblock %}
+
+{% block html_head %}
+<script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script src="{{ url_for('static', filename='js/deltalakeWizardStore.js') }}"></script>
+<script src="{{ url_for('static', filename='js/deltalakeRunningExports.js') }}"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+<style>
+    .export-card {
+        margin-bottom: 1.5rem;
+        box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+    }
+    .status-exporting { border-left: 5px solid #007bff; }
+    .status-complete { border-left: 5px solid #28a745; }
+    .status-failed { border-left: 5px solid #dc3545; }
+    .status-discovering_specs,
+    .status-computing_boundaries { border-left: 5px solid #17a2b8; }
+    .status-streaming { border-left: 5px solid #007bff; }
+    .status-optimizing { border-left: 5px solid #6f42c1; }
+
+    .log-panel {
+        max-height: 300px;
+        overflow-y: auto;
+        background: #1e1e1e;
+        color: #d4d4d4;
+        font-family: 'Courier New', monospace;
+        font-size: 0.8rem;
+        padding: 0.75rem;
+        border-radius: 4px;
+    }
+    .log-entry {
+        margin: 0;
+        padding: 2px 0;
+        white-space: pre-wrap;
+        word-break: break-all;
+    }
+    .error-panel {
+        border: 2px solid #dc3545;
+        background: #f8d7da;
+        color: #842029;
+        padding: 1rem;
+        border-radius: 4px;
+        white-space: pre-wrap;
+        word-break: break-all;
+    }
+    .progress-bar { transition: width 0.6s ease; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container mt-4" x-data="deltalakeRunningExports">
+    <div class="d-flex justify-content-between align-items-center border-bottom pb-3 mb-4">
+        <h2><i class="fas fa-download me-2"></i>Delta Lake Exports</h2>
+        <a href="{{ url_for('deltalake.wizard_step', step_number=1) }}" class="btn btn-sm btn-primary">
+            <i class="fas fa-plus me-1"></i> New Export
+        </a>
+    </div>
+
+    <!-- No active export -->
+    <div x-show="!exportKey" class="text-center my-5">
+        <i class="fas fa-folder-open fa-3x text-muted mb-3"></i>
+        <h4>No Active Export</h4>
+        <p class="text-muted">Start a new export from the wizard.</p>
+        <a href="{{ url_for('deltalake.wizard_step', step_number=1) }}" class="btn btn-primary mt-2">
+            <i class="fas fa-plus me-1"></i> Start Export
+        </a>
+    </div>
+
+    <!-- Export card grid (supports future N cards) -->
+    <div x-show="exportKey" class="row row-cols-1 g-4">
+        <div class="col">
+            <div class="card export-card" :class="`status-${progress.phase || progress.status || 'idle'}`">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <strong x-text="`${exportKey?.tableName} (v${exportKey?.version})`"></strong>
+                    <span class="badge"
+                          :class="{
+                              'bg-primary': progress.status === 'exporting',
+                              'bg-success': progress.status === 'complete',
+                              'bg-danger': progress.status === 'failed',
+                              'bg-info': !progress.status
+                          }"
+                          x-text="progress.phase || progress.status || 'pending'">
+                    </span>
+                </div>
+                <div class="card-body">
+                    <!-- Progress bar -->
+                    <div class="mb-3" x-show="progress.total_rows">
+                        <div class="d-flex justify-content-between mb-1">
+                            <small x-text="`${(progress.rows_processed || 0).toLocaleString()} / ${(progress.total_rows || 0).toLocaleString()} rows`"></small>
+                            <small x-text="`${(progress.percent_complete || 0).toFixed(1)}%`"></small>
+                        </div>
+                        <div class="progress" style="height: 20px;">
+                            <div class="progress-bar"
+                                 :class="{
+                                     'bg-success': progress.status === 'complete',
+                                     'bg-danger': progress.status === 'failed',
+                                     'bg-primary progress-bar-striped progress-bar-animated': progress.status === 'exporting'
+                                 }"
+                                 :style="`width: ${progress.percent_complete || 0}%`">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Error panel -->
+                    <div x-show="progress.error" class="error-panel mb-3">
+                        <strong><i class="fas fa-exclamation-triangle me-1"></i>Error:</strong>
+                        <p class="mb-0 mt-1" x-text="progress.error"></p>
+                    </div>
+
+                    <!-- Log panel -->
+                    <div x-show="progress.log_entries && progress.log_entries.length > 0">
+                        <label class="form-label small text-muted">Log</label>
+                        <div class="log-panel" x-ref="logPanel">
+                            <template x-for="(entry, i) in (progress.log_entries || [])" :key="i">
+                                <p class="log-entry" x-text="entry"></p>
+                            </template>
+                        </div>
+                    </div>
+
+                    <!-- Last updated -->
+                    <div class="mt-2 text-muted small" x-show="progress.last_updated">
+                        Last updated: <span x-text="progress.last_updated"></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
