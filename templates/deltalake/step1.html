@@ -29,7 +29,7 @@
 
         <div class="col-md-4">
             <label class="form-label fw-bold">Table</label>
-            <select class="form-select" x-model="tableName" :disabled="!version || loadingTables">
+            <select class="form-select" x-model="tableName" @change="onTableChange()" :disabled="!version || loadingTables">
                 <option value="">Select a table...</option>
                 <template x-for="t in tables" :key="t.name">
                     <option :value="t.name" x-text="`${t.name} (${t.type})`"></option>
@@ -65,6 +65,24 @@
                 </div>
             </div>
         </div>
+    </div>
+
+    <!-- Existing export warning -->
+    <div x-show="existingExports.length > 0" class="alert alert-warning mt-4 mb-0">
+        <strong><i class="fas fa-exclamation-triangle me-1"></i>Export already exists</strong>
+        <p class="mb-1 mt-2">Delta Lake data already exists for this table/version at the following locations:</p>
+        <ul class="mb-1">
+            <template x-for="spec in existingExports" :key="spec.uri">
+                <li>
+                    <code x-text="spec.uri"></code>
+                    <span class="text-muted" x-text="`(${spec.row_count.toLocaleString()} rows)`"></span>
+                </li>
+            </template>
+        </ul>
+        <small class="text-muted">Re-exporting will fail unless the existing data is removed first.</small>
+    </div>
+    <div x-show="checkingExists" class="form-text mt-3">
+        <i class="fas fa-spinner fa-spin me-1"></i> Checking for existing exports...
     </div>
 
     <!-- Discover button -->

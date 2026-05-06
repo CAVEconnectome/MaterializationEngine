@@ -15,6 +15,7 @@
     .status-complete { border-left: 5px solid #28a745; }
     .status-failed { border-left: 5px solid #dc3545; }
     .status-discovering_specs,
+    .status-resolving_specs,
     .status-computing_boundaries { border-left: 5px solid #17a2b8; }
     .status-streaming { border-left: 5px solid #007bff; }
     .status-optimizing { border-left: 5px solid #6f42c1; }
@@ -71,7 +72,7 @@
     <div x-show="exports.length > 0" class="row row-cols-1 g-4">
         <template x-for="(exp, idx) in exports" :key="exportId(exp)">
             <div class="col">
-                <div class="card export-card" :class="`status-${getProgress(exp).phase || getProgress(exp).status || 'idle'}`">
+                <div class="card export-card" :class="`status-${getProgress(exp).status === 'failed' ? 'failed' : (getProgress(exp).phase || getProgress(exp).status || 'idle')}`">
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <strong x-text="`${exp.tableName} (v${exp.version})`"></strong>
                         <div class="d-flex align-items-center gap-2">
@@ -93,14 +94,20 @@
                     </div>
                     <div class="card-body">
                         <!-- Queued / waiting state -->
-                        <div x-show="!getProgress(exp).status || getProgress(exp).status === 'pending'" class="text-center py-3">
+                        <div x-show="(!getProgress(exp).status || getProgress(exp).status === 'pending') && getProgress(exp).status !== 'failed'" class="text-center py-3">
                             <i class="fas fa-spinner fa-spin fa-2x text-info mb-2"></i>
                             <p class="mb-1"><strong>Export queued</strong></p>
                             <p class="text-muted small mb-0">Waiting for worker to pick up the task...</p>
                             <p class="text-muted small mt-1" x-show="exp.submittedAt" x-text="'Submitted: ' + new Date(exp.submittedAt).toLocaleString()"></p>
                         </div>
+                        <!-- Failed state -->
+                        <div x-show="getProgress(exp).status === 'failed'" class="text-center py-3">
+                            <i class="fas fa-times-circle fa-2x text-danger mb-2"></i>
+                            <p class="mb-1"><strong class="text-danger">Export Failed</strong></p>
+                            <p class="text-muted small mb-0" x-show="getProgress(exp).last_updated" x-text="'Failed at: ' + new Date(getProgress(exp).last_updated).toLocaleString()"></p>
+                        </div>
                         <!-- Progress bar -->
-                        <div class="mb-3" x-show="getProgress(exp).total_rows">
+                        <div class="mb-3" x-show="getProgress(exp).total_rows && getProgress(exp).status !== 'failed'">
                             <div class="d-flex justify-content-between mb-1">
                                 <small x-text="`${(getProgress(exp).rows_processed || 0).toLocaleString()} / ${(getProgress(exp).total_rows || 0).toLocaleString()} rows`"></small>
                                 <small x-text="`${(getProgress(exp).percent_complete || 0).toFixed(1)}%`"></small>
@@ -109,7 +116,6 @@
                                 <div class="progress-bar"
                                      :class="{
                                          'bg-success': getProgress(exp).status === 'complete',
-                                         'bg-danger': getProgress(exp).status === 'failed',
                                          'bg-primary progress-bar-striped progress-bar-animated': getProgress(exp).status === 'exporting'
                                      }"
                                      :style="`width: ${getProgress(exp).percent_complete || 0}%`">

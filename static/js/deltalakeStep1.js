@@ -11,6 +11,8 @@ document.addEventListener("alpine:init", () => {
     loadingTables: false,
     discovering: false,
     error: null,
+    existingExports: [],
+    checkingExists: false,
 
     init() {
       if (this.datastack) {
@@ -36,6 +38,7 @@ document.addEventListener("alpine:init", () => {
       this.tableName = "";
       this.tables = [];
       this.error = null;
+      this.existingExports = [];
       if (this.version) {
         await this.fetchTables();
       }
@@ -89,6 +92,38 @@ document.addEventListener("alpine:init", () => {
         this.error = `Error loading tables: ${e.message}`;
       } finally {
         this.loadingTables = false;
+      }
+    },
+
+    async onTableChange() {
+      this.existingExports = [];
+      this.error = null;
+      if (this.tableName && this.version && this.datastack) {
+        await this.checkExists();
+      }
+    },
+
+    async checkExists() {
+      this.checkingExists = true;
+      try {
+        const resp = await fetch("/materialize/deltalake/api/check-exists", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            datastack: this.datastack,
+            version: parseInt(this.version),
+            table_name: this.tableName,
+          }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          this.existingExports = data.existing_specs || [];
+        }
+      } catch (e) {
+        // Non-critical — don't block the user on check failure.
+        console.warn("[DeltaLake] check-exists failed:", e);
+      } finally {
+        this.checkingExists = false;
       }
     },
 

@@ -41,12 +41,12 @@ document.addEventListener("alpine:init", () => {
         const resp = await fetch(url);
         if (!resp.ok) {
           if (resp.status === 404) {
-            this.progress[key] = { status: "pending", phase: "pending" };
+            this.progress = { ...this.progress, [key]: { status: "pending", phase: "pending" } };
           }
           return;
         }
         const data = await resp.json();
-        this.progress[key] = data;
+        this.progress = { ...this.progress, [key]: data };
       } catch (e) {
         console.error("[DeltaLake] Polling error:", e);
       }

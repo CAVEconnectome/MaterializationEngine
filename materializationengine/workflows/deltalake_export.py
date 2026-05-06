@@ -1010,6 +1010,7 @@ def export_table_to_deltalake(
     flush_threshold_bytes: int = 2 * 1024 * 1024 * 1024,
     total_rows: int | None = None,
     progress_callback: Callable[[int, int | None], None] | None = None,
+    optimize_callback: Callable[[str, str], None] | None = None,
     row_limit: int | None = None,
     optimize_max_concurrent_tasks: int = 1,
     optimize_target_size: int | None = None,
@@ -1034,6 +1035,11 @@ def export_table_to_deltalake(
         If provided, called after each Arrow batch with
         ``(rows_processed_so_far, total_rows)``.  *total_rows* may be
         ``None`` if the caller doesn't know the table size.
+    optimize_callback
+        If provided, called before each spec's optimize step with
+        ``(spec_name, action)`` where *action* is one of
+        ``"z_order"``, ``"compact"``, or ``"vacuum"``.  Used to update
+        external progress tracking (e.g. Redis phase/log).
     total_rows
         Total expected row count (e.g. from ``MaterializedMetadata``).
         Passed through to *progress_callback*.
@@ -1094,6 +1100,9 @@ def export_table_to_deltalake(
     for spec in output_specs:
         lake_name = spec.partition_by or "flat"
         uri = f"{output_uri_base}/{lake_name}"
+        action = "z_order" if spec.zorder_columns else "compact"
+        if optimize_callback is not None:
+            optimize_callback(lake_name, action)
         optimize_deltalake(
             uri,
             zorder_columns=spec.zorder_columns or None,
@@ -1103,6 +1112,8 @@ def export_table_to_deltalake(
             target_size=optimize_target_size,
             max_spill_size=optimize_max_spill_size,
         )
+        if optimize_callback is not None:
+            optimize_callback(lake_name, "vacuum")
 
 
 def optimize_deltalake(
@@ -1485,18 +1496,37 @@ def write_deltalake_table(
     )
 
     # --- Resolve output specs ---
-    append_deltalake_log(datastack, version, table_name, "Discovering output specs...")
-    set_deltalake_export_status(
-        datastack,
-        version,
-        table_name,
-        "exporting",
-        total_rows=row_count,
-        phase="discovering_specs",
-    )
     if output_specs is not None:
+        append_deltalake_log(
+            datastack,
+            version,
+            table_name,
+            f"Resolving {len(output_specs)} user-provided output specs...",
+        )
+        set_deltalake_export_status(
+            datastack,
+            version,
+            table_name,
+            "exporting",
+            total_rows=row_count,
+            phase="resolving_specs",
+        )
         resolved_specs = [DeltaLakeOutputSpec(**s) for s in output_specs]
     else:
+        append_deltalake_log(
+            datastack,
+            version,
+            table_name,
+            "Discovering output specs...",
+        )
+        set_deltalake_export_status(
+            datastack,
+            version,
+            table_name,
+            "exporting",
+            total_rows=row_count,
+            phase="discovering_specs",
+        )
         resolved_specs = discover_default_output_specs(source, engine)
 
     celery_logger.info(
@@ -1633,6 +1663,31 @@ def write_deltalake_table(
         phase="streaming",
     )
 
+    def _optimize_callback(spec_name: str, action: str) -> None:
+        set_deltalake_export_status(
+            datastack,
+            version,
+            table_name,
+            "exporting",
+            total_rows=row_count,
+            rows_processed=row_count,
+            phase="optimizing",
+        )
+        if action == "vacuum":
+            append_deltalake_log(
+                datastack,
+                version,
+                table_name,
+                f"Vacuuming Delta Lake '{spec_name}'...",
+            )
+        else:
+            append_deltalake_log(
+                datastack,
+                version,
+                table_name,
+                f"Optimizing Delta Lake '{spec_name}' ({action})...",
+            )
+
     try:
         export_table_to_deltalake(
             connection_string=connection_string,
@@ -1642,6 +1697,7 @@ def write_deltalake_table(
             flush_threshold_bytes=flush_threshold,
             total_rows=row_count,
             progress_callback=_progress,
+            optimize_callback=_optimize_callback,
             optimize_max_concurrent_tasks=optimize_max_concurrent_tasks,
             optimize_target_size=optimize_target_size,
             optimize_max_spill_size=optimize_max_spill_size,

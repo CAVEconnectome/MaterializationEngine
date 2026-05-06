@@ -293,3 +293,75 @@ def recalculate():
         result_specs.append(spec)
 
     return jsonify({"specs": result_specs})
+
+
+@deltalake_bp.route("/api/check-exists", methods=["POST"])
+@reset_auth
+@auth_required
+def check_exists():
+    """Check whether Delta Lake exports already exist for a table/version.
+
+    Expects JSON body: { datastack, version, table_name }
+    Returns: { exists: bool, existing_specs: [{partition_by, uri, row_count}] }
+
+    This checks each potential output spec URI by attempting to open it as a
+    DeltaTable.  Returns per-spec existence info to support future selective
+    re-export flows.
+    """
+    if not request.is_json or not request.json:
+        return jsonify({"error": "Request body must be JSON"}), 400
+
+    data = request.json
+    datastack = data.get("datastack")
+    version = data.get("version")
+    table_name = data.get("table_name")
+
+    if not all([datastack, version, table_name]):
+        return jsonify(
+            {"error": "datastack, version, and table_name are required"}
+        ), 400
+
+    output_bucket = get_config_param("DELTALAKE_OUTPUT_BUCKET", "")
+    if not output_bucket:
+        return jsonify({"error": "DELTALAKE_OUTPUT_BUCKET not configured"}), 500
+
+    output_uri_base = f"{output_bucket}/{datastack}/v{version}/{table_name}"
+
+    # Check a set of common partition names.  If cached specs exist in Redis,
+    # use those partition_by values; otherwise check "flat" as the default.
+    from materializationengine.workflows.deltalake_export import _get_redis_client
+
+    redis_client = _get_redis_client()
+    cache_key = f"deltalake_specs:{datastack}:v{version}:{table_name}"
+    cached = redis_client.get(cache_key)
+
+    partition_names = ["flat"]
+    if cached:
+        import json as _json
+
+        cached_data = _json.loads(cached)
+        partition_names = list(
+            {
+                spec.get("partition_by") or "flat"
+                for spec in cached_data.get("specs", [])
+            }
+        )
+
+    existing_specs = []
+    for lake_name in partition_names:
+        uri = f"{output_uri_base}/{lake_name}"
+        try:
+            from deltalake import DeltaTable
+
+            dt = DeltaTable(uri)
+            row_count = dt.count()
+            existing_specs.append(
+                {"partition_by": lake_name, "uri": uri, "row_count": row_count}
+            )
+        except Exception:
+            # Table doesn't exist at this URI — not an error.
+            pass
+
+    return jsonify(
+        {"exists": len(existing_specs) > 0, "existing_specs": existing_specs}
+    )
