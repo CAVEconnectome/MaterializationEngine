@@ -62,15 +62,8 @@ def wizard_step(step_number):
         return redirect(url_for("deltalake.wizard_step", step_number=1))
 
     try:
-        all_datastacks = get_datastacks() or []
-        if _is_auth_disabled() or not g.get("auth_user"):
-            datastacks = sorted(all_datastacks)
-        else:
-            datastacks = sorted(
-                ds
-                for ds in all_datastacks
-                if _has_datastack_permission(g.auth_user, "admin", ds)
-            )
+        datastacks = get_datastacks() or []
+        datastacks.sort()
     except Exception as e:
         current_app.logger.error(
             f"Failed to get datastacks for deltalake wizard step {step_number}: {e}",
