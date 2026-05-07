@@ -140,26 +140,18 @@ document.addEventListener("alpine:init", () => {
       this.recalculating = true;
       this.error = null;
       try {
-        // Only recalculate specs where n_partitions is "auto" or null
-        const specsForCalc = this.specs.map((s) => ({ ...s }));
+        const store = Alpine.store("dlWizard").state;
+        const globalTarget = store.targetPartitionSizeMb || 256;
 
-        const resp = await fetch("/materialize/deltalake/api/recalculate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            row_count: this.rowCount,
-            bytes_per_row: this.bytesPerRow,
-            target_partition_size_mb:
-              Alpine.store("dlWizard").state.targetPartitionSizeMb,
-            specs: specsForCalc,
-          }),
-        });
-        const data = await resp.json();
-        if (!resp.ok) {
-          throw new Error(data.error || "Recalculation failed");
+        for (const spec of this.specs) {
+          if (spec.n_partitions === "auto" || spec.n_partitions == null) {
+            const targetMb = spec.target_file_size_mb || globalTarget;
+            const targetBytes = targetMb * 1024 * 1024;
+            const totalBytes = this.rowCount * this.bytesPerRow;
+            spec.n_partitions = Math.max(1, Math.ceil(totalBytes / targetBytes));
+          }
         }
 
-        this.specs = data.specs;
         this.syncStore();
       } catch (e) {
         this.error = e.message;

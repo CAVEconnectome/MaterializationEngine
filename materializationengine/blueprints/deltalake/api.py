@@ -296,50 +296,6 @@ def discover_specs():
     return jsonify(result)
 
 
-@deltalake_bp.route("/api/recalculate", methods=["POST"])
-@reset_auth
-@auth_required
-def recalculate():
-    """Recompute n_partitions for specs. Pure computation, no DB access.
-
-    Expects JSON body: { row_count, bytes_per_row, specs: [...] }
-    Returns: { specs: [...with recomputed n_partitions...] }
-    """
-    from materializationengine.workflows.deltalake_export import resolve_n_partitions
-
-    if not request.is_json or not request.json:
-        return jsonify({"error": "Request body must be JSON"}), 400
-
-    data = request.json
-    row_count = data.get("row_count")
-    bytes_per_row = data.get("bytes_per_row")
-    specs = data.get("specs")
-
-    if not all([row_count, bytes_per_row, specs]):
-        return jsonify(
-            {"error": "row_count, bytes_per_row, and specs are required"}
-        ), 400
-
-    global_target = int(get_config_param("DELTALAKE_TARGET_PARTITION_SIZE_MB", 256))
-    user_target = data.get("target_partition_size_mb")
-    if user_target is not None:
-        global_target = int(user_target)
-
-    result_specs = []
-    for spec in specs:
-        if spec.get("n_partitions") == "auto" or spec.get("n_partitions") is None:
-            effective_target = spec.get("target_file_size_mb") or global_target
-            spec["n_partitions"] = resolve_n_partitions(
-                "auto",
-                row_count,
-                target_file_size_mb=effective_target,
-                bytes_per_row=bytes_per_row,
-            )
-        result_specs.append(spec)
-
-    return jsonify({"specs": result_specs})
-
-
 @deltalake_bp.route("/api/check-exists", methods=["POST"])
 @reset_auth
 @auth_required
