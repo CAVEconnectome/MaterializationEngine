@@ -94,6 +94,8 @@ document.addEventListener("alpine:init", () => {
           body: JSON.stringify({
             row_count: this.rowCount,
             bytes_per_row: this.bytesPerRow,
+            target_partition_size_mb:
+              Alpine.store("dlWizard").state.targetPartitionSizeMb,
             specs: specsForCalc,
           }),
         });

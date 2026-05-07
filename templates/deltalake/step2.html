@@ -53,7 +53,7 @@
                                         x-model="spec.partition_by"
                                         @change="syncStore()">
                                     <option :value="null">flat (no partition)</option>
-                                    <template x-for="col in availableColumns" :key="col">
+                                    <template x-for="col in availableColumns.filter(c => !c.endsWith('_morton') || spec.partition_by === c)" :key="col">
                                         <option :value="col" x-text="col" :selected="spec.partition_by === col"></option>
                                     </template>
                                 </select>
@@ -76,6 +76,7 @@
                                        placeholder="auto"
                                        :disabled="!spec.partition_by"
                                        @change="syncStore()">
+                                <small class="form-text text-muted">Leave empty to auto-calculate from target file size</small>
                             </div>
                             <div class="col-md-3">
                                 <label class="form-label small fw-semibold text-start d-block">Target File Size (MB)</label>

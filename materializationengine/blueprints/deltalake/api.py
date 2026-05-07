@@ -90,7 +90,7 @@ def wizard_step(step_number):
 
 @deltalake_bp.route("/running-exports")
 @reset_auth
-@auth_required
+@auth_requires_admin
 def running_exports_page():
     """Render the running exports monitoring page."""
     return render_template(
@@ -132,17 +132,16 @@ def discover_specs():
     Returns: { row_count, bytes_per_row, specs: [...] }
     """
     from dynamicannotationdb.key_utils import build_segmentation_table_name
-    from sqlalchemy import create_engine
 
     from materializationengine.database import db_manager
     from materializationengine.models import MaterializedMetadata
     from materializationengine.workflows.deltalake_export import (
         _DEFAULT_DROP_COLUMNS,
-        DeltaLakeOutputSpec,
         TableSource,
         _build_frozen_db_connection_string,
         _get_redis_client,
         _resolve_select_columns,
+        _validate_identifier,
         discover_default_output_specs,
         estimate_bytes_per_row,
         resolve_n_partitions,
@@ -162,12 +161,31 @@ def discover_specs():
             {"error": "datastack, version, and table_name are required"}
         ), 400
 
+    try:
+        _validate_identifier(table_name)
+    except ValueError:
+        return jsonify({"error": f"Invalid table name: {table_name!r}"}), 400
+
     # Check Redis cache first.
     cache_key = f"deltalake_specs:{datastack}:v{version}:{table_name}"
     redis_client = _get_redis_client()
     cached = redis_client.get(cache_key)
     if cached:
-        return jsonify(json.loads(cached))
+        cached_data = json.loads(cached)
+        # Cached data contains raw specs (n_partitions still "auto").
+        # Resolve partition counts per-request using the caller's target.
+        for spec in cached_data["specs"]:
+            if spec.get("n_partitions") == "auto" or spec.get("n_partitions") is None:
+                effective_target = (
+                    spec.get("target_file_size_mb") or target_partition_size_mb
+                )
+                spec["n_partitions"] = resolve_n_partitions(
+                    "auto",
+                    cached_data["row_count"],
+                    target_file_size_mb=effective_target,
+                    bytes_per_row=cached_data["bytes_per_row"],
+                )
+        return jsonify(cached_data)
 
     try:
         datastack_info = get_datastack_info(datastack)
@@ -216,6 +234,9 @@ def discover_specs():
     resolved_specs = discover_default_output_specs(source, engine)
     bytes_per_row = estimate_bytes_per_row(connection_string, source)
 
+    # Track which specs had "auto" before resolution (for caching).
+    was_auto = [spec.n_partitions == "auto" for spec in resolved_specs]
+
     # Resolve partition counts.
     for spec in resolved_specs:
         if spec.n_partitions == "auto":
@@ -241,15 +262,29 @@ def discover_specs():
                 if computed not in available_columns:
                     available_columns.append(computed)
 
+    # Cache raw specs (before n_partitions resolution) so the cache stays
+    # valid regardless of the caller's target_partition_size_mb.
+    raw_specs = [asdict(s) for s in resolved_specs]
+    # Reset resolved n_partitions back to "auto" for specs that were auto.
+    for raw, auto in zip(raw_specs, was_auto):
+        if auto:
+            raw["n_partitions"] = "auto"
+
+    cache_result = {
+        "row_count": row_count,
+        "bytes_per_row": bytes_per_row,
+        "available_columns": available_columns,
+        "specs": raw_specs,
+    }
+    redis_client.set(cache_key, json.dumps(cache_result), ex=600)
+
+    # Return the result with resolved partition counts.
     result = {
         "row_count": row_count,
         "bytes_per_row": bytes_per_row,
         "available_columns": available_columns,
         "specs": [asdict(s) for s in resolved_specs],
     }
-
-    # Cache in Redis with 10-minute TTL.
-    redis_client.set(cache_key, json.dumps(result), ex=600)
 
     return jsonify(result)
 
@@ -279,6 +314,9 @@ def recalculate():
         ), 400
 
     global_target = int(get_config_param("DELTALAKE_TARGET_PARTITION_SIZE_MB", 256))
+    user_target = data.get("target_partition_size_mb")
+    if user_target is not None:
+        global_target = int(user_target)
 
     result_specs = []
     for spec in specs:
@@ -301,12 +339,11 @@ def recalculate():
 def check_exists():
     """Check whether Delta Lake exports already exist for a table/version.
 
-    Expects JSON body: { datastack, version, table_name }
-    Returns: { exists: bool, existing_specs: [{partition_by, uri, row_count}] }
+    Expects JSON body: { datastack, version, table_name, spec_names? }
+    Returns: { exists: bool, existing_specs: [{name, uri, row_count}] }
 
-    This checks each potential output spec URI by attempting to open it as a
-    DeltaTable.  Returns per-spec existence info to support future selective
-    re-export flows.
+    If ``spec_names`` is provided, checks those exact folder names.
+    Otherwise falls back to cached specs or checks "flat".
     """
     if not request.is_json or not request.json:
         return jsonify({"error": "Request body must be JSON"}), 400
@@ -327,25 +364,26 @@ def check_exists():
 
     output_uri_base = f"{output_bucket}/{datastack}/v{version}/{table_name}"
 
-    # Check a set of common partition names.  If cached specs exist in Redis,
-    # use those partition_by values; otherwise check "flat" as the default.
-    from materializationengine.workflows.deltalake_export import _get_redis_client
+    # If the caller provides explicit spec names, use those.
+    # Otherwise fall back to cached specs or just check "flat".
+    spec_names = data.get("spec_names")
+    if spec_names:
+        partition_names = list(set(spec_names))
+    else:
+        from materializationengine.workflows.deltalake_export import _get_redis_client
 
-    redis_client = _get_redis_client()
-    cache_key = f"deltalake_specs:{datastack}:v{version}:{table_name}"
-    cached = redis_client.get(cache_key)
+        redis_client = _get_redis_client()
+        cache_key = f"deltalake_specs:{datastack}:v{version}:{table_name}"
+        cached = redis_client.get(cache_key)
 
-    partition_names = ["flat"]
-    if cached:
-        import json as _json
+        partition_names = ["flat"]
+        if cached:
+            import json as _json
 
-        cached_data = _json.loads(cached)
-        partition_names = list(
-            {
-                spec.get("partition_by") or "flat"
-                for spec in cached_data.get("specs", [])
-            }
-        )
+            cached_data = _json.loads(cached)
+            partition_names = list(
+                {spec.get("name") or "flat" for spec in cached_data.get("specs", [])}
+            )
 
     existing_specs = []
     for lake_name in partition_names:
@@ -356,7 +394,7 @@ def check_exists():
             dt = DeltaTable(uri)
             row_count = dt.count()
             existing_specs.append(
-                {"partition_by": lake_name, "uri": uri, "row_count": row_count}
+                {"name": lake_name, "uri": uri, "row_count": row_count}
             )
         except Exception:
             # Table doesn't exist at this URI — not an error.

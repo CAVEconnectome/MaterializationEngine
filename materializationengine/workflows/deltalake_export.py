@@ -67,7 +67,7 @@ class TableSource:
 
 @dataclass
 class DeltaLakeOutputSpec:
-    name: str | None = None
+    name: str
     partition_by: str | None = None
     partition_strategy: Literal["percentile_range", "uniform_range", "hash"] | None = (
         None
@@ -80,6 +80,10 @@ class DeltaLakeOutputSpec:
     source_table: str | None = None
     bounds: list | None = None
     target_file_size_mb: int | None = None
+
+    def __post_init__(self):
+        if not self.name:
+            raise ValueError("DeltaLakeOutputSpec.name must be a non-empty string")
 
 
 _IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_$]*$")
@@ -995,8 +999,7 @@ def _flush_buffer(
                 partition_by = [f"{part_col}_partition"]
 
         # Build the URI for this particular Delta Lake.
-        lake_name = spec.partition_by or "flat"
-        uri = f"{output_uri_base}/{lake_name}"
+        uri = f"{output_uri_base}/{spec.name}"
 
         write_deltalake(
             uri,
@@ -1102,11 +1105,10 @@ def export_table_to_deltalake(
     # Optimize each Delta Lake: z-order, bloom filters, and vacuum.
     celery_logger.info("Optimizing Delta Lakes (z-order, bloom filters, vacuum)...")
     for spec in output_specs:
-        lake_name = spec.partition_by or "flat"
-        uri = f"{output_uri_base}/{lake_name}"
+        uri = f"{output_uri_base}/{spec.name}"
         action = "z_order" if spec.zorder_columns else "compact"
         if optimize_callback is not None:
-            optimize_callback(lake_name, action)
+            optimize_callback(spec.name, action)
         optimize_deltalake(
             uri,
             zorder_columns=spec.zorder_columns or None,
@@ -1117,7 +1119,7 @@ def export_table_to_deltalake(
             max_spill_size=optimize_max_spill_size,
         )
         if optimize_callback is not None:
-            optimize_callback(lake_name, "vacuum")
+            optimize_callback(spec.name, "vacuum")
 
 
 def optimize_deltalake(
@@ -1564,10 +1566,20 @@ def write_deltalake_table(
             )
             return
 
+        # --- Validate unique output names ---
+        seen = set()
+        for spec in resolved_specs:
+            ln = spec.name
+            if ln in seen:
+                raise ValueError(
+                    f"Duplicate output spec name {ln!r}. "
+                    f"Each spec must have a unique name."
+                )
+            seen.add(ln)
+
         # --- Existing Delta Lake detection ---
         for spec in resolved_specs:
-            lake_name = spec.partition_by or "flat"
-            uri = f"{output_uri_base}/{lake_name}"
+            uri = f"{output_uri_base}/{spec.name}"
             try:
                 from deltalake import DeltaTable
 
@@ -1601,7 +1613,7 @@ def write_deltalake_table(
         bytes_per_row = estimate_bytes_per_row(connection_string, source)
 
         for spec in resolved_specs:
-            if spec.n_partitions == "auto":
+            if spec.n_partitions == "auto" or spec.n_partitions is None:
                 effective_target = spec.target_file_size_mb or target_partition_size_mb
                 spec.n_partitions = resolve_n_partitions(
                     "auto",
@@ -1671,8 +1683,16 @@ def write_deltalake_table(
             optimize_max_spill_size=optimize_max_spill_size,
         )
     except Exception as e:
-        _log(f"Export failed: {e}")
-        _set_status(status="failed", total_rows=None, phase="failed", error=str(e))
+        try:
+            _log(f"Export failed: {e}")
+            _set_status(status="failed", total_rows=None, phase="failed", error=str(e))
+        except Exception:
+            celery_logger.warning(
+                "%s (v%d): failed to update Redis status after export error",
+                table_name,
+                version,
+                exc_info=True,
+            )
         raise
 
     _log("Export complete.")

@@ -2,11 +2,42 @@ document.addEventListener("alpine:init", () => {
   Alpine.data("deltalakeStep3", () => ({
     launching: false,
     error: null,
+    existingExports: [],
+    checkingExists: false,
+
+    init() {
+      this.checkExists();
+    },
 
     outputUri(spec) {
       const store = Alpine.store("dlWizard").state;
-      const lakeName = spec.partition_by || "flat";
-      return `${store.datastack}/v${store.version}/${store.tableName}/${lakeName}`;
+      return `${store.datastack}/v${store.version}/${store.tableName}/${spec.name}`;
+    },
+
+    async checkExists() {
+      this.checkingExists = true;
+      const state = Alpine.store("dlWizard").state;
+      const specNames = state.specs.map((s) => s.name);
+      try {
+        const resp = await fetch("/materialize/deltalake/api/check-exists", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            datastack: state.datastack,
+            version: state.version,
+            table_name: state.tableName,
+            spec_names: specNames,
+          }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          this.existingExports = data.existing_specs || [];
+        }
+      } catch (e) {
+        console.warn("[DeltaLake] check-exists failed:", e);
+      } finally {
+        this.checkingExists = false;
+      }
     },
 
     async launchExport() {
