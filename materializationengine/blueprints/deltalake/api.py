@@ -298,7 +298,7 @@ def discover_specs():
 
 @deltalake_bp.route("/api/check-exists", methods=["POST"])
 @reset_auth
-@auth_required
+@auth_requires_admin
 def check_exists():
     """Check whether Delta Lake exports already exist for a table/version.
 
@@ -321,6 +321,15 @@ def check_exists():
             {"error": "datastack, version, and table_name are required"}
         ), 400
 
+    from materializationengine.workflows.deltalake_export import _validate_identifier
+
+    try:
+        _validate_identifier(datastack)
+        _validate_identifier(table_name)
+        version = int(version)
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid datastack, version, or table_name"}), 400
+
     output_bucket = get_config_param("DELTALAKE_OUTPUT_BUCKET", "")
     if not output_bucket:
         return jsonify({"error": "DELTALAKE_OUTPUT_BUCKET not configured"}), 500
@@ -331,6 +340,11 @@ def check_exists():
     # Otherwise fall back to cached specs or just check "flat".
     spec_names = data.get("spec_names")
     if spec_names:
+        try:
+            for sn in spec_names:
+                _validate_identifier(sn)
+        except (ValueError, TypeError):
+            return jsonify({"error": "Invalid spec_names entry"}), 400
         partition_names = list(set(spec_names))
     else:
         from materializationengine.workflows.deltalake_export import _get_redis_client
