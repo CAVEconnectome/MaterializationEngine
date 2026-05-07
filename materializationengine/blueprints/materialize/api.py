@@ -898,7 +898,7 @@ class WriteDeltalakeResource(Resource):
                     return abort(400, "each entry in output_specs must be an object")
                 try:
                     DeltaLakeOutputSpec(**item)
-                except TypeError as exc:
+                except (TypeError, ValueError) as exc:
                     return abort(400, f"invalid output_specs entry: {exc}")
 
         job_id = uuid.uuid4().hex

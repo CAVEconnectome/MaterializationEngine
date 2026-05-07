@@ -262,6 +262,11 @@ def discover_specs():
                 if computed not in available_columns:
                     available_columns.append(computed)
 
+    # Collect geometry columns (position columns that get morton-encoded).
+    geometry_columns = sorted(
+        {s.source_geometry_column for s in resolved_specs if s.source_geometry_column}
+    )
+
     # Cache raw specs (before n_partitions resolution) so the cache stays
     # valid regardless of the caller's target_partition_size_mb.
     raw_specs = [asdict(s) for s in resolved_specs]
@@ -274,6 +279,7 @@ def discover_specs():
         "row_count": row_count,
         "bytes_per_row": bytes_per_row,
         "available_columns": available_columns,
+        "geometry_columns": geometry_columns,
         "specs": raw_specs,
     }
     redis_client.set(cache_key, json.dumps(cache_result), ex=600)
@@ -283,6 +289,7 @@ def discover_specs():
         "row_count": row_count,
         "bytes_per_row": bytes_per_row,
         "available_columns": available_columns,
+        "geometry_columns": geometry_columns,
         "specs": [asdict(s) for s in resolved_specs],
     }
 

@@ -425,6 +425,7 @@ class TestFlushBufferPartitionConsistency:
         """Two flushes with non-overlapping values should land in
         distinct partitions when using shared global breakpoints."""
         spec = DeltaLakeOutputSpec(
+            name="test_percentile",
             partition_by="val",
             partition_strategy="percentile_range",
             n_partitions=4,
@@ -448,6 +449,7 @@ class TestFlushBufferPartitionConsistency:
         """Two flushes with non-overlapping values should land in
         distinct partitions when using linspace-derived breakpoints on the spec."""
         spec = DeltaLakeOutputSpec(
+            name="test_uniform",
             partition_by="val",
             partition_strategy="uniform_range",
             n_partitions=4,
@@ -714,6 +716,7 @@ class TestExportTableToDeltalake:
         mock_stream.return_value = iter([batch1, batch2])
 
         spec = DeltaLakeOutputSpec(
+            name="test_root_id",
             partition_by="root_id",
             partition_strategy="percentile_range",
             n_partitions=2,
@@ -752,6 +755,7 @@ class TestExportTableToDeltalake:
 
         # Explicit spec: hash partition with 2 buckets (not percentile_range)
         spec = DeltaLakeOutputSpec(
+            name="test_hash",
             partition_by="root_id",
             partition_strategy="hash",
             n_partitions=2,
@@ -781,6 +785,7 @@ class TestExportTableToDeltalake:
         mock_stream.return_value = iter([batch1, batch2])
 
         spec = DeltaLakeOutputSpec(
+            name="test_val_percentile",
             partition_by="val",
             partition_strategy="percentile_range",
             n_partitions=2,
@@ -874,6 +879,7 @@ class TestOptimizeDeltalake:
         mock_stream.return_value = iter([batch])
 
         spec = DeltaLakeOutputSpec(
+            name="test_zorder_bloom",
             partition_by="val",
             partition_strategy="hash",
             n_partitions=2,
@@ -888,8 +894,8 @@ class TestOptimizeDeltalake:
             output_uri_base="/tmp/test",
         )
 
-        # Should have opened the DeltaTable at the correct URI
-        MockDeltaTable.assert_called_once_with("/tmp/test/val")
+        # Should have opened the DeltaTable at the correct URI (uses spec.name)
+        MockDeltaTable.assert_called_once_with("/tmp/test/test_zorder_bloom")
         # Should have called z_order (not compact) since zorder_columns is set
         mock_dt.optimize.z_order.assert_called_once()
         mock_dt.vacuum.assert_called_once()
@@ -1209,11 +1215,11 @@ class TestDeltaLakeOutputSpecTargetFileSize:
     """Test the target_file_size_mb field on DeltaLakeOutputSpec."""
 
     def test_default_is_none(self):
-        spec = DeltaLakeOutputSpec()
+        spec = DeltaLakeOutputSpec(name="test_default")
         assert spec.target_file_size_mb is None
 
     def test_can_set_value(self):
-        spec = DeltaLakeOutputSpec(target_file_size_mb=128)
+        spec = DeltaLakeOutputSpec(name="test_size", target_file_size_mb=128)
         assert spec.target_file_size_mb == 128
 
     def test_resolve_n_partitions_with_per_spec_override(self):

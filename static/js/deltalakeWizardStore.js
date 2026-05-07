@@ -18,6 +18,7 @@ document.addEventListener("alpine:init", () => {
       rowCount: null,
       bytesPerRow: null,
       availableColumns: [],
+      geometryColumns: [],
       bloomFilterFpp: 0.001,
       specs: [],
       // Export key for monitoring
@@ -66,6 +67,7 @@ document.addEventListener("alpine:init", () => {
       this.state.rowCount = null;
       this.state.bytesPerRow = null;
       this.state.availableColumns = [];
+      this.state.geometryColumns = [];
       this.state.bloomFilterFpp = 0.001;
       this.state.specs = [];
       this.state.exports = [];

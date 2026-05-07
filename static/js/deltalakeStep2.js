@@ -4,8 +4,63 @@ document.addEventListener("alpine:init", () => {
     rowCount: Alpine.store("dlWizard").state.rowCount,
     bytesPerRow: Alpine.store("dlWizard").state.bytesPerRow,
     availableColumns: Alpine.store("dlWizard").state.availableColumns || [],
+    geometryColumns: Alpine.store("dlWizard").state.geometryColumns || [],
     recalculating: false,
     error: null,
+
+    // --- Partition column helpers ---
+
+    /**
+     * Columns shown in the partition dropdown.
+     * Hides internal computed columns (_morton, _x, _y, _z suffixes of geometry cols).
+     * Shows the original geometry column names (selectable for spatial partitioning).
+     * For specs that already have a morton partition_by, shows the source geometry col.
+     */
+    partitionColumns(spec) {
+      const hidden = new Set();
+      for (const geo of this.geometryColumns) {
+        hidden.add(`${geo}_morton`);
+        hidden.add(`${geo}_x`);
+        hidden.add(`${geo}_y`);
+        hidden.add(`${geo}_z`);
+      }
+      return this.availableColumns.filter((c) => !hidden.has(c));
+    },
+
+    /**
+     * Display value for the partition dropdown.
+     * For spatial specs, shows the geometry column name rather than the internal _morton name.
+     */
+    partitionDisplayValue(spec) {
+      if (spec.source_geometry_column) {
+        return spec.source_geometry_column;
+      }
+      return spec.partition_by;
+    },
+
+    /**
+     * Handle partition column change. Auto-derives morton config for geometry columns.
+     */
+    onPartitionChange(specIdx, selectedCol) {
+      const spec = this.specs[specIdx];
+      if (this.geometryColumns.includes(selectedCol)) {
+        // Spatial column selected → auto-derive morton partitioning
+        spec.source_geometry_column = selectedCol;
+        spec.partition_by = `${selectedCol}_morton`;
+        spec.partition_strategy = "uniform_range";
+        // Auto-add the morton column to z-order if not already present
+        if (!spec.zorder_columns) spec.zorder_columns = [];
+        const mortonCol = `${selectedCol}_morton`;
+        if (!spec.zorder_columns.includes(mortonCol)) {
+          spec.zorder_columns = [mortonCol, ...spec.zorder_columns.filter(c => c !== mortonCol)];
+        }
+      } else {
+        // Non-spatial column (or flat)
+        spec.source_geometry_column = null;
+        spec.partition_by = selectedCol || null;
+      }
+      this.syncStore();
+    },
 
     // --- Z-order column management ---
     addZorderColumn(specIdx, col) {

@@ -50,19 +50,27 @@
                             <div class="col-md-3">
                                 <label class="form-label small fw-semibold text-start d-block">Partition By</label>
                                 <select class="form-select form-select-sm"
-                                        x-model="spec.partition_by"
-                                        @change="syncStore()">
-                                    <option :value="null">flat (no partition)</option>
-                                    <template x-for="col in availableColumns.filter(c => !c.endsWith('_morton') || spec.partition_by === c)" :key="col">
-                                        <option :value="col" x-text="col" :selected="spec.partition_by === col"></option>
+                                        :value="spec.source_geometry_column || spec.partition_by || ''"
+                                        @change="onPartitionChange(idx, $event.target.value)">
+                                    <option value="">flat (no partition)</option>
+                                    <template x-for="col in partitionColumns(spec)" :key="col">
+                                        <option :value="col" x-text="col"></option>
                                     </template>
                                 </select>
+                                <template x-if="spec.source_geometry_column">
+                                    <small class="form-text text-info">
+                                        <i class="fas fa-info-circle me-1"></i>
+                                        Spatial column — will be morton-encoded →
+                                        <code x-text="spec.partition_by"></code>
+                                        (uniform_range)
+                                    </small>
+                                </template>
                             </div>
                             <div class="col-md-3">
                                 <label class="form-label small fw-semibold text-start d-block">Strategy</label>
                                 <select class="form-select form-select-sm"
                                         x-model="spec.partition_strategy"
-                                        :disabled="!spec.partition_by"
+                                        :disabled="!spec.partition_by || !!spec.source_geometry_column"
                                         @change="syncStore()">
                                     <option value="percentile_range">percentile_range</option>
                                     <option value="uniform_range">uniform_range</option>

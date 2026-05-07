@@ -156,6 +156,7 @@ document.addEventListener("alpine:init", () => {
         store.state.rowCount = data.row_count;
         store.state.bytesPerRow = data.bytes_per_row;
         store.state.availableColumns = data.available_columns || [];
+        store.state.geometryColumns = data.geometry_columns || [];
         store.state.specs = data.specs;
         store.state.stepStatus[1].completed = true;
         store.saveState();
