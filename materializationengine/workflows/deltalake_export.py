@@ -1454,213 +1454,205 @@ def write_deltalake_table(
             datastack, version, table_name, job_id=job_id, **kwargs
         )
 
-    # Validate table_name early to prevent SQL injection through all downstream
-    # f-string identifier interpolations in the export pipeline.
-    _validate_identifier(table_name)
-    pcg_table_name = datastack_info["segmentation_source"].split("/")[-1]
-    analysis_database = f"{datastack}__mat{version}"
-
-    sql_uri_config = get_config_param("SQLALCHEMY_DATABASE_URI")
-    connection_string = _build_frozen_db_connection_string(
-        sql_uri_config, datastack, version
-    )
-
-    output_bucket = get_config_param("DELTALAKE_OUTPUT_BUCKET")
-    if not output_bucket:
-        raise ValueError("DELTALAKE_OUTPUT_BUCKET not set in app config")
-    output_uri_base = f"{output_bucket}/{datastack}/v{version}/{table_name}"
-
-    celery_logger.info("Outputting Delta Lakes to: %s", output_uri_base)
-
-    flush_threshold = get_config_param(
-        "DELTALAKE_FLUSH_THRESHOLD_BYTES", 2 * 1024 * 1024 * 1024
-    )
-    target_partition_size_mb = get_config_param(
-        "DELTALAKE_TARGET_PARTITION_SIZE_MB", 256
-    )
-    optimize_max_concurrent_tasks = get_config_param(
-        "DELTALAKE_OPTIMIZE_MAX_CONCURRENT_TASKS", 1
-    )
-    optimize_target_size = get_config_param(
-        "DELTALAKE_OPTIMIZE_TARGET_SIZE_BYTES", None
-    )
-    optimize_max_spill_size = get_config_param(
-        "DELTALAKE_OPTIMIZE_MAX_SPILL_SIZE_BYTES", None
-    )
-
-    # --- Resolve table structure from frozen DB metadata ---
-    engine = db_manager.get_engine(analysis_database)
-
-    # Determine if the table was merged and look up row count.
-    with db_manager.session_scope(analysis_database) as session:
-        metadata_row = (
-            session.query(MaterializedMetadata)
-            .filter(MaterializedMetadata.table_name == table_name)
-            .first()
-        )
-        if metadata_row is None:
-            raise ValueError(
-                f"No MaterializedMetadata entry for table {table_name!r} "
-                f"in {analysis_database}"
-            )
-        row_count = metadata_row.row_count
-
-    # Detect segmentation table presence.
-    seg_table_name = build_segmentation_table_name(table_name, pcg_table_name)
-    has_seg_table = engine.dialect.has_table(engine, seg_table_name)
-    # If merged (no separate seg table), segmentation_table stays None.
-    segmentation_table_name = seg_table_name if has_seg_table else None
-
-    celery_logger.info(
-        "Exporting table %s (v%d) with %d rows; segmentation table: %s",
-        table_name,
-        version,
-        row_count,
-        segmentation_table_name or "none",
-    )
-
-    source = TableSource(
-        annotation_table=table_name,
-        segmentation_table=segmentation_table_name,
-    )
-
-    # --- Resolve output specs ---
-    if output_specs is not None:
-        _log(f"Resolving {len(output_specs)} user-provided output specs...")
-        _set_status(status="exporting", total_rows=row_count, phase="resolving_specs")
-        resolved_specs = [DeltaLakeOutputSpec(**s) for s in output_specs]
-    else:
-        _log("Discovering output specs...")
-        _set_status(status="exporting", total_rows=row_count, phase="discovering_specs")
-        resolved_specs = discover_default_output_specs(source, engine)
-
-    celery_logger.info(
-        "Resolved %d output specs for table %s (v%d)",
-        len(resolved_specs),
-        table_name,
-        version,
-    )
-    for spec in resolved_specs:
-        celery_logger.info(
-            "  - partition_by: %s, strategy: %s",
-            spec.partition_by,
-            spec.partition_strategy,
-        )
-
-    if not resolved_specs:
-        celery_logger.warning(
-            "No output specs for table %s — skipping Delta Lake export", table_name
-        )
-        return
-
-    # --- Existing Delta Lake detection ---
-    for spec in resolved_specs:
-        lake_name = spec.partition_by or "flat"
-        uri = f"{output_uri_base}/{lake_name}"
-        try:
-            from deltalake import DeltaTable
-
-            dt = DeltaTable(uri)
-            # count() reads row count from Delta log add-action metadata
-            # (no file scan).  It may be approximate when per-file stats are
-            # absent, but is fast and sufficient for partial-export detection.
-            existing_rows = dt.count()
-        except Exception:
-            existing_rows = None
-
-        if existing_rows is not None and existing_rows != row_count:
-            raise RuntimeError(
-                f"Delta Lake for table {table_name!r} already exists at "
-                f"{uri} but has {existing_rows} rows (expected {row_count}). "
-                f"This may be the result of a partial export. "
-                f"Delete the existing Delta Lake before re-exporting."
-            )
-
-        if existing_rows is not None:
-            raise RuntimeError(
-                f"Delta Lake for table {table_name!r} already exists at "
-                f"{uri} with {existing_rows} rows (matches expected count). "
-                f"Delete the existing Delta Lake before re-exporting."
-            )
-
-    # --- Estimate bytes per row and resolve partition counts / bounds ---
-    _log(
-        f"Resolved {len(resolved_specs)} output specs. Computing partition boundaries..."
-    )
-    _set_status(status="exporting", total_rows=row_count, phase="computing_boundaries")
-    bytes_per_row = estimate_bytes_per_row(connection_string, source)
-
-    for spec in resolved_specs:
-        if spec.n_partitions == "auto":
-            effective_target = spec.target_file_size_mb or target_partition_size_mb
-            spec.n_partitions = resolve_n_partitions(
-                "auto",
-                row_count,
-                target_file_size_mb=effective_target,
-                bytes_per_row=bytes_per_row,
-            )
-
-    resolve_all_bounds(resolved_specs, connection_string, table_name)
-
-    # --- Stream and write ---
-    celery_logger.info(
-        "Exporting table %s (v%d) to Delta Lake: %d specs, %d rows",
-        table_name,
-        version,
-        len(resolved_specs),
-        row_count,
-    )
-
-    _last_log_time = {"t": 0.0}
-    _LOG_INTERVAL_SECONDS = 30
-
-    def _log_progress(rows_so_far: int, total: int | None) -> None:
-        now = time.monotonic()
-        if now - _last_log_time["t"] < _LOG_INTERVAL_SECONDS:
-            return
-        _last_log_time["t"] = now
-        if total:
-            pct = rows_so_far / total * 100
-            celery_logger.info(
-                "Delta Lake export progress for %s (v%d): %d / %d rows (%.1f%%)",
-                table_name,
-                version,
-                rows_so_far,
-                total,
-                pct,
-            )
-        else:
-            celery_logger.info(
-                "Delta Lake export progress for %s (v%d): %d rows",
-                table_name,
-                version,
-                rows_so_far,
-            )
-
-    redis_callback = make_redis_progress_callback(
-        datastack, version, table_name, job_id=job_id
-    )
-
-    def _progress(rows_so_far: int, total: int | None) -> None:
-        _log_progress(rows_so_far, total)
-        redis_callback(rows_so_far, total)
-
-    _log(f"Streaming {row_count:,} rows to Delta Lake...")
-    _set_status(status="exporting", total_rows=row_count, phase="streaming")
-
-    def _optimize_callback(spec_name: str, action: str) -> None:
-        _set_status(
-            status="exporting",
-            total_rows=row_count,
-            rows_processed=row_count,
-            phase="optimizing",
-        )
-        if action == "vacuum":
-            _log(f"Vacuuming Delta Lake '{spec_name}'...")
-        else:
-            _log(f"Optimizing Delta Lake '{spec_name}' ({action})...")
+    def _phase(phase: str, message: str, **status_kwargs) -> None:
+        """Log to celery + Redis log list + Redis status in one call."""
+        celery_logger.info("%s (v%d): %s", table_name, version, message)
+        _log(message)
+        _set_status(status="exporting", phase=phase, **status_kwargs)
 
     try:
+        # Validate table_name early to prevent SQL injection through all downstream
+        # f-string identifier interpolations in the export pipeline.
+        _validate_identifier(table_name)
+        pcg_table_name = datastack_info["segmentation_source"].split("/")[-1]
+        analysis_database = f"{datastack}__mat{version}"
+
+        sql_uri_config = get_config_param("SQLALCHEMY_DATABASE_URI")
+        connection_string = _build_frozen_db_connection_string(
+            sql_uri_config, datastack, version
+        )
+
+        output_bucket = get_config_param("DELTALAKE_OUTPUT_BUCKET")
+        if not output_bucket:
+            raise ValueError("DELTALAKE_OUTPUT_BUCKET not set in app config")
+        output_uri_base = f"{output_bucket}/{datastack}/v{version}/{table_name}"
+
+        celery_logger.info("Outputting Delta Lakes to: %s", output_uri_base)
+
+        flush_threshold = get_config_param(
+            "DELTALAKE_FLUSH_THRESHOLD_BYTES", 2 * 1024 * 1024 * 1024
+        )
+        target_partition_size_mb = get_config_param(
+            "DELTALAKE_TARGET_PARTITION_SIZE_MB", 256
+        )
+        optimize_max_concurrent_tasks = get_config_param(
+            "DELTALAKE_OPTIMIZE_MAX_CONCURRENT_TASKS", 1
+        )
+        optimize_target_size = get_config_param(
+            "DELTALAKE_OPTIMIZE_TARGET_SIZE_BYTES", None
+        )
+        optimize_max_spill_size = get_config_param(
+            "DELTALAKE_OPTIMIZE_MAX_SPILL_SIZE_BYTES", None
+        )
+
+        # --- Resolve table structure from frozen DB metadata ---
+        engine = db_manager.get_engine(analysis_database)
+
+        # Determine if the table was merged and look up row count.
+        with db_manager.session_scope(analysis_database) as session:
+            metadata_row = (
+                session.query(MaterializedMetadata)
+                .filter(MaterializedMetadata.table_name == table_name)
+                .first()
+            )
+            if metadata_row is None:
+                raise ValueError(
+                    f"No MaterializedMetadata entry for table {table_name!r} "
+                    f"in {analysis_database}"
+                )
+            row_count = metadata_row.row_count
+
+        # Detect segmentation table presence.
+        seg_table_name = build_segmentation_table_name(table_name, pcg_table_name)
+        has_seg_table = engine.dialect.has_table(engine, seg_table_name)
+        segmentation_table_name = seg_table_name if has_seg_table else None
+
+        celery_logger.info(
+            "Table %s (v%d): %d rows, segmentation=%s",
+            table_name,
+            version,
+            row_count,
+            segmentation_table_name or "none",
+        )
+
+        source = TableSource(
+            annotation_table=table_name,
+            segmentation_table=segmentation_table_name,
+        )
+
+        # --- Resolve output specs ---
+        if output_specs is not None:
+            _phase(
+                "resolving_specs",
+                f"Resolving {len(output_specs)} user-provided output specs...",
+                total_rows=row_count,
+            )
+            resolved_specs = [DeltaLakeOutputSpec(**s) for s in output_specs]
+        else:
+            _phase(
+                "discovering_specs",
+                "Discovering output specs...",
+                total_rows=row_count,
+            )
+            resolved_specs = discover_default_output_specs(source, engine)
+
+        for spec in resolved_specs:
+            celery_logger.info(
+                "  - partition_by: %s, strategy: %s",
+                spec.partition_by,
+                spec.partition_strategy,
+            )
+
+        if not resolved_specs:
+            celery_logger.warning(
+                "No output specs for table %s — skipping Delta Lake export",
+                table_name,
+            )
+            return
+
+        # --- Existing Delta Lake detection ---
+        for spec in resolved_specs:
+            lake_name = spec.partition_by or "flat"
+            uri = f"{output_uri_base}/{lake_name}"
+            try:
+                from deltalake import DeltaTable
+
+                dt = DeltaTable(uri)
+                existing_rows = dt.count()
+            except Exception:
+                existing_rows = None
+
+            if existing_rows is not None and existing_rows != row_count:
+                raise RuntimeError(
+                    f"Delta Lake for table {table_name!r} already exists at "
+                    f"{uri} but has {existing_rows} rows (expected {row_count}). "
+                    f"This may be the result of a partial export. "
+                    f"Delete the existing Delta Lake before re-exporting."
+                )
+
+            if existing_rows is not None:
+                raise RuntimeError(
+                    f"Delta Lake for table {table_name!r} already exists at "
+                    f"{uri} with {existing_rows} rows (matches expected count). "
+                    f"Delete the existing Delta Lake before re-exporting."
+                )
+
+        # --- Estimate bytes per row and resolve partition counts / bounds ---
+        _phase(
+            "computing_boundaries",
+            f"Resolved {len(resolved_specs)} output specs. "
+            "Computing partition boundaries...",
+            total_rows=row_count,
+        )
+        bytes_per_row = estimate_bytes_per_row(connection_string, source)
+
+        for spec in resolved_specs:
+            if spec.n_partitions == "auto":
+                effective_target = spec.target_file_size_mb or target_partition_size_mb
+                spec.n_partitions = resolve_n_partitions(
+                    "auto",
+                    row_count,
+                    target_file_size_mb=effective_target,
+                    bytes_per_row=bytes_per_row,
+                )
+
+        resolve_all_bounds(resolved_specs, connection_string, table_name)
+
+        # --- Stream and write ---
+        _last_log_time = {"t": 0.0}
+
+        def _log_progress(rows_so_far: int, total: int | None) -> None:
+            now = time.monotonic()
+            if now - _last_log_time["t"] < 30:
+                return
+            _last_log_time["t"] = now
+            pct = f" ({rows_so_far / total * 100:.1f}%)" if total else ""
+            celery_logger.info(
+                "%s (v%d): %d rows exported%s",
+                table_name,
+                version,
+                rows_so_far,
+                pct,
+            )
+
+        redis_callback = make_redis_progress_callback(
+            datastack, version, table_name, job_id=job_id
+        )
+
+        def _progress(rows_so_far: int, total: int | None) -> None:
+            _log_progress(rows_so_far, total)
+            redis_callback(rows_so_far, total)
+
+        _phase(
+            "streaming",
+            f"Streaming {row_count:,} rows to Delta Lake...",
+            total_rows=row_count,
+        )
+
+        def _optimize_callback(spec_name: str, action: str) -> None:
+            msg = (
+                f"Vacuuming Delta Lake '{spec_name}'..."
+                if action == "vacuum"
+                else f"Optimizing Delta Lake '{spec_name}' ({action})..."
+            )
+            _log(msg)
+            _set_status(
+                status="exporting",
+                total_rows=row_count,
+                rows_processed=row_count,
+                phase="optimizing",
+            )
+
         export_table_to_deltalake(
             connection_string=connection_string,
             source=source,
@@ -1676,7 +1668,7 @@ def write_deltalake_table(
         )
     except Exception as e:
         _log(f"Export failed: {e}")
-        _set_status(status="failed", total_rows=row_count, phase="failed", error=str(e))
+        _set_status(status="failed", total_rows=None, phase="failed", error=str(e))
         raise
 
     _log("Export complete.")
@@ -1686,7 +1678,4 @@ def write_deltalake_table(
         rows_processed=row_count,
         phase="complete",
     )
-
-    celery_logger.info(
-        "Delta Lake export complete for table %s (v%d)", table_name, version
-    )
+    celery_logger.info("%s (v%d): export complete", table_name, version)
