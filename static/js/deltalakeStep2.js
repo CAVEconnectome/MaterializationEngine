@@ -58,6 +58,7 @@ document.addEventListener("alpine:init", () => {
     addSpec() {
       this.specs.push({
         _editable: true,
+        name: "",
         partition_by: null,
         partition_strategy: "percentile_range",
         n_partitions: null,
@@ -71,11 +72,7 @@ document.addEventListener("alpine:init", () => {
     },
 
     unusedPartitionColumns(currentIdx) {
-      const used = this.specs
-        .filter((_, i) => i !== currentIdx)
-        .map((s) => s.partition_by)
-        .filter(Boolean);
-      return this.availableColumns.filter((c) => !used.includes(c));
+      return this.availableColumns;
     },
 
     removeSpec(idx) {

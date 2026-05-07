@@ -67,6 +67,7 @@ class TableSource:
 
 @dataclass
 class DeltaLakeOutputSpec:
+    name: str | None = None
     partition_by: str | None = None
     partition_strategy: Literal["percentile_range", "uniform_range", "hash"] | None = (
         None
@@ -197,6 +198,7 @@ def discover_default_output_specs(
         pk_col = pk_columns[0]
         specs.append(
             DeltaLakeOutputSpec(
+                name=pk_col,
                 partition_by=pk_col,
                 partition_strategy="percentile_range",
                 n_partitions="auto",
@@ -235,6 +237,7 @@ def discover_default_output_specs(
         else:
             specs.append(
                 DeltaLakeOutputSpec(
+                    name=col,
                     partition_by=col,
                     partition_strategy="percentile_range",
                     n_partitions="auto",
@@ -254,6 +257,7 @@ def discover_default_output_specs(
         # exist in the db
         specs.append(
             DeltaLakeOutputSpec(
+                name=f"{col}_morton",
                 partition_by=f"{col}_morton",
                 partition_strategy="uniform_range",
                 n_partitions="auto",

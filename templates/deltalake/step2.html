@@ -27,7 +27,7 @@
             <div class="col-12">
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
-                        <strong x-text="`Spec: ${spec.partition_by || 'flat'}`"></strong>
+                        <strong x-text="`Spec: ${spec.name || '(unnamed)'}`"></strong>
                         <button class="btn btn-sm btn-outline-danger"
                                 :disabled="specs.length <= 1"
                                 @click="removeSpec(idx)">
@@ -35,28 +35,34 @@
                         </button>
                     </div>
                     <div class="card-body">
+                        <!-- Row 0: Name -->
+                        <div class="row g-2 pb-3 mb-3" style="border-bottom: 1px solid #dee2e6">
+                            <div class="col-md-4">
+                                <label class="form-label small fw-semibold text-start d-block">Name <span class="fw-normal text-muted">(output folder name)</span></label>
+                                <input type="text" class="form-control form-control-sm"
+                                       x-model="spec.name"
+                                       placeholder="Required — output folder name"
+                                       @change="syncStore()">
+                            </div>
+                        </div>
                         <!-- Row 1: Partition params -->
                         <div class="row g-2 pb-3 mb-3" style="border-bottom: 1px solid #dee2e6">
                             <div class="col-md-3">
                                 <label class="form-label small fw-semibold text-start d-block">Partition By</label>
-                                <template x-if="spec._editable">
-                                    <select class="form-select form-select-sm"
-                                            x-model="spec.partition_by"
-                                            @change="syncStore()">
-                                        <option :value="null">flat (no partition)</option>
-                                        <template x-for="col in unusedPartitionColumns(idx)" :key="col">
-                                            <option :value="col" x-text="col"></option>
-                                        </template>
-                                    </select>
-                                </template>
-                                <template x-if="!spec._editable">
-                                    <input class="form-control form-control-sm" :value="spec.partition_by || 'flat'" disabled>
-                                </template>
+                                <select class="form-select form-select-sm"
+                                        x-model="spec.partition_by"
+                                        @change="syncStore()">
+                                    <option :value="null">flat (no partition)</option>
+                                    <template x-for="col in availableColumns" :key="col">
+                                        <option :value="col" x-text="col" :selected="spec.partition_by === col"></option>
+                                    </template>
+                                </select>
                             </div>
                             <div class="col-md-3">
                                 <label class="form-label small fw-semibold text-start d-block">Strategy</label>
                                 <select class="form-select form-select-sm"
                                         x-model="spec.partition_strategy"
+                                        :disabled="!spec.partition_by"
                                         @change="syncStore()">
                                     <option value="percentile_range">percentile_range</option>
                                     <option value="uniform_range">uniform_range</option>
@@ -68,6 +74,7 @@
                                 <input type="number" class="form-control form-control-sm"
                                        x-model.number="spec.n_partitions" min="1"
                                        placeholder="auto"
+                                       :disabled="!spec.partition_by"
                                        @change="syncStore()">
                             </div>
                             <div class="col-md-3">
