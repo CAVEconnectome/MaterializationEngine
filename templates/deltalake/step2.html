@@ -50,11 +50,11 @@
                             <div class="col-md-3">
                                 <label class="form-label small fw-semibold text-start d-block">Partition By</label>
                                 <select class="form-select form-select-sm"
-                                        :value="spec.source_geometry_column || spec.partition_by || ''"
                                         @change="onPartitionChange(idx, $event.target.value)">
-                                    <option value="">flat (no partition)</option>
+                                    <option value="" :selected="!spec.partition_by">flat (no partition)</option>
                                     <template x-for="col in partitionColumns(spec)" :key="col">
-                                        <option :value="col" x-text="col"></option>
+                                        <option :value="col" x-text="col"
+                                                :selected="col === (spec.source_geometry_column || spec.partition_by)"></option>
                                     </template>
                                 </select>
                                 <template x-if="spec.source_geometry_column">
