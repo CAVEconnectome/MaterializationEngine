@@ -1685,7 +1685,9 @@ def write_deltalake_table(
     except Exception as e:
         try:
             _log(f"Export failed: {e}")
-            _set_status(status="failed", total_rows=row_count, phase="failed", error=str(e))
+            _set_status(
+                status="failed", total_rows=row_count, phase="failed", error=str(e)
+            )
         except Exception:
             celery_logger.warning(
                 "%s (v%d): failed to update Redis status after export error",
