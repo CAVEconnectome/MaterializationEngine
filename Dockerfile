@@ -33,7 +33,7 @@ COPY uv.lock pyproject.toml ./
 
 ENV UV_PROJECT_ENVIRONMENT="/usr/local/"
 RUN --mount=type=cache,target=/root/.cache/uv \
-  UV_VENV_ARGS="--system-site-packages" uv sync --frozen --no-install-project --no-default-groups
+  UV_VENV_ARGS="--system-site-packages" uv sync --frozen --no-install-project --no-default-groups --group deploy
 
 # COPY . ./
 # RUN --mount=type=cache,target=/root/.cache/uv \

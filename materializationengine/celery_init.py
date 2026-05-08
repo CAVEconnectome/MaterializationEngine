@@ -1,6 +1,5 @@
 from celery import Celery
 
-
 celery = Celery(
     include=[
         "materializationengine.workflows.ingest_new_annotations",
@@ -12,6 +11,7 @@ celery = Celery(
         "materializationengine.workflows.periodic_database_removal",
         "materializationengine.workflows.periodic_materialization",
         "materializationengine.workflows.spatial_lookup",
+        "materializationengine.workflows.deltalake_export",
         "materializationengine.shared_tasks",
         "materializationengine.views",
         "materializationengine.monitor",
