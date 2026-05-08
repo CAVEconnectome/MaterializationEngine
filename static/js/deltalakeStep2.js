@@ -8,6 +8,23 @@ document.addEventListener("alpine:init", () => {
     recalculating: false,
     error: null,
 
+    init() {
+      // Ensure source_geometry_column is populated for specs whose
+      // partition_by matches a known geometry column's morton form.
+      // Guards against stale caches or serialization round-trips that
+      // may have dropped the field.
+      for (const spec of this.specs) {
+        if (!spec.source_geometry_column && spec.partition_by) {
+          for (const geo of this.geometryColumns) {
+            if (spec.partition_by === `${geo}_morton`) {
+              spec.source_geometry_column = geo;
+              break;
+            }
+          }
+        }
+      }
+    },
+
     // --- Shared column helpers ---
 
     /** Set of internal computed columns to hide from dropdowns. */
@@ -78,12 +95,6 @@ document.addEventListener("alpine:init", () => {
         spec.source_geometry_column = selectedCol;
         spec.partition_by = `${selectedCol}_morton`;
         spec.partition_strategy = "uniform_range";
-        // Auto-add the morton column to z-order if not already present
-        if (!spec.zorder_columns) spec.zorder_columns = [];
-        const mortonCol = `${selectedCol}_morton`;
-        if (!spec.zorder_columns.includes(mortonCol)) {
-          spec.zorder_columns = [mortonCol, ...spec.zorder_columns.filter(c => c !== mortonCol)];
-        }
       } else {
         // Non-spatial column (or flat)
         spec.source_geometry_column = null;
