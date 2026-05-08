@@ -1,0 +1,85 @@
+<div class="card-body" x-data="deltalakeStep3">
+    <h4 class="card-title mb-4">
+        <i class="fas fa-rocket me-2"></i>Confirm & Launch Export
+    </h4>
+
+    <!-- Summary -->
+    <table class="table table-bordered">
+        <tbody>
+            <tr>
+                <th>Datastack</th>
+                <td x-text="$store.dlWizard.state.datastack"></td>
+            </tr>
+            <tr>
+                <th>Version</th>
+                <td x-text="'v' + $store.dlWizard.state.version"></td>
+            </tr>
+            <tr>
+                <th>Table</th>
+                <td x-text="$store.dlWizard.state.tableName"></td>
+            </tr>
+            <tr>
+                <th>Row Count</th>
+                <td x-text="$store.dlWizard.state.rowCount?.toLocaleString()"></td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h5 class="mt-4 mb-3">Output Specs</h5>
+    <table class="table table-sm table-striped">
+        <thead>
+            <tr>
+                <th>Partition By</th>
+                <th>Strategy</th>
+                <th>N Partitions</th>
+                <th>File Size (MB)</th>
+                <th>Destination</th>
+            </tr>
+        </thead>
+        <tbody>
+            <template x-for="(spec, index) in $store.dlWizard.state.specs" :key="index">
+                <tr>
+                    <td x-text="spec.partition_by || 'flat'"></td>
+                    <td x-text="spec.partition_strategy"></td>
+                    <td x-text="spec.n_partitions"></td>
+                    <td x-text="spec.target_file_size_mb || $store.dlWizard.state.targetPartitionSizeMb"></td>
+                    <td class="text-muted small" x-text="outputUri(spec)"></td>
+                </tr>
+            </template>
+        </tbody>
+    </table>
+
+    <!-- Actions -->
+    <div class="mt-4 d-flex gap-3">
+        <button class="btn btn-outline-secondary" @click="$store.dlWizard.prev()">
+            <i class="fas fa-arrow-left me-2"></i>Back
+        </button>
+
+        <button class="btn btn-success btn-lg" @click="launchExport()" :disabled="launching || existingExports.length > 0">
+            <template x-if="!launching">
+                <span><i class="fas fa-play me-2"></i>Launch Export</span>
+            </template>
+            <template x-if="launching">
+                <span><i class="fas fa-spinner fa-spin me-2"></i>Launching...</span>
+            </template>
+        </button>
+    </div>
+
+    <!-- Existence check warning -->
+    <div x-show="existingExports.length > 0" class="alert alert-danger mt-3 mb-0">
+        <strong><i class="fas fa-exclamation-triangle me-1"></i>Cannot launch — existing exports found</strong>
+        <p class="mb-1 mt-2">Delta Lake data already exists at the following locations:</p>
+        <ul class="mb-1">
+            <template x-for="spec in existingExports" :key="spec.uri">
+                <li>
+                    <code x-text="spec.uri"></code>
+                    <span class="text-muted" x-text="`(${spec.row_count.toLocaleString()} rows)`"></span>
+                </li>
+            </template>
+        </ul>
+        <small class="text-muted">Delete the existing data or change spec names before re-exporting.</small>
+    </div>
+
+    <!-- Error display -->
+    <div x-show="error" class="alert alert-danger mt-3" x-text="error"></div>
+</div>

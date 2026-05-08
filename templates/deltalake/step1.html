@@ -1,0 +1,104 @@
+<div class="card-body" x-data="deltalakeStep1">
+    <h4 class="card-title mb-4">
+        <i class="fas fa-database me-2"></i>Select Table & Configuration
+    </h4>
+
+    <div class="row g-3">
+        <div class="col-md-4">
+            <label class="form-label fw-bold">Datastack</label>
+            <select class="form-select" x-model="datastack" @change="onDatastackChange()">
+                <option value="">Select a datastack...</option>
+                {% for ds in datastacks %}
+                <option value="{{ ds }}">{{ ds }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label fw-bold">Version</label>
+            <select class="form-select" x-model="version" @change="onVersionChange()" :disabled="!datastack || loadingVersions">
+                <option value="">Select a version...</option>
+                <template x-for="v in versions" :key="v">
+                    <option :value="v" x-text="`v${v}`"></option>
+                </template>
+            </select>
+            <div x-show="loadingVersions" class="form-text">
+                <i class="fas fa-spinner fa-spin me-1"></i> Loading versions...
+            </div>
+        </div>
+
+        <div class="col-md-4">
+            <label class="form-label fw-bold">Table</label>
+            <select class="form-select" x-model="tableName" @change="onTableChange()" :disabled="!version || loadingTables">
+                <option value="">Select a table...</option>
+                <template x-for="t in tables" :key="t.name">
+                    <option :value="t.name" x-text="`${t.name} (${t.type})`"></option>
+                </template>
+            </select>
+            <div x-show="loadingTables" class="form-text">
+                <i class="fas fa-spinner fa-spin me-1"></i> Loading tables...
+            </div>
+        </div>
+    </div>
+
+    <!-- Advanced options (collapsible) -->
+    <div class="mt-4">
+        <a class="text-decoration-none" data-bs-toggle="collapse" href="#advancedOptions" role="button" aria-expanded="false">
+            <i class="fas fa-cog me-1"></i> Advanced Options
+        </a>
+        <div class="collapse mt-2" id="advancedOptions">
+            <div class="row g-3">
+                <div class="col-md-4">
+                    <label class="form-label">Target File Size (MB)</label>
+                    <input type="number" class="form-control" x-model.number="targetPartitionSizeMb" min="1">
+                    <div class="form-text">Default from environment: {{ target_partition_size_mb }} MB</div>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">Bloom Filter FPP</label>
+                    <input type="number" class="form-control" x-model.number="bloomFilterFpp" step="0.0001" min="0.0001" max="1">
+                    <div class="form-text">False positive probability (default: {{ bloom_filter_fpp }})</div>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">Output Bucket</label>
+                    <input type="text" class="form-control" value="{{ output_bucket }}" disabled>
+                    <div class="form-text">Configured via environment (read-only)</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Existing export warning -->
+    <div x-show="existingExports.length > 0" class="alert alert-warning mt-4 mb-0">
+        <strong><i class="fas fa-exclamation-triangle me-1"></i>Export already exists</strong>
+        <p class="mb-1 mt-2">Delta Lake data already exists for this table/version at the following locations:</p>
+        <ul class="mb-1">
+            <template x-for="spec in existingExports" :key="spec.uri">
+                <li>
+                    <code x-text="spec.uri"></code>
+                    <span class="text-muted" x-text="`(${spec.row_count.toLocaleString()} rows)`"></span>
+                </li>
+            </template>
+        </ul>
+        <small class="text-muted">Re-exporting will fail unless the existing data is removed first.</small>
+    </div>
+    <div x-show="checkingExists" class="form-text mt-3">
+        <i class="fas fa-spinner fa-spin me-1"></i> Checking for existing exports...
+    </div>
+
+    <!-- Discover button -->
+    <div class="mt-4 d-flex align-items-center gap-3">
+        <button class="btn btn-primary"
+                :disabled="!datastack || !version || !tableName || discovering"
+                @click="discoverSpecs()">
+            <template x-if="!discovering">
+                <span><i class="fas fa-search me-2"></i>Discover Specs</span>
+            </template>
+            <template x-if="discovering">
+                <span><i class="fas fa-spinner fa-spin me-2"></i>Discovering...</span>
+            </template>
+        </button>
+    </div>
+
+    <!-- Error display -->
+    <div x-show="error" class="alert alert-danger mt-3" x-text="error"></div>
+</div>

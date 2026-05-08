@@ -117,3 +117,4 @@ credentials.tar.gz
 *.pkl
 # ignore sentinel conf outputs
 *running.conf
+preview_ui.py

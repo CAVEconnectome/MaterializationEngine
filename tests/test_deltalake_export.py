@@ -425,6 +425,7 @@ class TestFlushBufferPartitionConsistency:
         """Two flushes with non-overlapping values should land in
         distinct partitions when using shared global breakpoints."""
         spec = DeltaLakeOutputSpec(
+            name="test_percentile",
             partition_by="val",
             partition_strategy="percentile_range",
             n_partitions=4,
@@ -448,6 +449,7 @@ class TestFlushBufferPartitionConsistency:
         """Two flushes with non-overlapping values should land in
         distinct partitions when using linspace-derived breakpoints on the spec."""
         spec = DeltaLakeOutputSpec(
+            name="test_uniform",
             partition_by="val",
             partition_strategy="uniform_range",
             n_partitions=4,
@@ -714,6 +716,7 @@ class TestExportTableToDeltalake:
         mock_stream.return_value = iter([batch1, batch2])
 
         spec = DeltaLakeOutputSpec(
+            name="test_root_id",
             partition_by="root_id",
             partition_strategy="percentile_range",
             n_partitions=2,
@@ -752,6 +755,7 @@ class TestExportTableToDeltalake:
 
         # Explicit spec: hash partition with 2 buckets (not percentile_range)
         spec = DeltaLakeOutputSpec(
+            name="test_hash",
             partition_by="root_id",
             partition_strategy="hash",
             n_partitions=2,
@@ -781,6 +785,7 @@ class TestExportTableToDeltalake:
         mock_stream.return_value = iter([batch1, batch2])
 
         spec = DeltaLakeOutputSpec(
+            name="test_val_percentile",
             partition_by="val",
             partition_strategy="percentile_range",
             n_partitions=2,
@@ -874,6 +879,7 @@ class TestOptimizeDeltalake:
         mock_stream.return_value = iter([batch])
 
         spec = DeltaLakeOutputSpec(
+            name="test_zorder_bloom",
             partition_by="val",
             partition_strategy="hash",
             n_partitions=2,
@@ -888,8 +894,8 @@ class TestOptimizeDeltalake:
             output_uri_base="/tmp/test",
         )
 
-        # Should have opened the DeltaTable at the correct URI
-        MockDeltaTable.assert_called_once_with("/tmp/test/val")
+        # Should have opened the DeltaTable at the correct URI (uses spec.name)
+        MockDeltaTable.assert_called_once_with("/tmp/test/test_zorder_bloom")
         # Should have called z_order (not compact) since zorder_columns is set
         mock_dt.optimize.z_order.assert_called_once()
         mock_dt.vacuum.assert_called_once()
@@ -1198,3 +1204,137 @@ class TestDecodeGeometryColumnsMemory:
         assert result["pt_x"].to_list() == [10, None, 40]
         assert result["pt_y"].to_list() == [20, None, 50]
         assert result["pt_z"].to_list() == [30, None, 60]
+
+
+# ---------------------------------------------------------------------------
+# Tests for deltalake-export-ui features
+# ---------------------------------------------------------------------------
+
+
+class TestDeltaLakeOutputSpecTargetFileSize:
+    """Test the target_file_size_mb field on DeltaLakeOutputSpec."""
+
+    def test_default_is_none(self):
+        spec = DeltaLakeOutputSpec(name="test_default")
+        assert spec.target_file_size_mb is None
+
+    def test_can_set_value(self):
+        spec = DeltaLakeOutputSpec(name="test_size", target_file_size_mb=128)
+        assert spec.target_file_size_mb == 128
+
+    def test_resolve_n_partitions_with_per_spec_override(self):
+        """Per-spec target_file_size_mb should affect partition count."""
+        row_count = 1_000_000
+        bytes_per_row = 200
+        # 200 bytes * 1M rows = 200MB total → with 128MB target = 2 partitions
+        n = resolve_n_partitions(
+            "auto", row_count, target_file_size_mb=128, bytes_per_row=bytes_per_row
+        )
+        assert n == 2
+
+        # Same data with 256MB target = 1 partition
+        n = resolve_n_partitions(
+            "auto", row_count, target_file_size_mb=256, bytes_per_row=bytes_per_row
+        )
+        assert n == 1
+
+
+class TestRecalculateLogic:
+    """Test the pure-computation recalculate logic."""
+
+    def test_auto_resolves(self):
+        n = resolve_n_partitions(
+            "auto", 10_000_000, target_file_size_mb=256, bytes_per_row=200
+        )
+        # 10M * 200 = 2GB total, 2GB / 256MB = 8 partitions
+        assert n == 8
+
+    def test_explicit_passthrough(self):
+        n = resolve_n_partitions(
+            50, 10_000_000, target_file_size_mb=256, bytes_per_row=200
+        )
+        assert n == 50
+
+
+class TestProgressPayloadFields:
+    """Test that set_deltalake_export_status accepts phase and error."""
+
+    @patch("materializationengine.workflows.deltalake_export._get_redis_client")
+    def test_status_includes_phase_and_error(self, mock_redis_client):
+        import json
+
+        from materializationengine.workflows.deltalake_export import (
+            set_deltalake_export_status,
+        )
+
+        mock_client = MagicMock()
+        mock_redis_client.return_value = mock_client
+
+        set_deltalake_export_status(
+            "minnie65",
+            943,
+            "synapses",
+            "failed",
+            total_rows=1000,
+            rows_processed=500,
+            phase="streaming",
+            error="Connection reset",
+        )
+
+        # Verify Redis was called with the right payload
+        call_args = mock_client.set.call_args
+        key = call_args[0][0]
+        payload = json.loads(call_args[0][1])
+
+        assert key == "deltalake_export:minnie65:v943:synapses"
+        assert payload["status"] == "failed"
+        assert payload["phase"] == "streaming"
+        assert payload["error"] == "Connection reset"
+        assert payload["percent_complete"] == 50.0
+
+    @patch("materializationengine.workflows.deltalake_export._get_redis_client")
+    def test_append_deltalake_log(self, mock_redis_client):
+        from materializationengine.workflows.deltalake_export import (
+            append_deltalake_log,
+        )
+
+        mock_client = MagicMock()
+        mock_redis_client.return_value = mock_client
+
+        append_deltalake_log("minnie65", 943, "synapses", "Test message")
+
+        mock_client.rpush.assert_called_once()
+        key = mock_client.rpush.call_args[0][0]
+        assert key == "deltalake_log:minnie65:v943:synapses"
+
+        mock_client.ltrim.assert_called_once()
+        mock_client.expire.assert_called_once()
+
+    @patch("materializationengine.workflows.deltalake_export._get_redis_client")
+    def test_get_progress_includes_log_entries(self, mock_redis_client):
+        import json
+
+        from materializationengine.workflows.deltalake_export import (
+            get_deltalake_export_progress,
+        )
+
+        mock_client = MagicMock()
+        mock_redis_client.return_value = mock_client
+
+        progress_data = {
+            "status": "exporting",
+            "phase": "streaming",
+            "rows_processed": 100,
+            "total_rows": 1000,
+            "percent_complete": 10.0,
+            "error": None,
+            "last_updated": "2026-05-05T12:00:00Z",
+        }
+        mock_client.get.return_value = json.dumps(progress_data).encode()
+        mock_client.lrange.return_value = [b"12:00:01 Starting", b"12:00:02 Streaming"]
+
+        result = get_deltalake_export_progress("minnie65", 943, "synapses")
+
+        assert result["log_entries"] == ["12:00:01 Starting", "12:00:02 Streaming"]
+        assert result["phase"] == "streaming"
+        assert result["error"] is None
