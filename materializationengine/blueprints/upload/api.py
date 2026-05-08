@@ -169,7 +169,7 @@ def index():
 
 @upload_bp.route("/step<int:step_number>")
 @reset_auth
-@auth_requires_admin
+@auth_requires_permission("edit", table_arg="datastack_name")
 def wizard_step(step_number):
 
     total_steps = 4
