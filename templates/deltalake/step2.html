@@ -53,7 +53,7 @@
                                         @change="onPartitionChange(idx, $event.target.value)">
                                     <option value="" :selected="!spec.partition_by">flat (no partition)</option>
                                     <template x-for="col in partitionColumns(spec)" :key="col">
-                                        <option :value="col" x-text="col"
+                                        <option :value="col" x-text="columnDisplayName(col)"
                                                 :selected="col === (spec.source_geometry_column || spec.partition_by)"></option>
                                     </template>
                                 </select>
@@ -105,7 +105,7 @@
                                                 @click="moveZorderColumn(idx, colIdx, -1)">
                                             <i class="fas fa-chevron-left" style="font-size: 0.6rem"></i>
                                         </button>
-                                        <span x-text="col"></span>
+                                        <span x-text="zorderBadgeLabel(col)"></span>
                                         <button type="button" class="btn btn-link btn-sm text-white p-0"
                                                 :disabled="colIdx === spec.zorder_columns.length - 1"
                                                 @click="moveZorderColumn(idx, colIdx, 1)">
@@ -119,10 +119,16 @@
                             <select class="form-select form-select-sm" style="max-width: 300px"
                                     @change="addZorderColumn(idx, $event.target.value); $event.target.value = ''">
                                 <option value="">+ Add column...</option>
-                                <template x-for="col in availableColumns.filter(c => !(spec.zorder_columns || []).includes(c))" :key="col">
-                                    <option :value="col" x-text="col"></option>
+                                <template x-for="col in zorderSelectableColumns(spec)" :key="col">
+                                    <option :value="col" x-text="columnDisplayName(col)"></option>
                                 </template>
                             </select>
+                            <template x-if="(spec.zorder_columns || []).some(c => isMortonZorderCol(c))">
+                                <small class="form-text text-info">
+                                    <i class="fas fa-info-circle me-1"></i>
+                                    Spatial columns (marked *) are morton-encoded for efficient spatial ordering.
+                                </small>
+                            </template>
                         </div>
                         <!-- Row 3: Bloom filter columns + FPP -->
                         <div class="d-flex gap-4 align-items-start">

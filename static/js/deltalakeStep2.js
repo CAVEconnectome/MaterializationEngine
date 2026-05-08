@@ -8,15 +8,10 @@ document.addEventListener("alpine:init", () => {
     recalculating: false,
     error: null,
 
-    // --- Partition column helpers ---
+    // --- Shared column helpers ---
 
-    /**
-     * Columns shown in the partition dropdown.
-     * Hides internal computed columns (_morton, _x, _y, _z suffixes of geometry cols).
-     * Shows the original geometry column names (selectable for spatial partitioning).
-     * For specs that already have a morton partition_by, shows the source geometry col.
-     */
-    partitionColumns(spec) {
+    /** Set of internal computed columns to hide from dropdowns. */
+    _hiddenGeoColumns() {
       const hidden = new Set();
       for (const geo of this.geometryColumns) {
         hidden.add(`${geo}_morton`);
@@ -24,6 +19,41 @@ document.addEventListener("alpine:init", () => {
         hidden.add(`${geo}_y`);
         hidden.add(`${geo}_z`);
       }
+      return hidden;
+    },
+
+    /** Display name for a column in dropdowns. Appends * to spatial columns. */
+    columnDisplayName(col) {
+      if (this.geometryColumns.includes(col)) {
+        return `${col} *`;
+      }
+      return col;
+    },
+
+    /** Display label for z-order badges. Maps _morton columns to friendly name with *. */
+    zorderBadgeLabel(col) {
+      for (const geo of this.geometryColumns) {
+        if (col === `${geo}_morton`) {
+          return `${geo} *`;
+        }
+      }
+      return col;
+    },
+
+    /** Check if a z-order column is a morton-encoded spatial column. */
+    isMortonZorderCol(col) {
+      return this.geometryColumns.some(geo => col === `${geo}_morton`);
+    },
+
+    // --- Partition column helpers ---
+
+    /**
+     * Columns shown in the partition dropdown.
+     * Hides internal computed columns (_morton, _x, _y, _z suffixes of geometry cols).
+     * Shows the original geometry column names (selectable for spatial partitioning).
+     */
+    partitionColumns(spec) {
+      const hidden = this._hiddenGeoColumns();
       return this.availableColumns.filter((c) => !hidden.has(c));
     },
 
@@ -63,12 +93,32 @@ document.addEventListener("alpine:init", () => {
     },
 
     // --- Z-order column management ---
+
+    /**
+     * Columns shown in the z-order dropdown.
+     * Hides internal computed columns and already-selected columns.
+     * If a geometry column's _morton version is already selected, hides the original too.
+     */
+    zorderSelectableColumns(spec) {
+      const hidden = this._hiddenGeoColumns();
+      const selected = new Set(spec.zorder_columns || []);
+      const selectedGeos = new Set();
+      for (const geo of this.geometryColumns) {
+        if (selected.has(`${geo}_morton`)) {
+          selectedGeos.add(geo);
+        }
+      }
+      return this.availableColumns.filter(c => !hidden.has(c) && !selected.has(c) && !selectedGeos.has(c));
+    },
+
     addZorderColumn(specIdx, col) {
       if (!col) return;
       const spec = this.specs[specIdx];
       if (!spec.zorder_columns) spec.zorder_columns = [];
-      if (!spec.zorder_columns.includes(col)) {
-        spec.zorder_columns.push(col);
+      // Geometry columns are stored as their morton-encoded equivalent
+      const storeCol = this.geometryColumns.includes(col) ? `${col}_morton` : col;
+      if (!spec.zorder_columns.includes(storeCol)) {
+        spec.zorder_columns.push(storeCol);
         this.syncStore();
       }
     },
