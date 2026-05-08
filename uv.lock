@@ -740,7 +740,7 @@ wheels = [
 
 [[package]]
 name = "dynamicannotationdb"
-version = "5.13.1"
+version = "5.14.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "alembic" },
@@ -753,11 +753,11 @@ dependencies = [
     { name = "shapely" },
     { name = "sqlalchemy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/40/b5/476da64a201aaf4287fa9f6e66fc4b899192c741d436afdb2e8e862b625b/DynamicAnnotationDB-5.13.1.tar.gz", hash = "sha256:fd047086090ce0169f59f469789c58f8f145681052db56291d6741419325a2b4", size = 32335, upload-time = "2025-07-23T15:01:51.135Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2a/6e/42d69d2705d4a65f84c1ef0db1dae822bfd7c80b1053321aa3b674422546/dynamicannotationdb-5.14.1.tar.gz", hash = "sha256:17eda0b537b5c8a6bf0daf057db2cc06595c3af39ff991dc51b6373ef11bcb32", size = 32140, upload-time = "2025-11-20T21:46:35.047Z" }
 
 [[package]]
 name = "emannotationschemas"
-version = "5.26.1"
+version = "5.25.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "flask-cors" },
@@ -769,7 +769,7 @@ dependencies = [
     { name = "shapely" },
     { name = "sqlalchemy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f2/e8/a7366c41ef63ec5519aaf64a73cc730359fc4ef380b3348a295a49e10016/emannotationschemas-5.26.1.tar.gz", hash = "sha256:f61e4d51cb5197b751e2952caa3225e399a3b132a5d8d95880f9cf9c56081359", size = 39585, upload-time = "2026-04-28T16:59:44.519Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/cc/cb/b0e2a4e0563595bd1698932d0145fa74cca7259709fedf17e6ea4cd8ea9d/emannotationschemas-5.25.1.tar.gz", hash = "sha256:05114028fcd6b495208d3fbedacc256e9edb5dcf59ddae70a4e538eaffef84c7", size = 39278, upload-time = "2026-02-28T00:29:50.31Z" }
 
 [[package]]
 name = "executing"
@@ -1650,7 +1650,7 @@ wheels = [
 
 [[package]]
 name = "materializationengine"
-version = "5.17.0"
+version = "5.18.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -1722,7 +1722,7 @@ requires-dist = [
     { name = "cloud-volume", specifier = ">=8.5.4" },
     { name = "cryptography", specifier = ">=44.0.2" },
     { name = "dynamicannotationdb", specifier = ">=5.13.1" },
-    { name = "emannotationschemas", specifier = ">=5.26.1" },
+    { name = "emannotationschemas", specifier = "<=5.25.1" },
     { name = "flask", specifier = ">=2.0.2,<3.0" },
     { name = "flask-accepts" },
     { name = "flask-admin" },
