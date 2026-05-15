@@ -1612,6 +1612,20 @@ def write_deltalake_table(
         )
         bytes_per_row = estimate_bytes_per_row(connection_string, source)
 
+        small_table_threshold_mb = get_config_param(
+            "DELTALAKE_SMALL_TABLE_THRESHOLD_MB", 200
+        )
+        estimated_total_mb = row_count * bytes_per_row / (1024 * 1024)
+        if estimated_total_mb < small_table_threshold_mb and len(resolved_specs) > 1:
+            celery_logger.info(
+                "Table %s estimated size %.1f MB < threshold %s MB — "
+                "trimming to single (id) spec",
+                table_name,
+                estimated_total_mb,
+                small_table_threshold_mb,
+            )
+            resolved_specs = resolved_specs[:1]
+
         for spec in resolved_specs:
             if spec.n_partitions == "auto" or spec.n_partitions is None:
                 effective_target = spec.target_file_size_mb or target_partition_size_mb

@@ -234,6 +234,13 @@ def discover_specs():
     resolved_specs = discover_default_output_specs(source, engine)
     bytes_per_row = estimate_bytes_per_row(connection_string, source)
 
+    small_table_threshold_mb = int(
+        get_config_param("DELTALAKE_SMALL_TABLE_THRESHOLD_MB", 200)
+    )
+    estimated_total_mb = row_count * bytes_per_row / (1024 * 1024)
+    if estimated_total_mb < small_table_threshold_mb and len(resolved_specs) > 1:
+        resolved_specs = resolved_specs[:1]
+
     # Track which specs had "auto" before resolution (for caching).
     was_auto = [spec.n_partitions == "auto" for spec in resolved_specs]
 
