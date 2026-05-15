@@ -19,11 +19,10 @@ document.addEventListener("alpine:init", () => {
       const state = Alpine.store("dlWizard").state;
       const specNames = state.specs.map((s) => s.name);
       try {
-        const resp = await fetch("/materialize/deltalake/api/check-exists", {
+        const resp = await fetch(`/materialize/deltalake/api/${state.datastack}/check-exists`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            datastack: state.datastack,
             version: state.version,
             table_name: state.tableName,
             spec_names: specNames,
