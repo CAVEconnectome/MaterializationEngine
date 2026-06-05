@@ -227,7 +227,7 @@ def discover_specs():
         is_view = relation_kind == "view"
 
         if is_view:
-            row_count = estimate_view_rows(connection_string, table_name)
+            row_count = estimate_view_rows(engine, table_name)
             source = TableSource(annotation_table=table_name)
             resolved_specs = discover_view_output_specs(source, connection_string)
         else:
@@ -308,8 +308,12 @@ def discover_specs():
             if auto:
                 raw["n_partitions"] = "auto"
 
+        # For views, row_count is a fast Postgres planner estimate (an exact
+        # count would execute the full view); it can be far off for aggregating
+        # views and is advisory only — the exact count is determined at export.
         cache_result = {
             "row_count": row_count,
+            "row_count_estimated": is_view,
             "bytes_per_row": bytes_per_row,
             "available_columns": available_columns,
             "geometry_columns": geometry_columns,
@@ -320,6 +324,7 @@ def discover_specs():
         # Return the result with resolved partition counts.
         result = {
             "row_count": row_count,
+            "row_count_estimated": is_view,
             "bytes_per_row": bytes_per_row,
             "available_columns": available_columns,
             "geometry_columns": geometry_columns,

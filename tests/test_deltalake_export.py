@@ -31,6 +31,7 @@ from materializationengine.workflows.deltalake_export import (
     estimate_bytes_per_row,
     estimate_view_rows,
     export_table_to_deltalake,
+    export_view_to_deltalake,
     morton_encode_3d,
     optimize_deltalake,
     resolve_bounds,
@@ -192,29 +193,46 @@ class TestClassifyRelation:
 
 
 class TestEstimateViewRows:
-    """estimate_view_rows uses reltuples, falling back to COUNT(*) when <= 0."""
+    """estimate_view_rows uses reltuples when positive, else the EXPLAIN
+    planner estimate — never a full COUNT(*)."""
 
-    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
-    def test_uses_reltuples_when_positive(self, mock_fetchone):
-        mock_fetchone.return_value = (12345.0,)
-        result = estimate_view_rows("postgresql://localhost/db", "my_view")
-        assert result == 12345
-        # Only the reltuples query should run — no COUNT(*) fallback.
-        assert mock_fetchone.call_count == 1
+    def _make_engine(self, fetch_results):
+        """Return a mock engine whose connection .execute().fetchone()
+        yields *fetch_results* in order."""
+        results = list(fetch_results)
+        conn = MagicMock()
 
-    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
-    def test_falls_back_to_count_when_zero(self, mock_fetchone):
-        # First call: reltuples = 0 (stale stats). Second call: COUNT(*).
-        mock_fetchone.side_effect = [(0.0,), (777,)]
-        result = estimate_view_rows("postgresql://localhost/db", "my_view")
-        assert result == 777
-        assert mock_fetchone.call_count == 2
+        def _execute(*args, **kwargs):
+            res = MagicMock()
+            res.fetchone.return_value = results.pop(0)
+            return res
 
-    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
-    def test_falls_back_when_no_stats_row(self, mock_fetchone):
-        mock_fetchone.side_effect = [None, (42,)]
-        result = estimate_view_rows("postgresql://localhost/db", "my_view")
-        assert result == 42
+        conn.execute.side_effect = _execute
+        engine = MagicMock()
+        engine.connect.return_value.__enter__ = lambda s: conn
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        return engine, conn
+
+    def test_uses_reltuples_when_positive(self):
+        # reltuples query returns a positive value → used directly, no EXPLAIN.
+        engine, conn = self._make_engine([(12345.0,)])
+        assert estimate_view_rows(engine, "my_view") == 12345
+        assert conn.execute.call_count == 1
+
+    def test_explain_estimate_when_reltuples_negative(self):
+        # reltuples = -1 (never analyzed) → fall back to EXPLAIN planner estimate.
+        plan_json = [{"Plan": {"Plan Rows": 142358}}]
+        engine, conn = self._make_engine([(-1.0,), (plan_json,)])
+        assert estimate_view_rows(engine, "my_view") == 142358
+        assert conn.execute.call_count == 2
+
+    def test_explain_estimate_parses_json_string(self):
+        # Some drivers return the EXPLAIN JSON as a string.
+        import json as _json
+
+        plan_str = _json.dumps([{"Plan": {"Plan Rows": 999}}])
+        engine, _ = self._make_engine([(0.0,), (plan_str,)])
+        assert estimate_view_rows(engine, "my_view") == 999
 
 
 class TestDiscoverViewOutputSpecs:
@@ -234,6 +252,19 @@ class TestDiscoverViewOutputSpecs:
             ),
         )
 
+    def test_always_includes_flat_base(self):
+        # The flat (un-partitioned) base is always the first spec — it doubles
+        # as the staging lake that partitioned specs are derived from.
+        source = TableSource(annotation_table="my_view")
+        cols_patch, geom_patch = self._patch(
+            ["id", "pt_position", "score"], ["pt_position"]
+        )
+        with cols_patch, geom_patch:
+            specs = discover_view_output_specs(source, "postgresql://localhost/db")
+
+        assert specs[0].name == "flat"
+        assert specs[0].partition_by is None
+
     def test_id_and_geometry(self):
         source = TableSource(annotation_table="my_view")
         cols_patch, geom_patch = self._patch(
@@ -242,7 +273,8 @@ class TestDiscoverViewOutputSpecs:
         with cols_patch, geom_patch:
             specs = discover_view_output_specs(source, "postgresql://localhost/db")
 
-        assert len(specs) == 2
+        # flat + id + pt_position_morton
+        assert {s.name for s in specs} == {"flat", "id", "pt_position_morton"}
         id_spec = next(s for s in specs if s.name == "id")
         assert id_spec.partition_by == "id"
         assert id_spec.partition_strategy == "percentile_range"
@@ -266,7 +298,7 @@ class TestDiscoverViewOutputSpecs:
         assert len(morton_specs) == 1
         assert morton_specs[0].source_geometry_column == "pt_position"
 
-    def test_no_id_no_geometry_returns_flat(self):
+    def test_no_id_no_geometry_returns_flat_only(self):
         source = TableSource(annotation_table="my_view")
         cols_patch, geom_patch = self._patch(["score", "label"], [])
         with cols_patch, geom_patch:
@@ -1455,3 +1487,143 @@ class TestProgressPayloadFields:
         assert result["log_entries"] == ["12:00:01 Starting", "12:00:02 Streaming"]
         assert result["phase"] == "streaming"
         assert result["error"] is None
+
+
+# ---------------------------------------------------------------------------
+# export_view_to_deltalake — two-pass (stream-flat then re-partition)
+# ---------------------------------------------------------------------------
+
+
+class TestExportViewToDeltalake:
+    """End-to-end of the two-pass view exporter against a real local Delta
+    Lake, with only the Postgres stream mocked."""
+
+    def _make_batches(self, n_rows, n_batches=3):
+        """Yield real pyarrow RecordBatches: id, score, pt_position (3D WKB)."""
+        per = max(1, n_rows // n_batches)
+        made = 0
+        batches = []
+        i = 0
+        while made < n_rows:
+            count = min(per, n_rows - made)
+            ids = list(range(made, made + count))
+            scores = [float(x) * 1.5 for x in ids]
+            wkb = [
+                shapely.to_wkb(shapely.Point(x % 1000, (x * 2) % 1000, (x * 3) % 1000))
+                for x in ids
+            ]
+            batches.append(
+                pa.RecordBatch.from_arrays(
+                    [
+                        pa.array(ids, type=pa.int64()),
+                        pa.array(scores, type=pa.float64()),
+                        pa.array(wkb, type=pa.binary()),
+                    ],
+                    names=["id", "score", "pt_position"],
+                )
+            )
+            made += count
+            i += 1
+        return batches
+
+    def test_two_pass_flat_and_partitioned(self, tmp_path):
+        from deltalake import DeltaTable
+
+        n_rows = 30
+        batches = self._make_batches(n_rows)
+        output_uri_base = str(tmp_path / "out")
+
+        specs = [
+            DeltaLakeOutputSpec(name="flat"),
+            DeltaLakeOutputSpec(
+                name="id",
+                partition_by="id",
+                partition_strategy="percentile_range",
+                n_partitions=3,
+                zorder_columns=["id"],
+                source_table="my_view",
+            ),
+            DeltaLakeOutputSpec(
+                name="pt_position_morton",
+                partition_by="pt_position_morton",
+                partition_strategy="uniform_range",
+                n_partitions=3,
+                zorder_columns=["pt_position_morton"],
+                source_geometry_column="pt_position",
+                source_table="my_view",
+            ),
+        ]
+
+        with patch(
+            "materializationengine.workflows.deltalake_export.stream_table_to_arrow",
+            return_value=iter(batches),
+        ), patch(
+            "materializationengine.workflows.deltalake_export._get_geometry_columns",
+            return_value=["pt_position"],
+        ), patch(
+            # optimize/compact/vacuum is delta-rs internals — skip for the unit test.
+            "materializationengine.workflows.deltalake_export.optimize_deltalake"
+        ):
+            returned = export_view_to_deltalake(
+                connection_string="postgresql://ignored/db",
+                view_name="my_view",
+                output_specs=specs,
+                output_uri_base=output_uri_base,
+                flush_threshold_bytes=1,  # force a flush per batch
+            )
+
+        # Exact row count comes from streaming, not a COUNT(*).
+        assert returned == n_rows
+
+        # Flat base: decoded geometry, no partition column, all rows.
+        flat = DeltaTable(f"{output_uri_base}/flat")
+        assert flat.count() == n_rows
+        flat_cols = set(flat.schema().to_arrow().names)
+        assert {"id", "score", "pt_position_x", "pt_position_y", "pt_position_z"} <= flat_cols
+        assert "pt_position" not in flat_cols  # WKB dropped after decode
+
+        # id partition: same rows, gains the Hive partition column.
+        id_lake = DeltaTable(f"{output_uri_base}/id")
+        assert id_lake.count() == n_rows
+        assert "id_partition" in set(id_lake.schema().to_arrow().names)
+
+        # morton partition: same rows, morton + partition columns present.
+        morton_lake = DeltaTable(f"{output_uri_base}/pt_position_morton")
+        assert morton_lake.count() == n_rows
+        m_cols = set(morton_lake.schema().to_arrow().names)
+        assert "pt_position_morton_partition" in m_cols
+
+    def test_flat_only_view_no_second_pass(self, tmp_path):
+        from deltalake import DeltaTable
+
+        n_rows = 12
+        batches = self._make_batches(n_rows)
+        output_uri_base = str(tmp_path / "out")
+
+        # A view with no id / geometry → single flat spec.
+        specs = [DeltaLakeOutputSpec(name="flat")]
+
+        with patch(
+            "materializationengine.workflows.deltalake_export.stream_table_to_arrow",
+            return_value=iter(batches),
+        ), patch(
+            "materializationengine.workflows.deltalake_export._get_geometry_columns",
+            return_value=[],
+        ), patch(
+            "materializationengine.workflows.deltalake_export.optimize_deltalake"
+        ):
+            returned = export_view_to_deltalake(
+                connection_string="postgresql://ignored/db",
+                view_name="degree_view",
+                output_specs=specs,
+                output_uri_base=output_uri_base,
+                flush_threshold_bytes=1,
+            )
+
+        assert returned == n_rows
+        flat = DeltaTable(f"{output_uri_base}/flat")
+        assert flat.count() == n_rows
+        # No geometry to decode → original columns preserved, no partition col.
+        cols = set(flat.schema().to_arrow().names)
+        assert "pt_position" in cols  # untouched binary column
+        assert not any(c.endswith("_partition") for c in cols)
