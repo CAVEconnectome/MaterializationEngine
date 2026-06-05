@@ -1722,7 +1722,7 @@ wheels = [
 
 [[package]]
 name = "materializationengine"
-version = "5.21.0"
+version = "5.22.0"
 source = { editable = "." }
 dependencies = [
     { name = "adbc-driver-postgresql" },
