@@ -37,7 +37,7 @@ from materializationengine.info_client import (
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from materializationengine.utils import check_write_permission
 
-__version__ = "5.22.0"
+__version__ = "5.23.0"
 
 
 bulk_upload_parser = reqparse.RequestParser()
