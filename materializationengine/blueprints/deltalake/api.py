@@ -1,6 +1,7 @@
 import json
 import os
 
+import cachetools.func
 from flask import (
     Blueprint,
     current_app,
@@ -28,6 +29,25 @@ def _is_auth_disabled():
     return current_app.config.get(
         "AUTH_DISABLED",
         os.environ.get("AUTH_DISABLED", "").lower() in ("true", "1", "yes"),
+    )
+
+
+@cachetools.func.ttl_cache(maxsize=256, ttl=600)
+def _dataset_for_datastack(datastack_name):
+    """Resolve a datastack name to its auth *dataset* name via middle_auth.
+
+    ``g.auth_user["datasets_admin"]`` is keyed by the auth *dataset* name, which
+    can differ from the *datastack* name.  ``auth_requires_dataset_admin``
+    resolves datastack -> dataset (auth-service ``datastack`` namespace) before
+    checking; this mirrors that resolution so the wizard's datastack list agrees
+    with what the API endpoints actually allow.  The mapping is
+    user-independent, so we resolve with the service ``AUTH_TOKEN`` and cache it.
+    """
+    from middle_auth_client.decorators import dataset_from_table_id_from_request
+
+    return dataset_from_table_id_from_request(
+        datastack_name,
+        service_token=current_app.config.get("AUTH_TOKEN"),
     )
 
 
@@ -64,23 +84,37 @@ def wizard_step(step_number):
         datastacks = []
 
     if not _is_auth_disabled():
-        datasets_admin = g.get("auth_user", {}).get("datasets_admin", [])
-        datastacks = [ds for ds in datastacks if ds in datasets_admin]
+        datasets_admin = set(g.get("auth_user", {}).get("datasets_admin", []) or [])
+        # Resolve each datastack to its auth dataset name and keep only those the
+        # user is a dataset_admin of — matching what auth_requires_dataset_admin
+        # enforces on the API endpoints.
+        admin_datastacks = []
+        for ds in datastacks:
+            try:
+                dataset = _dataset_for_datastack(ds)
+            except Exception as e:
+                current_app.logger.warning(
+                    "Could not resolve dataset for datastack %s: %s", ds, e
+                )
+                continue
+            if dataset in datasets_admin:
+                admin_datastacks.append(ds)
+        datastacks = admin_datastacks
 
-    if not datastacks and not _is_auth_disabled():
-        return render_template(
-            "deltalake_wizard.html",
-            current_step=step_number,
-            total_steps=total_steps,
-            step_template=None,
-            datastacks=[],
-            current_user=g.get("auth_user", {}),
-            access_denied=True,
-            access_denied_message="dataset_admin permission is required. You do not have dataset_admin access for any datastacks.",
-            target_partition_size_mb=get_config_param("DELTALAKE_TARGET_PARTITION_SIZE_MB", 256),
-            bloom_filter_fpp=get_config_param("DELTALAKE_BLOOM_FILTER_FPP", 0.001),
-            output_bucket=get_config_param("DELTALAKE_OUTPUT_BUCKET", ""),
-        ), 403
+        if not datastacks:
+            return render_template(
+                "deltalake_wizard.html",
+                current_step=step_number,
+                total_steps=total_steps,
+                step_template=None,
+                datastacks=[],
+                current_user=g.get("auth_user", {}),
+                access_denied=True,
+                access_denied_message="dataset_admin permission is required. You do not have dataset_admin access for any datastacks.",
+                target_partition_size_mb=get_config_param("DELTALAKE_TARGET_PARTITION_SIZE_MB", 256),
+                bloom_filter_fpp=get_config_param("DELTALAKE_BLOOM_FILTER_FPP", 0.001),
+                output_bucket=get_config_param("DELTALAKE_OUTPUT_BUCKET", ""),
+            ), 403
 
     step_template_path = f"deltalake/step{step_number}.html"
 
