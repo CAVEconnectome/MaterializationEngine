@@ -2149,40 +2149,11 @@ def write_deltalake_table(
                     f"Delete the existing Delta Lake before re-exporting."
                 )
 
-        # --- Estimate bytes per row and resolve partition counts / bounds ---
-        _phase(
-            "computing_boundaries",
-            f"Resolved {len(resolved_specs)} output specs. "
-            "Computing partition boundaries...",
-            total_rows=row_count,
-        )
-        bytes_per_row = estimate_bytes_per_row(connection_string, source)
-
-        small_table_threshold_mb = get_config_param(
-            "DELTALAKE_SMALL_TABLE_THRESHOLD_MB", 200
-        )
-        estimated_total_mb = row_count * bytes_per_row / (1024 * 1024)
-        if estimated_total_mb < small_table_threshold_mb and len(resolved_specs) > 1:
-            celery_logger.info(
-                "Table %s estimated size %.1f MB < threshold %s MB — "
-                "trimming to single (id) spec",
-                table_name,
-                estimated_total_mb,
-                small_table_threshold_mb,
-            )
-            resolved_specs = resolved_specs[:1]
-
-        for spec in resolved_specs:
-            if spec.n_partitions == "auto" or spec.n_partitions is None:
-                effective_target = spec.target_file_size_mb or target_partition_size_mb
-                spec.n_partitions = resolve_n_partitions(
-                    "auto",
-                    row_count,
-                    target_file_size_mb=effective_target,
-                    bytes_per_row=bytes_per_row,
-                )
-
-        resolve_all_bounds(resolved_specs, connection_string, table_name)
+        # Boundary computation / partition sizing differs by relation kind and
+        # is handled per-branch below: views can't be counted or sampled
+        # upfront (it would execute the full view), so the table-only steps
+        # (estimate_bytes_per_row, small-table trim, resolve_all_bounds) must
+        # NOT run for views — they are done in the else branch only.
 
         # --- Stream and write ---
         _last_log_time = {"t": 0.0}
@@ -2279,6 +2250,25 @@ def write_deltalake_table(
                 total_rows=row_count,
             )
             bytes_per_row = estimate_bytes_per_row(connection_string, source)
+
+            # For a small table, collapse to a single output spec — partitioning
+            # a tiny table just produces many undersized files.
+            small_table_threshold_mb = get_config_param(
+                "DELTALAKE_SMALL_TABLE_THRESHOLD_MB", 200
+            )
+            estimated_total_mb = row_count * bytes_per_row / (1024 * 1024)
+            if (
+                estimated_total_mb < small_table_threshold_mb
+                and len(resolved_specs) > 1
+            ):
+                celery_logger.info(
+                    "Table %s estimated size %.1f MB < threshold %s MB — "
+                    "trimming to single spec",
+                    table_name,
+                    estimated_total_mb,
+                    small_table_threshold_mb,
+                )
+                resolved_specs = resolved_specs[:1]
 
             for spec in resolved_specs:
                 if spec.n_partitions == "auto" or spec.n_partitions is None:

@@ -271,32 +271,18 @@ def discover_specs(datastack_name):
 
         bytes_per_row = estimate_bytes_per_row(connection_string, source)
 
+        # For a small table, collapse to a single output — partitioning a tiny
+        # table just produces many undersized files. (For views the first spec
+        # is the flat base, so this keeps the flat export.)
+        small_table_threshold_mb = int(
+            get_config_param("DELTALAKE_SMALL_TABLE_THRESHOLD_MB", 200)
+        )
+        estimated_total_mb = row_count * bytes_per_row / (1024 * 1024)
+        if estimated_total_mb < small_table_threshold_mb and len(resolved_specs) > 1:
+            resolved_specs = resolved_specs[:1]
+
         # Track which specs had "auto" before resolution (for caching).
         was_auto = [spec.n_partitions == "auto" for spec in resolved_specs]
-    # Discover specs.
-    resolved_specs = discover_default_output_specs(source, engine)
-    bytes_per_row = estimate_bytes_per_row(connection_string, source)
-
-    small_table_threshold_mb = int(
-        get_config_param("DELTALAKE_SMALL_TABLE_THRESHOLD_MB", 200)
-    )
-    estimated_total_mb = row_count * bytes_per_row / (1024 * 1024)
-    if estimated_total_mb < small_table_threshold_mb and len(resolved_specs) > 1:
-        resolved_specs = resolved_specs[:1]
-
-    # Track which specs had "auto" before resolution (for caching).
-    was_auto = [spec.n_partitions == "auto" for spec in resolved_specs]
-
-    # Resolve partition counts.
-    for spec in resolved_specs:
-        if spec.n_partitions == "auto":
-            effective_target = spec.target_file_size_mb or target_partition_size_mb
-            spec.n_partitions = resolve_n_partitions(
-                "auto",
-                row_count,
-                target_file_size_mb=effective_target,
-                bytes_per_row=bytes_per_row,
-            )
 
         # Resolve partition counts.
         for spec in resolved_specs:
@@ -369,7 +355,7 @@ def discover_specs(datastack_name):
     except Exception as e:
         current_app.logger.error(
             "discover_specs failed for %s v%s table %r: %s",
-            datastack,
+            datastack_name,
             version,
             table_name,
             e,
