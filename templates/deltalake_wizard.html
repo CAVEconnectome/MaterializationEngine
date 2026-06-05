@@ -128,7 +128,15 @@
     </div>
 
     <div class="card mt-5">
+        {% if access_denied %}
+        <div class="card-body">
+            <div class="alert alert-danger mb-0" role="alert">
+                <i class="fas fa-lock me-2"></i>{{ access_denied_message }}
+            </div>
+        </div>
+        {% else %}
         {% include step_template %}
+        {% endif %}
     </div>
 </div>
 {% endblock %}

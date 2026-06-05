@@ -106,11 +106,10 @@ document.addEventListener("alpine:init", () => {
     async checkExists() {
       this.checkingExists = true;
       try {
-        const resp = await fetch("/materialize/deltalake/api/check-exists", {
+        const resp = await fetch(`/materialize/deltalake/api/${this.datastack}/check-exists`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            datastack: this.datastack,
             version: parseInt(this.version),
             table_name: this.tableName,
           }),
@@ -131,11 +130,10 @@ document.addEventListener("alpine:init", () => {
       this.discovering = true;
       this.error = null;
       try {
-        const resp = await fetch("/materialize/deltalake/api/discover-specs", {
+        const resp = await fetch(`/materialize/deltalake/api/${this.datastack}/discover-specs`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            datastack: this.datastack,
             version: parseInt(this.version),
             table_name: this.tableName,
             target_partition_size_mb: this.targetPartitionSizeMb,
