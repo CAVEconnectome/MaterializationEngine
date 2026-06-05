@@ -86,6 +86,20 @@ class DeltaLakeOutputSpec:
             raise ValueError("DeltaLakeOutputSpec.name must be a non-empty string")
 
 
+# Spatial column prefix priority (lower index = higher priority) used when a
+# table/view exposes more than one geometry column and we must pick a single
+# one to partition on via its Morton code.
+_SPATIAL_PREFIX_PRIORITY = ["ctr", "post", "pre", "pt", "bb"]
+
+
+def _spatial_col_rank(col_name: str) -> int:
+    """Rank a geometry column by ``_SPATIAL_PREFIX_PRIORITY`` (lower = preferred)."""
+    for i, prefix in enumerate(_SPATIAL_PREFIX_PRIORITY):
+        if col_name.startswith(prefix):
+            return i
+    return len(_SPATIAL_PREFIX_PRIORITY)
+
+
 _IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_$]*$")
 
 
@@ -145,6 +159,77 @@ def _resolve_select_columns(
                 seen.add(col_name)
 
     return columns
+
+
+def _classify_relation(connection_string: str, name: str) -> str | None:
+    """Classify a frozen-DB relation as ``"table"``, ``"view"``, or ``None``.
+
+    Inspects ``pg_class.relkind``: ordinary/partitioned tables (``r``/``p``)
+    are ``"table"``; ordinary and materialized views (``v``/``m``) are
+    ``"view"``.  Returns ``None`` when no relation with *name* exists.
+
+    Analysis views are cloned into the frozen DB as materialized views (via
+    ``CREATE DATABASE ... WITH TEMPLATE``) and so are not registered in
+    ``MaterializedMetadata`` — this lets callers route them to the
+    view-specific row-count and spec-discovery paths.
+    """
+    _validate_identifier(name)
+    row = _adbc_fetchone(
+        connection_string,
+        f"SELECT relkind FROM pg_class WHERE relname = '{name}'",
+    )
+    if row is None:
+        return None
+    relkind = row[0]
+    if relkind in ("r", "p"):
+        return "table"
+    if relkind in ("v", "m"):
+        return "view"
+    return None
+
+
+def estimate_view_rows(connection_string: str, name: str) -> int:
+    """Estimate the row count of a view from ``pg_class.reltuples``.
+
+    Views are not tracked in ``MaterializedMetadata``, so their row count must
+    come from elsewhere.  ``reltuples`` is a fast catalog lookup that is exact
+    for a materialized view immediately after ``REFRESH``/``ANALYZE``.  Because
+    the cloned frozen DB can carry stale or zero stats, fall back to an exact
+    ``COUNT(*)`` only when ``reltuples <= 0`` — otherwise partition sizing would
+    silently collapse to a single file.
+
+    The row count only drives partition-count heuristics, progress reporting,
+    and the existing-export guard's message; it never gates the data written
+    (the export streams ``SELECT *`` in full), so the estimate is safe.
+    """
+    _validate_identifier(name)
+    row = _adbc_fetchone(
+        connection_string,
+        f"SELECT reltuples FROM pg_class WHERE relname = '{name}'",
+    )
+    if row is not None and row[0] is not None and row[0] > 0:
+        return int(row[0])
+
+    count_row = _adbc_fetchone(connection_string, f'SELECT COUNT(*) FROM "{name}"')
+    return int(count_row[0]) if count_row is not None else 0
+
+
+def _get_geometry_columns(connection_string: str, name: str) -> list[str]:
+    """Return PostGIS geometry column names on *name*, in ordinal order.
+
+    Detects columns via ``information_schema.columns.udt_name = 'geometry'``,
+    which works identically for tables, views, and materialized views.  This is
+    necessary because we alias the SQLAlchemy ``geometry`` type to ``BYTEA`` for
+    reflection, so the inspector cannot distinguish geometry from plain bytea.
+    """
+    _validate_identifier(name)
+    rows = _adbc_fetchall(
+        connection_string,
+        f"SELECT column_name FROM information_schema.columns "
+        f"WHERE table_name = '{name}' AND udt_name = 'geometry' "
+        f"ORDER BY ordinal_position",
+    )
+    return [col_name for (col_name,) in rows]
 
 
 def discover_default_output_specs(
@@ -212,15 +297,6 @@ def discover_default_output_specs(
             )
         )
 
-    # Spatial column prefix priority (lower index = higher priority).
-    _spatial_prefix_priority = ["ctr", "post", "pre", "pt", "bb"]
-
-    def _spatial_col_rank(col_name: str) -> int:
-        for i, prefix in enumerate(_spatial_prefix_priority):
-            if col_name.startswith(prefix):
-                return i
-        return len(_spatial_prefix_priority)
-
     # Collect spatial (GiST) candidates; pick at most one after the loop.
     spatial_candidates: list[tuple[str, str]] = []  # (column_name, owning_table)
 
@@ -271,6 +347,67 @@ def discover_default_output_specs(
                 source_table=owning_table,
             )
         )
+
+    return specs
+
+
+def discover_view_output_specs(
+    source: TableSource,
+    connection_string: str,
+) -> list[DeltaLakeOutputSpec]:
+    """Derive output specs for a view, inferring from columns instead of indexes.
+
+    Materialized views generally lack the B-tree/GiST indexes and primary-key
+    constraint that :func:`discover_default_output_specs` relies on, so specs
+    are inferred from the view's columns to give views the same partition
+    quality tables get:
+
+    * If the view has an ``id`` column → a ``percentile_range`` spec on ``id``
+      (mirrors the PK spec emitted for tables).
+    * Among PostGIS geometry columns, at most **one** is selected by the prefix
+      priority ``ctr > post > pre > pt > bb`` and partitioned on its Morton code
+      (``uniform_range``), exactly as the table spatial branch does — so the
+      downstream geometry-decode / Morton pipeline is reused unchanged.
+
+    If neither an ``id`` column nor any geometry column is present, a single
+    un-partitioned ``flat`` spec is returned so the export still produces output.
+    """
+    view_name = source.annotation_table
+    columns = _resolve_select_columns(connection_string, source, [])
+
+    specs: list[DeltaLakeOutputSpec] = []
+
+    if "id" in columns:
+        specs.append(
+            DeltaLakeOutputSpec(
+                name="id",
+                partition_by="id",
+                partition_strategy="percentile_range",
+                n_partitions="auto",
+                zorder_columns=["id"],
+                bloom_filter_columns=[],
+                source_table=view_name,
+            )
+        )
+
+    geometry_columns = _get_geometry_columns(connection_string, view_name)
+    if geometry_columns:
+        col = min(geometry_columns, key=_spatial_col_rank)
+        specs.append(
+            DeltaLakeOutputSpec(
+                name=f"{col}_morton",
+                partition_by=f"{col}_morton",
+                partition_strategy="uniform_range",
+                n_partitions="auto",
+                zorder_columns=[f"{col}_morton"],
+                bloom_filter_columns=[],
+                source_geometry_column=col,
+                source_table=view_name,
+            )
+        )
+
+    if not specs:
+        specs.append(DeltaLakeOutputSpec(name="flat"))
 
     return specs
 
@@ -1504,27 +1641,41 @@ def write_deltalake_table(
         # --- Resolve table structure from frozen DB metadata ---
         engine = db_manager.get_engine(analysis_database)
 
-        # Determine if the table was merged and look up row count.
-        with db_manager.session_scope(analysis_database) as session:
-            metadata_row = (
-                session.query(MaterializedMetadata)
-                .filter(MaterializedMetadata.table_name == table_name)
-                .first()
+        # Views are materialized views cloned into the frozen DB; they are not
+        # tracked in MaterializedMetadata and have no segmentation join.
+        relation_kind = _classify_relation(connection_string, table_name)
+        if relation_kind is None:
+            raise ValueError(
+                f"No table or view named {table_name!r} in {analysis_database}"
             )
-            if metadata_row is None:
-                raise ValueError(
-                    f"No MaterializedMetadata entry for table {table_name!r} "
-                    f"in {analysis_database}"
-                )
-            row_count = metadata_row.row_count
+        is_view = relation_kind == "view"
 
-        # Detect segmentation table presence.
-        seg_table_name = build_segmentation_table_name(table_name, pcg_table_name)
-        has_seg_table = engine.dialect.has_table(engine, seg_table_name)
-        segmentation_table_name = seg_table_name if has_seg_table else None
+        if is_view:
+            row_count = estimate_view_rows(connection_string, table_name)
+            segmentation_table_name = None
+        else:
+            # Determine if the table was merged and look up row count.
+            with db_manager.session_scope(analysis_database) as session:
+                metadata_row = (
+                    session.query(MaterializedMetadata)
+                    .filter(MaterializedMetadata.table_name == table_name)
+                    .first()
+                )
+                if metadata_row is None:
+                    raise ValueError(
+                        f"No MaterializedMetadata entry for table {table_name!r} "
+                        f"in {analysis_database}"
+                    )
+                row_count = metadata_row.row_count
+
+            # Detect segmentation table presence.
+            seg_table_name = build_segmentation_table_name(table_name, pcg_table_name)
+            has_seg_table = engine.dialect.has_table(engine, seg_table_name)
+            segmentation_table_name = seg_table_name if has_seg_table else None
 
         celery_logger.info(
-            "Table %s (v%d): %d rows, segmentation=%s",
+            "%s %s (v%d): %d rows, segmentation=%s",
+            "View" if is_view else "Table",
             table_name,
             version,
             row_count,
@@ -1544,6 +1695,13 @@ def write_deltalake_table(
                 total_rows=row_count,
             )
             resolved_specs = [DeltaLakeOutputSpec(**s) for s in output_specs]
+        elif is_view:
+            _phase(
+                "discovering_specs",
+                "Discovering output specs...",
+                total_rows=row_count,
+            )
+            resolved_specs = discover_view_output_specs(source, connection_string)
         else:
             _phase(
                 "discovering_specs",

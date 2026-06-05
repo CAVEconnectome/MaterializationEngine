@@ -16,6 +16,7 @@ from materializationengine.workflows.deltalake_export import (
     _DEFAULT_BYTES_PER_ROW,
     DeltaLakeOutputSpec,
     TableSource,
+    _classify_relation,
     _compute_sampled_percentile_bounds,
     _flush_buffer,
     _validate_identifier,
@@ -26,7 +27,9 @@ from materializationengine.workflows.deltalake_export import (
     compute_uniform_range_bounds,
     decode_geometry_columns,
     discover_default_output_specs,
+    discover_view_output_specs,
     estimate_bytes_per_row,
+    estimate_view_rows,
     export_table_to_deltalake,
     morton_encode_3d,
     optimize_deltalake,
@@ -158,6 +161,120 @@ class TestDiscoverDefaultOutputSpecs:
             specs = discover_default_output_specs(source, engine)
 
         assert specs == []
+
+
+# ---------------------------------------------------------------------------
+# _classify_relation / estimate_view_rows / discover_view_output_specs
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyRelation:
+    """_classify_relation maps pg_class.relkind to table/view/None."""
+
+    @pytest.mark.parametrize(
+        "relkind,expected",
+        [
+            ("r", "table"),
+            ("p", "table"),
+            ("v", "view"),
+            ("m", "view"),
+        ],
+    )
+    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
+    def test_relkind_mapping(self, mock_fetchone, relkind, expected):
+        mock_fetchone.return_value = (relkind,)
+        assert _classify_relation("postgresql://localhost/db", "thing") == expected
+
+    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
+    def test_missing_relation_returns_none(self, mock_fetchone):
+        mock_fetchone.return_value = None
+        assert _classify_relation("postgresql://localhost/db", "nope") is None
+
+
+class TestEstimateViewRows:
+    """estimate_view_rows uses reltuples, falling back to COUNT(*) when <= 0."""
+
+    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
+    def test_uses_reltuples_when_positive(self, mock_fetchone):
+        mock_fetchone.return_value = (12345.0,)
+        result = estimate_view_rows("postgresql://localhost/db", "my_view")
+        assert result == 12345
+        # Only the reltuples query should run — no COUNT(*) fallback.
+        assert mock_fetchone.call_count == 1
+
+    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
+    def test_falls_back_to_count_when_zero(self, mock_fetchone):
+        # First call: reltuples = 0 (stale stats). Second call: COUNT(*).
+        mock_fetchone.side_effect = [(0.0,), (777,)]
+        result = estimate_view_rows("postgresql://localhost/db", "my_view")
+        assert result == 777
+        assert mock_fetchone.call_count == 2
+
+    @patch("materializationengine.workflows.deltalake_export._adbc_fetchone")
+    def test_falls_back_when_no_stats_row(self, mock_fetchone):
+        mock_fetchone.side_effect = [None, (42,)]
+        result = estimate_view_rows("postgresql://localhost/db", "my_view")
+        assert result == 42
+
+
+class TestDiscoverViewOutputSpecs:
+    """discover_view_output_specs infers specs from columns, not indexes."""
+
+    def _patch(self, columns, geometry_columns):
+        return (
+            patch(
+                "materializationengine.workflows.deltalake_export."
+                "_resolve_select_columns",
+                return_value=columns,
+            ),
+            patch(
+                "materializationengine.workflows.deltalake_export."
+                "_get_geometry_columns",
+                return_value=geometry_columns,
+            ),
+        )
+
+    def test_id_and_geometry(self):
+        source = TableSource(annotation_table="my_view")
+        cols_patch, geom_patch = self._patch(
+            ["id", "pt_position", "score"], ["pt_position"]
+        )
+        with cols_patch, geom_patch:
+            specs = discover_view_output_specs(source, "postgresql://localhost/db")
+
+        assert len(specs) == 2
+        id_spec = next(s for s in specs if s.name == "id")
+        assert id_spec.partition_by == "id"
+        assert id_spec.partition_strategy == "percentile_range"
+        assert id_spec.source_table == "my_view"
+
+        morton_spec = next(s for s in specs if s.name == "pt_position_morton")
+        assert morton_spec.partition_by == "pt_position_morton"
+        assert morton_spec.partition_strategy == "uniform_range"
+        assert morton_spec.source_geometry_column == "pt_position"
+
+    def test_multiple_geometry_columns_use_prefix_priority(self):
+        source = TableSource(annotation_table="my_view")
+        # pt (rank 3) should win over bb (rank 4).
+        cols_patch, geom_patch = self._patch(
+            ["id", "bb_position", "pt_position"], ["bb_position", "pt_position"]
+        )
+        with cols_patch, geom_patch:
+            specs = discover_view_output_specs(source, "postgresql://localhost/db")
+
+        morton_specs = [s for s in specs if s.source_geometry_column is not None]
+        assert len(morton_specs) == 1
+        assert morton_specs[0].source_geometry_column == "pt_position"
+
+    def test_no_id_no_geometry_returns_flat(self):
+        source = TableSource(annotation_table="my_view")
+        cols_patch, geom_patch = self._patch(["score", "label"], [])
+        with cols_patch, geom_patch:
+            specs = discover_view_output_specs(source, "postgresql://localhost/db")
+
+        assert len(specs) == 1
+        assert specs[0].name == "flat"
+        assert specs[0].partition_by is None
 
 
 # ---------------------------------------------------------------------------

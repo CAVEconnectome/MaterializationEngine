@@ -139,11 +139,14 @@ def discover_specs():
         _DEFAULT_DROP_COLUMNS,
         TableSource,
         _build_frozen_db_connection_string,
+        _classify_relation,
         _get_redis_client,
         _resolve_select_columns,
         _validate_identifier,
         discover_default_output_specs,
+        discover_view_output_specs,
         estimate_bytes_per_row,
+        estimate_view_rows,
         resolve_n_partitions,
     )
 
@@ -207,31 +210,47 @@ def discover_specs():
             {"error": f"Cannot connect to frozen DB for version {version}: {e}"}
         ), 404
 
-    # Look up row count.
-    with db_manager.session_scope(analysis_database) as session:
-        metadata_row = (
-            session.query(MaterializedMetadata)
-            .filter(MaterializedMetadata.table_name == table_name)
-            .first()
+    # Classify as table vs view. Views are materialized views cloned into the
+    # frozen DB; they are not tracked in MaterializedMetadata and have no
+    # segmentation join, so they need view-specific row-count and spec discovery.
+    relation_kind = _classify_relation(connection_string, table_name)
+    if relation_kind is None:
+        return jsonify(
+            {"error": f"Table {table_name!r} not found in version {version}"}
+        ), 404
+    is_view = relation_kind == "view"
+
+    if is_view:
+        row_count = estimate_view_rows(connection_string, table_name)
+        source = TableSource(annotation_table=table_name)
+        resolved_specs = discover_view_output_specs(source, connection_string)
+    else:
+        # Look up row count.
+        with db_manager.session_scope(analysis_database) as session:
+            metadata_row = (
+                session.query(MaterializedMetadata)
+                .filter(MaterializedMetadata.table_name == table_name)
+                .first()
+            )
+            if metadata_row is None:
+                return jsonify(
+                    {"error": f"Table {table_name!r} not found in version {version}"}
+                ), 404
+            row_count = metadata_row.row_count
+
+        # Detect segmentation table.
+        seg_table_name = build_segmentation_table_name(table_name, pcg_table_name)
+        has_seg_table = engine.dialect.has_table(engine, seg_table_name)
+        segmentation_table_name = seg_table_name if has_seg_table else None
+
+        source = TableSource(
+            annotation_table=table_name,
+            segmentation_table=segmentation_table_name,
         )
-        if metadata_row is None:
-            return jsonify(
-                {"error": f"Table {table_name!r} not found in version {version}"}
-            ), 404
-        row_count = metadata_row.row_count
 
-    # Detect segmentation table.
-    seg_table_name = build_segmentation_table_name(table_name, pcg_table_name)
-    has_seg_table = engine.dialect.has_table(engine, seg_table_name)
-    segmentation_table_name = seg_table_name if has_seg_table else None
+        # Discover specs.
+        resolved_specs = discover_default_output_specs(source, engine)
 
-    source = TableSource(
-        annotation_table=table_name,
-        segmentation_table=segmentation_table_name,
-    )
-
-    # Discover specs.
-    resolved_specs = discover_default_output_specs(source, engine)
     bytes_per_row = estimate_bytes_per_row(connection_string, source)
 
     # Track which specs had "auto" before resolution (for caching).
