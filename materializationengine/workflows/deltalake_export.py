@@ -5,6 +5,7 @@ import math
 import re
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal
@@ -15,7 +16,7 @@ import polars as pl
 import pyarrow as pa
 import shapely
 from celery.utils.log import get_task_logger
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 from sqlalchemy.dialects.postgresql import BYTEA
 
 # Register a minimal geometry type so SQLAlchemy's inspector doesn't warn
@@ -86,6 +87,20 @@ class DeltaLakeOutputSpec:
             raise ValueError("DeltaLakeOutputSpec.name must be a non-empty string")
 
 
+# Spatial column prefix priority (lower index = higher priority) used when a
+# table/view exposes more than one geometry column and we must pick a single
+# one to partition on via its Morton code.
+_SPATIAL_PREFIX_PRIORITY = ["ctr", "post", "pre", "pt", "bb"]
+
+
+def _spatial_col_rank(col_name: str) -> int:
+    """Rank a geometry column by ``_SPATIAL_PREFIX_PRIORITY`` (lower = preferred)."""
+    for i, prefix in enumerate(_SPATIAL_PREFIX_PRIORITY):
+        if col_name.startswith(prefix):
+            return i
+    return len(_SPATIAL_PREFIX_PRIORITY)
+
+
 _IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_$]*$")
 
 
@@ -145,6 +160,95 @@ def _resolve_select_columns(
                 seen.add(col_name)
 
     return columns
+
+
+def _classify_relation(connection_string: str, name: str) -> str | None:
+    """Classify a frozen-DB relation as ``"table"``, ``"view"``, or ``None``.
+
+    Inspects ``pg_class.relkind``: ordinary/partitioned tables (``r``/``p``)
+    are ``"table"``; ordinary and materialized views (``v``/``m``) are
+    ``"view"``.  Returns ``None`` when no relation with *name* exists.
+
+    Analysis views are cloned into the frozen DB as materialized views (via
+    ``CREATE DATABASE ... WITH TEMPLATE``) and so are not registered in
+    ``MaterializedMetadata`` — this lets callers route them to the
+    view-specific row-count and spec-discovery paths.
+    """
+    _validate_identifier(name)
+    row = _adbc_fetchone(
+        connection_string,
+        f"SELECT relkind FROM pg_class WHERE relname = '{name}'",
+    )
+    if row is None:
+        return None
+    relkind = row[0]
+    if relkind in ("r", "p"):
+        return "table"
+    if relkind in ("v", "m"):
+        return "view"
+    return None
+
+
+def estimate_view_rows(engine: Engine, name: str) -> int:
+    """Estimate the row count of a view without scanning it.
+
+    Views are not tracked in ``MaterializedMetadata``, so their row count must
+    come from elsewhere.  ``pg_class.reltuples`` is a fast catalog lookup that
+    is exact for a materialized view immediately after ``REFRESH``/``ANALYZE``,
+    so it is used when positive.  Otherwise — a *regular* view (which has no
+    stored stats) or a materialized view with stale/never-analyzed stats
+    (``reltuples`` is ``-1``) — fall back to the Postgres **planner estimate**
+    from ``EXPLAIN``, which is computed from base-table statistics without
+    executing the query.
+
+    A plain ``COUNT(*)`` is deliberately avoided: for a regular view that
+    aggregates over a huge base table it runs the full query and can take
+    minutes (or have its connection dropped by the gateway), which previously
+    surfaced in the wizard as an HTML timeout / "not valid JSON" error.
+
+    The row count only drives partition-count heuristics, progress reporting,
+    and the existing-export guard's message; it never gates the data written
+    (the export streams ``SELECT *`` in full), so an estimate is safe.
+
+    ``EXPLAIN`` is run through the SQLAlchemy *engine* rather than the ADBC
+    helpers because the ADBC postgres driver wraps statements in
+    ``COPY (...) TO STDOUT``, which rejects ``EXPLAIN``.
+    """
+    _validate_identifier(name)
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT reltuples FROM pg_class WHERE relname = :name"),
+            {"name": name},
+        ).fetchone()
+        if row is not None and row[0] is not None and row[0] > 0:
+            return int(row[0])
+
+        plan_row = conn.execute(
+            text(f'EXPLAIN (FORMAT JSON) SELECT * FROM "{name}"')
+        ).fetchone()
+
+    plan = plan_row[0]
+    if isinstance(plan, str):
+        plan = json.loads(plan)
+    return max(0, int(plan[0]["Plan"]["Plan Rows"]))
+
+
+def _get_geometry_columns(connection_string: str, name: str) -> list[str]:
+    """Return PostGIS geometry column names on *name*, in ordinal order.
+
+    Detects columns via ``information_schema.columns.udt_name = 'geometry'``,
+    which works identically for tables, views, and materialized views.  This is
+    necessary because we alias the SQLAlchemy ``geometry`` type to ``BYTEA`` for
+    reflection, so the inspector cannot distinguish geometry from plain bytea.
+    """
+    _validate_identifier(name)
+    rows = _adbc_fetchall(
+        connection_string,
+        f"SELECT column_name FROM information_schema.columns "
+        f"WHERE table_name = '{name}' AND udt_name = 'geometry' "
+        f"ORDER BY ordinal_position",
+    )
+    return [col_name for (col_name,) in rows]
 
 
 def discover_default_output_specs(
@@ -212,15 +316,6 @@ def discover_default_output_specs(
             )
         )
 
-    # Spatial column prefix priority (lower index = higher priority).
-    _spatial_prefix_priority = ["ctr", "post", "pre", "pt", "bb"]
-
-    def _spatial_col_rank(col_name: str) -> int:
-        for i, prefix in enumerate(_spatial_prefix_priority):
-            if col_name.startswith(prefix):
-                return i
-        return len(_spatial_prefix_priority)
-
     # Collect spatial (GiST) candidates; pick at most one after the loop.
     spatial_candidates: list[tuple[str, str]] = []  # (column_name, owning_table)
 
@@ -269,6 +364,67 @@ def discover_default_output_specs(
                 bloom_filter_columns=[],
                 source_geometry_column=col,
                 source_table=owning_table,
+            )
+        )
+
+    return specs
+
+
+def discover_view_output_specs(
+    source: TableSource,
+    connection_string: str,
+) -> list[DeltaLakeOutputSpec]:
+    """Derive output specs for a view, inferring from columns instead of indexes.
+
+    A view export always produces a ``flat`` (un-partitioned) lake.  It is both a
+    useful full export *and* the staging input for :func:`export_view_to_deltalake`'s
+    re-partitioning pass — the view query is executed once into the flat lake, and
+    any partitioned specs are then derived from that materialized data (the view
+    itself cannot be cheaply counted or sampled; see ``export_view_to_deltalake``).
+
+    In addition to ``flat``, columns are inspected to give views the same
+    partition quality tables get:
+
+    * If the view has an ``id`` column → a ``percentile_range`` spec on ``id``
+      (mirrors the PK spec emitted for tables).
+    * Among PostGIS geometry columns, at most **one** is selected by the prefix
+      priority ``ctr > post > pre > pt > bb`` and partitioned on its Morton code
+      (``uniform_range``), exactly as the table spatial branch does — so the
+      downstream geometry-decode / Morton pipeline is reused unchanged.
+    """
+    view_name = source.annotation_table
+    columns = _resolve_select_columns(connection_string, source, [])
+
+    # The flat base is always produced first; it doubles as the staging lake
+    # that partitioned specs are re-partitioned from.
+    specs: list[DeltaLakeOutputSpec] = [DeltaLakeOutputSpec(name="flat")]
+
+    if "id" in columns:
+        specs.append(
+            DeltaLakeOutputSpec(
+                name="id",
+                partition_by="id",
+                partition_strategy="percentile_range",
+                n_partitions="auto",
+                zorder_columns=["id"],
+                bloom_filter_columns=[],
+                source_table=view_name,
+            )
+        )
+
+    geometry_columns = _get_geometry_columns(connection_string, view_name)
+    if geometry_columns:
+        col = min(geometry_columns, key=_spatial_col_rank)
+        specs.append(
+            DeltaLakeOutputSpec(
+                name=f"{col}_morton",
+                partition_by=f"{col}_morton",
+                partition_strategy="uniform_range",
+                n_partitions="auto",
+                zorder_columns=[f"{col}_morton"],
+                bloom_filter_columns=[],
+                source_geometry_column=col,
+                source_table=view_name,
             )
         )
 
@@ -1122,6 +1278,324 @@ def export_table_to_deltalake(
             optimize_callback(spec.name, "vacuum")
 
 
+def _flush_flat_buffer(
+    buffer: list[pa.RecordBatch],
+    base_uri: str,
+    geometry_columns: list[str],
+) -> None:
+    """Decode geometry and append accumulated batches to a flat Delta Lake.
+
+    Like :func:`_flush_buffer` but writes a single un-partitioned lake (no
+    partition assignment).  Used by :func:`_stream_view_to_flat_lake`.
+    """
+    from deltalake import write_deltalake
+
+    arrow_table = pa.Table.from_batches(buffer)
+    buffer.clear()
+    arrow_table = _strip_arrow_extension_types(arrow_table)
+    df = pl.from_arrow(arrow_table)
+    del arrow_table
+    if geometry_columns:
+        df = decode_geometry_columns(df, geometry_columns)
+    write_deltalake(base_uri, df.to_arrow(), mode="append")
+
+
+def _stream_view_to_flat_lake(
+    connection_string: str,
+    source: TableSource,
+    base_uri: str,
+    geometry_columns: list[str],
+    flush_threshold_bytes: int,
+    progress_callback: Callable[[int, int | None], None] | None = None,
+) -> int:
+    """Pass 1: stream a view once into a flat Delta Lake; return the row count.
+
+    The view query is executed exactly once.  Geometry columns are decoded to
+    ``{col}_x/_y/_z`` so the materialized lake can be re-partitioned (including
+    Morton encoding) without re-running the view.  The exact row count is
+    accumulated from the streamed batches — no ``COUNT(*)`` is issued.
+    """
+    buffer: list[pa.RecordBatch] = []
+    buffer_bytes = 0
+    rows_processed = 0
+
+    for batch in stream_table_to_arrow(
+        connection_string,
+        source,
+        drop_columns=_DEFAULT_DROP_COLUMNS,
+    ):
+        buffer.append(batch)
+        buffer_bytes += batch.nbytes
+        rows_processed += batch.num_rows
+
+        if progress_callback is not None:
+            progress_callback(rows_processed, None)
+
+        if buffer_bytes >= flush_threshold_bytes:
+            _flush_flat_buffer(buffer, base_uri, geometry_columns)
+            buffer = []
+            buffer_bytes = 0
+
+    if buffer:
+        _flush_flat_buffer(buffer, base_uri, geometry_columns)
+
+    return rows_processed
+
+
+def _lake_bytes_per_row(base_uri: str, row_count: int) -> int:
+    """Average on-disk bytes/row of a Delta Lake, from its add-action stats.
+
+    Parquet is compressed, so this reflects the *output* file size — exactly
+    what :func:`resolve_n_partitions` needs to target a Delta output file size
+    (a better basis than the Postgres ``pg_class`` estimate for views).
+    """
+    if row_count <= 0:
+        return _DEFAULT_BYTES_PER_ROW
+    from deltalake import DeltaTable
+
+    try:
+        actions = DeltaTable(base_uri).get_add_actions(flatten=True)
+        total_bytes = sum(actions.column("size_bytes").to_pylist())
+    except Exception:
+        return _DEFAULT_BYTES_PER_ROW
+    if total_bytes <= 0:
+        return _DEFAULT_BYTES_PER_ROW
+    return max(1, int(total_bytes / row_count))
+
+
+def _percentile_bounds_from_lake(
+    base_uri: str,
+    column: str,
+    n_partitions: int,
+) -> list:
+    """Percentile breakpoints for *column*, computed from the materialized lake.
+
+    Mirrors :func:`compute_partition_boundaries` but reads from the flat Delta
+    Lake (cheap, columnar) instead of querying the view.  Returns ``n-1``
+    breakpoints, or ``[]`` for the trivial / all-null cases.
+    """
+    if n_partitions <= 1:
+        return []
+    fractions = [i / n_partitions for i in range(1, n_partitions)]
+    lf = pl.scan_delta(base_uri)
+    row = (
+        lf.select(
+            [
+                pl.col(column)
+                .quantile(f, interpolation="nearest")
+                .alias(f"q{i}")
+                for i, f in enumerate(fractions)
+            ]
+        )
+        .collect()
+        .row(0)
+    )
+    bounds = [b for b in row if b is not None]
+    return bounds
+
+
+def _morton_bounds_from_lake(
+    base_uri: str,
+    geometry_column: str,
+    n_partitions: int,
+) -> list:
+    """Uniform Morton-range breakpoints, computed from the materialized lake.
+
+    Mirrors :func:`compute_uniform_range_bounds` + the ``uniform_range`` branch
+    of :func:`resolve_bounds`: take the bounding box of the decoded
+    ``{col}_x/_y/_z`` columns, Morton-encode its corners, then ``linspace`` the
+    interior breakpoints.
+    """
+    if n_partitions <= 1:
+        return []
+    col = geometry_column
+    stats = (
+        pl.scan_delta(base_uri)
+        .select(
+            pl.col(f"{col}_x").min().alias("xmin"),
+            pl.col(f"{col}_x").max().alias("xmax"),
+            pl.col(f"{col}_y").min().alias("ymin"),
+            pl.col(f"{col}_y").max().alias("ymax"),
+            pl.col(f"{col}_z").min().alias("zmin"),
+            pl.col(f"{col}_z").max().alias("zmax"),
+        )
+        .collect()
+        .row(0, named=True)
+    )
+    if stats["xmin"] is None:
+        return []
+    corners = morton_encode_3d(
+        np.array([stats["xmin"], stats["xmax"]], dtype=np.uint64),
+        np.array([stats["ymin"], stats["ymax"]], dtype=np.uint64),
+        np.array([stats["zmin"], stats["zmax"]], dtype=np.uint64),
+    )
+    col_min, col_max = float(corners.min()), float(corners.max())
+    if col_min == col_max:
+        return []
+    return np.linspace(col_min, col_max, n_partitions + 1)[1:-1].tolist()
+
+
+def _repartition_view_spec_from_lake(
+    base_uri: str,
+    spec: DeltaLakeOutputSpec,
+    output_uri_base: str,
+    row_count: int,
+    bytes_per_row: int,
+    target_partition_size_mb: int,
+    optimize_max_concurrent_tasks: int = 1,
+    optimize_target_size: int | None = None,
+    optimize_max_spill_size: int | None = None,
+) -> None:
+    """Pass 2: write one partitioned spec by reading back the flat base lake.
+
+    Bounds are derived from the materialized data (now that the row count is
+    known) and rows are streamed batch-by-batch from the base lake — the view
+    is never touched again.
+    """
+    from deltalake import DeltaTable, write_deltalake
+
+    out_uri = f"{output_uri_base}/{spec.name}"
+
+    n = spec.n_partitions
+    if n == "auto" or n is None:
+        effective_target = spec.target_file_size_mb or target_partition_size_mb
+        n = resolve_n_partitions(
+            "auto",
+            row_count,
+            target_file_size_mb=effective_target,
+            bytes_per_row=bytes_per_row,
+        )
+
+    if spec.partition_strategy == "percentile_range":
+        bounds = _percentile_bounds_from_lake(base_uri, spec.partition_by, n)
+    elif spec.partition_strategy == "uniform_range":
+        bounds = _morton_bounds_from_lake(base_uri, spec.source_geometry_column, n)
+    else:
+        bounds = spec.bounds
+
+    partition_col = f"{spec.partition_by}_partition"
+    dataset = DeltaTable(base_uri).to_pyarrow_dataset()
+    for batch in dataset.to_batches():
+        if batch.num_rows == 0:
+            continue
+        df = pl.from_arrow(batch)
+        if spec.source_geometry_column is not None:
+            df = add_morton_column(df, spec.source_geometry_column)
+        if spec.partition_strategy == "hash":
+            df = assign_hash_partition(df, spec.partition_by, n if isinstance(n, int) else 1)
+        else:
+            df = assign_partition(df, spec.partition_by, bounds or [])
+        write_deltalake(
+            out_uri,
+            df.to_arrow(),
+            mode="append",
+            partition_by=[partition_col],
+        )
+
+    optimize_deltalake(
+        out_uri,
+        zorder_columns=spec.zorder_columns or None,
+        bloom_filter_columns=spec.bloom_filter_columns or None,
+        fpp=spec.bloom_filter_fpp or 0.001,
+        max_concurrent_tasks=optimize_max_concurrent_tasks,
+        target_size=optimize_target_size,
+        max_spill_size=optimize_max_spill_size,
+    )
+
+
+def export_view_to_deltalake(
+    connection_string: str,
+    view_name: str,
+    output_specs: list[DeltaLakeOutputSpec],
+    output_uri_base: str,
+    flush_threshold_bytes: int = 2 * 1024 * 1024 * 1024,
+    target_partition_size_mb: int = 256,
+    progress_callback: Callable[[int, int | None], None] | None = None,
+    phase_callback: Callable[[str, str], None] | None = None,
+    optimize_callback: Callable[[str, str], None] | None = None,
+    optimize_max_concurrent_tasks: int = 1,
+    optimize_target_size: int | None = None,
+    optimize_max_spill_size: int | None = None,
+) -> int:
+    """Two-pass, count-free export of a (regular) view to one or more Delta Lakes.
+
+    A view cannot be cheaply counted or sampled — every upfront query executes
+    its full (often aggregating) definition.  So instead of resolving partition
+    counts/bounds against the source first, this:
+
+    1. **Streams the view exactly once** into a flat (un-partitioned) base Delta
+       Lake, decoding geometry and counting rows as it goes.
+    2. **Re-partitions from that materialized lake**: now that the true row
+       count is known, partition counts and bounds are derived from the cheap
+       columnar data, and each partitioned spec is written by reading the base
+       lake back.
+
+    *output_specs* must contain exactly one un-partitioned spec (``partition_by``
+    is ``None``) — the flat base; the rest are partitioned specs derived from it.
+
+    Returns the exact streamed row count.
+    """
+    source = TableSource(annotation_table=view_name)
+    geometry_columns = _get_geometry_columns(connection_string, view_name)
+
+    flat_spec = next((s for s in output_specs if s.partition_by is None), None)
+    base_name = flat_spec.name if flat_spec is not None else "flat"
+    base_uri = f"{output_uri_base}/{base_name}"
+    partitioned_specs = [s for s in output_specs if s.partition_by is not None]
+
+    # --- Pass 1: stream the view once into the flat base lake ---
+    if phase_callback is not None:
+        phase_callback("streaming", "Streaming view to flat Delta Lake...")
+    row_count = _stream_view_to_flat_lake(
+        connection_string,
+        source,
+        base_uri,
+        geometry_columns,
+        flush_threshold_bytes,
+        progress_callback=progress_callback,
+    )
+
+    if optimize_callback is not None:
+        optimize_callback(base_name, "z_order" if flat_spec and flat_spec.zorder_columns else "compact")
+    optimize_deltalake(
+        base_uri,
+        zorder_columns=(flat_spec.zorder_columns or None) if flat_spec else None,
+        bloom_filter_columns=(flat_spec.bloom_filter_columns or None) if flat_spec else None,
+        fpp=(flat_spec.bloom_filter_fpp or 0.001) if flat_spec else 0.001,
+        max_concurrent_tasks=optimize_max_concurrent_tasks,
+        target_size=optimize_target_size,
+        max_spill_size=optimize_max_spill_size,
+    )
+    if optimize_callback is not None:
+        optimize_callback(base_name, "vacuum")
+
+    # --- Pass 2: re-partition each partitioned spec from the base lake ---
+    bytes_per_row = _lake_bytes_per_row(base_uri, row_count)
+    for spec in partitioned_specs:
+        if phase_callback is not None:
+            phase_callback(
+                "repartitioning",
+                f"Re-partitioning '{spec.name}' from flat lake ({row_count:,} rows)...",
+            )
+        if optimize_callback is not None:
+            optimize_callback(spec.name, "z_order" if spec.zorder_columns else "compact")
+        _repartition_view_spec_from_lake(
+            base_uri,
+            spec,
+            output_uri_base,
+            row_count,
+            bytes_per_row,
+            target_partition_size_mb,
+            optimize_max_concurrent_tasks=optimize_max_concurrent_tasks,
+            optimize_target_size=optimize_target_size,
+            optimize_max_spill_size=optimize_max_spill_size,
+        )
+        if optimize_callback is not None:
+            optimize_callback(spec.name, "vacuum")
+
+    return row_count
+
+
 def optimize_deltalake(
     uri: str,
     zorder_columns: list[str] | None = None,
@@ -1302,6 +1776,37 @@ def _get_redis_client():
     )
 
 
+@contextmanager
+def _progress_heartbeat(write_fn: Callable[[], None], interval: float = 10.0):
+    """Call *write_fn* every *interval* seconds in a daemon thread.
+
+    Used to keep an export's Redis status fresh while the worker is blocked on
+    a long, silent operation — e.g. an aggregating view where Postgres emits no
+    rows until the whole aggregation completes, so the per-batch progress
+    callback would otherwise not fire for minutes.  *write_fn* must be safe to
+    call concurrently with the main thread's own status writes (last-writer-wins
+    on the same Redis key, both deriving from the same shared counter).
+    """
+    import threading
+
+    stop = threading.Event()
+
+    def _run() -> None:
+        while not stop.wait(interval):
+            try:
+                write_fn()
+            except Exception:
+                celery_logger.warning("progress heartbeat failed", exc_info=True)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+
+
 def make_redis_progress_callback(
     datastack: str,
     version: int,
@@ -1342,8 +1847,15 @@ def set_deltalake_export_status(
     phase: str | None = None,
     error: str | None = None,
     job_id: str | None = None,
+    elapsed_seconds: float | None = None,
+    rows_per_second: float | None = None,
 ) -> None:
-    """Write a terminal status (``complete``, ``failed``, etc.) to Redis."""
+    """Write a terminal status (``complete``, ``failed``, etc.) to Redis.
+
+    *elapsed_seconds* and *rows_per_second* provide a live "heartbeat" for
+    exports whose total row count is unknown (e.g. views): the UI can show that
+    work is progressing — and how fast — even before/without a percentage.
+    """
     client = _get_redis_client()
     key = deltalake_export_redis_key(datastack, version, table_name, job_id=job_id)
     pct = None
@@ -1355,6 +1867,12 @@ def set_deltalake_export_status(
         "rows_processed": rows_processed,
         "total_rows": total_rows,
         "percent_complete": pct,
+        "elapsed_seconds": (
+            round(elapsed_seconds, 1) if elapsed_seconds is not None else None
+        ),
+        "rows_per_second": (
+            round(rows_per_second) if rows_per_second is not None else None
+        ),
         "error": error,
         "last_updated": datetime.now(timezone.utc).isoformat(),
     }
@@ -1504,30 +2022,47 @@ def write_deltalake_table(
         # --- Resolve table structure from frozen DB metadata ---
         engine = db_manager.get_engine(analysis_database)
 
-        # Determine if the table was merged and look up row count.
-        with db_manager.session_scope(analysis_database) as session:
-            metadata_row = (
-                session.query(MaterializedMetadata)
-                .filter(MaterializedMetadata.table_name == table_name)
-                .first()
+        # Views are materialized views cloned into the frozen DB; they are not
+        # tracked in MaterializedMetadata and have no segmentation join.
+        relation_kind = _classify_relation(connection_string, table_name)
+        if relation_kind is None:
+            raise ValueError(
+                f"No table or view named {table_name!r} in {analysis_database}"
             )
-            if metadata_row is None:
-                raise ValueError(
-                    f"No MaterializedMetadata entry for table {table_name!r} "
-                    f"in {analysis_database}"
-                )
-            row_count = metadata_row.row_count
+        is_view = relation_kind == "view"
 
-        # Detect segmentation table presence.
-        seg_table_name = build_segmentation_table_name(table_name, pcg_table_name)
-        has_seg_table = engine.dialect.has_table(engine, seg_table_name)
-        segmentation_table_name = seg_table_name if has_seg_table else None
+        if is_view:
+            # A view's row count is unknown until it is streamed once — counting
+            # it upfront would execute the full (often aggregating) view query.
+            # export_view_to_deltalake fills this in from the streamed batches.
+            row_count = None
+            segmentation_table_name = None
+        else:
+            # Determine if the table was merged and look up row count.
+            with db_manager.session_scope(analysis_database) as session:
+                metadata_row = (
+                    session.query(MaterializedMetadata)
+                    .filter(MaterializedMetadata.table_name == table_name)
+                    .first()
+                )
+                if metadata_row is None:
+                    raise ValueError(
+                        f"No MaterializedMetadata entry for table {table_name!r} "
+                        f"in {analysis_database}"
+                    )
+                row_count = metadata_row.row_count
+
+            # Detect segmentation table presence.
+            seg_table_name = build_segmentation_table_name(table_name, pcg_table_name)
+            has_seg_table = engine.dialect.has_table(engine, seg_table_name)
+            segmentation_table_name = seg_table_name if has_seg_table else None
 
         celery_logger.info(
-            "Table %s (v%d): %d rows, segmentation=%s",
+            "%s %s (v%d): %s rows, segmentation=%s",
+            "View" if is_view else "Table",
             table_name,
             version,
-            row_count,
+            row_count if row_count is not None else "unknown (streamed)",
             segmentation_table_name or "none",
         )
 
@@ -1544,6 +2079,13 @@ def write_deltalake_table(
                 total_rows=row_count,
             )
             resolved_specs = [DeltaLakeOutputSpec(**s) for s in output_specs]
+        elif is_view:
+            _phase(
+                "discovering_specs",
+                "Discovering output specs...",
+                total_rows=row_count,
+            )
+            resolved_specs = discover_view_output_specs(source, connection_string)
         else:
             _phase(
                 "discovering_specs",
@@ -1588,7 +2130,11 @@ def write_deltalake_table(
             except Exception:
                 existing_rows = None
 
-            if existing_rows is not None and existing_rows != row_count:
+            if (
+                existing_rows is not None
+                and not is_view
+                and existing_rows != row_count
+            ):
                 raise RuntimeError(
                     f"Delta Lake for table {table_name!r} already exists at "
                     f"{uri} but has {existing_rows} rows (expected {row_count}). "
@@ -1598,45 +2144,16 @@ def write_deltalake_table(
 
             if existing_rows is not None:
                 raise RuntimeError(
-                    f"Delta Lake for table {table_name!r} already exists at "
-                    f"{uri} with {existing_rows} rows (matches expected count). "
+                    f"Delta Lake for {table_name!r} already exists at "
+                    f"{uri} with {existing_rows} rows. "
                     f"Delete the existing Delta Lake before re-exporting."
                 )
 
-        # --- Estimate bytes per row and resolve partition counts / bounds ---
-        _phase(
-            "computing_boundaries",
-            f"Resolved {len(resolved_specs)} output specs. "
-            "Computing partition boundaries...",
-            total_rows=row_count,
-        )
-        bytes_per_row = estimate_bytes_per_row(connection_string, source)
-
-        small_table_threshold_mb = get_config_param(
-            "DELTALAKE_SMALL_TABLE_THRESHOLD_MB", 200
-        )
-        estimated_total_mb = row_count * bytes_per_row / (1024 * 1024)
-        if estimated_total_mb < small_table_threshold_mb and len(resolved_specs) > 1:
-            celery_logger.info(
-                "Table %s estimated size %.1f MB < threshold %s MB — "
-                "trimming to single (id) spec",
-                table_name,
-                estimated_total_mb,
-                small_table_threshold_mb,
-            )
-            resolved_specs = resolved_specs[:1]
-
-        for spec in resolved_specs:
-            if spec.n_partitions == "auto" or spec.n_partitions is None:
-                effective_target = spec.target_file_size_mb or target_partition_size_mb
-                spec.n_partitions = resolve_n_partitions(
-                    "auto",
-                    row_count,
-                    target_file_size_mb=effective_target,
-                    bytes_per_row=bytes_per_row,
-                )
-
-        resolve_all_bounds(resolved_specs, connection_string, table_name)
+        # Boundary computation / partition sizing differs by relation kind and
+        # is handled per-branch below: views can't be counted or sampled
+        # upfront (it would execute the full view), so the table-only steps
+        # (estimate_bytes_per_row, small-table trim, resolve_all_bounds) must
+        # NOT run for views — they are done in the else branch only.
 
         # --- Stream and write ---
         _last_log_time = {"t": 0.0}
@@ -1663,12 +2180,6 @@ def write_deltalake_table(
             _log_progress(rows_so_far, total)
             redis_callback(rows_so_far, total)
 
-        _phase(
-            "streaming",
-            f"Streaming {row_count:,} rows to Delta Lake...",
-            total_rows=row_count,
-        )
-
         def _optimize_callback(spec_name: str, action: str) -> None:
             msg = (
                 f"Vacuuming Delta Lake '{spec_name}'..."
@@ -1676,26 +2187,122 @@ def write_deltalake_table(
                 else f"Optimizing Delta Lake '{spec_name}' ({action})..."
             )
             _log(msg)
-            _set_status(
-                status="exporting",
-                total_rows=row_count,
-                rows_processed=row_count,
-                phase="optimizing",
+            _set_status(status="exporting", phase="optimizing")
+
+        if is_view:
+            # Views can't be counted/sampled cheaply, so stream once into a flat
+            # lake (which yields the exact row count) and re-partition from it.
+            # Postgres emits no rows until an aggregating view is fully computed,
+            # so a heartbeat keeps the UI live (elapsed + rows/s) during that wait
+            # — without it the per-batch callback wouldn't fire for minutes.
+            _view_state = {"rows": 0, "phase": "streaming"}
+            _view_start = time.monotonic()
+
+            def _view_status_write() -> None:
+                elapsed = time.monotonic() - _view_start
+                rows = _view_state["rows"]
+                rate = rows / elapsed if elapsed > 0 else None
+                _set_status(
+                    status="exporting",
+                    phase=_view_state["phase"],
+                    rows_processed=rows,
+                    elapsed_seconds=elapsed,
+                    rows_per_second=rate,
+                )
+
+            def _view_progress(rows_so_far: int, total: int | None) -> None:
+                _view_state["rows"] = rows_so_far
+                _log_progress(rows_so_far, total)
+                _view_status_write()
+
+            def _view_phase(phase: str, message: str) -> None:
+                _view_state["phase"] = phase
+                celery_logger.info("%s (v%d): %s", table_name, version, message)
+                _log(message)
+                _view_status_write()
+
+            _log(
+                "Executing view query in Postgres — for large aggregating views "
+                "the first rows can take several minutes."
             )
 
-        export_table_to_deltalake(
-            connection_string=connection_string,
-            source=source,
-            output_specs=resolved_specs,
-            output_uri_base=output_uri_base,
-            flush_threshold_bytes=flush_threshold,
-            total_rows=row_count,
-            progress_callback=_progress,
-            optimize_callback=_optimize_callback,
-            optimize_max_concurrent_tasks=optimize_max_concurrent_tasks,
-            optimize_target_size=optimize_target_size,
-            optimize_max_spill_size=optimize_max_spill_size,
-        )
+            with _progress_heartbeat(_view_status_write, interval=10.0):
+                row_count = export_view_to_deltalake(
+                    connection_string=connection_string,
+                    view_name=table_name,
+                    output_specs=resolved_specs,
+                    output_uri_base=output_uri_base,
+                    flush_threshold_bytes=flush_threshold,
+                    target_partition_size_mb=target_partition_size_mb,
+                    progress_callback=_view_progress,
+                    phase_callback=_view_phase,
+                    optimize_callback=_optimize_callback,
+                    optimize_max_concurrent_tasks=optimize_max_concurrent_tasks,
+                    optimize_target_size=optimize_target_size,
+                    optimize_max_spill_size=optimize_max_spill_size,
+                )
+        else:
+            # --- Estimate bytes per row and resolve partition counts / bounds ---
+            _phase(
+                "computing_boundaries",
+                f"Resolved {len(resolved_specs)} output specs. "
+                "Computing partition boundaries...",
+                total_rows=row_count,
+            )
+            bytes_per_row = estimate_bytes_per_row(connection_string, source)
+
+            # For a small table, collapse to a single output spec — partitioning
+            # a tiny table just produces many undersized files.
+            small_table_threshold_mb = get_config_param(
+                "DELTALAKE_SMALL_TABLE_THRESHOLD_MB", 200
+            )
+            estimated_total_mb = row_count * bytes_per_row / (1024 * 1024)
+            if (
+                estimated_total_mb < small_table_threshold_mb
+                and len(resolved_specs) > 1
+            ):
+                celery_logger.info(
+                    "Table %s estimated size %.1f MB < threshold %s MB — "
+                    "trimming to single spec",
+                    table_name,
+                    estimated_total_mb,
+                    small_table_threshold_mb,
+                )
+                resolved_specs = resolved_specs[:1]
+
+            for spec in resolved_specs:
+                if spec.n_partitions == "auto" or spec.n_partitions is None:
+                    effective_target = (
+                        spec.target_file_size_mb or target_partition_size_mb
+                    )
+                    spec.n_partitions = resolve_n_partitions(
+                        "auto",
+                        row_count,
+                        target_file_size_mb=effective_target,
+                        bytes_per_row=bytes_per_row,
+                    )
+
+            resolve_all_bounds(resolved_specs, connection_string, table_name)
+
+            _phase(
+                "streaming",
+                f"Streaming {row_count:,} rows to Delta Lake...",
+                total_rows=row_count,
+            )
+
+            export_table_to_deltalake(
+                connection_string=connection_string,
+                source=source,
+                output_specs=resolved_specs,
+                output_uri_base=output_uri_base,
+                flush_threshold_bytes=flush_threshold,
+                total_rows=row_count,
+                progress_callback=_progress,
+                optimize_callback=_optimize_callback,
+                optimize_max_concurrent_tasks=optimize_max_concurrent_tasks,
+                optimize_target_size=optimize_target_size,
+                optimize_max_spill_size=optimize_max_spill_size,
+            )
     except Exception as e:
         try:
             _log(f"Export failed: {e}")

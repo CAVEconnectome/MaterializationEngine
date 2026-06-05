@@ -122,6 +122,23 @@
                             </div>
                         </div>
 
+                        <!-- Indeterminate heartbeat (no known total, e.g. views) -->
+                        <div class="mb-3" x-show="getProgress(exp).status === 'exporting' && !getProgress(exp).total_rows">
+                            <div class="d-flex justify-content-between mb-1">
+                                <small>
+                                    <span x-text="(getProgress(exp).rows_processed || 0).toLocaleString()"></span> rows processed
+                                    <span x-show="getProgress(exp).rows_per_second" x-text="` · ${(getProgress(exp).rows_per_second || 0).toLocaleString()} rows/s`"></span>
+                                </small>
+                                <small class="text-muted" x-show="getProgress(exp).elapsed_seconds != null" x-text="`elapsed ${fmtDuration(getProgress(exp).elapsed_seconds)}`"></small>
+                            </div>
+                            <div class="progress" style="height: 20px;">
+                                <div class="progress-bar progress-bar-striped progress-bar-animated bg-primary" style="width: 100%"></div>
+                            </div>
+                            <small class="text-muted d-block mt-1" x-show="(getProgress(exp).rows_processed || 0) === 0">
+                                Postgres is computing the view; the first rows can take several minutes for large aggregating views.
+                            </small>
+                        </div>
+
                         <!-- Error panel -->
                         <div x-show="getProgress(exp).error" class="error-panel mb-3">
                             <strong><i class="fas fa-exclamation-triangle me-1"></i>Error:</strong>
