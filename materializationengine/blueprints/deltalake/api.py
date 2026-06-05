@@ -11,7 +11,7 @@ from flask import (
     request,
     url_for,
 )
-from middle_auth_client import auth_required, auth_requires_admin
+from middle_auth_client import auth_required, auth_requires_dataset_admin
 
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.info_client import get_datastack_info, get_datastacks
@@ -31,14 +31,6 @@ def _is_auth_disabled():
     )
 
 
-def _has_datastack_permission(auth_user_info, permission_level, datastack_name):
-    if not auth_user_info or not datastack_name or not permission_level:
-        return False
-    permissions = auth_user_info.get("permissions", [])
-    required_permission = f"{datastack_name.lower()}_{permission_level.lower()}"
-    return required_permission in permissions
-
-
 # ---------------------------------------------------------------------------
 # Wizard page routes
 # ---------------------------------------------------------------------------
@@ -46,7 +38,7 @@ def _has_datastack_permission(auth_user_info, permission_level, datastack_name):
 
 @deltalake_bp.route("/")
 @reset_auth
-@auth_requires_admin
+@auth_required
 def index():
     """Redirect to step 1 of the wizard."""
     return redirect(url_for("deltalake.wizard_step", step_number=1))
@@ -54,7 +46,7 @@ def index():
 
 @deltalake_bp.route("/step<int:step_number>")
 @reset_auth
-@auth_requires_admin
+@auth_required
 def wizard_step(step_number):
     total_steps = 3
 
@@ -70,6 +62,25 @@ def wizard_step(step_number):
             exc_info=True,
         )
         datastacks = []
+
+    if not _is_auth_disabled():
+        datasets_admin = g.get("auth_user", {}).get("datasets_admin", [])
+        datastacks = [ds for ds in datastacks if ds in datasets_admin]
+
+    if not datastacks and not _is_auth_disabled():
+        return render_template(
+            "deltalake_wizard.html",
+            current_step=step_number,
+            total_steps=total_steps,
+            step_template=None,
+            datastacks=[],
+            current_user=g.get("auth_user", {}),
+            access_denied=True,
+            access_denied_message="dataset_admin permission is required. You do not have dataset_admin access for any datastacks.",
+            target_partition_size_mb=get_config_param("DELTALAKE_TARGET_PARTITION_SIZE_MB", 256),
+            bloom_filter_fpp=get_config_param("DELTALAKE_BLOOM_FILTER_FPP", 0.001),
+            output_bucket=get_config_param("DELTALAKE_OUTPUT_BUCKET", ""),
+        ), 403
 
     step_template_path = f"deltalake/step{step_number}.html"
 
@@ -90,7 +101,7 @@ def wizard_step(step_number):
 
 @deltalake_bp.route("/running-exports")
 @reset_auth
-@auth_requires_admin
+@auth_required
 def running_exports_page():
     """Render the running exports monitoring page."""
     return render_template(
@@ -122,10 +133,10 @@ def get_defaults():
     )
 
 
-@deltalake_bp.route("/api/discover-specs", methods=["POST"])
+@deltalake_bp.route("/api/<string:datastack_name>/discover-specs", methods=["POST"])
 @reset_auth
-@auth_requires_admin
-def discover_specs():
+@auth_requires_dataset_admin(table_arg="datastack_name")
+def discover_specs(datastack_name):
     """Run spec discovery for a table without enqueuing an export.
 
     Expects JSON body: { datastack, version, table_name, target_partition_size_mb }
@@ -151,14 +162,13 @@ def discover_specs():
         return jsonify({"error": "Request body must be JSON"}), 400
 
     data = request.json
-    datastack = data.get("datastack")
     version = data.get("version")
     table_name = data.get("table_name")
     target_partition_size_mb = data.get("target_partition_size_mb", 256)
 
-    if not all([datastack, version, table_name]):
+    if not all([version, table_name]):
         return jsonify(
-            {"error": "datastack, version, and table_name are required"}
+            {"error": "version and table_name are required"}
         ), 400
 
     try:
@@ -167,7 +177,7 @@ def discover_specs():
         return jsonify({"error": f"Invalid table name: {table_name!r}"}), 400
 
     # Check Redis cache first.
-    cache_key = f"deltalake_specs:{datastack}:v{version}:{table_name}"
+    cache_key = f"deltalake_specs:{datastack_name}:v{version}:{table_name}"
     redis_client = _get_redis_client()
     cached = redis_client.get(cache_key)
     if cached:
@@ -188,16 +198,16 @@ def discover_specs():
         return jsonify(cached_data)
 
     try:
-        datastack_info = get_datastack_info(datastack)
+        datastack_info = get_datastack_info(datastack_name)
     except Exception as e:
         return jsonify({"error": f"Datastack not found: {e}"}), 404
 
     sql_uri_config = get_config_param("SQLALCHEMY_DATABASE_URI")
     connection_string = _build_frozen_db_connection_string(
-        sql_uri_config, datastack, version
+        sql_uri_config, datastack_name, version
     )
 
-    analysis_database = f"{datastack}__mat{version}"
+    analysis_database = f"{datastack_name}__mat{version}"
     pcg_table_name = datastack_info["segmentation_source"].split("/")[-1]
 
     try:
@@ -233,6 +243,13 @@ def discover_specs():
     # Discover specs.
     resolved_specs = discover_default_output_specs(source, engine)
     bytes_per_row = estimate_bytes_per_row(connection_string, source)
+
+    small_table_threshold_mb = int(
+        get_config_param("DELTALAKE_SMALL_TABLE_THRESHOLD_MB", 200)
+    )
+    estimated_total_mb = row_count * bytes_per_row / (1024 * 1024)
+    if estimated_total_mb < small_table_threshold_mb and len(resolved_specs) > 1:
+        resolved_specs = resolved_specs[:1]
 
     # Track which specs had "auto" before resolution (for caching).
     was_auto = [spec.n_partitions == "auto" for spec in resolved_specs]
@@ -296,10 +313,10 @@ def discover_specs():
     return jsonify(result)
 
 
-@deltalake_bp.route("/api/check-exists", methods=["POST"])
+@deltalake_bp.route("/api/<string:datastack_name>/check-exists", methods=["POST"])
 @reset_auth
-@auth_requires_admin
-def check_exists():
+@auth_requires_dataset_admin(table_arg="datastack_name")
+def check_exists(datastack_name):
     """Check whether Delta Lake exports already exist for a table/version.
 
     Expects JSON body: { datastack, version, table_name, spec_names? }
@@ -312,19 +329,18 @@ def check_exists():
         return jsonify({"error": "Request body must be JSON"}), 400
 
     data = request.json
-    datastack = data.get("datastack")
     version = data.get("version")
     table_name = data.get("table_name")
 
-    if not all([datastack, version, table_name]):
+    if not all([version, table_name]):
         return jsonify(
-            {"error": "datastack, version, and table_name are required"}
+            {"error": "version and table_name are required"}
         ), 400
 
     from materializationengine.workflows.deltalake_export import _validate_identifier
 
     try:
-        _validate_identifier(datastack)
+        _validate_identifier(datastack_name)
         _validate_identifier(table_name)
         version = int(version)
     except (ValueError, TypeError):
@@ -334,7 +350,7 @@ def check_exists():
     if not output_bucket:
         return jsonify({"error": "DELTALAKE_OUTPUT_BUCKET not configured"}), 500
 
-    output_uri_base = f"{output_bucket}/{datastack}/v{version}/{table_name}"
+    output_uri_base = f"{output_bucket}/{datastack_name}/v{version}/{table_name}"
 
     # If the caller provides explicit spec names, use those.
     # Otherwise fall back to cached specs or just check "flat".
@@ -350,7 +366,7 @@ def check_exists():
         from materializationengine.workflows.deltalake_export import _get_redis_client
 
         redis_client = _get_redis_client()
-        cache_key = f"deltalake_specs:{datastack}:v{version}:{table_name}"
+        cache_key = f"deltalake_specs:{datastack_name}:v{version}:{table_name}"
         cached = redis_client.get(cache_key)
 
         partition_names = ["flat"]
