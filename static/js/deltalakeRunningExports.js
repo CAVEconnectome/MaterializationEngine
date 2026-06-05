@@ -22,6 +22,17 @@ document.addEventListener("alpine:init", () => {
       return this.progress[this.exportId(exp)] || {};
     },
 
+    fmtDuration(seconds) {
+      if (seconds == null) return "";
+      const total = Math.floor(seconds);
+      const s = total % 60;
+      const m = Math.floor((total / 60) % 60);
+      const h = Math.floor(total / 3600);
+      if (h > 0) return `${h}h ${m}m ${s}s`;
+      if (m > 0) return `${m}m ${s}s`;
+      return `${s}s`;
+    },
+
     async pollAll() {
       await Promise.all(this.exports.map((exp) => this.pollOne(exp)));
       // Stop polling if all are terminal

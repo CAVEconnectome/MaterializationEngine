@@ -5,6 +5,7 @@ import math
 import re
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal
@@ -1775,6 +1776,37 @@ def _get_redis_client():
     )
 
 
+@contextmanager
+def _progress_heartbeat(write_fn: Callable[[], None], interval: float = 10.0):
+    """Call *write_fn* every *interval* seconds in a daemon thread.
+
+    Used to keep an export's Redis status fresh while the worker is blocked on
+    a long, silent operation — e.g. an aggregating view where Postgres emits no
+    rows until the whole aggregation completes, so the per-batch progress
+    callback would otherwise not fire for minutes.  *write_fn* must be safe to
+    call concurrently with the main thread's own status writes (last-writer-wins
+    on the same Redis key, both deriving from the same shared counter).
+    """
+    import threading
+
+    stop = threading.Event()
+
+    def _run() -> None:
+        while not stop.wait(interval):
+            try:
+                write_fn()
+            except Exception:
+                celery_logger.warning("progress heartbeat failed", exc_info=True)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+
+
 def make_redis_progress_callback(
     datastack: str,
     version: int,
@@ -1815,8 +1847,15 @@ def set_deltalake_export_status(
     phase: str | None = None,
     error: str | None = None,
     job_id: str | None = None,
+    elapsed_seconds: float | None = None,
+    rows_per_second: float | None = None,
 ) -> None:
-    """Write a terminal status (``complete``, ``failed``, etc.) to Redis."""
+    """Write a terminal status (``complete``, ``failed``, etc.) to Redis.
+
+    *elapsed_seconds* and *rows_per_second* provide a live "heartbeat" for
+    exports whose total row count is unknown (e.g. views): the UI can show that
+    work is progressing — and how fast — even before/without a percentage.
+    """
     client = _get_redis_client()
     key = deltalake_export_redis_key(datastack, version, table_name, job_id=job_id)
     pct = None
@@ -1828,6 +1867,12 @@ def set_deltalake_export_status(
         "rows_processed": rows_processed,
         "total_rows": total_rows,
         "percent_complete": pct,
+        "elapsed_seconds": (
+            round(elapsed_seconds, 1) if elapsed_seconds is not None else None
+        ),
+        "rows_per_second": (
+            round(rows_per_second) if rows_per_second is not None else None
+        ),
         "error": error,
         "last_updated": datetime.now(timezone.utc).isoformat(),
     }
@@ -2141,20 +2186,55 @@ def write_deltalake_table(
         if is_view:
             # Views can't be counted/sampled cheaply, so stream once into a flat
             # lake (which yields the exact row count) and re-partition from it.
-            row_count = export_view_to_deltalake(
-                connection_string=connection_string,
-                view_name=table_name,
-                output_specs=resolved_specs,
-                output_uri_base=output_uri_base,
-                flush_threshold_bytes=flush_threshold,
-                target_partition_size_mb=target_partition_size_mb,
-                progress_callback=_progress,
-                phase_callback=lambda phase, message: _phase(phase, message),
-                optimize_callback=_optimize_callback,
-                optimize_max_concurrent_tasks=optimize_max_concurrent_tasks,
-                optimize_target_size=optimize_target_size,
-                optimize_max_spill_size=optimize_max_spill_size,
+            # Postgres emits no rows until an aggregating view is fully computed,
+            # so a heartbeat keeps the UI live (elapsed + rows/s) during that wait
+            # — without it the per-batch callback wouldn't fire for minutes.
+            _view_state = {"rows": 0, "phase": "streaming"}
+            _view_start = time.monotonic()
+
+            def _view_status_write() -> None:
+                elapsed = time.monotonic() - _view_start
+                rows = _view_state["rows"]
+                rate = rows / elapsed if elapsed > 0 else None
+                _set_status(
+                    status="exporting",
+                    phase=_view_state["phase"],
+                    rows_processed=rows,
+                    elapsed_seconds=elapsed,
+                    rows_per_second=rate,
+                )
+
+            def _view_progress(rows_so_far: int, total: int | None) -> None:
+                _view_state["rows"] = rows_so_far
+                _log_progress(rows_so_far, total)
+                _view_status_write()
+
+            def _view_phase(phase: str, message: str) -> None:
+                _view_state["phase"] = phase
+                celery_logger.info("%s (v%d): %s", table_name, version, message)
+                _log(message)
+                _view_status_write()
+
+            _log(
+                "Executing view query in Postgres — for large aggregating views "
+                "the first rows can take several minutes."
             )
+
+            with _progress_heartbeat(_view_status_write, interval=10.0):
+                row_count = export_view_to_deltalake(
+                    connection_string=connection_string,
+                    view_name=table_name,
+                    output_specs=resolved_specs,
+                    output_uri_base=output_uri_base,
+                    flush_threshold_bytes=flush_threshold,
+                    target_partition_size_mb=target_partition_size_mb,
+                    progress_callback=_view_progress,
+                    phase_callback=_view_phase,
+                    optimize_callback=_optimize_callback,
+                    optimize_max_concurrent_tasks=optimize_max_concurrent_tasks,
+                    optimize_target_size=optimize_target_size,
+                    optimize_max_spill_size=optimize_max_spill_size,
+                )
         else:
             # --- Estimate bytes per row and resolve partition counts / bounds ---
             _phase(

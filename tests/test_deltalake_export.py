@@ -4,6 +4,7 @@ Tasks 4.1–4.5: output spec derivation, partition count heuristic,
 bucket boundary computation, and bucket assignment strategies.
 """
 
+import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -1440,6 +1441,55 @@ class TestProgressPayloadFields:
         assert payload["phase"] == "streaming"
         assert payload["error"] == "Connection reset"
         assert payload["percent_complete"] == 50.0
+
+    @patch("materializationengine.workflows.deltalake_export._get_redis_client")
+    def test_status_includes_heartbeat_fields(self, mock_redis_client):
+        import json
+
+        from materializationengine.workflows.deltalake_export import (
+            set_deltalake_export_status,
+        )
+
+        mock_client = MagicMock()
+        mock_redis_client.return_value = mock_client
+
+        # No total_rows (e.g. a view) — heartbeat carries elapsed + rate.
+        set_deltalake_export_status(
+            "minnie65",
+            943,
+            "my_view",
+            "exporting",
+            rows_processed=12345,
+            phase="streaming",
+            elapsed_seconds=42.37,
+            rows_per_second=291.6,
+        )
+
+        payload = json.loads(mock_client.set.call_args[0][1])
+        assert payload["rows_processed"] == 12345
+        assert payload["total_rows"] is None
+        assert payload["percent_complete"] is None
+        assert payload["elapsed_seconds"] == 42.4  # rounded to 1 decimal
+        assert payload["rows_per_second"] == 292  # rounded to int
+
+
+class TestProgressHeartbeat:
+    """_progress_heartbeat calls write_fn periodically until the block exits."""
+
+    def test_heartbeat_ticks_and_stops(self):
+        from materializationengine.workflows.deltalake_export import (
+            _progress_heartbeat,
+        )
+
+        calls = []
+        with _progress_heartbeat(lambda: calls.append(1), interval=0.05):
+            time.sleep(0.18)  # expect ~3 ticks
+        ticks_at_exit = len(calls)
+
+        assert ticks_at_exit >= 2  # fired periodically while inside the block
+        time.sleep(0.12)
+        # No further ticks after the context exits (thread stopped).
+        assert len(calls) == ticks_at_exit
 
     @patch("materializationengine.workflows.deltalake_export._get_redis_client")
     def test_append_deltalake_log(self, mock_redis_client):
