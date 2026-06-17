@@ -53,14 +53,14 @@ another for an otherwise-identical configuration, it is a **MAJOR** bump.
 | --- | --- | --- | --- |
 | `spec_version` | string | SemVer | Version of this metadata format. See §1. |
 | `scheme` | string | `"hash-modulo"` | The partitioning strategy. Only `hash-modulo` is defined in v1. |
-| `hash.algorithm` | string | `"MurmurHash3_x86_32"` | Exact hash variant. The `x86` denotes 32-bit-architecture mixing; the `32` denotes a 32-bit output. **Not** the x64_128 variant. |
+| `hash.algorithm` | string | `"MurmurHash3_x86_32"` | Exact hash variant. The `x86` denotes 32-bit-architecture mixing; the `32` denotes a 32-bit output. **Not** the x64_128 variant. Currently this is the only hash supported but more could easily be added here. |
 | `hash.seed` | integer | `0` .. `2^32 - 1` | Seed passed to the hash. |
-| `hash.output` | string | `"uint32"` | The hash result is interpreted as an unsigned 32-bit integer. |
+| `hash.output` | string | `"uint64"`, `"uint32"`, `"uint128"`, … | How the hash result should be interpreted. |
 | `key_encoding.type` | string | `"uint64"`, `"uint32"`, `"uint128"`, … | Logical type of the input key (unsigned integer). |
 | `key_encoding.bytes` | integer | `>= 1` | Number of bytes the key is serialized to before hashing. Must match be compatible with type width. |
 | `key_encoding.byte_order` | string | `"little"` \| `"big"` | Endianness of the serialized key. |
-| `partition_count` | integer | `>= 1` | Number of partitions. |
-| `partition_op` | string | `"hash_u32 mod partition_count"` | The reduction from hash to partition index. Fixed in v1. |
+| `partition_count` | integer | `>= 1` | Number of output partitions. |
+| `partition_op` | string | `"hash_u32 mod partition_count"` | The reduction from hash to partition index.|
 
 ## 4. Partition algorithm
 
@@ -70,7 +70,7 @@ computed as follows. The order is significant.
 1. **Serialize** `k` to exactly `key_encoding.bytes` bytes using
    `key_encoding.byte_order` endianness, producing a byte array `B`.
 2. **Hash** `B` with the named algorithm and `seed`, and interpret the result
-   as an unsigned 32-bit integer `h` (`hash.output`).
+   as an unsigned integer `h` as specified by (`hash.output`).
 3. **Reduce**: `partition = h mod partition_count`.
 4. The result is an integer in the half-open range `[0, partition_count)`.
 
@@ -91,8 +91,6 @@ The reference for step 2 is Austin Appleby's public-domain MurmurHash3
   value. Languages with sign-of-dividend modulo (C, Java, Go, Rust) will return
   a different (possibly negative) result if the hash is treated as signed first.
   Interpret as `uint32`, then reduce.
-- **Algorithm, not library.** Pin the algorithm and parameters, not a specific
-  library version. The algorithm is fixed; library packaging is not.
 - **Power-of-two note.** When `partition_count` is a power of two, `2^32` is an
   exact multiple of it, so the mapping is perfectly uniform with no modulo bias,
   and `h mod partition_count` equals masking the low `log2(partition_count)` bits.
@@ -118,9 +116,6 @@ convenience.
 | 81985529216486895 | `0x0123456789ABCDEF` | 4203775010 | 34 |
 | 9223372036854775808 | `0x8000000000000000` | 1366273829 | 805 |
 | 18446744073709551615 | `0xFFFFFFFFFFFFFFFF` | 1651860712 | 232 |
-
-The `0x0123456789ABCDEF` vector is included because any endianness error makes
-its hash diverge; `0xFFFFFFFFFFFFFFFF` exercises the full-width key.
 
 ## 7. Reference implementation (Python)
 
