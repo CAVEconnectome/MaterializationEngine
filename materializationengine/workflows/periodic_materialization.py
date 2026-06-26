@@ -35,7 +35,8 @@ def process_datastack(datastack, days_to_expire, merge_tables):
             .count()
         )
         if valid_databases >= max_databases:
-            return f"Number of valid materialized databases is {valid_databases}, threshold is set to: {max_databases}"
+            celery_logger.info("Number of valid materialized databases is {valid_databases}, threshold is set to: {max_databases}")
+            return False
     datastack_info["database_expires"] = True
     task = run_complete_workflow.s(
         datastack_info, days_to_expire=days_to_expire, merge_tables=merge_tables
@@ -74,6 +75,8 @@ def run_periodic_materialization(
     for datastack in datastacks:
         try:
             is_running = process_datastack(datastack, days_to_expire, merge_tables)
+            if not is_running:
+                celery_logger.error(f"Materialization workflow for {datastack} is not running: {is_running}")
         except Exception as e:
             celery_logger.error(e)
             raise e
