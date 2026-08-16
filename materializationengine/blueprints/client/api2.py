@@ -1810,7 +1810,10 @@ def assemble_live_query_dataframe(user_data, datastack_name, args):
 class LiveTableQuery(Resource):
     method_decorators = [
         validate_datastack,
-        limit_by_category("query"),
+        # Named so a service account override can target just this endpoint; it is the one
+        # caveclient's live_live_query posts to, and so the one internal batch consumers
+        # (e.g. SkeletonService's _get_root_soma) saturate.
+        limit_by_category("query", endpoint="LiveTableQuery"),
         auth_requires_permission("view", table_arg="datastack_name"),
         reset_auth,
     ]
