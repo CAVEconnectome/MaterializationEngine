@@ -18,7 +18,6 @@ import json
 import flask
 import pytest
 
-from materializationengine import limiter as limiter_module
 from materializationengine.limiter import (
     get_rate_limit_from_config,
     get_service_account_rate_limit,
@@ -53,14 +52,6 @@ def app():
     application.config["RATELIMIT_ENABLED"] = True
     limiter.init_app(application)
     return application
-
-
-def _as(app, user):
-    """Request context with flask.g.auth_user set, as middle_auth_client would."""
-    ctx = app.test_request_context("/")
-    ctx.push()
-    flask.g.auth_user = user
-    return ctx
 
 
 SERVICE_ACCOUNT = {"id": 1174, "service_account": True, "name": "minniev2_pcg"}
