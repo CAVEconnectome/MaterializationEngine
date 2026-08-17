@@ -11,7 +11,7 @@ minniev7 (2026-08-17): while it scaled, materialize's internal call was refused 
 -- and materialize returned that to its callers as a 500, which the skeleton cache then dropped.
 """
 
-import importlib
+import pathlib
 
 import pytest
 
@@ -66,12 +66,24 @@ class TestServiceResolution:
         assert url.startswith("http://"), url
         assert "." not in url.split("//", 1)[1].rstrip("/"), f"{url} looks like an external domain"
 
-    def test_module_level_constant_uses_the_resolver(self, env):
-        reloaded = importlib.reload(gw)
-        try:
-            assert reloaded.PCG_SERVICE == "http://pychunkedgraph-read-service/"
-        finally:
-            importlib.reload(gw)  # restore for any later test in the session
+    def test_module_level_constant_uses_the_resolver(self):
+        """Checked against the source, deliberately, rather than by reloading the module.
+
+        tests/test_ingest_new_annotations.py and tests/test_update_root_ids.py both do
+
+            sys.modules["materializationengine.chunkedgraph_gateway"] = MagicMock()
+
+        at import scope, so from collection onwards the sys.modules entry is a mock and
+        importlib.reload() raises "module ... not in sys.modules". Re-registering the real module
+        to work around that would break those two files instead. The resolver's behaviour is
+        covered by the tests above; this only pins the constant to it, so a future edit cannot
+        reintroduce a separate os.environ.get here and bypass the default.
+        """
+        src = pathlib.Path(gw.__file__).read_text()
+
+        assert "PCG_SERVICE = _resolve_pcg_service()" in src
+        assert 'os.environ.get("LOCAL_SERVER_URL")' not in src, \
+            "the chunkedgraph must not be resolved through LOCAL_SERVER_URL"
 
     def test_the_gateway_passes_the_address_to_the_client(self, env, monkeypatch):
         captured = {}
