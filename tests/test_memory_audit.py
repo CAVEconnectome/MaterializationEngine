@@ -102,7 +102,7 @@ class TestMemReading:
 
 
 class TestFilterSummary:
-    def test_records_shapes_never_values(self):
+    def test_long_filters_record_only_a_count(self):
         rid = 864691136928006474
         body = {
             "table": "synapses_pni_2",
@@ -112,14 +112,58 @@ class TestFilterSummary:
             "select_columns": ["x", "y", "z"],
         }
         summary = _summarize_filters(body)
-        # The whole point: a filter can hold hundreds of thousands of root ids, so logging
-        # values would reproduce the memory problem being diagnosed.
+        # A filter can hold hundreds of thousands of root ids, so logging those values would
+        # reproduce the memory problem being diagnosed.
         assert str(rid) not in json.dumps(summary)
         assert summary["filter_in_dict"]["synapses_pni_2"]["pre_pt_root_id"] == 50000
         assert summary["table"] == "synapses_pni_2"
         assert summary["limit"] == 200000
         assert summary["n_joins"] == 2
         assert summary["n_select_columns"] == 3
+
+    def test_short_filters_record_the_values(self):
+        """Shape alone cannot identify a culprit; a one-value filter must name it."""
+        rid = 864691135406097394
+        summary = _summarize_filters(
+            {
+                "table": "synapses_pni_2",
+                "filter_equal_dict": {"synapses_pni_2": {"post_pt_root_id": rid}},
+            }
+        )
+        assert summary["filter_equal_dict"]["synapses_pni_2"]["post_pt_root_id"] == [
+            str(rid)
+        ]
+        assert str(rid) in json.dumps(summary)
+
+    def test_root_ids_are_strings_to_survive_json_reparsing(self):
+        """864691135406097394 > 2**53, so a double-parsing consumer would corrupt it."""
+        rid = 864691135406097394
+        assert rid > 2**53
+        summary = _summarize_filters(
+            {"filter_in_dict": {"t": {"pre_pt_root_id": [rid, rid + 1]}}}
+        )
+        vals = summary["filter_in_dict"]["t"]["pre_pt_root_id"]
+        assert vals == [str(rid), str(rid + 1)]
+        # Round-trip through a float-parsing consumer must not change the recorded value.
+        assert int(json.loads(json.dumps(vals))[0]) == rid
+
+    def test_value_logging_respects_max_values(self):
+        rid = 864691135406097394
+        body = {"filter_in_dict": {"t": {"c": [rid + i for i in range(5)]}}}
+        assert len(_summarize_filters(body, max_values=5)["filter_in_dict"]["t"]["c"]) == 5
+        # One over the threshold degrades to a count rather than truncating silently.
+        assert _summarize_filters(body, max_values=4)["filter_in_dict"]["t"]["c"] == 5
+
+    def test_global_budget_bounds_a_wide_body(self):
+        """Many short filters must not add up to an enormous log line."""
+        rid = 864691135406097394
+        body = {
+            "filter_in_dict": {
+                f"t{i}": {f"c{j}": [rid] * 8 for j in range(12)} for i in range(12)
+            }
+        }
+        rendered = json.dumps(_summarize_filters(body, total_values=64))
+        assert len(rendered) < 4000, len(rendered)
 
     def test_tolerates_unexpected_shapes(self):
         for body in (

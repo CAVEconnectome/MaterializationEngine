@@ -60,6 +60,13 @@ class BaseConfig:
     MEMORY_AUDIT_MAX_BODY_BYTES = int(
         os.environ.get("MEMORY_AUDIT_MAX_BODY_BYTES", 2 * 1024 * 1024)
     )
+    # Filters with at most this many values are logged WITH their values, so the offending
+    # request is identifiable; longer filters degrade to a count. Shape alone was not enough:
+    # two root ids OOM-killing api pods on 2026-08-18 all logged as
+    # {synapses_pni_2: {post_pt_root_id: 1}} -- one value, value unknown.
+    MEMORY_AUDIT_MAX_FILTER_VALUES = int(
+        os.environ.get("MEMORY_AUDIT_MAX_FILTER_VALUES", 8)
+    )
 
     REDIS_HOST = "localhost"
     REDIS_PORT = 6379

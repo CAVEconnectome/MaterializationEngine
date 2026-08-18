@@ -71,14 +71,48 @@ def _mb(kb):
     return None if kb is None else round(kb / 1024.0, 1)
 
 
-def _summarize_filters(body, max_keys=12):
-    """Shape of a query body: which tables and filters, and how large, never the values.
+def _filter_values(v, budget, max_values):
+    """Filter values verbatim when the list is short, otherwise just its length.
 
-    Filter dicts routinely hold hundreds of thousands of root ids. Logging them would
-    reproduce the memory problem being diagnosed, and the *shape* is what distinguishes
-    an expensive query from a cheap one anyway.
+    A LIST in the output means "these are the actual values"; an INT means "this many values,
+    elided". Consumers tell them apart by type.
+
+    Values are stringified on purpose. A root id such as 864691135406097394 exceeds 2**53, so
+    any consumer that re-parses the log line as JSON with double-precision numbers silently
+    corrupts its low digits -- destroying the one property the id is logged for.
+
+    ``budget`` is a single-element list used as a shared counter across the whole summary, so a
+    body filtering many columns cannot add up to an enormous log line even when every
+    individual column sits under ``max_values``.
+    """
+    if isinstance(v, (list, tuple)):
+        n = len(v)
+        if n > max_values or n > budget[0]:
+            return n
+        budget[0] -= n
+        return [str(x) for x in v]
+    if budget[0] <= 0:
+        return 1
+    budget[0] -= 1
+    return [str(v)]
+
+
+def _summarize_filters(body, max_keys=12, max_values=8, total_values=64):
+    """Shape of a query body, plus the filter values when there are few enough to be useful.
+
+    Filter dicts routinely hold hundreds of thousands of root ids, and logging those verbatim
+    would reproduce the memory problem being diagnosed -- so anything longer than
+    ``max_values`` is recorded as a count, and a global ``total_values`` budget bounds the
+    record no matter how many columns are filtered.
+
+    Short lists ARE logged, because shape alone proved insufficient in practice: on 2026-08-18
+    two root ids were OOM-killing api pods with oversized synapse queries, and every audit
+    record showed an indistinguishable ``{synapses_pni_2: {post_pt_root_id: 1}}`` -- one value,
+    value unknown -- so the culprits had to be recovered from the caller's logs instead. A
+    one-value filter is precisely the case where the value is both tiny to log and decisive.
     """
     q = {}
+    budget = [total_values]
     for key in ("table", "limit", "offset", "timestamp", "desired_resolution"):
         val = body.get(key)
         if val is not None and not isinstance(val, (dict, list)):
@@ -98,13 +132,13 @@ def _summarize_filters(body, max_keys=12):
         shape = {}
         for tbl, cols in list(spec.items())[:max_keys]:
             if isinstance(cols, dict):
-                # {table: {column: [values]}} -> value count per column
+                # {table: {column: [values]}} -> the values, or a count when too long
                 shape[tbl] = {
-                    c: (len(v) if isinstance(v, (list, tuple)) else 1)
+                    c: _filter_values(v, budget, max_values)
                     for c, v in list(cols.items())[:max_keys]
                 }
             elif isinstance(cols, (list, tuple)):
-                shape[tbl] = len(cols)
+                shape[tbl] = _filter_values(cols, budget, max_values)
         if shape:
             q[key] = shape
     for key in ("joins", "select_columns", "suffixes"):
@@ -116,7 +150,7 @@ def _summarize_filters(body, max_keys=12):
     return q
 
 
-def _identity(max_body_bytes):
+def _identity(max_body_bytes, max_filter_values=8):
     """Enough of the request to identify the query, cheap and never raising."""
     ident = {}
     try:
@@ -134,7 +168,7 @@ def _identity(max_body_bytes):
             return ident
         body = request.get_json(silent=True)
         if isinstance(body, dict):
-            ident.update(_summarize_filters(body))
+            ident.update(_summarize_filters(body, max_values=max_filter_values))
     except Exception:
         pass
     return ident
@@ -148,6 +182,10 @@ def init_memory_audit(app):
 
     warn_delta_mb = float(app.config.get("MEMORY_AUDIT_WARN_DELTA_MB", 100))
     max_body_bytes = int(app.config.get("MEMORY_AUDIT_MAX_BODY_BYTES", 2 * 1024 * 1024))
+    # Filters at or below this length are logged with their VALUES, which is what makes an
+    # offending request identifiable; longer ones degrade to a count. Keep it small -- a filter
+    # can legitimately carry hundreds of thousands of root ids.
+    max_filter_values = int(app.config.get("MEMORY_AUDIT_MAX_FILTER_VALUES", 8))
     # /health runs on every probe on every pod and never allocates, so its start/end pair
     # is pure noise -- except that it is also the endpoint whose stalls take a pod out of
     # the Service (35 of 219 harakiri kills in 24h were GET /health). It is therefore not
@@ -182,7 +220,7 @@ def init_memory_audit(app):
                 "endpoint": request.endpoint,
                 "rss_mb": _mb(rss),
             }
-            payload.update(_identity(max_body_bytes))
+            payload.update(_identity(max_body_bytes, max_filter_values))
             _emit(payload)
         except Exception:
             pass
@@ -235,7 +273,8 @@ def init_memory_audit(app):
             pass
 
     app.logger.info(
-        "memory_audit enabled (warn_delta_mb=%s, max_body_bytes=%s)",
+        "memory_audit enabled (warn_delta_mb=%s, max_body_bytes=%s, max_filter_values=%s)",
         warn_delta_mb,
         max_body_bytes,
+        max_filter_values,
     )
