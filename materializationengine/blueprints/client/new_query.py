@@ -239,7 +239,7 @@ def map_filters(
         mat_map_str = "past_id_map"
         query_map_str = "future_id_map"
 
-    elif timestamp_query > timestamp_mat:
+    elif timestamp_mat > timestamp_query:
         id_mapping = cg_client.get_past_ids(
             root_ids, timestamp_past=timestamp_query, timestamp_future=timestamp_mat
         )
