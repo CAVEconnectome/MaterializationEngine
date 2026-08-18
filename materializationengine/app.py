@@ -21,6 +21,7 @@ from materializationengine.blueprints.upload.storage import StorageService
 from materializationengine.config import config, configure_app
 from materializationengine.database import db_manager
 from materializationengine.limiter import limiter
+from materializationengine.memory_audit import init_memory_audit
 from materializationengine.migrate import migrator
 from materializationengine.request_db import init_request_db_cleanup
 from materializationengine.schemas import ma
@@ -75,6 +76,11 @@ def create_app(config_name: str = None):
 
     # Initialize request-scoped database session cleanup
     init_request_db_cleanup(app)
+
+    # Per-request RSS accounting. Registered before the blueprints so its before_request
+    # hook runs first and a request that is OOM-killed mid-flight has already been
+    # recorded; see materializationengine/memory_audit.py.
+    init_memory_audit(app)
 
     # register blueprints
     apibp = Blueprint("api", __name__, url_prefix="/materialize")

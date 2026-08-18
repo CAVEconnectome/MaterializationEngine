@@ -48,6 +48,19 @@ class BaseConfig:
     MERGE_TABLES = True
     AUTH_SERVICE_NAMESPACE = "datastack"
 
+    # Per-request RSS accounting (materializationengine/memory_audit.py). On by default:
+    # the cost is one /proc read per request boundary, and it is the only thing that
+    # identifies a request the kernel OOM-killed, since such a request runs no teardown.
+    MEMORY_AUDIT_ENABLED = (
+        os.environ.get("MEMORY_AUDIT_ENABLED", "true").lower() == "true"
+    )
+    MEMORY_AUDIT_WARN_DELTA_MB = float(
+        os.environ.get("MEMORY_AUDIT_WARN_DELTA_MB", 100)
+    )
+    MEMORY_AUDIT_MAX_BODY_BYTES = int(
+        os.environ.get("MEMORY_AUDIT_MAX_BODY_BYTES", 2 * 1024 * 1024)
+    )
+
     REDIS_HOST = "localhost"
     REDIS_PORT = 6379
     REDIS_PASSWORD = ""
