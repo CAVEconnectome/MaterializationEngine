@@ -15,19 +15,28 @@ import numpy as np
 import polars as pl
 import pyarrow as pa
 import shapely
+
+# Importing geoalchemy2 registers the PostGIS ``geometry`` type in the shared
+# ``PGDialect.ischema_names`` map, so SQLAlchemy's inspector recognizes geometry
+# columns instead of warning "Did not recognize type 'geometry'".
+#
+# Do NOT re-alias ``geometry`` to BYTEA here.  ``PGDialect.ischema_names`` is a
+# single process-global dict shared with geoalchemy2, so mutating it would
+# un-register ``Geometry`` for the whole process -- including the Flask workers
+# that import this module via the Celery ``include`` list.  Client code keys off
+# the reflected type (``isinstance(column.type, Geometry)``) to expand points
+# into x/y/z and to build view jsonschemas, and would silently emit raw WKB and
+# 500 on /views/schemas.  See ViewSchemas in blueprints/client/api2.py.
+#
+# Nothing in this module needs geometry typed as binary: geometry columns are
+# discovered from information_schema by _get_geometry_columns, and the data path
+# is ADBC, which streams geometry as WKB bytes regardless of SQLAlchemy types.
+import geoalchemy2  # noqa: F401
 from celery.utils.log import get_task_logger
 from sqlalchemy import inspect, text
-from sqlalchemy.dialects.postgresql import BYTEA
-
-# Register a minimal geometry type so SQLAlchemy's inspector doesn't warn
-# "Did not recognize type 'geometry'" during reflection.  We decode WKB
-# ourselves — all SQLAlchemy needs to know is that it's binary.
-from sqlalchemy.dialects.postgresql import dialect as _pg_dialect
 from sqlalchemy.engine import Engine
 
 from materializationengine.celery_init import celery
-
-_pg_dialect.ischema_names["geometry"] = BYTEA
 
 celery_logger = get_task_logger(__name__)
 
@@ -237,9 +246,8 @@ def _get_geometry_columns(connection_string: str, name: str) -> list[str]:
     """Return PostGIS geometry column names on *name*, in ordinal order.
 
     Detects columns via ``information_schema.columns.udt_name = 'geometry'``,
-    which works identically for tables, views, and materialized views.  This is
-    necessary because we alias the SQLAlchemy ``geometry`` type to ``BYTEA`` for
-    reflection, so the inspector cannot distinguish geometry from plain bytea.
+    which works identically for tables, views, and materialized views -- unlike
+    SQLAlchemy reflection, which cannot see the columns of a plain view.
     """
     _validate_identifier(name)
     rows = _adbc_fetchall(

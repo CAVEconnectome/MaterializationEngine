@@ -1677,3 +1677,33 @@ class TestExportViewToDeltalake:
         cols = set(flat.schema().to_arrow().names)
         assert "pt_position" in cols  # untouched binary column
         assert not any(c.endswith("_partition") for c in cols)
+
+
+class TestGeometryTypeRegistrationNotClobbered:
+    """Regression guard for the view-schema / WKB-passthrough bug.
+
+    ``PGDialect.ischema_names`` is a single process-global dict that geoalchemy2
+    populates with ``Geometry``.  This module used to alias ``geometry`` to
+    ``BYTEA`` in it at import time, which un-registered ``Geometry`` for the
+    entire process.  Because the Flask app imports this module transitively via
+    the Celery ``include`` list, reflected view columns then typed as ``BYTEA``,
+    so /views/schemas raised "Unsupported column type" and query_view returned
+    raw WKB instead of x/y/z.
+    """
+
+    def test_importing_deltalake_export_leaves_geometry_mapped_to_geometry(self):
+        # Importing the module under test is the action being guarded.
+        import materializationengine.workflows.deltalake_export  # noqa: F401
+        from geoalchemy2.types import Geometry
+        from sqlalchemy.dialects.postgresql import dialect as pg_dialect
+
+        assert pg_dialect.ischema_names["geometry"] is Geometry
+
+    def test_client_geometry_check_still_recognizes_reflected_type(self):
+        """The client keys off ``isinstance(column.type, Geometry)``."""
+        import materializationengine.workflows.deltalake_export  # noqa: F401
+        from geoalchemy2.types import Geometry
+        from sqlalchemy.dialects.postgresql import dialect as pg_dialect
+
+        reflected_type = pg_dialect.ischema_names["geometry"]()
+        assert isinstance(reflected_type, Geometry)

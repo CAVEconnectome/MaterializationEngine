@@ -3521,7 +3521,10 @@ def get_table_schema(table):
         elif isinstance(column.type, Numeric):
             column_type = "number"
         else:
-            raise ValueError(f"Unsupported column type: {column.type}")
+            raise ValueError(
+                f"Unsupported column type for column "
+                f"'{table.name}.{column.name}': {column.type!r}"
+            )
 
         properties[column.name] = {"type": column_type}
         if format:
