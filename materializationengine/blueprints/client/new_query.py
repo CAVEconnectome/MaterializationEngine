@@ -240,12 +240,53 @@ def map_filters(
         query_map_str = "future_id_map"
 
     elif timestamp_mat > timestamp_query:
-        id_mapping = cg_client.get_past_ids(
-            root_ids, timestamp_past=timestamp_query, timestamp_future=timestamp_mat
-        )
+        # The query asks for a moment BEFORE the materialized version. This happens whenever the
+        # requested timestamp predates every available version: get_closest_versions then finds no
+        # `past_ver` and falls back to `future_ver`. pcg_meshwork(timestamp=root_ts) does exactly
+        # this for an object retired before the oldest surviving version.
+        #
+        # This branch's condition used to read `timestamp_query > timestamp_mat`, the same
+        # expression as the branch above, so it was unreachable: every such query fell through to
+        # `else` and was never remapped. The caller's id went straight into SQL against a table
+        # that does not contain it, silently returning zero rows -- measured on minniev7
+        # 2026-08-18, a query below the cliff returned 0 rows where the answer was 10,701.
+        #
+        # The forward mapping cannot come from get_past_ids: the server never populates
+        # future_id_map (verified empty for every combination tried, including ones where a forward
+        # id demonstrably exists), and caveclient documents timestamp_future as "Not implemented on
+        # the server currently". get_latest_roots answers the same question -- "which ids at time T
+        # contain parts of this object" -- and does work.
+        #
+        # NOTE get_latest_roots takes a SCALAR root_id. Passing a list silently returns the
+        # expansion of the first one only, so this must loop. That is one chunkedgraph call per
+        # filtered root id, where the branch above needs a single call for all of them; worth
+        # batching if multi-root filters become common on this path.
+        future_id_map = {}
+        for rid in root_ids:
+            rid = int(rid)
+            mat_ids = np.asarray(
+                cg_client.get_latest_roots(rid, timestamp=timestamp_mat), dtype=np.int64
+            )
+            if len(mat_ids) == 0:
+                warnings.append(
+                    f"root_id {rid} has no corresponding ids at the materialized timestamp "
+                    f"{timestamp_mat}; results for it will be empty"
+                )
+            future_id_map[rid] = mat_ids
+        id_mapping = {
+            "future_id_map": future_id_map,
+            # Deliberately empty. This is returned as `query_map` and applied by update_rootids via
+            # pandas .replace(), which needs scalar->scalar -- but a materialized-era id can map
+            # back to several query-era ids, so no such mapping exists in general. It does not need
+            # to: update_rootids corrects result root ids by re-looking up every supervoxel at the
+            # query timestamp (get_roots(svids, timestamp=timestamp)). The branch above already
+            # depends on exactly that, since its future_id_map is always empty too.
+            "past_id_map": {},
+        }
         mat_map_str = "future_id_map"
         query_map_str = "past_id_map"
     else:
+        # Equal timestamps: the materialized table already stores query-time ids.
         return filters, {}, warnings
 
     if len(id_mapping[mat_map_str]) == 0:
