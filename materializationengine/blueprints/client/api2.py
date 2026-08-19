@@ -3518,7 +3518,9 @@ def get_table_schema(table):
         elif isinstance(column.type, Numeric):
             column_type = "number"
         else:
-            raise ValueError(f"Unsupported column type: {column.type}")
+            raise ValueError(
+                f"Unsupported column type for column '{column.name}': {column.type}"
+            )
 
         properties[column.name] = {"type": column_type}
         if format:
@@ -3619,6 +3621,13 @@ class ViewSchemas(Resource):
         schemas = {}
         for view_dict in dumped_views:
             view_name = view_dict["table_name"]
-            table = meta_db.database.get_view_table(view_name)
-            schemas[view_name] = get_table_schema(table)
+            try:
+                table = meta_db.database.get_view_table(view_name)
+                schemas[view_name] = get_table_schema(table)
+            except Exception as e:
+                # Degrade gracefully: one bad view shouldn't 500 the whole endpoint.
+                current_app.logger.warning(
+                    f"Failed to build schema for view '{view_name}': {e}"
+                )
+                schemas[view_name] = {"error": str(e)}
         return schemas, 200

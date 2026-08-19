@@ -15,19 +15,16 @@ import numpy as np
 import polars as pl
 import pyarrow as pa
 import shapely
+
+# Registers geoalchemy2's Geometry type with SQLAlchemy's PostGIS dialect so
+# the inspector recognizes 'geometry' columns during reflection instead of
+# warning "Did not recognize type 'geometry'".  Import for the side effect only.
+import geoalchemy2  # noqa: F401
 from celery.utils.log import get_task_logger
 from sqlalchemy import inspect, text
-from sqlalchemy.dialects.postgresql import BYTEA
-
-# Register a minimal geometry type so SQLAlchemy's inspector doesn't warn
-# "Did not recognize type 'geometry'" during reflection.  We decode WKB
-# ourselves — all SQLAlchemy needs to know is that it's binary.
-from sqlalchemy.dialects.postgresql import dialect as _pg_dialect
 from sqlalchemy.engine import Engine
 
 from materializationengine.celery_init import celery
-
-_pg_dialect.ischema_names["geometry"] = BYTEA
 
 celery_logger = get_task_logger(__name__)
 
@@ -237,9 +234,7 @@ def _get_geometry_columns(connection_string: str, name: str) -> list[str]:
     """Return PostGIS geometry column names on *name*, in ordinal order.
 
     Detects columns via ``information_schema.columns.udt_name = 'geometry'``,
-    which works identically for tables, views, and materialized views.  This is
-    necessary because we alias the SQLAlchemy ``geometry`` type to ``BYTEA`` for
-    reflection, so the inspector cannot distinguish geometry from plain bytea.
+    which works identically for tables, views, and materialized views.
     """
     _validate_identifier(name)
     rows = _adbc_fetchall(
