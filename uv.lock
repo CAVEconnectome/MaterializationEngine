@@ -1732,7 +1732,7 @@ wheels = [
 
 [[package]]
 name = "materializationengine"
-version = "5.26.1"
+version = "5.26.2"
 source = { editable = "." }
 dependencies = [
     { name = "adbc-driver-postgresql" },
@@ -1811,7 +1811,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=44.0.2" },
     { name = "deltalake", specifier = ">=1.5.0" },
     { name = "dynamicannotationdb", specifier = ">=5.13.1" },
-    { name = "emannotationschemas", specifier = "<=5.26.1" },
+    { name = "emannotationschemas", specifier = "<=5.26.2" },
     { name = "flask", specifier = ">=2.0.2,<3.0" },
     { name = "flask-accepts" },
     { name = "flask-admin" },
