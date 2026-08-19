@@ -20,6 +20,7 @@ from materializationengine.blueprints.upload.models import init_staging_database
 from materializationengine.blueprints.upload.storage import StorageService
 from materializationengine.config import config, configure_app
 from materializationengine.database import db_manager
+from materializationengine.health import health_bp
 from materializationengine.limiter import limiter
 from materializationengine.memory_audit import init_memory_audit
 from materializationengine.migrate import migrator
@@ -124,6 +125,9 @@ def create_app(config_name: str = None):
         app.register_blueprint(views_bp)
         app.register_blueprint(upload_bp)
         app.register_blueprint(deltalake_bp)
+        # /health/ready and /health/live. Registered alongside the others so both probe paths
+        # exist even though /health below is kept for backward compatibility.
+        app.register_blueprint(health_bp)
         limiter.init_app(app)
         try:
             db.create_all()

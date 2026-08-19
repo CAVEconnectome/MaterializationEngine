@@ -68,6 +68,27 @@ class BaseConfig:
         os.environ.get("MEMORY_AUDIT_MAX_FILTER_VALUES", 8)
     )
 
+    # Probe semantics (materializationengine/health.py).
+    #
+    # HEALTH_READY_MAX_BUSY_FRACTION: drain a pod once this fraction of uwsgi worker SLOTS is
+    # busy. Denominator is `processes`, not the number spawned, so a pod that cheaper can still
+    # scale up is not drained. Set to 0 to disable saturation draining and leave readiness as a
+    # pure database check.
+    #
+    # CAUTION: readiness has no cluster-wide floor. If every replica saturates at once they all
+    # drain, the Service loses all endpoints and the ingress returns 503 -- worse than queueing.
+    # Keep this ABOVE the KEDA scale-out trigger (uwsgi_perc_busy_workers > 75) so the fleet adds
+    # replicas before any pod starts refusing.
+    HEALTH_READY_MAX_BUSY_FRACTION = float(
+        os.environ.get("HEALTH_READY_MAX_BUSY_FRACTION", 0.9)
+    )
+    # Liveness fails only on the corrupted-pool signature: this many consecutive database
+    # failures AND no success for this many seconds. Being busy must never restart a pod.
+    HEALTH_LIVE_DB_FAILURES = int(os.environ.get("HEALTH_LIVE_DB_FAILURES", 3))
+    HEALTH_LIVE_DB_STALE_SECONDS = int(
+        os.environ.get("HEALTH_LIVE_DB_STALE_SECONDS", 120)
+    )
+
     REDIS_HOST = "localhost"
     REDIS_PORT = 6379
     REDIS_PASSWORD = ""
