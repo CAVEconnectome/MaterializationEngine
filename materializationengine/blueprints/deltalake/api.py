@@ -14,6 +14,7 @@ from flask import (
 )
 from middle_auth_client import auth_required, auth_requires_dataset_admin
 
+from materializationengine.config import as_bool
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.info_client import get_datastack_info, get_datastacks
 from materializationengine.utils import get_config_param
@@ -26,9 +27,13 @@ deltalake_bp = Blueprint(
 
 
 def _is_auth_disabled():
-    return current_app.config.get(
-        "AUTH_DISABLED",
-        os.environ.get("AUTH_DISABLED", "").lower() in ("true", "1", "yes"),
+    # Coerced rather than truth-tested: config.cfg and the environment both deliver
+    # strings, and a bare `if value` on "false" disables auth. Same precedence as before
+    # -- app config wins over the environment -- but neither side can be a truthy string.
+    return as_bool(
+        current_app.config.get("AUTH_DISABLED", os.environ.get("AUTH_DISABLED")),
+        default=False,
+        name="AUTH_DISABLED",
     )
 
 

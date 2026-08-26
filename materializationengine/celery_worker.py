@@ -28,13 +28,6 @@ celery_logger = get_task_logger(__name__)
 def create_celery(app=None):
     celery.conf.broker_url = app.config["CELERY_BROKER_URL"]
     celery.conf.result_backend = app.config["CELERY_RESULT_BACKEND"]
-    if app.config.get("USE_SENTINEL", False):
-        celery.conf.broker_transport_options = {
-            "master_name": app.config["MASTER_NAME"]
-        }
-        celery.conf.result_backend_transport_options = {
-            "master_name": app.config["MASTER_NAME"]
-        }
     # Configure Celery and related loggers
     log_level = app.config["LOGGING_LEVEL"]
     celery_logger.setLevel(log_level)
@@ -83,6 +76,27 @@ def create_celery(app=None):
     )
 
     celery.conf.update(app.config)
+
+    if app.config.get("USE_SENTINEL", False):
+        # Applied here, after every conf.update() above, deliberately. Celery REPLACES
+        # broker_transport_options on each update rather than merging into it, so setting
+        # master_name before them -- which is what this used to do -- left it silently
+        # dropped: the hardcoded dict above overwrote it, and so does an uppercase
+        # BROKER_TRANSPORT_OPTIONS arriving from config.cfg. Sentinel would then fail to
+        # resolve the master with no indication why.
+        #
+        # Merge rather than assign, so the visibility/socket timeouts configured above (or
+        # from config.cfg) survive alongside master_name.
+        master_name = app.config["MASTER_NAME"]
+        celery.conf.broker_transport_options = {
+            **(celery.conf.broker_transport_options or {}),
+            "master_name": master_name,
+        }
+        celery.conf.result_backend_transport_options = {
+            **(celery.conf.result_backend_transport_options or {}),
+            "master_name": master_name,
+        }
+
     # Ensure beat_schedules is set correctly after update (in case app.config overwrote it)
     # Use BEAT_SCHEDULES from app.config if beat_schedules is empty or missing
     if not celery.conf.get("beat_schedules") and app.config.get("BEAT_SCHEDULES"):

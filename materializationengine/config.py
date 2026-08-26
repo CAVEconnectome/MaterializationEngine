@@ -8,6 +8,43 @@ from flask import Flask
 from flask.logging import default_handler
 
 
+_TRUE_VALUES = frozenset(("1", "true", "yes", "on"))
+_FALSE_VALUES = frozenset(("0", "false", "no", "off", ""))
+
+
+def as_bool(value, default=False, name="value"):
+    """Coerce a config value that may have arrived as a string into a real bool.
+
+    Anything that reaches the app through the environment -- or through a config.cfg the
+    chart renders -- is a string, and a plain truth test on a string is exactly backwards
+    for a flag: "false", "0" and "off" are all truthy. A flag meant to turn something OFF
+    turns it ON, usually with no symptom at the point of the mistake.
+
+    ``None`` (unset) and unrecognized values fall back to ``default``; unrecognized values
+    also warn, rather than being guessed at. ``name`` only labels that warning.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in _TRUE_VALUES:
+        return True
+    if text in _FALSE_VALUES:
+        return False
+    logging.getLogger(__name__).warning(
+        "%s=%r is not a recognized boolean; falling back to %s", name, value, default
+    )
+    return default
+
+
+def env_bool(name, default=False):
+    """Read a boolean flag from the environment. See :func:`as_bool`."""
+    return as_bool(os.environ.get(name), default=default, name=name)
+
+
 class BaseConfig:
     ENV = "base"
     HOME = os.path.expanduser("~")
@@ -51,9 +88,7 @@ class BaseConfig:
     # Per-request RSS accounting (materializationengine/memory_audit.py). On by default:
     # the cost is one /proc read per request boundary, and it is the only thing that
     # identifies a request the kernel OOM-killed, since such a request runs no teardown.
-    MEMORY_AUDIT_ENABLED = (
-        os.environ.get("MEMORY_AUDIT_ENABLED", "true").lower() == "true"
-    )
+    MEMORY_AUDIT_ENABLED = env_bool("MEMORY_AUDIT_ENABLED", True)
     MEMORY_AUDIT_WARN_DELTA_MB = float(
         os.environ.get("MEMORY_AUDIT_WARN_DELTA_MB", 100)
     )
@@ -215,7 +250,7 @@ class DevConfig(BaseConfig):
     REDIS_URL = f"redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_PORT}/0"
     CELERY_BROKER_URL = REDIS_URL
     CELERY_RESULT_BACKEND = REDIS_URL
-    USE_SENTINEL = os.environ.get("USE_SENTINEL", False)
+    USE_SENTINEL = env_bool("USE_SENTINEL", False)
 
 
 class TestConfig(BaseConfig):

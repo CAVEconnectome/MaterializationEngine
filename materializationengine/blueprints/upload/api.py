@@ -28,6 +28,7 @@ from middle_auth_client import (
 )
 from redis import StrictRedis
 
+from materializationengine.config import as_bool
 from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.blueprints.upload.checkpoint_manager import (
     RedisCheckpointManager,
@@ -121,9 +122,13 @@ def is_auth_disabled():
     Returns:
         bool: True if authentication is disabled, False otherwise
     """
-    return current_app.config.get(
-        "AUTH_DISABLED",
-        os.environ.get("AUTH_DISABLED", "").lower() in ("true", "1", "yes"),
+    # Coerced rather than truth-tested: config.cfg and the environment both deliver
+    # strings, and a bare `if value` on "false" disables auth. Same precedence as before
+    # -- app config wins over the environment -- but neither side can be a truthy string.
+    return as_bool(
+        current_app.config.get("AUTH_DISABLED", os.environ.get("AUTH_DISABLED")),
+        default=False,
+        name="AUTH_DISABLED",
     )
 
 
