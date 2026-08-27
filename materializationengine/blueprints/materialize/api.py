@@ -1,6 +1,8 @@
 import datetime
+import json
 import logging
 import os
+import shlex
 import subprocess
 
 import cloudfiles
@@ -903,6 +905,63 @@ class WriteDeltalakeResource(Resource):
 
         job_id = uuid.uuid4().hex
 
+        # backend=ray runs the export as a Kubernetes RayJob instead of a Celery
+        # task. Same pipeline either way (run_deltalake_export), but the RayJob CR
+        # is the durable record: no broker, so no ack to expire and no
+        # visibility_timeout redelivering a task that is still running, and the
+        # final per-spec optimize pass fans out across workers instead of running
+        # serially at max_concurrent_tasks=1.
+        #
+        # Opt-in per request, and only where the deployment enables ray. Celery
+        # stays the default so this is additive.
+        from materializationengine.rayjobs import ray_enabled
+
+        backend = (request.args.get("backend") or "").lower()
+        if backend == "ray":
+            if not ray_enabled():
+                return abort(501, "Ray is not enabled on this deployment")
+
+            from materializationengine.rayjobs import (
+                RayJobSubmissionError,
+                submit_rayjob,
+            )
+
+            entrypoint = (
+                "python -m materializationengine.rayjobs.entrypoints.deltalake_export"
+                f" --datastack {shlex.quote(datastack_name)}"
+                f" --version {int(version)}"
+                f" --table {shlex.quote(table_name)}"
+                f" --job-id {shlex.quote(job_id)}"
+            )
+            if output_specs is not None:
+                entrypoint += (
+                    f" --output-specs {shlex.quote(json.dumps(output_specs))}"
+                )
+
+            try:
+                rayjob_name = submit_rayjob(
+                    entrypoint=entrypoint,
+                    # DNS-label safe: table names allow underscores, RayJob names
+                    # do not.
+                    name_prefix=f"mat-deltalake-{table_name.replace('_', '-')}",
+                    num_workers=request.args.get("workers", type=int),
+                    metadata={
+                        "datastack": datastack_name,
+                        "table": table_name,
+                        "version": str(version),
+                        "job-id": job_id,
+                    },
+                )
+            except RayJobSubmissionError as exc:
+                return abort(500, f"failed to submit RayJob: {exc}")
+
+            return {
+                "message": f"Delta Lake export submitted as RayJob for {table_name} v{version}",
+                "job_id": job_id,
+                "backend": "ray",
+                "rayjob_name": rayjob_name,
+            }, 200
+
         write_deltalake_table.s(
             datastack_info,
             version,
@@ -914,6 +973,7 @@ class WriteDeltalakeResource(Resource):
         return {
             "message": f"Delta Lake export enqueued for {table_name} v{version}",
             "job_id": job_id,
+            "backend": "celery",
         }, 200
 
     @reset_auth
