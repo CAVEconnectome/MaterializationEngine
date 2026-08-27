@@ -947,3 +947,65 @@ class WriteDeltalakeResource(Resource):
             }, 404
 
         return progress, 200
+
+
+@mat_bp.route("/materialize/ray/job/<string:job_name>/")
+class RayJobResource(Resource):
+    """Status of a RayJob.
+
+    RayJobs are the durable record for work submitted to the ephemeral Ray
+    platform: the Kubernetes CR is the job, so unlike a Celery task there is no
+    broker state to consult and no ack that can expire mid-run. This reads the
+    CR's status directly.
+
+    Available only where the deployment enables ray (``ray.enabled`` in the
+    chart, ``enable_ray`` in Terraform); returns 501 otherwise so callers can
+    tell "not configured" apart from "job not found".
+    """
+
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("Get RayJob status", security="apikey")
+    def get(self, job_name: str):
+        from materializationengine.rayjobs import (
+            RayJobSubmissionError,
+            get_rayjob_status,
+            ray_enabled,
+        )
+
+        if not ray_enabled():
+            return {"message": "Ray is not enabled on this deployment"}, 501
+
+        try:
+            return get_rayjob_status(job_name), 200
+        except RayJobSubmissionError as exc:
+            # Covers both "no such RayJob" and a genuine API failure. The
+            # message carries which.
+            return {"message": str(exc)}, 404
+
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("Cancel a RayJob", security="apikey")
+    def delete(self, job_name: str):
+        """Delete a RayJob, tearing down any cluster KubeRay created for it.
+
+        This is also the manual remedy for a wedged job: Ray worker pods are
+        owned by the RayCluster CR, which the cluster autoscaler will not evict
+        pods on behalf of, so a hung job holds its nodes until either
+        ``activeDeadlineSeconds`` fires or the CR is deleted here.
+        """
+        from materializationengine.rayjobs import (
+            RayJobSubmissionError,
+            delete_rayjob,
+            ray_enabled,
+        )
+
+        if not ray_enabled():
+            return {"message": "Ray is not enabled on this deployment"}, 501
+
+        try:
+            delete_rayjob(job_name)
+        except RayJobSubmissionError as exc:
+            return {"message": str(exc)}, 404
+
+        return {"message": f"RayJob {job_name} deleted"}, 200
