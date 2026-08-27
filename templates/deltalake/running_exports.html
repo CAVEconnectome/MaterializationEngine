@@ -73,7 +73,18 @@
             <div class="col">
                 <div class="card export-card" :class="`status-${getProgress(exp).status === 'failed' ? 'failed' : (getProgress(exp).phase || getProgress(exp).status || 'idle')}`">
                     <div class="card-header d-flex justify-content-between align-items-center">
-                        <strong x-text="`${exp.tableName} (v${exp.version})`"></strong>
+                        <div class="d-flex align-items-center gap-2">
+                            <strong x-text="`${exp.tableName} (v${exp.version})`"></strong>
+                            {# Which engine ran this export, and -- on Ray -- the RayJob
+                               name, so a stuck export can be chased down with
+                               `kubectl -n ray-jobs describe rayjob <name>` without
+                               digging through logs to find it. Hidden for exports
+                               recorded before this was stored. #}
+                            <span x-show="exp.backend === 'ray'"
+                                  class="badge bg-secondary"
+                                  :title="exp.rayJobName ? `RayJob: ${exp.rayJobName}` : 'Ray'"
+                                  x-text="exp.rayJobName || 'ray'"></span>
+                        </div>
                         <div class="d-flex align-items-center gap-2">
                             <span class="badge"
                                   :class="{
