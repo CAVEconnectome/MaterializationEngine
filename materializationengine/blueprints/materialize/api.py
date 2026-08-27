@@ -905,26 +905,38 @@ class WriteDeltalakeResource(Resource):
 
         job_id = uuid.uuid4().hex
 
-        # backend=ray runs the export as a Kubernetes RayJob instead of a Celery
-        # task. Same pipeline either way (run_deltalake_export), but the RayJob CR
-        # is the durable record: no broker, so no ack to expire and no
+        # Which engine runs the export is a DEPLOYMENT decision, not a caller
+        # one: it is driven by the chart (ray.enabled + ray.deltalakeExport), so
+        # the wizard does not offer a choice and clients need no changes to
+        # benefit. Same pipeline either way (run_deltalake_export); on Ray the
+        # RayJob CR is the durable record, so there is no ack to expire and no
         # visibility_timeout redelivering a task that is still running, and the
-        # final per-spec optimize pass fans out across workers instead of running
-        # serially at max_concurrent_tasks=1.
+        # final per-spec optimize pass fans out across workers instead of
+        # running serially at max_concurrent_tasks=1.
         #
-        # Opt-in per request, and only where the deployment enables ray. Celery
-        # stays the default so this is additive.
-        from materializationengine.rayjobs import ray_enabled
+        # ?backend= remains as an operator escape hatch -- forcing celery to get
+        # a specific export off Ray without a redeploy, or forcing ray to smoke
+        # test before flipping the chart value for everyone. Not used by the UI.
+        from materializationengine.rayjobs import ray_deltalake_export_enabled
 
-        backend = (request.args.get("backend") or "").lower()
-        if backend == "ray":
-            if not ray_enabled():
-                return abort(501, "Ray is not enabled on this deployment")
+        requested = (request.args.get("backend") or "").lower()
+        if requested not in ("", "ray", "celery"):
+            return abort(400, "backend must be 'ray' or 'celery'")
+        use_ray = (
+            ray_deltalake_export_enabled() if requested == "" else requested == "ray"
+        )
 
+        if use_ray:
             from materializationengine.rayjobs import (
                 RayJobSubmissionError,
+                ray_enabled,
                 submit_rayjob,
             )
+
+            # Only reachable when ?backend=ray was forced on a deployment without
+            # the platform; the server-side default already accounts for it.
+            if not ray_enabled():
+                return abort(501, "Ray is not enabled on this deployment")
 
             entrypoint = (
                 "python -m materializationengine.rayjobs.entrypoints.deltalake_export"
