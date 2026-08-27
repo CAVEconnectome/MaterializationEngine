@@ -32,14 +32,41 @@ class RayJobSubmissionError(RuntimeError):
     """Raised when a RayJob cannot be created or read."""
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.lower() in ("1", "true", "yes")
+
+
 def ray_enabled() -> bool:
-    """Whether this deployment is configured to submit RayJobs.
+    """Whether the Ray *platform* is available to this deployment.
 
     Set by the chart only when ``ray.enabled``; absent everywhere else, so the
     Celery path stays the default and this whole subsystem is inert until a
     deployment explicitly turns it on.
+
+    This answers "can I submit a RayJob at all", not "should this particular
+    workload use Ray" -- see :func:`ray_deltalake_export_enabled`.
     """
-    return os.environ.get("RAY_ENABLED", "").lower() in ("1", "true", "yes")
+    return _env_flag("RAY_ENABLED")
+
+
+def ray_deltalake_export_enabled() -> bool:
+    """Whether Delta Lake exports should be routed through Ray.
+
+    Deliberately a separate switch from :func:`ray_enabled`. Having the platform
+    installed and routing production exports through it are different decisions:
+    an operator will want the operator, namespace and RBAC in place while
+    exports still run on Celery, and will want to roll a misbehaving Ray path
+    back to Celery by flipping one chart value -- not by tearing the platform
+    down and losing any in-flight job's records with it.
+
+    Chart: ``ray.deltalakeExport``, which is itself gated on ``ray.enabled``, so
+    this can never be true without a platform to run on. The `and` below keeps
+    that invariant even if the env vars are set by hand.
+    """
+    return ray_enabled() and _env_flag("RAY_DELTALAKE_EXPORT", default=True)
 
 
 def _namespace() -> str:

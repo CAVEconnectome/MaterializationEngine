@@ -68,12 +68,21 @@ document.addEventListener("alpine:init", () => {
           throw new Error(data.message || data.error || "Export launch failed");
         }
 
-        // Add to exports list for monitoring page
+        // Add to exports list for monitoring page.
+        //
+        // backend and rayJobName come from the server, which picks the engine
+        // from chart config -- the wizard deliberately does not offer a choice.
+        // Both are recorded so the monitoring page can name the RayJob when a
+        // job needs chasing down in the cluster; on the celery path they are
+        // "celery" and undefined, and entries saved before this existed simply
+        // lack them (localStorage is not migrated).
         const newExport = {
           datastack: state.datastack,
           version: state.version,
           tableName: state.tableName,
           jobId: data.job_id,
+          backend: data.backend || "celery",
+          rayJobName: data.rayjob_name || null,
           submittedAt: new Date().toISOString(),
         };
         // Clear wizard form state, then add the export
