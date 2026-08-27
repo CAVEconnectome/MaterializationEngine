@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import time
 from collections.abc import Callable
@@ -1115,62 +1116,498 @@ def _strip_arrow_extension_types(table: pa.Table) -> pa.Table:
     return table
 
 
+# ---------------------------------------------------------------------------
+# Flush hot path.
+#
+# The flush used to convert the whole accumulated buffer to Polars at once,
+# decode WKB through shapely, and then hand each output spec its own full-size
+# Arrow copy.  Measured against a synthetic synapses_pni_2 buffer that peaked at
+# 8.2x the buffer size, which is what OOM-killed the v1822 export: a 1 GiB
+# threshold against an 8 GiB container limit leaves no room for an 8x spike.
+#
+# Two costs dominated.  Shapely decoding cost 4.2x on its own -- `.to_list()`
+# materialises every WKB blob as a Python bytes object and `shapely.from_wkb`
+# then builds a GEOS geometry per row.  The rest came from materialising the
+# full table once per spec.  Both are fixed by working one RecordBatch at a
+# time and streaming batches into the writer, so peak memory is set by the
+# decoded buffer rather than by a multiple of it.
+# ---------------------------------------------------------------------------
+
+_WKB_LITTLE_ENDIAN = 1
+_WKB_TYPE_POINT = 1
+_WKB_Z_FLAG = 0x80000000
+_WKB_M_FLAG = 0x40000000
+_WKB_SRID_FLAG = 0x20000000
+_WKB_HEADER_COMPARE_BYTES = 5  # endianness byte + 4-byte type word
+
+
+def _wkb_pointz_coord_offset(header: bytes, width: int) -> int | None:
+    """Byte offset of the X ordinate within a fixed-width EWKB Point Z blob.
+
+    Returns ``None`` for anything the vectorised reader should not attempt --
+    big-endian blobs, non-point geometries, an M dimension, 2D points, or a
+    width that disagrees with the header.  The caller then falls back to
+    shapely, which handles the general case.
+
+    2D points are deliberately excluded rather than zero-filled: the shapely
+    path asks for `include_z=True` and gets NaN for them, so matching its
+    behaviour here would mean reproducing a cast of NaN to int32.
+    """
+    if len(header) < _WKB_HEADER_COMPARE_BYTES:
+        return None
+    if header[0] != _WKB_LITTLE_ENDIAN:
+        return None
+    type_word = int.from_bytes(header[1:5], "little")
+    if type_word & _WKB_M_FLAG:
+        return None
+    if not type_word & _WKB_Z_FLAG:
+        return None
+    if (type_word & 0x0000FFFF) != _WKB_TYPE_POINT:
+        return None
+    offset = 5 + (4 if type_word & _WKB_SRID_FLAG else 0)
+    if width != offset + 24:  # three float64 ordinates
+        return None
+    return offset
+
+
+def _decode_wkb_pointz_vectorised(arr: pa.Array):
+    """Decode a binary array of EWKB Point Z blobs with numpy alone.
+
+    Returns ``(x, y, z, valid_mask)`` as Int32 arrays covering only the valid
+    rows, with *valid_mask* ``None`` when there are no nulls.  Returns ``None``
+    if the array is not uniform fixed-width little-endian Point Z, leaving the
+    caller to fall back to shapely.
+
+    Arrow stores no bytes at all for a null entry, so the valid blobs remain
+    contiguous with a constant stride even when nulls are present.  That lets
+    this reshape the values buffer directly instead of building a gather index,
+    which for a large flush would itself cost several times the coordinate data.
+    """
+    if isinstance(arr, pa.ChunkedArray):
+        arr = arr.combine_chunks()
+    if isinstance(arr, pa.ExtensionArray):
+        arr = arr.storage
+    if not isinstance(arr, (pa.BinaryArray, pa.LargeBinaryArray)):
+        return None
+
+    n_rows = len(arr)
+    if n_rows == 0:
+        return None
+
+    buffers = arr.buffers()
+    if len(buffers) != 3 or buffers[1] is None or buffers[2] is None:
+        return None
+
+    offset_dtype = np.int64 if isinstance(arr, pa.LargeBinaryArray) else np.int32
+    offsets = np.frombuffer(buffers[1], dtype=offset_dtype)
+    offsets = offsets[arr.offset : arr.offset + n_rows + 1]
+    if offsets.size != n_rows + 1:
+        return None
+    values = np.frombuffer(buffers[2], dtype=np.uint8)
+
+    valid = None
+    if arr.null_count:
+        valid = arr.is_valid().to_numpy(zero_copy_only=False)
+
+    lengths = np.diff(offsets)
+    valid_lengths = lengths if valid is None else lengths[valid]
+    if valid_lengths.size == 0:
+        return None
+    width = int(valid_lengths[0])
+    if width <= 0 or not np.all(valid_lengths == width):
+        return None
+
+    starts = offsets[:-1] if valid is None else offsets[:-1][valid]
+    base = int(starts[0])
+    n_valid = int(starts.size)
+
+    # Contiguity is what makes the reshape below correct; verify rather than
+    # assume it, since a sliced or concatenated array could break it.
+    if int(starts[-1]) != base + (n_valid - 1) * width:
+        return None
+    if base + n_valid * width > values.size:
+        return None
+
+    coord_offset = _wkb_pointz_coord_offset(
+        bytes(values[base : base + _WKB_HEADER_COMPARE_BYTES]), width
+    )
+    if coord_offset is None:
+        return None
+
+    block = values[base : base + n_valid * width].reshape(n_valid, width)
+
+    # Every blob must carry the same endianness and geometry type; a column
+    # mixing point types would otherwise be silently misread. SRID is allowed
+    # to vary because it does not move the ordinates.
+    headers = block[:, :_WKB_HEADER_COMPARE_BYTES]
+    if not np.array_equal(headers, np.broadcast_to(headers[0], headers.shape)):
+        return None
+
+    coords = np.ascontiguousarray(block[:, coord_offset : coord_offset + 24])
+    coords = coords.view(np.float64).reshape(n_valid, 3)
+    return (
+        coords[:, 0].astype(np.int32),
+        coords[:, 1].astype(np.int32),
+        coords[:, 2].astype(np.int32),
+        valid,
+    )
+
+
+def _int32_column(values: np.ndarray, valid: np.ndarray | None, n_rows: int) -> pa.Array:
+    """Build a nullable Int32 Arrow array from valid-row values plus a mask."""
+    if valid is None:
+        return pa.array(values, type=pa.int32())
+    full = np.zeros(n_rows, dtype=np.int32)
+    full[valid] = values
+    return pa.array(full, mask=~valid, type=pa.int32())
+
+
+def _decode_geometry_batch(
+    batch: pa.RecordBatch,
+    geometry_columns: list[str],
+) -> pa.RecordBatch:
+    """Replace WKB geometry columns with ``{col}_x/_y/_z`` Int32 columns.
+
+    The Arrow-level equivalent of :func:`decode_geometry_columns`, operating on
+    a single RecordBatch so peak memory tracks the batch rather than the whole
+    flush buffer.  Also strips ``arrow.opaque`` extension wrappers, which is why
+    the streaming path does not need a separate
+    :func:`_strip_arrow_extension_types` pass.
+    """
+    names = list(batch.schema.names)
+    columns = [batch.column(i) for i in range(batch.num_columns)]
+
+    # Drop extension wrappers on every column, not just geometry ones, so the
+    # Polars conversion downstream never meets an unregistered extension type.
+    for idx, field in enumerate(batch.schema):
+        if isinstance(field.type, pa.BaseExtensionType):
+            columns[idx] = columns[idx].storage
+
+    n_rows = batch.num_rows
+    for col in geometry_columns:
+        if col not in names:
+            continue
+        idx = names.index(col)
+        source = columns[idx]
+
+        decoded = _decode_wkb_pointz_vectorised(source)
+        if decoded is not None:
+            x, y, z, valid = decoded
+            new_cols = [
+                _int32_column(x, valid, n_rows),
+                _int32_column(y, valid, n_rows),
+                _int32_column(z, valid, n_rows),
+            ]
+        else:
+            # General case: hand this one batch to shapely. Still bounded,
+            # because a batch is orders of magnitude smaller than a flush.
+            frame = pl.from_arrow(pa.record_batch([source], names=[col]))
+            frame = decode_geometry_columns(frame, [col])
+            decoded_tbl = frame.to_arrow().combine_chunks()
+            new_cols = [
+                decoded_tbl.column(f"{col}_{axis}").combine_chunks()
+                for axis in ("x", "y", "z")
+            ]
+            new_cols = [
+                c.chunk(0) if isinstance(c, pa.ChunkedArray) else c for c in new_cols
+            ]
+
+        del names[idx], columns[idx]
+        for axis, arr in zip(("x", "y", "z"), new_cols):
+            names.append(f"{col}_{axis}")
+            columns.append(arr)
+
+    return pa.RecordBatch.from_arrays(columns, names=names)
+
+
+def _partition_indices(values: pl.Series, breakpoints: list) -> np.ndarray | None:
+    """Bin indices matching ``pl.cut``, computed with ``np.searchsorted``.
+
+    ``assign_partition`` goes through ``pl.cut``, whose categorical result has
+    to be cast Utf8 then Int32 -- materialising a string per row. ``searchsorted``
+    with ``side="left"`` reproduces the same ``(b[i-1], b[i]]`` bins directly as
+    integers.  Returns ``None`` when the column has nulls, which ``pl.cut``
+    propagates and this shortcut does not model.
+    """
+    if values.null_count():
+        return None
+    array = values.to_numpy()
+    if array.dtype.kind not in "iuf":
+        return None
+    breaks = np.asarray(sorted(float(b) for b in breakpoints), dtype=np.float64)
+    return np.searchsorted(breaks, array.astype(np.float64), side="left").astype(
+        np.int32
+    )
+
+
+def _as_array(column) -> pa.Array:
+    """Flatten a possibly-chunked column to a single Array.
+
+    ``RecordBatch.from_arrays`` will not take a ChunkedArray, and a zero-row
+    batch produces a column with no chunks at all, so neither ``chunk(0)`` nor
+    ``combine_chunks`` is safe on its own.
+    """
+    if isinstance(column, pa.ChunkedArray):
+        if column.num_chunks == 1:
+            return column.chunk(0)
+        return pa.concat_arrays([chunk for chunk in column.chunks] or
+                                [pa.array([], type=column.type)])
+    return column
+
+
+def _spec_derived_columns(
+    batch: pa.RecordBatch,
+    spec: DeltaLakeOutputSpec,
+) -> list[tuple[str, pa.Array]]:
+    """The Morton and/or partition columns this spec adds to a decoded batch.
+
+    Returns only the *new* columns rather than a rebuilt batch, so the caller can
+    attach them to the decoded batches without copying the batches themselves.
+    """
+    needs_morton = spec.source_geometry_column is not None
+    needs_partition = (
+        spec.partition_by is not None and spec.partition_strategy is not None
+    )
+    if not needs_morton and not needs_partition:
+        return []
+
+    frame = pl.from_arrow(batch)
+    if isinstance(frame, pl.Series):
+        frame = frame.to_frame()
+
+    added: list[str] = []
+    if needs_morton:
+        morton_col = f"{spec.source_geometry_column}_morton"
+        frame = add_morton_column(frame, spec.source_geometry_column)
+        added.append(morton_col)
+
+    if needs_partition:
+        part_col = spec.partition_by
+        if spec.bounds is not None:
+            indices = _partition_indices(frame[part_col], spec.bounds)
+            if indices is not None:
+                frame = frame.with_columns(
+                    pl.Series(f"{part_col}_partition", indices, dtype=pl.Int32)
+                )
+            else:
+                frame = assign_partition(frame, part_col, spec.bounds)
+            added.append(f"{part_col}_partition")
+        elif spec.partition_strategy == "hash":
+            n = spec.n_partitions if isinstance(spec.n_partitions, int) else 1
+            frame = assign_hash_partition(frame, part_col, n)
+            added.append(f"{part_col}_partition")
+
+    table = frame.select(added).to_arrow().combine_chunks()
+    return [(name, _as_array(table.column(name))) for name in added]
+
+
+def _apply_spec_to_batch(
+    batch: pa.RecordBatch,
+    spec: DeltaLakeOutputSpec,
+) -> pa.RecordBatch:
+    """A decoded batch plus this spec's derived columns."""
+    columns = [batch.column(i) for i in range(batch.num_columns)]
+    names = list(batch.schema.names)
+    for name, array in _spec_derived_columns(batch, spec):
+        names.append(name)
+        columns.append(array)
+    return pa.RecordBatch.from_arrays(columns, names=names)
+
+
+# How many partitions one ``write_deltalake`` call may span. The writer holds an
+# open Parquet writer per partition it has seen and flushes them only when the
+# call returns, so a single call covering every partition pins them all at once
+# -- measured at 3.9x the flush buffer for 63 partitions. Writing a bounded group
+# at a time caps the open writers without fragmenting the output: each group
+# still emits exactly the files for its own partitions, so the file count is
+# unchanged. Lowering ``target_file_size`` also bounds memory, but only by
+# splitting the output into many more, much smaller files.
+#
+# The tension is commit count: each group is its own commit, and every
+# ``write_deltalake`` replays the table's transaction log, so smaller groups
+# make later flushes progressively slower. Over eight 256 MiB flushes, 8 gave
+# 2521 MiB at 2.4 s/flush and 16 gave 2604 MiB at 1.6 s/flush, while one call
+# per spec gave 3308 MiB at 1.3 s. 16 buys nearly all of the memory saving for a
+# third less time.
+_PARTITION_WRITE_GROUP = int(
+    os.environ.get("DELTALAKE_PARTITION_WRITE_GROUP", 16) or 16
+)
+
+
+def _write_partitioned_in_groups(
+    table: pa.Table,
+    uri: str,
+    partition_column: str,
+    partition_values: np.ndarray | None = None,
+    group_size: int = _PARTITION_WRITE_GROUP,
+) -> None:
+    """Append *table* to a partitioned lake a bounded group of partitions at a time.
+
+    Selects each group with a filter rather than sorting the whole table: the
+    filter allocates only the rows of the group it is about to write, whereas a
+    sort would hold a second full-size copy alongside the original.
+    """
+    from deltalake import write_deltalake
+
+    if table.num_rows == 0:
+        return
+
+    column = table.column(partition_column)
+    if column.null_count:
+        # Nulls have no numeric group; rare enough to take the simple path.
+        write_deltalake(uri, table, mode="append", partition_by=[partition_column])
+        return
+
+    if partition_values is None:
+        partition_values = column.to_numpy()
+
+    lo, hi = int(partition_values.min()), int(partition_values.max())
+    if hi - lo < group_size:
+        write_deltalake(uri, table, mode="append", partition_by=[partition_column])
+        return
+
+    for start in range(lo, hi + 1, group_size):
+        mask = (partition_values >= start) & (partition_values < start + group_size)
+        if not mask.any():
+            continue
+        chunk = table.filter(pa.array(mask))
+        try:
+            write_deltalake(
+                uri, chunk, mode="append", partition_by=[partition_column]
+            )
+        finally:
+            del chunk
+
+
+def _spec_partition_by(spec: "DeltaLakeOutputSpec") -> list[str] | None:
+    """The ``partition_by`` argument for this spec's ``write_deltalake`` call."""
+    if spec.partition_by is None or spec.partition_strategy is None:
+        return None
+    if spec.bounds is not None or spec.partition_strategy == "hash":
+        return [f"{spec.partition_by}_partition"]
+    return None
+
+
+
+
+_malloc_trim = None
+_malloc_trim_checked = False
+
+
+def _release_freed_heap() -> None:
+    """Hand memory freed during a flush back to the OS. glibc only, best effort.
+
+    The Parquet writer allocates and frees large native buffers on every flush.
+    glibc keeps that memory in its arenas instead of returning it, so RSS
+    ratchets upward across a long export even though almost nothing stays live --
+    measured climbing from 1.3 GB to 2.1 GB over six 256 MiB flushes, and the
+    container limit is enforced on RSS, not on live bytes. ``malloc_trim``
+    releases the free pages and flattens that curve.
+
+    A no-op anywhere without glibc (musl, macOS), so it is safe to call
+    unconditionally.
+    """
+    global _malloc_trim, _malloc_trim_checked
+    if not _malloc_trim_checked:
+        _malloc_trim_checked = True
+        try:
+            import ctypes
+
+            libc = ctypes.CDLL("libc.so.6")
+            libc.malloc_trim.argtypes = [ctypes.c_size_t]
+            libc.malloc_trim.restype = ctypes.c_int
+            _malloc_trim = libc.malloc_trim
+        except (OSError, AttributeError):
+            _malloc_trim = None
+    if _malloc_trim is not None:
+        try:
+            _malloc_trim(0)
+        except Exception:  # pragma: no cover - never fail a flush over this
+            pass
+
+
 def _flush_buffer(
     buffer: list[pa.RecordBatch],
     output_specs: list[DeltaLakeOutputSpec],
     output_uri_base: str,
     geometry_columns: list[str],
 ) -> None:
-    """Convert accumulated batches to Polars, decode geometry, assign
-    partitions, and append to each target Delta Lake."""
+    """Decode geometry once, then append to each target Delta Lake.
+
+    Peak memory tracks the decoded buffer rather than a multiple of it. Three
+    things make that hold:
+
+    * Geometry is decoded a batch at a time and only once, up front. Decoding
+      *shrinks* the data -- three 33-byte WKB blobs become nine Int32s -- so the
+      decoded buffer is smaller than the raw batches it replaces, and the raw
+      batches are released as they are consumed.
+    * Each spec's derived columns are attached to those same decoded batches
+      instead of rebuilding them, so the only new allocation per spec is the
+      derived columns. Previously every spec copied the whole table twice while
+      the shared frame stayed alive alongside it.
+    * Partitioned lakes are written a bounded group of partitions at a time; see
+      :func:`_write_partitioned_in_groups`.
+
+    Together these took a synthetic 512 MiB synapse buffer from 6.8x the buffer
+    size to 3.6x, and the sustained peak over eight flushes from 5.3 GB to 3.4 GB.
+    """
     from deltalake import write_deltalake
 
-    arrow_table = pa.Table.from_batches(buffer)
-    buffer.clear()  # free buffer memory immediately
+    # Consume from the end so the source batches can be freed as we go; the
+    # caller's list is emptied either way.
+    decoded: list[pa.RecordBatch] = []
+    while buffer:
+        decoded.append(_decode_geometry_batch(buffer.pop(), geometry_columns))
+    decoded.reverse()
 
-    # Strip extension types (e.g. arrow.opaque on PostGIS columns) before
-    # Polars conversion.
-    # NOTE: I've debated whether to make this decoding happen on the Postgres side
-    # but it somehow felt more robust to have a piece of code that could handle whatever
-    arrow_table = _strip_arrow_extension_types(arrow_table)
+    if not decoded:
+        return
 
-    df = pl.from_arrow(arrow_table)
-    del arrow_table  # free Arrow table; Polars owns the data now
+    try:
+        for spec in output_specs:
+            uri = f"{output_uri_base}/{spec.name}"
+            partition_by = _spec_partition_by(spec)
 
-    # Decode geometry columns (WKB → x/y/z) once for all specs.
-    if geometry_columns:
-        df = decode_geometry_columns(df, geometry_columns)
+            if partition_by is None:
+                # Nothing to group by, so stream and never hold the full table.
+                # The schema comes from a one-row probe rather than a zero-row
+                # slice, so Morton encoding and binning see real data.
+                schema = _apply_spec_to_batch(decoded[0].slice(0, 1), spec).schema
+                reader = pa.RecordBatchReader.from_batches(
+                    schema,
+                    (_apply_spec_to_batch(batch, spec) for batch in decoded),
+                )
+                write_deltalake(uri, reader, mode="append")
+                continue
 
-    for spec in output_specs:
-        write_df = df
-
-        # Compute Morton code if this spec partitions on a spatial column.
-        if spec.source_geometry_column is not None:
-            write_df = add_morton_column(write_df, spec.source_geometry_column)
-
-        partition_by: list[str] | None = None
-
-        if spec.partition_by is not None and spec.partition_strategy is not None:
-            part_col = spec.partition_by
-
-            if spec.bounds is not None:
-                write_df = assign_partition(write_df, part_col, spec.bounds)
-                partition_by = [f"{part_col}_partition"]
-
-            elif spec.partition_strategy == "hash":
-                n = spec.n_partitions if isinstance(spec.n_partitions, int) else 1
-                write_df = assign_hash_partition(write_df, part_col, n)
-                partition_by = [f"{part_col}_partition"]
-
-        # Build the URI for this particular Delta Lake.
-        uri = f"{output_uri_base}/{spec.name}"
-
-        write_deltalake(
-            uri,
-            write_df.to_arrow(),  # TODO check whether this to_arrow hurts memory usage
-            mode="append",
-            partition_by=partition_by,
-        )
+            # Attach the derived columns to the decoded batches rather than
+            # rebuilding them: from_batches shares the existing buffers, so the
+            # only new allocation is the derived columns themselves.
+            part_col = partition_by[0]
+            derived = [_spec_derived_columns(batch, spec) for batch in decoded]
+            names = [name for name, _ in derived[0]]
+            table = pa.Table.from_batches(decoded)
+            for position, name in enumerate(names):
+                table = table.append_column(
+                    name, pa.chunked_array([cols[position][1] for cols in derived])
+                )
+            # Keep the partition values as numpy so the group filter below does
+            # not have to re-read them off the table for every group.
+            part_position = names.index(part_col)
+            values = np.concatenate(
+                [
+                    cols[part_position][1].to_numpy(zero_copy_only=False)
+                    for cols in derived
+                ]
+            )
+            del derived
+            try:
+                _write_partitioned_in_groups(table, uri, part_col, values)
+            finally:
+                del table, values
+    finally:
+        decoded.clear()
+        _release_freed_heap()
 
 
 def export_table_to_deltalake(

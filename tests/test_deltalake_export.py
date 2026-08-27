@@ -19,7 +19,13 @@ from materializationengine.workflows.deltalake_export import (
     TableSource,
     _classify_relation,
     _compute_sampled_percentile_bounds,
+    _decode_geometry_batch,
+    _decode_wkb_pointz_vectorised,
     _flush_buffer,
+    _int32_column,
+    _partition_indices,
+    _release_freed_heap,
+    _write_partitioned_in_groups,
     _validate_identifier,
     add_morton_column,
     assign_hash_partition,
@@ -1707,3 +1713,280 @@ class TestGeometryTypeRegistrationNotClobbered:
 
         reflected_type = pg_dialect.ischema_names["geometry"]()
         assert isinstance(reflected_type, Geometry)
+
+
+def _ewkb_point_z(x, y, z, srid=9606, little_endian=True, with_z=True):
+    """Build an EWKB point blob the way PostGIS emits one."""
+    import struct
+
+    type_word = 1
+    if with_z:
+        type_word |= 0x80000000
+    if srid is not None:
+        type_word |= 0x20000000
+    endian = "<" if little_endian else ">"
+    blob = struct.pack("<B" if little_endian else ">B", 1 if little_endian else 0)
+    blob += struct.pack(f"{endian}I", type_word)
+    if srid is not None:
+        blob += struct.pack(f"{endian}I", srid)
+    blob += struct.pack(f"{endian}ddd" if with_z else f"{endian}dd",
+                        *( (x, y, z) if with_z else (x, y) ))
+    return blob
+
+
+class TestVectorisedWkbDecode:
+    """The numpy WKB reader must agree with the shapely path it shortcuts.
+
+    Shapely decoding was the single largest cost in the flush -- it built a
+    Python bytes object and a GEOS geometry per row -- so the fast path exists
+    to skip it. It is only safe if it is indistinguishable from shapely.
+    """
+
+    @staticmethod
+    def _shapely_reference(binary_array):
+        frame = pl.from_arrow(pa.record_batch([binary_array], names=["g"]))
+        out = decode_geometry_columns(frame, ["g"])
+        return out["g_x"].to_list(), out["g_y"].to_list(), out["g_z"].to_list()
+
+    @staticmethod
+    def _fast(binary_array):
+        decoded = _decode_wkb_pointz_vectorised(binary_array)
+        if decoded is None:
+            return None
+        x, y, z, valid = decoded
+        n = len(binary_array)
+        return (
+            pl.Series(_int32_column(x, valid, n)).to_list(),
+            pl.Series(_int32_column(y, valid, n)).to_list(),
+            pl.Series(_int32_column(z, valid, n)).to_list(),
+        )
+
+    @pytest.mark.parametrize(
+        "blobs",
+        [
+            pytest.param([_ewkb_point_z(1, 2, 3)], id="single"),
+            pytest.param(
+                [_ewkb_point_z(1, 2, 3), _ewkb_point_z(4, 5, 6)], id="several"
+            ),
+            pytest.param([_ewkb_point_z(0, 0, 0)] * 4, id="zeros"),
+            pytest.param(
+                [_ewkb_point_z(2**20, 2**20 + 1, 2**20 - 1)] * 3, id="large-coords"
+            ),
+            pytest.param(
+                [_ewkb_point_z(i, i + 1, i + 2, srid=None) for i in range(5)],
+                id="no-srid",
+            ),
+            pytest.param([None, _ewkb_point_z(1, 2, 3)], id="leading-null"),
+            pytest.param([_ewkb_point_z(1, 2, 3), None], id="trailing-null"),
+            pytest.param(
+                [_ewkb_point_z(i, i, i) if i % 3 else None for i in range(30)],
+                id="interleaved-nulls",
+            ),
+        ],
+    )
+    def test_matches_shapely(self, blobs):
+        arr = pa.array(blobs, type=pa.binary())
+        assert self._fast(arr) == self._shapely_reference(arr)
+
+    def test_matches_shapely_on_random_data(self):
+        rng = np.random.default_rng(11)
+        blobs = [
+            _ewkb_point_z(*rng.integers(0, 2**21 - 1, 3).tolist()) for _ in range(2000)
+        ]
+        arr = pa.array(blobs, type=pa.binary())
+        assert self._fast(arr) == self._shapely_reference(arr)
+
+    @pytest.mark.parametrize(
+        "blobs, reason",
+        [
+            ([_ewkb_point_z(1, 2, 3, little_endian=False)], "big-endian"),
+            ([_ewkb_point_z(1, 2, 0, with_z=False)], "2D point"),
+            (
+                [_ewkb_point_z(1, 2, 3), _ewkb_point_z(1, 2, 3, srid=None)],
+                "mixed widths",
+            ),
+            (
+                [_ewkb_point_z(1, 2, 3), _ewkb_point_z(4, 5, 6, little_endian=False)],
+                "mixed endianness",
+            ),
+            ([None, None], "all null"),
+        ],
+    )
+    def test_declines_what_it_cannot_read(self, blobs, reason):
+        """Declining is the contract: the caller then falls back to shapely."""
+        arr = pa.array(blobs, type=pa.binary())
+        assert _decode_wkb_pointz_vectorised(arr) is None, reason
+
+    def test_respects_array_offset(self):
+        full = pa.array([_ewkb_point_z(i, i, i) for i in range(50)], type=pa.binary())
+        decoded = _decode_wkb_pointz_vectorised(full.slice(10, 20))
+        assert decoded is not None
+        assert decoded[0].tolist() == list(range(10, 30))
+
+
+class TestDecodeGeometryBatch:
+    """Batch-level decoding must match the whole-frame function it replaces."""
+
+    def _batch(self, n=64, null_every=0):
+        rng = np.random.default_rng(5)
+        blobs = [
+            None
+            if (null_every and i % null_every == 0)
+            else _ewkb_point_z(*rng.integers(0, 2**21 - 1, 3).tolist())
+            for i in range(n)
+        ]
+        return pa.record_batch(
+            [pa.array(range(n), type=pa.int64()), pa.array(blobs, type=pa.binary())],
+            names=["id", "pt_position"],
+        )
+
+    @pytest.mark.parametrize("null_every", [0, 4])
+    def test_matches_decode_geometry_columns(self, null_every):
+        batch = self._batch(null_every=null_every)
+        got = pl.from_arrow(_decode_geometry_batch(batch, ["pt_position"]))
+        want = decode_geometry_columns(pl.from_arrow(batch), ["pt_position"])
+        assert sorted(got.columns) == sorted(want.columns)
+        assert got.select(sorted(got.columns)).equals(want.select(sorted(want.columns)))
+
+    def test_drops_the_binary_column(self):
+        out = _decode_geometry_batch(self._batch(), ["pt_position"])
+        assert "pt_position" not in out.schema.names
+        assert {"pt_position_x", "pt_position_y", "pt_position_z"} <= set(
+            out.schema.names
+        )
+
+    def test_strips_extension_types(self):
+        """ADBC delivers geometry as arrow.opaque; Polars chokes on it."""
+
+        class _Opaque(pa.ExtensionType):
+            def __init__(self):
+                super().__init__(pa.binary(), "test.opaque")
+
+            def __arrow_ext_serialize__(self):
+                return b""
+
+            @classmethod
+            def __arrow_ext_deserialize__(cls, storage_type, serialized):
+                return cls()
+
+        storage = pa.array([_ewkb_point_z(1, 2, 3)], type=pa.binary())
+        batch = pa.record_batch(
+            [pa.ExtensionArray.from_storage(_Opaque(), storage)], names=["pt_position"]
+        )
+        out = _decode_geometry_batch(batch, ["pt_position"])
+        assert not any(
+            isinstance(f.type, pa.BaseExtensionType) for f in out.schema
+        )
+        assert pl.from_arrow(out)["pt_position_x"].to_list() == [1]
+
+
+class TestPartitionIndices:
+    """searchsorted binning must reproduce pl.cut, which it replaces to avoid
+    materialising a string label per row."""
+
+    @pytest.mark.parametrize(
+        "values, breaks",
+        [
+            ([0, 10, 20, 30, 40], [10.0, 20.0, 30.0]),
+            ([-5, -1], [0.0, 10.0]),
+            ([999, 10_000], [0.0, 10.0]),
+            (list(range(-20, 20)), [0.0]),
+            ([8 * 10**17, 85 * 10**16, 9 * 10**17], list(np.linspace(8e17, 9e17, 8))),
+        ],
+    )
+    def test_matches_pl_cut(self, values, breaks):
+        frame = pl.DataFrame({"v": values})
+        want = assign_partition(frame, "v", breaks)["v_partition"].to_list()
+        got = _partition_indices(frame["v"], breaks)
+        assert got is not None
+        assert got.tolist() == want
+
+    def test_matches_pl_cut_on_unsorted_breaks(self):
+        frame = pl.DataFrame({"v": list(range(100))})
+        breaks = [70.0, 10.0, 40.0]
+        want = assign_partition(frame, "v", breaks)["v_partition"].to_list()
+        assert _partition_indices(frame["v"], breaks).tolist() == want
+
+    def test_declines_on_nulls(self):
+        """pl.cut propagates nulls; the shortcut does not model that."""
+        assert _partition_indices(pl.DataFrame({"v": [1, None, 3]})["v"], [2.0]) is None
+
+    def test_declines_on_non_numeric(self):
+        assert _partition_indices(pl.DataFrame({"v": ["a", "b"]})["v"], [2.0]) is None
+
+
+class TestWritePartitionedInGroups:
+    """Grouped writes exist to bound writer memory; they must not change data
+    or split the output into extra files."""
+
+    def _table(self, n=400, n_partitions=40):
+        rng = np.random.default_rng(2)
+        return pa.table(
+            {
+                "id": pa.array(range(n), type=pa.int64()),
+                "p": pa.array(
+                    rng.integers(0, n_partitions, n).tolist(), type=pa.int32()
+                ),
+            }
+        )
+
+    def _read(self, uri):
+        from deltalake import DeltaTable
+
+        frame = pl.from_arrow(DeltaTable(uri).to_pyarrow_table())
+        frame = frame.with_columns(pl.col("p").cast(pl.Int64))
+        return frame.select(sorted(frame.columns)).sort(sorted(frame.columns))
+
+    def test_same_rows_as_a_single_write(self, tmp_path):
+        from deltalake import write_deltalake
+
+        table = self._table()
+        single, grouped = str(tmp_path / "single"), str(tmp_path / "grouped")
+        write_deltalake(single, table, mode="append", partition_by=["p"])
+        _write_partitioned_in_groups(table, grouped, "p", group_size=8)
+        assert self._read(single).equals(self._read(grouped))
+
+    def test_does_not_fragment_the_output(self, tmp_path):
+        """One file per partition either way -- unlike shrinking target_file_size."""
+        import os as _os
+
+        from deltalake import write_deltalake
+
+        table = self._table()
+        single, grouped = str(tmp_path / "single"), str(tmp_path / "grouped")
+        write_deltalake(single, table, mode="append", partition_by=["p"])
+        _write_partitioned_in_groups(table, grouped, "p", group_size=8)
+
+        def n_files(root):
+            return sum(
+                1
+                for _, _, fs in _os.walk(root)
+                for f in fs
+                if f.endswith(".parquet")
+            )
+
+        assert n_files(grouped) == n_files(single)
+
+    def test_handles_nulls_in_the_partition_column(self, tmp_path):
+        table = pa.table(
+            {
+                "id": pa.array([1, 2, 3], type=pa.int64()),
+                "p": pa.array([0, None, 2], type=pa.int32()),
+            }
+        )
+        uri = str(tmp_path / "nulls")
+        _write_partitioned_in_groups(table, uri, "p", group_size=2)
+        assert self._read(uri).height == 3
+
+    def test_empty_table_writes_nothing(self, tmp_path):
+        """A flush can end with an empty slice; it must not create a table."""
+        target = tmp_path / "empty"
+        _write_partitioned_in_groups(self._table().slice(0, 0), str(target), "p")
+        assert not target.exists()
+
+
+class TestReleaseFreedHeap:
+    def test_is_safe_to_call_anywhere(self):
+        """No-op off glibc; must never raise, since it runs in a finally block."""
+        _release_freed_heap()
+        _release_freed_heap()
