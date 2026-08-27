@@ -40,6 +40,7 @@ Usage::
 import argparse
 import json
 import logging
+import os
 import sys
 
 logging.basicConfig(
@@ -47,14 +48,125 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ray.deltalake_export")
 
-# Memory ceiling for one optimize task, and what Ray schedules against. z-order
-# is the memory-hungry phase; requesting it explicitly stops Ray packing several
-# onto a worker that cannot hold them, which is the failure the serial
-# max_concurrent_tasks=1 was working around in the first place.
-DEFAULT_OPTIMIZE_MEMORY_BYTES = 6 * 1024 * 1024 * 1024
+# Memory reserved per optimize task.
+#
+# Default None: request no `memory` resource at all, and rely on num_cpus=1 to
+# keep one optimize per worker. A hardcoded figure here is a number that has to
+# agree with the worker's memory request in a DIFFERENT repository, and when it
+# does not the failure is silent and total -- Ray marks the demand infeasible,
+# the autoscaler declines to create a worker (it cannot make one big enough),
+# and the job hangs until activeDeadlineSeconds fires. That is a 24-hour wait
+# for a scheduling constraint that was never satisfiable, with nothing logged.
+#
+# The chart sets RAY_OPTIMIZE_MEMORY_BYTES from the worker's own memory request
+# when it wants an explicit reservation, so the two cannot diverge.
+DEFAULT_OPTIMIZE_MEMORY_BYTES = None
+
+# How long to wait for the first optimize task to be scheduled before declaring
+# the demand unsatisfiable. Generous enough for a cold mesh-pool scale-up
+# (~60-90s for a node, plus image pull), short enough to be a useful error.
+SCHEDULING_TIMEOUT_SECONDS = 900
 
 
-def _build_ray_optimize_runner(memory_bytes: int, max_concurrent_tasks: int):
+def _optimize_memory_default():
+    """Resolve RAY_OPTIMIZE_MEMORY_BYTES, or None to reserve no memory.
+
+    Unset, empty and "0" all mean "reserve none" -- the safe default, where
+    num_cpus=1 alone keeps one optimize per worker. A malformed value is a
+    configuration error worth naming: left to argparse it surfaces as a bare
+    ValueError raised while the parser is being built, before --help exists.
+    """
+    raw = os.environ.get("RAY_OPTIMIZE_MEMORY_BYTES", "").strip()
+    if not raw:
+        return DEFAULT_OPTIMIZE_MEMORY_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        raise SystemExit(
+            f"RAY_OPTIMIZE_MEMORY_BYTES must be an integer number of bytes, "
+            f"got {raw!r}. Unset it (or set 0) to reserve no memory and let "
+            f"num_cpus=1 keep one optimize per worker."
+        ) from None
+    if value < 0:
+        raise SystemExit(
+            f"RAY_OPTIMIZE_MEMORY_BYTES must not be negative, got {value}."
+        )
+    return value or DEFAULT_OPTIMIZE_MEMORY_BYTES
+
+
+def _warn_if_packing_risk(ray, memory_bytes) -> None:
+    """Warn when workers could pack several optimizes onto one node.
+
+    With no memory reservation, `num_cpus=1` is the ONLY thing keeping one
+    z-order per worker, and that holds only while Ray believes a worker has one
+    CPU. The chart pins that via rayStartParams.num-cpus, but this image can be
+    run against a cluster that does not -- a hand-written RayJob, a plain Ray
+    cluster, a laptop -- where Ray auto-detects and a 4-vCPU node advertises 4.
+    Four concurrent z-orders on one small worker is how the original OOMKills
+    happened, so make the condition visible rather than silently likely.
+    """
+    if memory_bytes:
+        return  # an explicit reservation already bounds co-location
+    try:
+        workers = [
+            n
+            for n in ray.nodes()
+            if n.get("Alive") and not n.get("Resources", {}).get("node:__internal_head__")
+        ]
+        crowded = [n for n in workers if n.get("Resources", {}).get("CPU", 0) > 1]
+    except Exception:  # diagnostics must never break the export
+        return
+    if crowded:
+        cpus = sorted({int(n["Resources"]["CPU"]) for n in crowded})
+        logger.warning(
+            "%d worker node(s) advertise %s CPUs, so Ray may run that many "
+            "z-orders concurrently on one node with no memory reservation to "
+            "stop it. Set RAY_OPTIMIZE_MEMORY_BYTES (<= the worker memory "
+            "request), or pin rayStartParams.num-cpus to 1 as the chart does.",
+            len(crowded),
+            "/".join(str(c) for c in cpus),
+        )
+
+
+def _fail_if_unschedulable(ray, refs, options) -> None:
+    """Raise if no task has started within SCHEDULING_TIMEOUT_SECONDS.
+
+    An over-large resource request does not error in Ray -- it is simply never
+    satisfiable, so the autoscaler declines to add a node (it cannot build one
+    that fits) and the tasks pend silently until activeDeadlineSeconds kills the
+    job hours later, with nothing in the logs to say why. That happened: a 6 GiB
+    memory request against workers declaring 3 Gi.
+
+    A wait that is only ever going to time out should say so, and say what to
+    change.
+    """
+    import time
+
+    deadline = time.time() + SCHEDULING_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        ready, _ = ray.wait(refs, num_returns=1, timeout=15)
+        if ready:
+            return
+        # Any worker joining means the demand was satisfiable after all.
+        if any(k for k in ray.cluster_resources() if k.startswith("node:")) and len(
+            ray.nodes()
+        ) > 1:
+            return
+        logger.info("waiting for a worker to accept the optimize tasks...")
+
+    demand = ", ".join(f"{k}={v}" for k, v in sorted(options.items()))
+    raise RuntimeError(
+        f"no optimize task was scheduled within {SCHEDULING_TIMEOUT_SECONDS}s. "
+        f"Each task requests {demand}, and Ray reports cluster resources "
+        f"{ray.cluster_resources()}. If the request exceeds what one worker "
+        f"declares, the autoscaler cannot create a node that fits and will not "
+        f"try -- the job would otherwise hang until activeDeadlineSeconds. "
+        f"Lower RAY_OPTIMIZE_MEMORY_BYTES, or raise the worker's memory request "
+        f"(ray.worker.resources.requests.memory in the chart)."
+    )
+
+
+def _build_ray_optimize_runner(memory_bytes, max_concurrent_tasks: int):
     """Return an ``optimize_runner`` that fans specs out across Ray workers."""
     import ray
 
@@ -82,11 +194,19 @@ def _build_ray_optimize_runner(memory_bytes: int, max_concurrent_tasks: int):
         kwargs["max_concurrent_tasks"] = max_concurrent_tasks
 
         logger.info(
-            "optimizing %d Delta Lake(s) in parallel (%.1f GiB, %d merge tasks each)",
+            "optimizing %d Delta Lake(s) in parallel (memory reservation: %s, "
+            "%d merge tasks each)",
             len(jobs),
-            memory_bytes / 1024**3,
+            f"{memory_bytes / 1024**3:.1f} GiB" if memory_bytes else "none (num_cpus only)",
             max_concurrent_tasks,
         )
+
+        # num_cpus=1 is what keeps one optimize per worker. `memory` is only
+        # added when explicitly configured -- see DEFAULT_OPTIMIZE_MEMORY_BYTES
+        # for why an unsatisfiable default is worse than none.
+        options = {"num_cpus": 1}
+        if memory_bytes:
+            options["memory"] = memory_bytes
 
         pending = {}
         for spec, uri in jobs:
@@ -94,7 +214,7 @@ def _build_ray_optimize_runner(memory_bytes: int, max_concurrent_tasks: int):
                 optimize_callback(
                     spec.name, "z_order" if spec.zorder_columns else "compact"
                 )
-            ref = _optimize_one.options(memory=memory_bytes).remote(
+            ref = _optimize_one.options(**options).remote(
                 uri,
                 spec.zorder_columns or None,
                 spec.bloom_filter_columns or None,
@@ -109,6 +229,9 @@ def _build_ray_optimize_runner(memory_bytes: int, max_concurrent_tasks: int):
         # of lakes should fail the job loudly, not look like a success.
         outstanding = list(pending)
         failures = []
+        _fail_if_unschedulable(ray, outstanding, options)
+        # After the first task schedules, at least one worker exists to inspect.
+        _warn_if_packing_risk(ray, memory_bytes)
         while outstanding:
             done, outstanding = ray.wait(outstanding, num_returns=1)
             for ref in done:
@@ -152,8 +275,12 @@ def main() -> int:
     parser.add_argument(
         "--optimize-memory-bytes",
         type=int,
-        default=DEFAULT_OPTIMIZE_MEMORY_BYTES,
-        help="memory Ray reserves per optimize task",
+        default=_optimize_memory_default(),
+        help=(
+            "memory Ray reserves per optimize task; 0/unset requests none and "
+            "relies on num_cpus=1. The chart sets RAY_OPTIMIZE_MEMORY_BYTES from "
+            "the worker's own memory request so the two cannot diverge"
+        ),
     )
     parser.add_argument(
         "--optimize-max-concurrent-tasks",
