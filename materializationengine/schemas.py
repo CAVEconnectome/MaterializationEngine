@@ -119,7 +119,8 @@ class MaterializationInfoSchema(Schema):
     
     materialization_time_stamp = fields.Str(required=True)
     last_updated_time_stamp = fields.Str(allow_none=True)
-    
+    last_modified_time_stamp = fields.Str(allow_none=True)
+
     create_segmentation_table = fields.Bool(default=False)
     add_indices = fields.Bool(default=True)
     merge_table = fields.Bool(default=True)
