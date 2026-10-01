@@ -110,7 +110,9 @@ def _run_complete_workflow(
         if mat_metadata.get("segmentation_table_name"):
             workflow = chain(
                 ingest_new_annotations_workflow(mat_metadata),
-                # find_missing_root_ids_workflow(mat_metadata), # skip for now
+                # rows posted through the API get a supervoxel_id but no root_id,
+                # and ingest only handles rows with no segmentation row at all
+                find_missing_root_ids_workflow(mat_metadata),
                 update_root_ids_workflow(mat_metadata),
             )
         else:

@@ -63,6 +63,7 @@ def update_database_workflow(self, datastack_info: dict, **kwargs):
     """Updates 'live' database:
         - Find all annotations with missing segmentation rows
         and lookup supervoxel_id and root_id
+        - Lookup root_ids for rows that have a supervoxel_id but a NULL root_id
         - Lookup all expired root_ids and update them
 
     Args:
@@ -88,7 +89,9 @@ def update_database_workflow(self, datastack_info: dict, **kwargs):
             if mat_metadata.get("segmentation_table_name"):
                 workflow = chain(
                     ingest_new_annotations_workflow(mat_metadata),
-                    # find_missing_root_ids_workflow(mat_metadata), # skip for now
+                    # rows posted through the API get a supervoxel_id but no root_id,
+                    # and ingest only handles rows with no segmentation row at all
+                    find_missing_root_ids_workflow(mat_metadata),
                     update_root_ids_workflow(mat_metadata),
                 )
 

@@ -248,6 +248,11 @@ def get_materialization_info(
                 last_updated_time_stamp = (
                     str(last_updated_time_stamp) if last_updated_time_stamp else None
                 )
+                # bumped on every annotation insert/update/delete
+                last_modified_time_stamp = md.get("last_modified")
+                last_modified_time_stamp = (
+                    str(last_modified_time_stamp) if last_modified_time_stamp else None
+                )
 
                 table_metadata.update({
                     "create_segmentation_table": create_segmentation_table,
@@ -256,6 +261,7 @@ def get_materialization_info(
                     "pcg_table_name": pcg_table_name,
                     "segmentation_source": segmentation_source,
                     "last_updated_time_stamp": last_updated_time_stamp,
+                    "last_modified_time_stamp": last_modified_time_stamp,
                     "chunk_size": get_config_param("MATERIALIZATION_ROW_CHUNK_SIZE"),
                     "queue_length_limit": get_config_param("QUEUE_LENGTH_LIMIT"),
                     "throttle_queues": get_config_param("THROTTLE_QUEUES"),

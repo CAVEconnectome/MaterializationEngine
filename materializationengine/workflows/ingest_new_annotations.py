@@ -30,7 +30,7 @@ from materializationengine.utils import (
     get_query_columns_by_suffix,
 )
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.sql import or_
+from sqlalchemy.sql import and_, or_
 from sqlalchemy.sql import func, text
 
 celery_logger = get_task_logger(__name__)
@@ -277,9 +277,34 @@ def batch_missing_root_ids_query(query, mat_metadata):
     return tasks
 
 
+# How far before the segmentation table's last update an annotation change still
+# triggers a missing root id scan. Covers posts whose supervoxel-only segmentation
+# row was written after the previous scan had already run.
+MISSING_ROOT_ID_LOOKBACK = datetime.timedelta(days=1)
+
+
+def table_modified_since_last_update(mat_metadata: dict) -> bool:
+    """True if the annotation table may have rows the last update did not see.
+
+    Compares the annotation table's last_modified (bumped on every insert, update
+    and delete) with the segmentation table's last_updated. Tables that have not
+    changed, like large synapse tables, are skipped so they are not scanned every run.
+    """
+    last_modified = mat_metadata.get("last_modified_time_stamp")
+    last_updated = mat_metadata.get("last_updated_time_stamp")
+    if not last_modified or not last_updated:
+        return True
+    last_modified = datetime.datetime.fromisoformat(str(last_modified))
+    last_updated = datetime.datetime.fromisoformat(str(last_updated))
+    return last_modified > last_updated - MISSING_ROOT_ID_LOOKBACK
+
+
 def find_missing_root_ids_workflow(mat_metadata: dict):
     """Find missing root ids in the segmentation table. If missing root ids
     are found, lookup supervoxel ids and root ids in batches.
+
+    Skipped for tables whose annotations have not changed since the segmentation
+    table was last updated.
 
     Parameters
     ----------
@@ -291,17 +316,29 @@ def find_missing_root_ids_workflow(mat_metadata: dict):
     celery task
 
     """
+    if not table_modified_since_last_update(mat_metadata):
+        celery_logger.debug(
+            f"Skipping missing root id lookup for '{mat_metadata['segmentation_table_name']}', "
+            f"not modified since {mat_metadata.get('last_updated_time_stamp')}"
+        )
+        return fin.si()
+
     query = get_ids_with_missing_roots(mat_metadata)
     tasks = batch_missing_root_ids_query(query, mat_metadata)
+    if tasks:
+        celery_logger.info(
+            f"Looking up missing root ids for '{mat_metadata['segmentation_table_name']}' "
+            f"in {len(tasks)} batches"
+        )
     tasks_completed = monitor_task_states(tasks)
 
     return fin.si()
 
 
 def get_ids_with_missing_roots(mat_metadata: dict):
-    """Get a chunk generator of the primary key ids for rows that contain
-    at least one missing root id. Finds the min and max primary key id values
-    globally across the table where a missing root id is present in a column.
+    """Get a query for the primary key ids of rows that have at least one
+    root id column that is NULL while its supervoxel id is set. Rows whose
+    supervoxel id is also missing are skipped, since there is nothing to look up yet.
 
     Args:
         mat_metadata (dict): materialization metadata
@@ -317,10 +354,16 @@ def get_ids_with_missing_roots(mat_metadata: dict):
         root_id_columns = [
             root_column for root_column in columns if "root_id" in root_column
         ]
-        query_columns = [
-            getattr(SegmentationModel, root_id_column).is_(None)
-            for root_id_column in root_id_columns
-        ]
+        query_columns = []
+        for root_id_column in root_id_columns:
+            missing_root = getattr(SegmentationModel, root_id_column).is_(None)
+            supervoxel_column = root_id_column.replace("root_id", "supervoxel_id")
+            if supervoxel_column in columns:
+                missing_root = and_(
+                    missing_root,
+                    getattr(SegmentationModel, supervoxel_column).isnot(None),
+                )
+            query_columns.append(missing_root)
         query = session.query(SegmentationModel.id).filter(or_(*query_columns))
         stmt = query.statement.compile(compile_kwargs={"literal_binds": True})
 
@@ -906,14 +949,10 @@ def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
     """
     pcg_table_name = mat_metadata.get("pcg_table_name")
     database = mat_metadata.get("database")
-    try:
-        materialization_time_stamp = datetime.datetime.strptime(
-            mat_metadata.get("materialization_time_stamp"), "%Y-%m-%d %H:%M:%S.%f"
-        )
-    except ValueError:
-        materialization_time_stamp = datetime.datetime.strptime(
-            mat_metadata.get("materialization_time_stamp"), "%Y-%m-%dT%H:%M:%S.%f"
-        )
+    # fromisoformat accepts both "T" and " " separators, with or without microseconds
+    materialization_time_stamp = datetime.datetime.fromisoformat(
+        str(mat_metadata.get("materialization_time_stamp"))
+    )
     supervoxel_df = pd.DataFrame(materialization_data, dtype=object)
     drop_col_names = list(
         supervoxel_df.loc[:, supervoxel_df.columns.str.endswith("position")]
@@ -959,21 +998,19 @@ def get_new_root_ids(materialization_data: dict, mat_metadata: dict) -> dict:
 
     cg_client = chunkedgraph_cache.init_pcg(pcg_table_name)
 
-    # filter missing root_ids and lookup root_ids if missing or zero
-    mask = np.logical_and.reduce(
-        [(root_ids_df[col].isna() | (root_ids_df[col] == 0)) for col in cols]
-    )
-    missing_root_rows = root_ids_df.loc[mask]
-    if not missing_root_rows.empty:
-        supervoxel_data = missing_root_rows.loc[:, supervoxel_col_names]
-        for col_name in supervoxel_data:
-            if "supervoxel_id" in col_name:
-                root_id_name = col_name.replace("supervoxel_id", "root_id")
-                data = missing_root_rows.loc[:, col_name]
-                root_id_array = get_root_ids(
-                    cg_client, data, materialization_time_stamp
-                )
-                root_ids_df.loc[data.index, root_id_name] = root_id_array
+    # lookup root_ids that are missing or zero, one column at a time so a row
+    # missing only one of its root_ids (e.g. post_pt_root_id) is still filled in
+    for col_name in supervoxel_col_names:
+        root_id_name = col_name.replace("supervoxel_id", "root_id")
+        if root_id_name not in cols:
+            continue
+        mask = (
+            root_ids_df[root_id_name].isna() | (root_ids_df[root_id_name] == 0)
+        ) & root_ids_df[col_name].notna()
+        if mask.any():
+            data = root_ids_df.loc[mask, col_name]
+            root_id_array = get_root_ids(cg_client, data, materialization_time_stamp)
+            root_ids_df.loc[data.index, root_id_name] = root_id_array
 
     return root_ids_df.to_dict(orient="records")
 
