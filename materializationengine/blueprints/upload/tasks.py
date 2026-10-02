@@ -11,7 +11,7 @@ from celery.result import AsyncResult
 from celery.utils.log import get_task_logger
 from flask import current_app
 from redis import Redis
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from dynamicannotationdb.key_utils import build_segmentation_table_name
 from dynamicannotationdb.models import SegmentationMetadata
 
@@ -132,6 +132,7 @@ def process_and_upload(
             materialization_time_stamp=str(materialization_time_stamp),
             job_id_for_status=main_job_id,
         ),
+        cluster_staging_tables.s(),
         transfer_to_production.s(
             transfer_segmentation=True,
         ),
@@ -803,7 +804,91 @@ def monitor_spatial_workflow_completion(
             f"Not yet complete. Retrying in 60 seconds."
         )
         raise self.retry(countdown=60)
-    
+
+
+def _primary_key_index_name(table_name: str, engine) -> Optional[str]:
+    """Name of the table's primary key index, or None if the table or key is missing."""
+    with engine.connect() as conn:
+        if not engine.dialect.has_table(conn, table_name):
+            return None
+    return inspect(engine).get_pk_constraint(table_name).get("name")
+
+
+def cluster_table_on_primary_key(table_name: str, engine) -> bool:
+    """Rewrite the table in primary key (id) order with CLUSTER, then ANALYZE it.
+
+    Returns False without doing anything if the table or its primary key is missing.
+    CLUSTER holds an ACCESS EXCLUSIVE lock and needs about the table's size again in
+    temporary disk while it rewrites the table and its indexes.
+    """
+    pk_index = _primary_key_index_name(table_name, engine)
+    if not pk_index:
+        celery_logger.info(f"Not clustering '{table_name}': table or primary key not found")
+        return False
+
+    quote = engine.dialect.identifier_preparer.quote
+    with engine.begin() as conn:
+        conn.execute(text(f"CLUSTER {quote(table_name)} USING {quote(pk_index)}"))
+        conn.execute(text(f"ANALYZE {quote(table_name)}"))
+    return True
+
+
+def mark_clustered_on_primary_key(table_name: str, engine) -> bool:
+    """Record the primary key as the table's clustering index (metadata only, no rewrite),
+    so a later plain `CLUSTER <table>` keeps rows in id order."""
+    pk_index = _primary_key_index_name(table_name, engine)
+    if not pk_index:
+        return False
+    quote = engine.dialect.identifier_preparer.quote
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE {quote(table_name)} CLUSTER ON {quote(pk_index)}"))
+    return True
+
+
+@celery.task(name="process:cluster_staging_tables", bind=True, acks_late=True)
+def cluster_staging_tables(self, monitor_result: dict) -> dict:
+    """Physically order the staging annotation and segmentation tables by id.
+
+    transfer_to_production copies each table with pg_dump, which reads rows in physical
+    order, into an emptied production table, so production ends up in id order without
+    running CLUSTER on the production database. The spatial lookup writes segmentation
+    rows in spatial chunk order, so that table in particular is not in id order before this.
+
+    Clustering only changes row order, never the data, so a failure here is logged and the
+    upload carries on to the transfer. Returns monitor_result unchanged for the next task.
+    """
+    datastack_info = monitor_result["datastack_info"]
+    table_name = monitor_result["table_name"]
+    job_id = monitor_result.get("job_id_for_status")
+
+    staging_database = get_config_param("STAGING_DATABASE_NAME")
+    engine = db_manager.get_engine(staging_database)
+    pcg_table_name = datastack_info["segmentation_source"].split("/")[-1]
+
+    for staging_table, label in (
+        (table_name, "Annotation Table"),
+        (build_segmentation_table_name(table_name, pcg_table_name), "Segmentation Table"),
+    ):
+        if job_id:
+            update_job_status(
+                job_id,
+                {"status": "processing", "phase": f"Clustering Staging {label} by id"},
+            )
+        try:
+            start = datetime.now(timezone.utc)
+            if cluster_table_on_primary_key(staging_table, engine):
+                elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+                celery_logger.info(
+                    f"Clustered staging table '{staging_table}' by id in {elapsed:.1f}s"
+                )
+        except Exception as e:
+            celery_logger.warning(
+                f"Could not cluster staging table '{staging_table}', transferring unclustered: {e}"
+            )
+
+    return monitor_result
+
+
 @celery.task(name="process:transfer_to_production", bind=True, ack_late=True)
 def transfer_to_production(
     self,
@@ -1188,6 +1273,10 @@ def transfer_table_using_pg_dump(
     pg_env = os.environ.copy()
     if db_info["password"]:
         pg_env["PGPASSWORD"] = db_info["password"]
+    # pg_dump copies rows in the source table's physical order, which preserves the id
+    # order cluster_staging_tables put them in. A synchronized scan could start the copy
+    # partway through a large table and wrap around, so turn that off for pg_dump.
+    pg_env["PGOPTIONS"] = f'{pg_env.get("PGOPTIONS", "")} -c synchronize_seqscans=off'.strip()
 
     celery_logger.info(f"Transferring data for {table_name} using pg_dump/psql")
     try:
@@ -1284,6 +1373,10 @@ def transfer_table_using_pg_dump(
             celery_logger.info(f"Adding index: {index}")
             with engine.begin() as conn:
                 conn.execute(text(index))
+        try:
+            mark_clustered_on_primary_key(table_name, engine)
+        except Exception as e:
+            celery_logger.warning(f"Could not mark '{table_name}' clustered on its primary key: {e}")
 
     return row_count
 
