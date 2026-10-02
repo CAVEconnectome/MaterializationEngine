@@ -47,7 +47,9 @@ from materializationengine.blueprints.upload.storage import (
 from materializationengine.blueprints.upload.tasks import (
     cancel_processing_job,
     get_job_status,
+    make_upload_job_id,
     process_and_upload,
+    update_job_status,
 )
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.info_client import get_datastack_info, get_datastacks
@@ -736,11 +738,30 @@ def start_csv_processing():
             500,
         )
 
+    # Write the job record before enqueueing so it shows up in the job list right
+    # away; the orchestration worker that runs process_and_upload can take minutes
+    # to be scheduled.
+    job_id = make_upload_job_id(
+        datastack_info.get("datastack", "unknown"),
+        file_metadata["metadata"]["table_name"],
+        datetime.datetime.utcnow(),
+    )
+    update_job_status(
+        job_id,
+        {
+            "status": "pending",
+            "phase": "Queued, waiting for a worker",
+            "progress": 0,
+            "user_id": user_id,
+            "datastack_name": datastack_info.get("datastack", "unknown"),
+        },
+    )
+
     result = process_and_upload.s(
-        file_path, file_metadata, datastack_info, user_id=user_id
+        file_path, file_metadata, datastack_info, user_id=user_id, job_id=job_id
     ).apply_async()
 
-    return jsonify({"status": "start", "task_id": result.id})
+    return jsonify({"status": "start", "task_id": result.id, "job_id": job_id})
 
 
 @upload_bp.route("/api/process/status/<job_id>", methods=["GET"])

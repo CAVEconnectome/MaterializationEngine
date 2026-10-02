@@ -56,10 +56,16 @@ def update_job_status(job_id: str, status: Dict[str, Any]) -> None:
             status["user_id"] = existing_status["user_id"]
         if "datastack_name" in existing_status and "datastack_name" not in status:
             status["datastack_name"] = existing_status["datastack_name"]
+        if "status" in existing_status and "status" not in status:
+            status["status"] = existing_status["status"]
 
     REDIS_CLIENT.set(
         f"csv_processing:{job_id}", json.dumps(status), ex=3600  # Expires in 1 hour
     )
+
+
+def make_upload_job_id(datastack_name: str, table_name: str, time_stamp: datetime) -> str:
+    return f"{datastack_name}_{table_name}_{time_stamp.strftime('%Y%m%d_%H%M%S')}"
 
 
 def get_job_status(job_id: str) -> Dict[str, Any]:
@@ -92,7 +98,11 @@ def process_and_upload(
     reference_table = file_metadata["metadata"].get("reference_table")
     column_mapping = file_metadata["column_mapping"]
     ignored_columns = file_metadata.get("ignored_columns")
-    main_job_id = f"{datastack_name}_{table_name}_{materialization_time_stamp.strftime('%Y%m%d_%H%M%S')}"
+    # the API passes the id of the "pending" record it already created; fall back
+    # to generating one for callers that do not
+    main_job_id = kwargs.get("job_id") or make_upload_job_id(
+        datastack_name, table_name, materialization_time_stamp
+    )
 
     workflow = chain(
         process_csv.si(
