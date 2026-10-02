@@ -44,6 +44,7 @@ from materializationengine.workflows.deltalake_export import (
     resolve_bounds,
     resolve_n_partitions,
 )
+from materializationengine.workflows.deltalake_export import _serial_optimize_runner
 
 # ---------------------------------------------------------------------------
 # 4.1  discover_default_output_specs
@@ -1055,6 +1056,97 @@ class TestOptimizeDeltalake:
         # Should have called z_order (not compact) since zorder_columns is set
         mock_dt.optimize.z_order.assert_called_once()
         mock_dt.vacuum.assert_called_once()
+
+
+class TestSkipOptimize:
+    """skip_optimize hands the optimize pass to the caller.
+
+    This is the seam the Ray entrypoint uses to fan the per-spec optimizes out
+    across workers instead of running them serially in one pod. The default must
+    stay False so the Celery path is byte-for-byte unchanged.
+    """
+
+    @patch("deltalake.write_deltalake")
+    @patch("deltalake.DeltaTable")
+    @patch("materializationengine.workflows.deltalake_export.stream_table_to_arrow")
+    def test_skip_optimize_does_not_optimize(
+        self, mock_stream, MockDeltaTable, mock_write
+    ):
+        mock_dt = MagicMock()
+        MockDeltaTable.return_value = mock_dt
+        mock_stream.return_value = iter(
+            [pa.RecordBatch.from_pydict({"id": [1, 2], "val": [10, 20]})]
+        )
+        spec = DeltaLakeOutputSpec(
+            name="lake",
+            partition_by="val",
+            partition_strategy="hash",
+            n_partitions=2,
+            zorder_columns=["val"],
+        )
+
+        export_table_to_deltalake(
+            connection_string="unused",
+            source=TableSource(annotation_table="t"),
+            output_specs=[spec],
+            output_uri_base="/tmp/test",
+            skip_optimize=True,
+        )
+
+        # The rows are still written -- only the optimize pass is deferred.
+        assert mock_write.called
+        mock_dt.optimize.z_order.assert_not_called()
+        mock_dt.optimize.compact.assert_not_called()
+        mock_dt.vacuum.assert_not_called()
+
+
+class TestSerialOptimizeRunner:
+    """The default runner preserves the historical serial behaviour."""
+
+    @patch("materializationengine.workflows.deltalake_export.optimize_deltalake")
+    def test_runs_every_spec_in_order(self, mock_optimize):
+        specs = [
+            DeltaLakeOutputSpec(name="a", zorder_columns=["x"]),
+            DeltaLakeOutputSpec(name="b"),
+        ]
+        jobs = [(s, f"gs://bucket/{s.name}") for s in specs]
+        events = []
+
+        _serial_optimize_runner(
+            jobs,
+            {"max_concurrent_tasks": 1, "target_size": None, "max_spill_size": None},
+            lambda name, action: events.append((name, action)),
+        )
+
+        assert [c.args[0] for c in mock_optimize.call_args_list] == [
+            "gs://bucket/a",
+            "gs://bucket/b",
+        ]
+        # z_order for the spec with zorder_columns, compact for the one without,
+        # and a vacuum callback after each.
+        assert events == [
+            ("a", "z_order"),
+            ("a", "vacuum"),
+            ("b", "compact"),
+            ("b", "vacuum"),
+        ]
+        # The per-pod memory compromise is still what the default passes through.
+        assert mock_optimize.call_args_list[0].kwargs["max_concurrent_tasks"] == 1
+
+    @patch("materializationengine.workflows.deltalake_export.optimize_deltalake")
+    def test_forwards_spec_optimize_settings(self, mock_optimize):
+        spec = DeltaLakeOutputSpec(
+            name="a",
+            zorder_columns=["x", "y"],
+            bloom_filter_columns=["id"],
+            bloom_filter_fpp=0.05,
+        )
+        _serial_optimize_runner([(spec, "gs://b/a")], {}, None)
+
+        kwargs = mock_optimize.call_args.kwargs
+        assert kwargs["zorder_columns"] == ["x", "y"]
+        assert kwargs["bloom_filter_columns"] == ["id"]
+        assert kwargs["fpp"] == 0.05
 
 
 # ===========================================================================

@@ -1,6 +1,8 @@
 import datetime
+import json
 import logging
 import os
+import shlex
 import subprocess
 
 import cloudfiles
@@ -903,6 +905,75 @@ class WriteDeltalakeResource(Resource):
 
         job_id = uuid.uuid4().hex
 
+        # Which engine runs the export is a DEPLOYMENT decision, not a caller
+        # one: it is driven by the chart (ray.enabled + ray.deltalakeExport), so
+        # the wizard does not offer a choice and clients need no changes to
+        # benefit. Same pipeline either way (run_deltalake_export); on Ray the
+        # RayJob CR is the durable record, so there is no ack to expire and no
+        # visibility_timeout redelivering a task that is still running, and the
+        # final per-spec optimize pass fans out across workers instead of
+        # running serially at max_concurrent_tasks=1.
+        #
+        # ?backend= remains as an operator escape hatch -- forcing celery to get
+        # a specific export off Ray without a redeploy, or forcing ray to smoke
+        # test before flipping the chart value for everyone. Not used by the UI.
+        from materializationengine.rayjobs import ray_deltalake_export_enabled
+
+        requested = (request.args.get("backend") or "").lower()
+        if requested not in ("", "ray", "celery"):
+            return abort(400, "backend must be 'ray' or 'celery'")
+        use_ray = (
+            ray_deltalake_export_enabled() if requested == "" else requested == "ray"
+        )
+
+        if use_ray:
+            from materializationengine.rayjobs import (
+                RayJobSubmissionError,
+                ray_enabled,
+                submit_rayjob,
+            )
+
+            # Only reachable when ?backend=ray was forced on a deployment without
+            # the platform; the server-side default already accounts for it.
+            if not ray_enabled():
+                return abort(501, "Ray is not enabled on this deployment")
+
+            entrypoint = (
+                "python -m materializationengine.rayjobs.entrypoints.deltalake_export"
+                f" --datastack {shlex.quote(datastack_name)}"
+                f" --version {int(version)}"
+                f" --table {shlex.quote(table_name)}"
+                f" --job-id {shlex.quote(job_id)}"
+            )
+            if output_specs is not None:
+                entrypoint += (
+                    f" --output-specs {shlex.quote(json.dumps(output_specs))}"
+                )
+
+            try:
+                rayjob_name = submit_rayjob(
+                    entrypoint=entrypoint,
+                    # DNS-label safe: table names allow underscores, RayJob names
+                    # do not.
+                    name_prefix=f"mat-deltalake-{table_name.replace('_', '-')}",
+                    num_workers=request.args.get("workers", type=int),
+                    metadata={
+                        "datastack": datastack_name,
+                        "table": table_name,
+                        "version": str(version),
+                        "job-id": job_id,
+                    },
+                )
+            except RayJobSubmissionError as exc:
+                return abort(500, f"failed to submit RayJob: {exc}")
+
+            return {
+                "message": f"Delta Lake export submitted as RayJob for {table_name} v{version}",
+                "job_id": job_id,
+                "backend": "ray",
+                "rayjob_name": rayjob_name,
+            }, 200
+
         write_deltalake_table.s(
             datastack_info,
             version,
@@ -914,6 +985,7 @@ class WriteDeltalakeResource(Resource):
         return {
             "message": f"Delta Lake export enqueued for {table_name} v{version}",
             "job_id": job_id,
+            "backend": "celery",
         }, 200
 
     @reset_auth
@@ -947,3 +1019,65 @@ class WriteDeltalakeResource(Resource):
             }, 404
 
         return progress, 200
+
+
+@mat_bp.route("/materialize/ray/job/<string:job_name>/")
+class RayJobResource(Resource):
+    """Status of a RayJob.
+
+    RayJobs are the durable record for work submitted to the ephemeral Ray
+    platform: the Kubernetes CR is the job, so unlike a Celery task there is no
+    broker state to consult and no ack that can expire mid-run. This reads the
+    CR's status directly.
+
+    Available only where the deployment enables ray (``ray.enabled`` in the
+    chart, ``enable_ray`` in Terraform); returns 501 otherwise so callers can
+    tell "not configured" apart from "job not found".
+    """
+
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("Get RayJob status", security="apikey")
+    def get(self, job_name: str):
+        from materializationengine.rayjobs import (
+            RayJobSubmissionError,
+            get_rayjob_status,
+            ray_enabled,
+        )
+
+        if not ray_enabled():
+            return {"message": "Ray is not enabled on this deployment"}, 501
+
+        try:
+            return get_rayjob_status(job_name), 200
+        except RayJobSubmissionError as exc:
+            # Covers both "no such RayJob" and a genuine API failure. The
+            # message carries which.
+            return {"message": str(exc)}, 404
+
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("Cancel a RayJob", security="apikey")
+    def delete(self, job_name: str):
+        """Delete a RayJob, tearing down any cluster KubeRay created for it.
+
+        This is also the manual remedy for a wedged job: Ray worker pods are
+        owned by the RayCluster CR, which the cluster autoscaler will not evict
+        pods on behalf of, so a hung job holds its nodes until either
+        ``activeDeadlineSeconds`` fires or the CR is deleted here.
+        """
+        from materializationengine.rayjobs import (
+            RayJobSubmissionError,
+            delete_rayjob,
+            ray_enabled,
+        )
+
+        if not ray_enabled():
+            return {"message": "Ray is not enabled on this deployment"}, 501
+
+        try:
+            delete_rayjob(job_name)
+        except RayJobSubmissionError as exc:
+            return {"message": str(exc)}, 404
+
+        return {"message": f"RayJob {job_name} deleted"}, 200

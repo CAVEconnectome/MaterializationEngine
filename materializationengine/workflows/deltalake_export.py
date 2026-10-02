@@ -1623,6 +1623,7 @@ def export_table_to_deltalake(
     optimize_max_concurrent_tasks: int = 1,
     optimize_target_size: int | None = None,
     optimize_max_spill_size: int | None = None,
+    skip_optimize: bool = False,
 ) -> None:
     """Stream a table from Postgres and write to one or more Delta Lakes.
 
@@ -1704,6 +1705,19 @@ def export_table_to_deltalake(
         )
 
     # Optimize each Delta Lake: z-order, bloom filters, and vacuum.
+    #
+    # skip_optimize hands this phase to the caller. Each spec is a separate Delta
+    # table, so the optimizes are independent and the only reason they run serially
+    # here -- with max_concurrent_tasks=1 -- is that a single celery pod could not
+    # afford more. A Ray driver fans them out across workers instead; see
+    # materializationengine/rayjobs/entrypoints/deltalake_export.py.
+    if skip_optimize:
+        celery_logger.info(
+            "skip_optimize: leaving optimize/vacuum of %d Delta Lake(s) to the caller",
+            len(output_specs),
+        )
+        return
+
     celery_logger.info("Optimizing Delta Lakes (z-order, bloom filters, vacuum)...")
     for spec in output_specs:
         uri = f"{output_uri_base}/{spec.name}"
@@ -2405,6 +2419,77 @@ def write_deltalake_table(
         Redis progress keys when the same table/version is exported
         multiple times.
     """
+    run_deltalake_export(
+        datastack_info,
+        version,
+        table_name,
+        output_specs=output_specs,
+        job_id=job_id,
+    )
+
+
+def _serial_optimize_runner(
+    jobs: list[tuple["DeltaLakeOutputSpec", str]],
+    optimize_kwargs: dict,
+    optimize_callback: Callable[[str, str], None] | None = None,
+) -> None:
+    """Optimize each Delta Lake one after another, in this process.
+
+    The historical behaviour, and still the right one for the Celery path: a
+    single pod cannot afford two z-orders at once, which is why
+    ``max_concurrent_tasks`` defaults to 1.
+    """
+    celery_logger.info("Optimizing Delta Lakes (z-order, bloom filters, vacuum)...")
+    for spec, uri in jobs:
+        action = "z_order" if spec.zorder_columns else "compact"
+        if optimize_callback is not None:
+            optimize_callback(spec.name, action)
+        optimize_deltalake(
+            uri,
+            zorder_columns=spec.zorder_columns or None,
+            bloom_filter_columns=spec.bloom_filter_columns or None,
+            fpp=spec.bloom_filter_fpp or 0.001,
+            **optimize_kwargs,
+        )
+        if optimize_callback is not None:
+            optimize_callback(spec.name, "vacuum")
+
+
+def run_deltalake_export(
+    datastack_info: dict,
+    version: int,
+    table_name: str,
+    output_specs: list[dict] | None = None,
+    job_id: str | None = None,
+    optimize_runner: Callable[..., None] | None = None,
+) -> None:
+    """Orchestrate a full Delta Lake export for one table, without Celery.
+
+    This is the whole export pipeline as a plain function so that it has exactly
+    one implementation regardless of what drives it. :func:`write_deltalake_table`
+    is a thin Celery wrapper over it, and the Ray entrypoint
+    (``materializationengine.rayjobs.entrypoints.deltalake_export``) calls it
+    directly -- there is no broker in that path, so no ack, no visibility
+    timeout, and no redelivery of a task that is still running.
+
+    Parameters
+    ----------
+    optimize_runner
+        Callable ``(jobs, optimize_kwargs, optimize_callback)`` that performs the
+        final optimize/vacuum pass, where *jobs* is a list of
+        ``(spec, uri)`` pairs. Defaults to :func:`_serial_optimize_runner`.
+
+        This is the seam Ray plugs into. Each spec is a separate Delta table, so
+        the optimizes are mutually independent; running them concurrently is safe
+        precisely because they touch different tables -- and therefore different
+        transaction logs. (Concurrent writers against the *same* table would be
+        correct but would serialise on that table's commit file, which on GCS is
+        a single object limited to roughly one mutation per second.)
+
+        Only the regular-table path is routed through this. The view path is a
+        different two-pass algorithm whose optimizes are interleaved with
+        re-partitioning, and it still runs serially.
+    """
     from dynamicannotationdb.key_utils import build_segmentation_table_name
     from sqlalchemy import create_engine
 
@@ -2735,6 +2820,9 @@ def write_deltalake_table(
                 total_rows=row_count,
             )
 
+            # skip_optimize: the streaming write and the optimize pass are
+            # separated so the caller decides how the latter runs. Serial in
+            # process for Celery; fanned out across Ray workers otherwise.
             export_table_to_deltalake(
                 connection_string=connection_string,
                 source=source,
@@ -2747,6 +2835,24 @@ def write_deltalake_table(
                 optimize_max_concurrent_tasks=optimize_max_concurrent_tasks,
                 optimize_target_size=optimize_target_size,
                 optimize_max_spill_size=optimize_max_spill_size,
+                skip_optimize=True,
+            )
+
+            optimize_kwargs = {
+                "max_concurrent_tasks": optimize_max_concurrent_tasks,
+                "target_size": optimize_target_size,
+                "max_spill_size": optimize_max_spill_size,
+            }
+            jobs = [
+                (spec, f"{output_uri_base}/{spec.name}") for spec in resolved_specs
+            ]
+            _phase(
+                "optimizing",
+                f"Optimizing {len(jobs)} Delta Lake(s)...",
+                total_rows=row_count,
+            )
+            (optimize_runner or _serial_optimize_runner)(
+                jobs, optimize_kwargs, _optimize_callback
             )
     except Exception as e:
         try:
