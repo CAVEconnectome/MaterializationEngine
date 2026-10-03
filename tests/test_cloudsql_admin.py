@@ -125,6 +125,16 @@ class TestCloudSQLAdmin:
         assert http.post.call_args.kwargs["headers"] == {"Authorization": "Bearer tok"}
         assert http.get.call_args.kwargs["headers"] == {"Authorization": "Bearer tok"}
 
+    def test_credentials_request_cloud_platform_scope(self):
+        # instances.import rejects tokens that only have sqlservice.admin
+        with mock.patch.object(
+            cloudsql_admin.google.auth, "default", return_value=(mock.MagicMock(), "p")
+        ) as default:
+            cloudsql_admin._session_and_default_project()
+        assert default.call_args.kwargs["scopes"] == [
+            "https://www.googleapis.com/auth/cloud-platform"
+        ]
+
     def test_resolve_instance_without_any_project_raises(self):
         with mock.patch.object(cloudsql_admin, "get_config_param", return_value=None):
             with pytest.raises(CloudSQLAdminError, match="SQL_INSTANCE_PROJECT"):

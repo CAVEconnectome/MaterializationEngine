@@ -18,7 +18,10 @@ import requests
 from materializationengine.utils import get_config_param
 
 SQLADMIN_ROOT = "https://sqladmin.googleapis.com/v1"
-SCOPES = ["https://www.googleapis.com/auth/sqlservice.admin"]
+# The narrower sqlservice.admin scope is enough for GETs, but instances.import is
+# rejected with ACCESS_TOKEN_SCOPE_INSUFFICIENT unless the token has cloud-platform
+# (which is what gcloud requests).
+SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
 
 
 class CloudSQLAdminError(RuntimeError):
