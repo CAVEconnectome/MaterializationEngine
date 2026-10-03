@@ -300,7 +300,10 @@ def process_csv(
         raise
 
 
-@celery.task(name="process:upload_to_db", bind=True)
+# Long-running (CSV import, then index builds over this worker's connection), so it
+# runs on the workflow queue: the producer is on non-preemptible nodes and drains
+# before scale-down. Acked on receipt: re-running would import the rows twice.
+@celery.task(name="workflow:upload_to_db", bind=True)
 def upload_to_database(
     self,
     process_result: Dict[str, Any],
@@ -712,7 +715,9 @@ def mark_clustered_on_primary_key(table_name: str, engine) -> bool:
     return True
 
 
-@celery.task(name="process:cluster_staging_tables", bind=True, acks_late=True)
+# Long-running for large tables (the CLUSTER holds this worker's connection), so it
+# runs on the workflow queue. Re-running is harmless, so it is acked late.
+@celery.task(name="workflow:cluster_staging_tables", bind=True, acks_late=True)
 def cluster_staging_tables(self, monitor_result: dict) -> dict:
     """Physically order the staging annotation and segmentation tables by id.
 
@@ -756,7 +761,12 @@ def cluster_staging_tables(self, monitor_result: dict) -> dict:
     return monitor_result
 
 
-@celery.task(name="process:transfer_to_production", bind=True, ack_late=True)
+# Long-running: the copy streams through this worker (pg_dump | psql) and the index
+# rebuilds run over its connection, so the worker must stay up for the whole task. It
+# runs on the workflow queue (non-preemptible producer that drains before scale-down)
+# rather than the process queue, which is for short, easily retried tasks. Acked late
+# so a lost worker means a rerun, which is safe: each table is truncated before its copy.
+@celery.task(name="workflow:transfer_to_production", bind=True, acks_late=True)
 def transfer_to_production(
     self,
     monitor_result: dict,
