@@ -178,3 +178,46 @@ class DynamicMaterializationCache:
 
 dynamic_annotation_cache = DynamicMaterializationCache()
 db_manager = DatabaseConnectionManager()
+
+
+# Database clients a forked worker process inherited from its parent. They are kept
+# referenced, never closed: closing them, or letting them be garbage collected, sends a
+# disconnect over sockets a sibling worker process may still be using.
+_inherited_database_state = []
+
+
+def reset_database_connections(close_connections: bool) -> None:
+    """Drop every cached database client and engine so they are recreated on next use.
+
+    A prefork celery worker builds its app, and with it some database clients, in the
+    parent process before forking the pool. Without this, every child inherits the
+    same open connections and the same cached DynamicAnnotationDB session, so
+    concurrent queries from two children interleave on one socket and read each
+    other's results (e.g. NoSuchColumnError on annotation_table_metadata.id).
+
+    close_connections=True closes the connections; use it in the parent before
+    forking. close_connections=False forgets them without closing; use it in a child
+    after forking, where the sockets are shared with the parent and siblings.
+    """
+    clients = dict(dynamic_annotation_cache._clients)
+    engines = dict(db_manager._engines)
+    session_factories = dict(db_manager._session_factories)
+
+    if close_connections:
+        for name, client in clients.items():
+            database = getattr(client, "_database", None)
+            if database is None:
+                continue
+            try:
+                if database._cached_session is not None:
+                    database._cached_session.close()
+                database.engine.dispose()
+            except Exception as e:
+                celery_logger.warning(f"Error closing database client for {name}: {e}")
+        db_manager.cleanup()
+    else:
+        _inherited_database_state.append((clients, engines, session_factories))
+
+    dynamic_annotation_cache.invalidate_cache()
+    db_manager._engines.clear()
+    db_manager._session_factories.clear()
