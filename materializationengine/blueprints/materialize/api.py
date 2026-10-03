@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import shlex
-import subprocess
 
 import cloudfiles
 import redis
@@ -27,6 +26,7 @@ from materializationengine.blueprints.materialize.schemas import (
     VirtualVersionSchema,
 )
 from materializationengine.blueprints.reset_auth import reset_auth
+from materializationengine.cloudsql_admin import CloudSQLAdminError, export_csv
 from materializationengine.database import (
     db_manager,
     dynamic_annotation_cache,
@@ -460,81 +460,33 @@ class DumpTableToBucketAsCSV(Resource):
             }, 200
 
         else:
-            # run a gcloud command to activate the service account for gcloud
-            activate_command = [
-                "gcloud",
-                "auth",
-                "activate-service-account",
-                "--key-file",
-                os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
-            ]
-            process = subprocess.Popen(
-                activate_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            header_query = (
+                "SELECT column_name, data_type from INFORMATION_SCHEMA.COLUMNS "
+                f"where TABLE_NAME = '{table_name}'"
             )
-            stdout, stderr = process.communicate()
-            # run this command and capture the stdout and return code
-            return_code = process.returncode
-            if return_code != 0:
-                return {
-                    "message": f"failed to activate service account using {activate_command}. Error: {stderr.decode()} stdout: {stdout.decode()}"
-                }, 500
+            try:
+                # Cloud SQL runs one operation at a time per instance, so wait for the
+                # header export before starting the table export.
+                export_csv(sql_instance_name, header_cloudpath, mat_db_name, header_query)
+            except (CloudSQLAdminError, TimeoutError) as e:
+                return {"message": f"header file failed to create: {e}"}, 500
 
-            header_command = [
-                "gcloud",
-                "sql",
-                "export",
-                "csv",
-                sql_instance_name,
-                header_cloudpath,
-                "--database",
-                mat_db_name,
-                "--query",
-                f"SELECT column_name, data_type from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = '{table_name}'",
-            ]
-            process = subprocess.Popen(
-                header_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            stdout, stderr = process.communicate()
-            # run this command and capture the stdout and return code
-            return_code = process.returncode
-            if return_code != 0:
-                return {
-                    "message": f"header file failed to create using:\
-                          {header_command}. Error: {stderr.decode()} stdout: {stdout.decode()}"
-                }, 500
+            try:
+                export_csv(
+                    sql_instance_name,
+                    cloudpath,
+                    mat_db_name,
+                    f"SELECT * from {table_name}",
+                    wait=False,
+                )
+            except CloudSQLAdminError as e:
+                return {"message": f"file failed to create: {e}"}, 500
 
-            # run a gcloud command to select * from table and write it to disk as a csv
-            export_command = [
-                "gcloud",
-                "sql",
-                "export",
-                "csv",
-                sql_instance_name,
-                cloudpath,
-                "--database",
-                mat_db_name,
-                "--async",
-                "--query",
-                f"SELECT * from {table_name}",
-            ]
-
-            process = subprocess.Popen(
-                export_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            stdout, stderr = process.communicate()
-            # run this command and capture the stdout and return code
-            return_code = process.returncode
-            if return_code != 0:
-                return {
-                    "message": f"file failed to create using: {export_command}. Error: {stderr.decode()} stdout: {stdout.decode()}"
-                }, 500
-
-            else:
-                return {
-                    "message": "file created sucessefully",
-                    "csv_path": cloudpath,
-                    "header_path": header_cloudpath,
-                }, 200
+            return {
+                "message": "file created sucessefully",
+                "csv_path": cloudpath,
+                "header_path": header_cloudpath,
+            }, 200
 
 
 @mat_bp.route("/materialize/run/update_database/datastack/<string:datastack_name>")

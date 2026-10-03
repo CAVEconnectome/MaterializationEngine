@@ -18,6 +18,7 @@ from dynamicannotationdb.models import SegmentationMetadata
 from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
 from materializationengine.blueprints.upload.processor import SchemaProcessor
 from materializationengine.celery_init import celery
+from materializationengine.cloudsql_admin import CloudSQLAdminError, import_csv
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.index_manager import index_cache
 from materializationengine.shared_tasks import add_index
@@ -341,17 +342,9 @@ def upload_to_database(
         notice_text = file_metadata["metadata"].get("notice_text")
 
         staging_database = current_app.config.get("STAGING_DATABASE_NAME")
-        google_app_creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 
         if not sql_instance_name:
             error_msg = "SQL_INSTANCE_NAME is not configured or is None."
-            celery_logger.error(error_msg)
-            raise ValueError(error_msg)
-
-        if not google_app_creds:
-            error_msg = (
-                "GOOGLE_APPLICATION_CREDENTIALS environment variable is not set."
-            )
             celery_logger.error(error_msg)
             raise ValueError(error_msg)
 
@@ -425,140 +418,29 @@ def upload_to_database(
         # create table in staging database and drop indices
         index_cache.drop_table_indices(table_name, db_client.database.engine)
 
-        # Activate gcloud service account
-        activate_command = [
-            "gcloud",
-            "auth",
-            "activate-service-account",
-            "--key-file",
-            google_app_creds,
-        ]
+        import_uri = f"gs://{output_path}"
         try:
-            celery_logger.info("Activating service account")
-            update_job_status(
-                job_id_for_status,
-                {"phase": "Uploading to Database: Setting up transfer", "progress": 15},
-            )
-
-            activate_process = subprocess.run(
-                activate_command,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
             celery_logger.info(
-                f"Service account activation stdout: {activate_process.stdout}"
+                f"Importing {import_uri} into {staging_database}.{table_name} "
+                f"on Cloud SQL instance {sql_instance_name}"
             )
-            if activate_process.stderr:
-                celery_logger.warning(
-                    f"Service account activation stderr: {activate_process.stderr}"
-                )
-        except subprocess.CalledProcessError as e:
-            error_msg = f"Failed to activate service account: {e}, stderr: {e.stderr}"
-            celery_logger.error(error_msg)
-            if job_id:
-                update_job_status(
-                    job_id,
-                    {
-                        "status": "error",
-                        "phase": "Service Account Activation",
-                        "progress": 0,
-                        "error": e.stderr or str(e),
-                    },
-                )
-            raise
-        except subprocess.TimeoutExpired as e:
-            error_msg = f"Service account activation timed out: {e}"
-            celery_logger.error(error_msg)
-            if job_id:
-                update_job_status(
-                    job_id,
-                    {
-                        "status": "error",
-                        "phase": "Service Account Activation",
-                        "progress": 0,
-                        "error": "Service account activation timed out",
-                    },
-                )
             update_job_status(
                 job_id_for_status,
                 {
-                    "status": "error",
-                    "phase": "Service Account Activation",
-                    "error": "Service account activation timed out",
-                },
-            )
-
-            raise
-
-        # TODO move to deployment scripts
-        # get sql service account email
-        # get_service_account_command = [
-        #     "gcloud",
-        #     "sql",
-        #     "instances",
-        #     "describe",
-        #     sql_instance_name,
-        #     "--format=json",
-        # ]
-        # try:
-        #     sql_instance_info = subprocess.run(get_service_account_command, check=True, capture_output=True, text=True)
-        #     sql_instance_info = json.loads(sql_instance_info.stdout)
-        #     service_account_email = sql_instance_info["serviceAccountEmailAddress"]
-        # except subprocess.CalledProcessError as e:
-        #     celery_logger.error(f"Database upload failed: {e}")
-        #     raise e
-
-        # auth_command = [
-        #     "gcloud",
-        #     "storage",
-        #     "buckets",
-        #     "add-iam-policy-binding",
-        #     f"gs://{bucket_name}",
-        #     "--member",
-        #     f"serviceAccount:{service_account_email}",
-        #     "--role",
-        #     "roles/storage.objectAdmin",
-        # ]
-
-        load_command = [
-            "gcloud",
-            "sql",
-            "import",
-            "csv",
-            sql_instance_name,
-            f"gs://{output_path}",
-            "--database",
-            staging_database,
-            "--table",
-            table_name,
-            "--user",
-            "postgres",
-            "--quiet",
-        ]
-        try:
-            celery_logger.info(f"Running command: {shlex.join(load_command)}")
-            update_job_status(
-                job_id_for_status,
-                {
-                    "phase": "Uploading to Database: Importing CSV via gcloud",
+                    "phase": "Uploading to Database: Importing CSV into Cloud SQL",
                     "progress": 30,
                 },
             )
-
-            result = subprocess.run(
-                load_command,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=1200,
+            import_csv(
+                sql_instance_name,
+                import_uri,
+                database=staging_database,
+                table=table_name,
+                user="postgres",
+                timeout=current_app.config.get("SQL_IMPORT_TIMEOUT_SECONDS", 1200),
             )
-            celery_logger.info(f"Subprocess output: {result.stdout}")
-            if result.stderr:
-                celery_logger.warning(f"Subprocess stderr: {result.stderr}")
-        except subprocess.CalledProcessError as e:
-            celery_logger.error(f"Database upload failed: {e}, stderr: {e.stderr}")
+        except (CloudSQLAdminError, TimeoutError) as e:
+            celery_logger.error(f"Cloud SQL CSV import failed: {e}")
             if job_id:
                 update_job_status(
                     job_id,
@@ -566,33 +448,18 @@ def upload_to_database(
                         "status": "error",
                         "phase": "Uploading to Database",
                         "progress": 0,
-                        "error": e.stderr or str(e),
+                        "error": str(e),
                     },
                 )
             update_job_status(
                 job_id_for_status,
                 {
                     "status": "error",
-                    "phase": "Uploading to Database (gcloud import)",
-                    "error": e.stderr or str(e),
+                    "phase": "Uploading to Database (Cloud SQL import)",
+                    "error": str(e),
                 },
             )
-
-            raise RuntimeError(
-                f"gcloud sql import csv failed: {e.stderr or str(e)}"
-            ) from e
-        except subprocess.TimeoutExpired as e:
-            celery_logger.error(f"Subprocess timed out: {e}")
-            update_job_status(
-                job_id_for_status,
-                {
-                    "status": "error",
-                    "phase": "Uploading to Database (gcloud import)",
-                    "error": "gcloud sql import timed out",
-                },
-            )
-
-            raise
+            raise RuntimeError(f"Cloud SQL CSV import failed: {e}") from e
         update_job_status(
             job_id_for_status,
             {"phase": "Uploading to Database: Rebuilding Indices", "progress": 80},
