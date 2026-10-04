@@ -20,6 +20,9 @@ class FakeRedis:
     def get(self, key):
         return self.data.get(key)
 
+    def exists(self, key):
+        return int(key in self.data)
+
 
 def _run_process_and_upload(**kwargs):
     """Run process_and_upload with the chain mocked out; return the job id it used."""
@@ -32,7 +35,9 @@ def _run_process_and_upload(**kwargs):
     app = Flask(__name__)
     with app.app_context(), mock.patch.object(
         tasks, "chain", return_value=workflow
-    ), mock.patch.object(tasks, "update_job_status") as mock_update:
+    ), mock.patch.object(tasks, "update_job_status") as mock_update, mock.patch.object(
+        tasks, "is_upload_cancelled", return_value=False
+    ):
         tasks.process_and_upload.run(
             "gs://bucket/file.csv",
             file_metadata,

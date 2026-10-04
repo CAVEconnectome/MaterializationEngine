@@ -29,6 +29,8 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
     CHUNK_STATUS_PENDING,
     CHUNK_STATUS_PROCESSING_SUBTASKS,
     CHUNK_STATUS_ERROR,
+    WORKFLOW_STATUS_CANCELLED,
+    WORKFLOW_STOPPED_STATUSES,
     RedisCheckpointManager,
 )
 from materializationengine.celery_init import celery
@@ -220,7 +222,8 @@ def run_spatial_lookup_workflow(
     should_resume = (
         resume_from_checkpoint
         and existing_workflow
-        and existing_workflow.status not in [CHUNK_STATUS_COMPLETED, "failed"]
+        and existing_workflow.status
+        not in [CHUNK_STATUS_COMPLETED, "failed", WORKFLOW_STATUS_CANCELLED]
     )
 
     if should_resume:
@@ -364,9 +367,17 @@ def process_table_in_chunks(
                 f"Workflow data not found for {workflow_name} in process_table_in_chunks. Aborting."
             )
             checkpoint_manager.update_workflow(
-                workflow_name=workflow_name,
+                table_name=workflow_name,
                 status="failed",
                 last_error="Workflow data missing in dispatcher",
+            )
+            return
+
+        # Cancelled (or failed): dispatch nothing more. Checked before anything below can
+        # reset the status to processing_chunks.
+        if workflow_data.status in WORKFLOW_STOPPED_STATUSES:
+            celery_logger.info(
+                f"Workflow {workflow_name} is {workflow_data.status}; not dispatching more chunks."
             )
             return
 
@@ -375,7 +386,7 @@ def process_table_in_chunks(
                 f"No mat_metadata found for {annotation_table_name}. Cannot proceed."
             )
             checkpoint_manager.update_workflow(
-                workflow_name=workflow_name,
+                table_name=workflow_name,
                 status="failed",
                 last_error=f"Mat metadata missing for {annotation_table_name}",
             )
@@ -436,7 +447,7 @@ def process_table_in_chunks(
                     f"Failed to update/fetch workflow_data after chunking calculation for {workflow_name}."
                 )
                 checkpoint_manager.update_workflow(
-                    workflow_name=workflow_name,
+                    table_name=workflow_name,
                     status="failed",
                     last_error="Chunking data init failed",
                 )
@@ -691,6 +702,10 @@ def process_chunk(
         raise ValueError("workflow_name and chunk_idx are required for process_chunk")
 
     log_prefix = f"[WF:{workflow_name}, SpChunk:{chunk_idx}, Task:{self.request.id}]"
+
+    if checkpoint_manager.is_workflow_stopped(workflow_name):
+        celery_logger.info(f"{log_prefix} Workflow cancelled or failed; skipping chunk.")
+        return {"status": "skipped_workflow_stopped", "chunk_idx": chunk_idx}
 
     current_chunk_status_data = checkpoint_manager.get_failed_chunk_details(
         workflow_name, chunk_idx
@@ -1450,6 +1465,13 @@ def process_and_insert_sub_batch(
     Retries on transient errors. Reports status upon completion or permanent failure.
     """
     log_prefix = f"[WF:{workflow_name}, SpChunk:{original_chunk_idx}, SubBatch:{sub_batch_idx}, Task:{self.request.id}]"
+    if RedisCheckpointManager(database_name).is_workflow_stopped(workflow_name):
+        celery_logger.info(f"{log_prefix} Workflow cancelled or failed; skipping sub-batch.")
+        return {
+            "status": "skipped_workflow_stopped",
+            "rows_processed": 0,
+            "sub_batch_idx": sub_batch_idx,
+        }
     celery_logger.info(
         f"{log_prefix} Starting processing for {len(sub_batch_point_data)} points."
     )

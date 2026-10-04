@@ -45,10 +45,10 @@ from materializationengine.blueprints.upload.storage import (
     StorageService,
 )
 from materializationengine.blueprints.upload.tasks import (
-    cancel_processing_job,
     get_job_status,
     make_upload_job_id,
     process_and_upload,
+    request_upload_cancel,
     update_job_status,
 )
 from materializationengine.database import db_manager, dynamic_annotation_cache
@@ -912,8 +912,9 @@ def cancel_job(job_id):
                     403,
                 )
 
-        result = cancel_processing_job.delay(job_id)
-        status = result.get(timeout=10)
+        # Just Redis writes, so done here rather than through a task: waiting on a
+        # process-queue worker made cancel time out whenever consumers were scaled down.
+        status = request_upload_cancel(job_id)
 
         return jsonify(
             {"status": "success", "message": "Processing cancelled", "details": status}

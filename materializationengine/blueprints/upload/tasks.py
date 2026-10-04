@@ -7,6 +7,7 @@ import shlex
 
 import pandas as pd
 from celery import chain
+from celery.exceptions import Ignore
 from celery.result import AsyncResult
 from celery.utils.log import get_task_logger
 from flask import current_app
@@ -29,6 +30,7 @@ from materializationengine.workflows.ingest_new_annotations import (
 )
 from materializationengine.workflows.spatial_lookup import run_spatial_lookup_workflow
 from materializationengine.blueprints.upload.checkpoint_manager import (
+    WORKFLOW_STATUS_CANCELLED,
     CHUNK_STATUS_COMPLETED,
     CHUNK_STATUS_FAILED_PERMANENT,
     CHUNK_STATUS_FAILED_RETRYABLE,
@@ -48,8 +50,69 @@ REDIS_CLIENT = Redis(
 )
 
 
+CANCEL_KEY_PREFIX = "csv_processing_cancelled:"
+# Longer than any upload, and independent of the job record (1h, rewritten by every step).
+CANCEL_KEY_TTL_SECONDS = 7 * 24 * 3600
+
+
+class UploadCancelled(Ignore):
+    """An upload step found its job cancelled.
+
+    Raising celery's Ignore stops the chain here without marking the task failed.
+    """
+
+
+def is_upload_cancelled(job_id: Optional[str]) -> bool:
+    return bool(job_id) and bool(REDIS_CLIENT.exists(f"{CANCEL_KEY_PREFIX}{job_id}"))
+
+
+def raise_if_upload_cancelled(job_id: Optional[str], step: str) -> None:
+    if is_upload_cancelled(job_id):
+        celery_logger.info(f"Upload {job_id} was cancelled; stopping at {step}.")
+        raise UploadCancelled(f"Upload {job_id} cancelled")
+
+
+def _stop_spatial_workflow(database_name: Optional[str], workflow_name: Optional[str]) -> None:
+    """Mark a running spatial lookup cancelled so its dispatcher and chunk tasks stop."""
+    if not (database_name and workflow_name):
+        return
+    checkpoint_manager = RedisCheckpointManager(database_name)
+    if checkpoint_manager.get_workflow_data(workflow_name):
+        checkpoint_manager.update_workflow(
+            table_name=workflow_name,
+            status=WORKFLOW_STATUS_CANCELLED,
+            last_error="Cancelled by user",
+        )
+
+
+def request_upload_cancel(job_id: str) -> Dict[str, Any]:
+    """Cancel an upload: every later step, and a running spatial lookup, stops on its own.
+
+    Only Redis writes, so the API can call it directly. Steps check for cancellation
+    when they start (process_csv also while it runs); a step already past its last check
+    finishes, but nothing after it starts. Staging tables are left as they are.
+    """
+    REDIS_CLIENT.set(f"{CANCEL_KEY_PREFIX}{job_id}", "1", ex=CANCEL_KEY_TTL_SECONDS)
+    spatial = (get_job_status(job_id) or {}).get("spatial_lookup_config") or {}
+    try:
+        _stop_spatial_workflow(spatial.get("database_name"), spatial.get("table_name"))
+    except Exception as e:
+        # the monitor stops the workflow too when it next sees the cancellation
+        celery_logger.warning(f"Could not mark spatial workflow cancelled for {job_id}: {e}")
+    status_update = {
+        "status": "cancelled",
+        "phase": "Cancelled by user",
+        "error": None,
+    }
+    update_job_status(job_id, status_update)
+    return status_update
+
+
 def update_job_status(job_id: str, status: Dict[str, Any]) -> None:
     """Update job status in Redis"""
+    # Steps still winding down after a cancel must not overwrite it.
+    if status.get("status") != "cancelled" and is_upload_cancelled(job_id):
+        return
     status["last_updated"] = datetime.now(timezone.utc).isoformat()
     existing_status = get_job_status(job_id)
     if existing_status:
@@ -104,6 +167,9 @@ def process_and_upload(
     main_job_id = kwargs.get("job_id") or make_upload_job_id(
         datastack_name, table_name, materialization_time_stamp
     )
+    if is_upload_cancelled(main_job_id):
+        celery_logger.info(f"Upload {main_job_id} was cancelled before it started.")
+        return {"status": "cancelled"}
 
     workflow = chain(
         process_csv.si(
@@ -194,6 +260,7 @@ def process_csv(
     id_counter_start: int = 0,
 ) -> Dict[str, Any]:
     """Process CSV file in chunks using GCSCsvProcessor"""
+    raise_if_upload_cancelled(job_id_for_status, "CSV processing")
     try:
         update_job_status(
             job_id_for_status,
@@ -232,6 +299,7 @@ def process_csv(
             celery_logger.info(f"Upload formatted progress: {progress:.2f}%")
 
         def progress_callback(progress_details: Dict[str, Any]):
+            raise_if_upload_cancelled(job_id_for_status, "CSV processing")
             celery_logger.info(
                 f"CSV Processing Progress (Job: {job_id_for_status}): "
                 f"{progress_details['progress']:.2f}%, "
@@ -281,6 +349,8 @@ def process_csv(
             "last_assigned_id": last_assigned_id,
             "dropped_rows": dropped_rows,
         }
+    except UploadCancelled:
+        raise
     except Exception as e:
         celery_logger.error(
             f"Error processing CSV for job {job_id_for_status}: {str(e)}", exc_info=True
@@ -315,6 +385,7 @@ def upload_to_database(
     """Upload processed CSV to database"""
 
     job_id_for_status = process_result.get("job_id_for_status")
+    raise_if_upload_cancelled(job_id_for_status, "database upload")
     output_path = process_result.get("output_path")
 
     processed_rows_from_csv = process_result.get("processed_rows", 0)
@@ -463,6 +534,7 @@ def upload_to_database(
                 },
             )
             raise RuntimeError(f"Cloud SQL CSV import failed: {e}") from e
+        raise_if_upload_cancelled(job_id_for_status, "index rebuild after import")
         update_job_status(
             job_id_for_status,
             {"phase": "Uploading to Database: Rebuilding Indices", "progress": 80},
@@ -521,6 +593,8 @@ def upload_to_database(
             "table_name": table_name,
             "datastack_info": datastack_info,
         }
+    except UploadCancelled:
+        raise
     except Exception as e:
         celery_logger.error(
             f"Database upload failed for job {job_id_for_status}: {str(e)}",
@@ -553,6 +627,10 @@ def monitor_spatial_workflow_completion(
     """
     workflow_to_monitor = spatial_launch_result.get("workflow_name")
     db_for_monitor = spatial_launch_result.get("database_name")
+
+    if is_upload_cancelled(job_id_for_status):
+        _stop_spatial_workflow(db_for_monitor, workflow_to_monitor)
+        raise_if_upload_cancelled(job_id_for_status, "spatial lookup monitor")
 
     if spatial_launch_result.get("status") == "completed_no_data_found":
         celery_logger.info(
@@ -596,6 +674,11 @@ def monitor_spatial_workflow_completion(
     celery_logger.info(
         f"{log_prefix} Current overall workflow status from Redis: '{current_workflow_status}'"
     )
+
+    if current_workflow_status == WORKFLOW_STATUS_CANCELLED:
+        # cancelled directly on the workflow; cancel the upload with it
+        request_upload_cancel(job_id_for_status)
+        raise_if_upload_cancelled(job_id_for_status, "spatial lookup monitor")
 
     if current_workflow_status == CHUNK_STATUS_COMPLETED:
         celery_logger.info(
@@ -732,6 +815,7 @@ def cluster_staging_tables(self, monitor_result: dict) -> dict:
     datastack_info = monitor_result["datastack_info"]
     table_name = monitor_result["table_name"]
     job_id = monitor_result.get("job_id_for_status")
+    raise_if_upload_cancelled(job_id, "clustering staging tables")
 
     staging_database = get_config_param("STAGING_DATABASE_NAME")
     engine = db_manager.get_engine(staging_database)
@@ -783,6 +867,9 @@ def transfer_to_production(
         materialization_time_stamp_str = monitor_result["materialization_time_stamp"]
         spatial_workflow_status = monitor_result.get("spatial_workflow_final_status", "UNKNOWN")
         job_id_for_ui = monitor_result.get("job_id_for_status")
+        # Checked once, here: a transfer already under way is left to finish rather
+        # than leave production with a half-transferred table.
+        raise_if_upload_cancelled(job_id_for_ui, "transfer to production")
 
         try:
             materialization_time_stamp_dt = datetime.fromisoformat(materialization_time_stamp_str)
@@ -1027,6 +1114,8 @@ def transfer_to_production(
             },
         }
 
+    except UploadCancelled:
+        raise
     except Exception as e:
         celery_logger.error(f"Error during transfer_to_production for table '{monitor_result.get('table_name', 'UNKNOWN')}': {str(e)}", exc_info=True)
         job_id_for_ui = monitor_result.get("job_id_for_status")
@@ -1262,18 +1351,7 @@ def transfer_table_using_pg_dump(
 def cancel_processing_job(job_id: str) -> Dict[str, Any]:
     """Cancel processing job associated with main_job_id."""
     try:
-
-        celery.control.revoke(job_id, terminate=True, signal="SIGUSR1")
-
-        status_update = {
-            "status": "cancelled",
-            "phase": "Job Cancelled by User",
-            "progress": 0,
-            "error": "User initiated cancellation.",
-        }
-        update_job_status(job_id, status_update)  # Update Redis status
-
-        return status_update
+        return request_upload_cancel(job_id)
     except Exception as e:
         celery_logger.error(f"Error cancelling job {job_id}: {str(e)}")
         update_job_status(

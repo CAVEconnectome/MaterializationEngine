@@ -31,6 +31,10 @@ CHUNK_STATUS_FAILED_RETRYABLE = "FAILED_RETRYABLE"
 CHUNK_STATUS_FAILED_PERMANENT = "FAILED_PERMANENT"
 CHUNK_STATUS_ERROR = "ERROR"
 
+# Workflow statuses that mean no more chunks should be processed or dispatched.
+WORKFLOW_STATUS_CANCELLED = "cancelled"
+WORKFLOW_STOPPED_STATUSES = {WORKFLOW_STATUS_CANCELLED, "failed"}
+
 
 @dataclass
 class ChunkInfo:
@@ -129,6 +133,11 @@ class RedisCheckpointManager:
         """Generate hash for bounding box."""
         bbox_list = bbox.tolist() if isinstance(bbox, np.ndarray) else bbox
         return hashlib.md5(json.dumps(bbox_list).encode()).hexdigest()
+
+    def is_workflow_stopped(self, table_name: str) -> bool:
+        """True if the workflow was cancelled or failed, so chunk work should stop."""
+        workflow_data = self.get_workflow_data(table_name)
+        return bool(workflow_data and workflow_data.status in WORKFLOW_STOPPED_STATUSES)
 
     def get_workflow_data(self, table_name: str) -> Optional[WorkflowData]:
         """Get the complete workflow data for a table."""
