@@ -148,7 +148,7 @@ class TestUploadCancel:
     def test_later_steps_stop_without_marking_an_error(self, redis_clients, run_step):
         tasks.request_upload_cancel(JOB)
         app = Flask(__name__)
-        with app.app_context(), mock.patch.object(tasks, "cluster_table_on_primary_key") as cluster, \
+        with app.app_context(), mock.patch.object(tasks, "cluster_table_by_id") as cluster, \
                 mock.patch.object(tasks, "transfer_table_using_pg_dump") as transfer:
             with pytest.raises(tasks.UploadCancelled):
                 run_step()

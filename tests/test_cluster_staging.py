@@ -93,7 +93,7 @@ class TestClusterStagingTables:
         _, _, (source, _) = source_and_target
         ids = _load_shuffled(source, table_name)
 
-        assert tasks.cluster_table_on_primary_key(table_name, source) is True
+        assert tasks.cluster_table_by_id(table_name, source) is True
         assert _physical_ids(source, table_name) == sorted(ids)
 
         assert tasks.mark_clustered_on_primary_key(table_name, source) is True
@@ -106,7 +106,7 @@ class TestClusterStagingTables:
         ids = _load_shuffled(source, table_name)
         _create_table(target, table_name)
 
-        assert tasks.cluster_table_on_primary_key(table_name, source) is True
+        assert tasks.cluster_table_by_id(table_name, source) is True
 
         rows = tasks.transfer_table_using_pg_dump(
             table_name=table_name,
@@ -129,14 +129,35 @@ class TestClusterStagingTables:
         assert tasks.mark_clustered_on_primary_key(table_name, target) is True
         assert _is_clustered_on_pkey(target, table_name) is True
 
-    def test_cluster_skips_missing_table_and_table_without_primary_key(self, source_and_target):
+    def test_cluster_skips_missing_table(self, source_and_target):
         _, _, (source, _) = source_and_target
-        with source.begin() as conn:
-            conn.execute("CREATE TABLE no_pkey (id bigint)")
+        assert tasks.cluster_table_by_id("does_not_exist", source) is False
 
-        assert tasks.cluster_table_on_primary_key("does_not_exist", source) is False
-        assert tasks.cluster_table_on_primary_key("no_pkey", source) is False
-        assert tasks.mark_clustered_on_primary_key("no_pkey", source) is False
+    # The staging segmentation table has no indexes when it is clustered
+    @pytest.mark.parametrize(
+        "table_name",
+        ["synapse_cluster_test__minnie3_v1", "Synapse_Cluster_Test__minnie3_v1"],
+        ids=["lowercase", "mixed_case"],
+    )
+    def test_cluster_orders_table_without_indexes_and_leaves_it_without(self, source_and_target, table_name):
+        _, _, (source, _) = source_and_target
+        ids = list(range(1, 20001))
+        random.Random(0).shuffle(ids)
+        with source.begin() as conn:
+            conn.execute(f'CREATE TABLE "{table_name}" (id bigint NOT NULL, v text)')
+            conn.execute(
+                sa.text(f'INSERT INTO "{table_name}" (id, v) SELECT x, md5(x::text) FROM unnest(:ids) AS x'),
+                {"ids": ids},
+            )
+
+        assert tasks.cluster_table_by_id(table_name, source) is True
+        assert _physical_ids(source, table_name) == sorted(ids)
+        with source.connect() as conn:
+            assert conn.execute(
+                sa.text("SELECT count(*) FROM pg_index WHERE indrelid = CAST(:t AS regclass)"),
+                {"t": f'"{table_name}"'},
+            ).scalar() == 0
+        assert tasks.mark_clustered_on_primary_key(table_name, source) is False
 
     def test_cluster_staging_tables_clusters_both_tables_and_passes_result_through(self):
         monitor_result = {
@@ -149,7 +170,7 @@ class TestClusterStagingTables:
         ), mock.patch.object(tasks, "update_job_status"), mock.patch.object(
             tasks, "is_upload_cancelled", return_value=False
         ), mock.patch.object(
-            tasks, "cluster_table_on_primary_key", side_effect=[True, RuntimeError("disk full")]
+            tasks, "cluster_table_by_id", side_effect=[True, RuntimeError("disk full")]
         ) as mock_cluster:
             result = tasks.cluster_staging_tables.run(monitor_result)
 

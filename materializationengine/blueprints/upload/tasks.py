@@ -762,21 +762,36 @@ def _primary_key_index_name(table_name: str, engine) -> Optional[str]:
     return inspect(engine).get_pk_constraint(table_name).get("name")
 
 
-def cluster_table_on_primary_key(table_name: str, engine) -> bool:
-    """Rewrite the table in primary key (id) order with CLUSTER, then ANALYZE it.
+def cluster_table_by_id(table_name: str, engine) -> bool:
+    """Rewrite the table in id order with CLUSTER, then ANALYZE it.
 
-    Returns False without doing anything if the table or its primary key is missing.
-    CLUSTER holds an ACCESS EXCLUSIVE lock and needs about the table's size again in
-    temporary disk while it rewrites the table and its indexes.
+    Uses the primary key index when there is one. The staging segmentation table has no
+    indexes at all (the spatial lookup writes it without them, and they are built after
+    the transfer), so for a table without one this builds a temporary index on id,
+    clusters on it and drops it, leaving the table's schema as it was. Skipping such
+    tables left the ltv7 test6 segmentation table in spatial chunk order in production
+    (2026-10-05).
+
+    Returns False without doing anything if the table is missing. CLUSTER holds an
+    ACCESS EXCLUSIVE lock and needs about the table's size again in temporary disk
+    while it rewrites the table and its indexes.
     """
+    with engine.connect() as conn:
+        if not engine.dialect.has_table(conn, table_name):
+            celery_logger.warning(f"Not clustering '{table_name}': table not found")
+            return False
     pk_index = _primary_key_index_name(table_name, engine)
-    if not pk_index:
-        celery_logger.info(f"Not clustering '{table_name}': table or primary key not found")
-        return False
 
     quote = engine.dialect.identifier_preparer.quote
     with engine.begin() as conn:
-        conn.execute(text(f"CLUSTER {quote(table_name)} USING {quote(pk_index)}"))
+        if pk_index:
+            conn.execute(text(f"CLUSTER {quote(table_name)} USING {quote(pk_index)}"))
+        else:
+            # Index names are limited to 63 bytes
+            temp_index = f"{table_name[:40]}_cluster_id_tmp"
+            conn.execute(text(f"CREATE INDEX {quote(temp_index)} ON {quote(table_name)} (id)"))
+            conn.execute(text(f"CLUSTER {quote(table_name)} USING {quote(temp_index)}"))
+            conn.execute(text(f"DROP INDEX {quote(temp_index)}"))
         conn.execute(text(f"ANALYZE {quote(table_name)}"))
     return True
 
@@ -827,7 +842,7 @@ def cluster_staging_tables(self, monitor_result: dict) -> dict:
             )
         try:
             start = datetime.now(timezone.utc)
-            if cluster_table_on_primary_key(staging_table, engine):
+            if cluster_table_by_id(staging_table, engine):
                 elapsed = (datetime.now(timezone.utc) - start).total_seconds()
                 celery_logger.info(
                     f"Clustered staging table '{staging_table}' by id in {elapsed:.1f}s"
