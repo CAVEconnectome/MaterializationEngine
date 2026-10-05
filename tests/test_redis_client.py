@@ -67,3 +67,22 @@ class TestSharedRedisClient:
             assert throttle.get_redis_memory_usage() == 42
             assert deltalake_export._get_redis_client() is fake
         constructed.assert_not_called()
+
+
+class TestCloudVolumeGatewayParallel:
+    """The shared CloudVolume must not fork a process pool in every celery worker."""
+
+    def test_gateway_builds_cloudvolume_with_one_process(self):
+        import importlib
+        import os
+        from unittest import mock
+
+        from materializationengine import cloudvolume_gateway
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLOUDVOLUME_PARALLEL", None)
+            gateway_module = importlib.reload(cloudvolume_gateway)
+            with mock.patch.object(gateway_module.cloudvolume, "CloudVolume") as cv:
+                gateway_module.CloudVolumeGateway().get_cv("graphene://https://example/segmentation/table/pcg")
+        assert cv.call_args.kwargs["parallel"] == 1
+        importlib.reload(cloudvolume_gateway)

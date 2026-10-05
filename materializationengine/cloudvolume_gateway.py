@@ -1,10 +1,14 @@
 import cloudvolume
 import os
 
-# Number of parallel threads CloudVolume uses internally for fetching data.
-# Default of 10 matches the urllib3 pool_maxsize (10) used by cloud-files/google-cloud-storage,
-# avoiding connection pool overflow. Override with CLOUDVOLUME_PARALLEL env var.
-_CV_PARALLEL = int(os.environ.get("CLOUDVOLUME_PARALLEL", "10"))
+# CloudVolume's `parallel` is a number of PROCESSES, not threads: constructing a CloudVolume
+# with parallel=10 forks a 10-process multiprocessing pool on the spot. Each prefork celery
+# worker builds one on its first spatial lookup task and keeps it, so a consumer pod
+# (--concurrency=2) carried 20 idle ~226MB processes, each holding inherited copies of its
+# parent's redis and database sockets (seen on ltv7, 2026-10-05). The only caller,
+# spatial_lookup's scattered_points, never uses it: download_points fetches with threads.
+# Override with CLOUDVOLUME_PARALLEL for code that does bulk cutout downloads.
+_CV_PARALLEL = int(os.environ.get("CLOUDVOLUME_PARALLEL", "1"))
 
 
 class CloudVolumeGateway:
