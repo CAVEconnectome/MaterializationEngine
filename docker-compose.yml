@@ -96,6 +96,9 @@ services:
       - .:/app
     env_file:
       - ./dev.env
+    environment:
+      # source is mounted from the host above, so reload workers when it changes
+      - UWSGI_PY_AUTORELOAD=1
     depends_on:
       - db
       - redis-master
