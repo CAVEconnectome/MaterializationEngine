@@ -98,6 +98,9 @@ def _on_connection_error(database_name: str, task_self: Task) -> None:
         with _infra_lock:
             _worker_isolated = True
         hostname = task_self.request.hostname
+        # Pause the queue this task came from. This used to pause "celery", which no
+        # spatial lookup task is routed to, so isolation never took a worker out.
+        queue = _task_queue(task_self)
         celery_logger.critical(
             f"Worker {hostname}: {count} consecutive DB connection failures for "
             f"'{database_name}'. Pausing queue consumption so healthy pods can "
@@ -105,21 +108,30 @@ def _on_connection_error(database_name: str, task_self: Task) -> None:
         )
         try:
             task_self.app.control.cancel_consumer(
-                "celery", destination=[hostname], reply=False
+                queue, destination=[hostname], reply=False
             )
-            celery_logger.warning(f"Worker {hostname}: queue consumer paused.")
+            celery_logger.warning(f"Worker {hostname}: '{queue}' queue consumer paused.")
         except Exception as cancel_err:
             celery_logger.error(
                 f"Worker {hostname}: could not pause consumer: {cancel_err}"
             )
         threading.Thread(
             target=_db_recovery_watcher,
-            args=(database_name, hostname, task_self.app),
+            args=(database_name, hostname, task_self.app, queue),
             daemon=True,
         ).start()
 
 
-def _db_recovery_watcher(database_name: str, hostname: str, app) -> None:
+def _task_queue(task_self: Task) -> str:
+    """The queue a running task was delivered from, falling back to its route."""
+    delivery_info = task_self.request.delivery_info or {}
+    queue = delivery_info.get("routing_key")
+    if queue:
+        return queue
+    return task_self.name.split(":", 1)[0] if ":" in task_self.name else "celery"
+
+
+def _db_recovery_watcher(database_name: str, hostname: str, app, queue: str) -> None:
     """Background thread: poll DB until it becomes available, then re-enable consumer."""
     global _consecutive_infra_failures, _worker_isolated
 
@@ -139,7 +151,7 @@ def _db_recovery_watcher(database_name: str, hostname: str, app) -> None:
                 _worker_isolated = False
             try:
                 app.control.add_consumer(
-                    "celery", destination=[hostname], reply=False
+                    queue, destination=[hostname], reply=False
                 )
                 celery_logger.info(f"[DBRecovery/{hostname}] Queue consumer re-enabled.")
             except Exception as add_err:
@@ -674,7 +686,7 @@ def process_table_in_chunks(
 
 
 @celery.task(
-    name="process:process_chunk",
+    name="spatial:process_chunk",
     bind=True,
     acks_late=True,
     max_retries=10,
@@ -1440,7 +1452,7 @@ def insert_segmentation_data(
 
 
 @celery.task(
-    name="process:process_and_insert_sub_batch",
+    name="spatial:process_and_insert_sub_batch",
     bind=True,
     acks_late=True,
     autoretry_for=(OperationalError, DisconnectionError, ChunkDataValidationError),
