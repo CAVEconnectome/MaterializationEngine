@@ -11,7 +11,7 @@ from celery.exceptions import Ignore
 from celery.result import AsyncResult
 from celery.utils.log import get_task_logger
 from flask import current_app
-from redis import Redis
+from materializationengine.redis_client import SharedRedis
 from sqlalchemy import inspect, text
 from dynamicannotationdb.key_utils import build_segmentation_table_name
 from dynamicannotationdb.models import SegmentationMetadata
@@ -42,12 +42,7 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
 celery_logger = get_task_logger(__name__)
 
 # Redis client for storing job status
-REDIS_CLIENT = Redis(
-    host=get_config_param("REDIS_HOST"),
-    port=get_config_param("REDIS_PORT"),
-    password=get_config_param("REDIS_PASSWORD"),
-    db=0,
-)
+REDIS_CLIENT = SharedRedis(db=0)
 
 
 CANCEL_KEY_PREFIX = "csv_processing_cancelled:"

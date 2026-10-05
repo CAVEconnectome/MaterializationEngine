@@ -1,19 +1,16 @@
 import os
 
 from celery.utils.log import get_task_logger
-from redis import ConnectionError, StrictRedis
+from redis import ConnectionError
+
+from materializationengine.redis_client import SharedRedis
 
 from materializationengine.celery_init import celery
 from materializationengine.utils import get_config_param
 
 celery_logger = get_task_logger(__name__)
 
-REDIS_CLIENT = StrictRedis(
-    host=get_config_param("REDIS_HOST"),
-    port=get_config_param("REDIS_PORT"),
-    password=get_config_param("REDIS_PASSWORD"),
-    db=0,
-)
+REDIS_CLIENT = SharedRedis(db=0)
 
 REDIS_STATUS_FILE = "/tmp/redis_status.txt"
 

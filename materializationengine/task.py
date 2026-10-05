@@ -2,7 +2,7 @@ import json
 import threading
 from hashlib import md5
 
-import redis
+from materializationengine.redis_client import SharedRedis
 from celery import Task
 from celery.utils.log import get_task_logger
 from kombu.utils.uuid import uuid
@@ -10,12 +10,7 @@ from kombu.utils.uuid import uuid
 from materializationengine.celery_slack import post_to_slack_on_task_failure
 from materializationengine.utils import get_config_param
 
-REDIS_CLIENT = redis.StrictRedis(
-    host=get_config_param("REDIS_HOST"),
-    port=get_config_param("REDIS_PORT"),
-    password=get_config_param("REDIS_PASSWORD"),
-    db=0,
-)
+REDIS_CLIENT = SharedRedis(db=0)
 
 celery_logger = get_task_logger(__name__)
 

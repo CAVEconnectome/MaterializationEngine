@@ -26,7 +26,7 @@ from middle_auth_client import (
     auth_requires_permission,
     auth_required,
 )
-from redis import StrictRedis
+from materializationengine.redis_client import SharedRedis
 
 from materializationengine.config import as_bool
 from materializationengine.blueprints.reset_auth import reset_auth
@@ -109,12 +109,7 @@ spatial_lookup_status.add_argument(
 )
 
 
-REDIS_CLIENT = StrictRedis(
-    host=get_config_param("REDIS_HOST"),
-    port=get_config_param("REDIS_PORT"),
-    password=get_config_param("REDIS_PASSWORD"),
-    db=0,
-)
+REDIS_CLIENT = SharedRedis(db=0)
 
 
 def is_auth_disabled():

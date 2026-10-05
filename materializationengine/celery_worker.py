@@ -8,7 +8,6 @@ import time
 import warnings
 from typing import Any, Callable, Dict
 
-import redis
 from celery.app.builtins import add_backend_cleanup_task
 from celery.schedules import crontab
 from celery.signals import after_setup_logger, worker_init, worker_process_init
@@ -530,12 +529,9 @@ def get_activate_tasks():
 
 
 def inspect_locked_tasks(release_locks: bool = False):
-    client = redis.StrictRedis(
-        host=get_config_param("REDIS_HOST"),
-        port=get_config_param("REDIS_PORT"),
-        password=get_config_param("REDIS_PASSWORD"),
-        db=0,
-    )
+    from materializationengine.redis_client import get_redis_client
+
+    client = get_redis_client(0)
 
     locked_tasks = list(client.scan_iter(match="LOCKED_WORKFLOW_TASK*"))
     lock_status_dict = {locked_task: {"locked": True} for locked_task in locked_tasks}

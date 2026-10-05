@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import redis
+
+from materializationengine.redis_client import SharedRedis
 from celery.utils.log import get_task_logger
 
 from materializationengine.utils import get_config_param
@@ -16,12 +18,7 @@ from materializationengine.utils import get_config_param
 celery_logger = get_task_logger(__name__)
 
 
-REDIS_CLIENT = redis.StrictRedis(
-    host=get_config_param("REDIS_HOST"),
-    port=get_config_param("REDIS_PORT"),
-    password=get_config_param("REDIS_PASSWORD"),
-    db=1,
-)
+REDIS_CLIENT = SharedRedis(db=1)
 
 CHUNK_STATUS_PENDING = "PENDING"
 CHUNK_STATUS_PROCESSING = "PROCESSING"
