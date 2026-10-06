@@ -1213,6 +1213,12 @@ def drop_upload_tables(table_name: str, engine, dry_run: bool = False) -> List[s
     return sorted(existing)
 
 
+def _note_on_job(job_id: Optional[str], **fields) -> None:
+    """Add fields to a job record, keeping the rest (update_job_status replaces it)."""
+    if job_id:
+        update_job_status(job_id, {**(get_job_status(job_id) or {}), **fields})
+
+
 def _discard_staging(table_name: str, job_id: Optional[str], reason: str) -> dict:
     staging_database = get_config_param("STAGING_DATABASE_NAME")
     try:
@@ -1221,14 +1227,12 @@ def _discard_staging(table_name: str, job_id: Optional[str], reason: str) -> dic
         celery_logger.warning(
             f"Could not discard staging tables for '{table_name}' ({reason} upload): {e}"
         )
-        if job_id:
-            update_job_status(job_id, {"staging_cleanup": f"failed: {e}"})
+        _note_on_job(job_id, staging_cleanup=f"failed: {e}")
         return {"status": "error", "error": str(e)}
     celery_logger.info(
         f"Dropped staging tables {dropped} from '{staging_database}' ({reason} upload)"
     )
-    if job_id:
-        update_job_status(job_id, {"staging_cleanup": "done"})
+    _note_on_job(job_id, staging_cleanup="done")
     return {"status": "success", "dropped": dropped}
 
 

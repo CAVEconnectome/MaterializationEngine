@@ -110,28 +110,32 @@ def _transfer_result(status="success"):
 class TestAutomaticCleanup:
     def test_finished_upload_drops_its_staging_tables_only(self, databases):
         staging, production = databases
-        with mock.patch.object(tasks, "update_job_status") as status:
+        with mock.patch.object(tasks, "get_job_status", return_value=None), \
+                mock.patch.object(tasks, "update_job_status") as status:
             result = tasks.cleanup_staging_tables.run(_transfer_result())
         assert result == {"status": "success", "dropped": sorted([ANNO, SEG])}
         assert not has_upload(staging)
         assert has_upload(staging, "other_upload")
         assert has_upload(production)  # production is never touched here
-        status.assert_called_once_with(JOB, {"staging_cleanup": "done"})
+        assert status.call_args.args[1]["staging_cleanup"] == "done"
 
     def test_rerun_is_harmless(self, databases):
-        with mock.patch.object(tasks, "update_job_status"):
+        with mock.patch.object(tasks, "get_job_status", return_value=None), \
+                mock.patch.object(tasks, "update_job_status"):
             tasks.cleanup_staging_tables.run(_transfer_result())
             assert tasks.cleanup_staging_tables.run(_transfer_result()) == {"status": "success", "dropped": []}
 
     def test_unsuccessful_transfer_leaves_staging(self, databases):
         staging, _ = databases
-        with mock.patch.object(tasks, "update_job_status"):
+        with mock.patch.object(tasks, "get_job_status", return_value=None), \
+                mock.patch.object(tasks, "update_job_status"):
             assert tasks.cleanup_staging_tables.run(_transfer_result("error"))["status"] == "skipped"
         assert has_upload(staging)
 
     def test_failed_or_cancelled_upload_drops_its_staging_tables(self, databases):
         staging, production = databases
-        with mock.patch.object(tasks, "update_job_status"):
+        with mock.patch.object(tasks, "get_job_status", return_value=None), \
+                mock.patch.object(tasks, "update_job_status"):
             result = tasks.discard_upload_staging.run(table_name=ANNO, job_id=JOB, reason="failed")
         assert result["status"] == "success"
         assert not has_upload(staging) and has_upload(staging, "other_upload") and has_upload(production)
@@ -356,3 +360,10 @@ class TestFollowUps:
             report = tasks.purge_failed_uploads(dry_run=True)
         assert len(report["orphaned_staging_tables"]) == 5  # the fixture tables are too new
         assert scan.call_count == 1
+
+    def test_cleanup_keeps_the_rest_of_the_job_record(self, databases, redis_clients):
+        # final4: the record lost phase "Transfer Complete" and progress 100
+        tasks.update_job_status(JOB, {"status": "done", "phase": "Transfer Complete", "progress": 100})
+        tasks.cleanup_staging_tables.run(_transfer_result())
+        job = tasks.get_job_status(JOB)
+        assert (job["status"], job["phase"], job["progress"], job["staging_cleanup"]) == ("done", "Transfer Complete", 100, "done")
