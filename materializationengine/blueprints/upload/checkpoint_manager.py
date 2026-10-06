@@ -73,6 +73,13 @@ class WorkflowData:
 
     processing_rate: Optional[str] = None
     total_row_estimate: Optional[int] = None
+    # Points to look up: rows x point columns with a supervoxel column (2 for a synapse
+    # table). rows_processed counts points, so this, not total_row_estimate, is what it
+    # runs up to.
+    total_point_estimate: Optional[int] = None
+    # Recent (iso time, rows_processed) samples, for a rate that follows the current
+    # throughput rather than the average since the start (which includes scale-up)
+    rate_samples: Optional[List[List[Any]]] = None
 
     min_enclosing_bbox: Optional[List[List[float]]] = None
     bbox_hash: Optional[str] = None
@@ -95,6 +102,53 @@ class WorkflowData:
         if self.total_chunks <= 0:
             return 0.0
         return (self.completed_chunks / self.total_chunks) * 100
+
+
+RATE_WINDOW_SECONDS = 300
+RATE_SAMPLE_SPACING_SECONDS = 15
+
+
+def _progress_estimate(workflow_data: "WorkflowData", rows_processed: int, now_iso: str) -> dict:
+    """processing_rate, estimated_completion and rate_samples after a chunk completes.
+
+    rows_processed counts looked-up points, so the remaining work is measured against
+    total_point_estimate. It used to be measured against total_row_estimate (rows,
+    half the points of a synapse table), so the estimate reached zero halfway through
+    and read "done now" from then on (ltv7, 2026-10-06).
+    The rate is taken over the last RATE_WINDOW_SECONDS, falling back to the average
+    since the start while the window is still filling.
+    """
+    now_dt = datetime.datetime.fromisoformat(now_iso)
+    samples = [
+        s for s in (workflow_data.rate_samples or [])
+        if (now_dt - datetime.datetime.fromisoformat(s[0])).total_seconds() <= RATE_WINDOW_SECONDS
+    ]
+    if not samples or (now_dt - datetime.datetime.fromisoformat(samples[-1][0])).total_seconds() >= RATE_SAMPLE_SPACING_SECONDS:
+        samples.append([now_iso, rows_processed])
+    result: Dict[str, Any] = {"rate_samples": samples}
+
+    oldest_dt = datetime.datetime.fromisoformat(samples[0][0])
+    window_seconds = (now_dt - oldest_dt).total_seconds()
+    if window_seconds >= 60:
+        rate = (rows_processed - samples[0][1]) / window_seconds
+    elif workflow_data.start_time:
+        elapsed = (now_dt - datetime.datetime.fromisoformat(workflow_data.start_time)).total_seconds()
+        rate = rows_processed / elapsed if elapsed > 0 else 0.0
+    else:
+        rate = 0.0
+    if rate > 0:
+        result["processing_rate"] = f"{rate * 60:.2f} rows/minute"
+
+    total = workflow_data.total_point_estimate
+    if total and total > 0:
+        remaining = total - rows_processed
+        if remaining <= 0:
+            result["estimated_completion"] = now_iso
+        elif rate > 0:
+            result["estimated_completion"] = (
+                now_dt + datetime.timedelta(seconds=remaining / rate)
+            ).isoformat()
+    return result
 
 
 class RedisCheckpointManager:
@@ -501,55 +555,14 @@ class RedisCheckpointManager:
                                 )
                             )
 
-                        if workflow_data.start_time:
-                            start_dt = datetime.datetime.fromisoformat(
-                                workflow_data.start_time
+                        current_rows_processed = updated_workflow_fields.get(
+                            "rows_processed", workflow_data.rows_processed
+                        )
+                        updated_workflow_fields.update(
+                            _progress_estimate(
+                                workflow_data, current_rows_processed, current_time_iso
                             )
-                            now_dt = datetime.datetime.fromisoformat(current_time_iso)
-                            elapsed_seconds = (now_dt - start_dt).total_seconds()
-
-                            if elapsed_seconds > 0:
-                                current_rows_processed = updated_workflow_fields.get(
-                                    "rows_processed", workflow_data.rows_processed
-                                )
-                                if "rows_processed" in status_payload:
-                                    current_rows_processed = (
-                                        workflow_data.rows_processed
-                                        + status_payload["rows_processed"]
-                                    )
-                                else:
-                                    current_rows_processed = (
-                                        workflow_data.rows_processed
-                                    )
-
-                                rows_per_second = (
-                                    current_rows_processed / elapsed_seconds
-                                )
-                                updated_workflow_fields["processing_rate"] = (
-                                    f"{rows_per_second * 60:.2f} rows/minute"
-                                )
-
-                                if (
-                                    workflow_data.total_row_estimate
-                                    and workflow_data.total_row_estimate > 0
-                                ):
-                                    remaining_rows = (
-                                        workflow_data.total_row_estimate
-                                        - current_rows_processed
-                                    )
-                                    if remaining_rows > 0 and rows_per_second > 0:
-                                        seconds_left = remaining_rows / rows_per_second
-                                        estimated_completion_dt = (
-                                            now_dt
-                                            + datetime.timedelta(seconds=seconds_left)
-                                        )
-                                        updated_workflow_fields[
-                                            "estimated_completion"
-                                        ] = estimated_completion_dt.isoformat()
-                                    elif remaining_rows <= 0:
-                                        updated_workflow_fields[
-                                            "estimated_completion"
-                                        ] = current_time_iso
+                        )
 
                     elif status in [
                         CHUNK_STATUS_FAILED_RETRYABLE,

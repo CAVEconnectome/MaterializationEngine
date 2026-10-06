@@ -1,7 +1,7 @@
 import datetime
 import threading
 import time
-from typing import Dict, List, Any
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -445,6 +445,7 @@ def process_table_in_chunks(
                 chunking_strategy=chunking.strategy_name,
                 used_chunk_size=chunking.actual_chunk_size,
                 total_row_estimate=chunking.estimated_rows,
+                total_point_estimate=_total_point_estimate(chunking.estimated_rows, mat_metadata),
                 min_enclosing_bbox=(
                     [chunking.min_coords.tolist(), chunking.max_coords.tolist()]
                     if chunking.min_coords is not None
@@ -1312,6 +1313,43 @@ def select_3D_points_in_bbox(
     )
 
 
+def _total_point_estimate(estimated_rows: Optional[int], mat_metadata: dict) -> Optional[int]:
+    """Rows x looked-up point columns: what rows_processed counts up to."""
+    if not estimated_rows:
+        return None
+    try:
+        _, columns = spatial_lookup_point_columns(dict(mat_metadata))
+    except Exception as e:
+        celery_logger.warning(f"Could not count point columns for the progress estimate: {e}")
+        return None
+    return estimated_rows * len(columns) if columns else None
+
+
+def spatial_lookup_point_columns(mat_info: dict):
+    """The annotation model and its PointZ columns that get a supervoxel lookup.
+
+    A column is looked up when the segmentation table has a matching
+    <name>_supervoxel_id column (pre_pt_position -> pre_pt_supervoxel_id).
+    """
+    db = dynamic_annotation_cache.get_db(mat_info["database"])
+    mat_info["schema"] = db.database.get_table_schema(mat_info["annotation_table_name"])
+    AnnotationModel = create_annotation_model(mat_info)
+    SegmentationModel = create_segmentation_model(mat_info)
+
+    spatial_columns = []
+    for annotation_column in AnnotationModel.__table__.columns:
+        if (
+            isinstance(annotation_column.type, Geometry)
+            and "Z" in annotation_column.type.geometry_type.upper()
+        ):
+            supervoxel_column_name = (
+                f"{annotation_column.name.rsplit('_', 1)[0]}_supervoxel_id"
+            )
+            if getattr(SegmentationModel, supervoxel_column_name, None):
+                spatial_columns.append(annotation_column.name)
+    return AnnotationModel, spatial_columns
+
+
 def select_all_points_in_bbox(
     min_corner: np.array,
     max_corner: np.array,
@@ -1329,29 +1367,7 @@ def select_all_points_in_bbox(
         union_all: sqlalchemy statement that creates the union of all points
                    for all geometry columns in the bounding box
     """
-    db = dynamic_annotation_cache.get_db(mat_info["database"])
-    table_name = mat_info["annotation_table_name"]
-    schema = db.database.get_table_schema(table_name)
-    mat_info["schema"] = schema
-    AnnotationModel = create_annotation_model(mat_info)
-    SegmentationModel = create_segmentation_model(mat_info)
-
-    spatial_columns = []
-    for annotation_column in AnnotationModel.__table__.columns:
-        if (
-            isinstance(annotation_column.type, Geometry)
-            and "Z" in annotation_column.type.geometry_type.upper()
-        ):
-            supervoxel_column_name = (
-                f"{annotation_column.name.rsplit('_', 1)[0]}_supervoxel_id"
-            )
-            # skip lookup for column if not in Segmentation Model
-            if getattr(SegmentationModel, supervoxel_column_name, None):
-                spatial_columns.append(
-                    annotation_column.name
-                )  # use column name instead of Column object
-            else:
-                continue
+    AnnotationModel, spatial_columns = spatial_lookup_point_columns(mat_info)
     selects = [
         select_3D_points_in_bbox(
             AnnotationModel, spatial_column, min_corner, max_corner
