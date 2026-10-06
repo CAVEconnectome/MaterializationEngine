@@ -332,7 +332,42 @@ class RedisCheckpointManager:
     ):
         """
         Sets the status of a chunk and updates workflow aggregates.
+
+        Chunk status writers take turns on a short per-workflow lock. They all rewrite
+        the one workflow key, and with only WATCH (optimistic locking) ~100 spatial
+        workers collided constantly: ~630 WatchError retries in a 25-minute ltv7
+        upload, and 3 writes dropped after their last attempt, which can leave a
+        finished chunk looking unfinished. Under the lock a writer waits instead.
+        WATCH stays for update_workflow, which writes the same key without the lock.
         """
+        lock = REDIS_CLIENT.lock(
+            f"{self._get_workflow_key(table_name)}:status_lock",
+            timeout=30,
+            blocking_timeout=120,
+        )
+        if not lock.acquire():
+            celery_logger.error(
+                f"Timed out waiting to set chunk {chunk_index} of {table_name} to {status}."
+            )
+            return False
+        try:
+            return self._set_chunk_status_watched(
+                table_name, chunk_index, status, status_payload
+            )
+        finally:
+            try:
+                lock.release()
+            except redis.exceptions.LockError:
+                # Held past its 30s timeout; another writer may already have it
+                celery_logger.warning(f"Chunk status lock for {table_name} expired before release.")
+
+    def _set_chunk_status_watched(
+        self,
+        table_name: str,
+        chunk_index: int,
+        status: str,
+        status_payload: Optional[dict] = None,
+    ):
         if status_payload is None:
             status_payload = {}
 
@@ -341,7 +376,8 @@ class RedisCheckpointManager:
         retryable_set_key = self._get_retryable_chunks_set_key(table_name)
         workflow_key = self._get_workflow_key(table_name)
 
-        max_retries = 3
+        # Only update_workflow can still collide here (status writers hold the lock)
+        max_retries = 10
         for attempt in range(max_retries):
             try:
                 with REDIS_CLIENT.pipeline() as pipe:
@@ -360,6 +396,22 @@ class RedisCheckpointManager:
                     old_status = (
                         old_status_bytes.decode("utf-8") if old_status_bytes else None
                     )
+
+                    # COMPLETED is final within a run (initialize_workflow resets the
+                    # statuses for a new one). process_chunk records PROCESSING_SUBTASKS
+                    # after dispatching its sub-batches, so a small chunk's finalize can
+                    # mark it COMPLETED first; overwriting that left chunk 2541 of ltv7
+                    # final2 "in progress" until stale recovery re-ran it 10 min later.
+                    if (
+                        old_status == CHUNK_STATUS_COMPLETED
+                        and status != CHUNK_STATUS_COMPLETED
+                    ):
+                        pipe.unwatch()
+                        celery_logger.info(
+                            f"Chunk {chunk_index} of {table_name} is already COMPLETED; "
+                            f"not setting it to {status}."
+                        )
+                        return False
 
                     processing_subtasks_ts_key = self._get_processing_subtasks_timestamps_key(table_name)
                     processing_ts_key = self._get_processing_timestamps_key(table_name)
@@ -585,7 +637,7 @@ class RedisCheckpointManager:
                         f"Failed to set chunk status for {chunk_index} after {max_retries} retries due to WatchError."
                     )
                     return False
-                time.sleep(random.uniform(0.1, 0.5) * (attempt + 1))
+                time.sleep(random.uniform(0.1, 0.5) * min(attempt + 1, 4))
             except Exception as e:
                 celery_logger.error(
                     f"Error setting chunk status for {table_name}, chunk {chunk_index}: {str(e)}"
