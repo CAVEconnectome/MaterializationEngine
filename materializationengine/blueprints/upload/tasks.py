@@ -198,6 +198,9 @@ def process_and_upload(
         transfer_to_production.s(
             transfer_segmentation=True,
         ),
+        # A chain stops at the first task that raises, so this only runs once every
+        # step above, including the transfer, has succeeded.
+        cleanup_staging_tables.s(),
     )
 
     result = workflow.apply_async()
@@ -1114,6 +1117,7 @@ def transfer_to_production(
         return {
             "status": "success",
             "message": f"Transfer completed for table '{table_name_to_transfer}'.",
+            "job_id_for_status": job_id_for_ui,
             "tables_transferred": {
                 "annotation_table": {
                     "name": table_name_to_transfer,
@@ -1142,6 +1146,86 @@ def transfer_to_production(
             except Exception as update_err:
                 celery_logger.error(f"Failed to update job status after transfer error: {update_err}")
         raise
+
+def drop_staging_table(table_name: str, engine) -> None:
+    """Drop a staging table and its row in the staging metadata tables."""
+    quote = engine.dialect.identifier_preparer.quote
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS {quote(table_name)}"))
+        # Only this table's own metadata row (segmentation_table_metadata for a
+        # segmentation table, annotation_table_metadata for an annotation table) and a
+        # combined table built from it. A row of any other table that references this
+        # one (another pcg version's segmentation table, a combined table using it as
+        # reference_table) is left alone: its foreign key fails the transaction, so the
+        # table is not dropped.
+        conn.execute(
+            text("DELETE FROM segmentation_table_metadata WHERE table_name = :t"),
+            {"t": table_name},
+        )
+        conn.execute(
+            text("DELETE FROM combined_table_metadata WHERE annotation_table = :t"),
+            {"t": table_name},
+        )
+        conn.execute(
+            text("DELETE FROM annotation_table_metadata WHERE table_name = :t"),
+            {"t": table_name},
+        )
+
+
+# Last step of the upload chain. DROP ... IF EXISTS makes a redelivered run harmless.
+@celery.task(name="workflow:cleanup_staging_tables", bind=True, acks_late=True)
+def cleanup_staging_tables(self, transfer_result: dict) -> dict:
+    """Remove an upload's tables from the staging database once they are in production.
+
+    Without this every upload left its staging tables behind (~500MB for 1M synapses).
+    Only tables transfer_to_production reports as transferred are dropped. A failure
+    here is logged and recorded on the job, which stays "done": the data is already in
+    production, and the staging tables can be removed by hand.
+    """
+    job_id = transfer_result.get("job_id_for_status")
+    tables = transfer_result.get("tables_transferred", {})
+    if transfer_result.get("status") != "success":
+        celery_logger.warning(f"Not cleaning up staging: transfer status was {transfer_result.get('status')!r}")
+        return {"status": "skipped", "reason": "transfer not successful"}
+
+    # All or nothing: a table that was not transferred still exists only in staging,
+    # and its partner is needed to redo the transfer.
+    not_transferred = [
+        info.get("name") for info in tables.values() if info and not info.get("success")
+    ]
+    if not_transferred:
+        celery_logger.warning(f"Not cleaning up staging: {not_transferred} were not transferred")
+        if job_id:
+            update_job_status(job_id, {"staging_cleanup": f"skipped: {not_transferred} not transferred"})
+        return {"status": "skipped", "reason": f"not transferred: {not_transferred}"}
+
+    # Segmentation table first: its metadata row references the annotation table's
+    transferred = [
+        info["name"]
+        for key in ("segmentation_table", "annotation_table")
+        for info in [tables.get(key) or {}]
+        if info.get("name")
+    ]
+    staging_database = get_config_param("STAGING_DATABASE_NAME")
+    engine = db_manager.get_engine(staging_database)
+
+    dropped, errors = [], {}
+    for table_name in transferred:
+        try:
+            drop_staging_table(table_name, engine)
+            dropped.append(table_name)
+        except Exception as e:
+            celery_logger.warning(f"Could not drop staging table '{table_name}': {e}")
+            errors[table_name] = str(e)
+
+    celery_logger.info(f"Dropped staging tables {dropped} from '{staging_database}'")
+    if job_id:
+        update_job_status(
+            job_id,
+            {"staging_cleanup": "done" if not errors else f"failed for {sorted(errors)}"},
+        )
+    return {"status": "success" if not errors else "partial", "dropped": dropped, "errors": errors}
+
 
 def get_db_connection_info(db_url):
     """Extract connection information from SQLAlchemy URL object."""
