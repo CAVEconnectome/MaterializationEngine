@@ -65,7 +65,7 @@ services:
     environment:
       - WORKER_NAME=worker.process
       - QUEUE_NAME=process
-    command: celery --app="run.celery" worker --pool=prefork --hostname=worker.process@%h --queues=celery,process --concurrency=1 --loglevel=INFO -Ofair
+    command: celery --app="run.celery" worker --pool=prefork --hostname=worker.process@%h --queues=celery,process,spatial --concurrency=1 --loglevel=INFO -Ofair
     volumes:
       - ~/.cloudvolume/secrets:/home/nginx/.cloudvolume/secrets:z
       - ~/.cloudvolume/secrets/google-secret.json:/home/nginx/.cloudvolume/secrets/google-secret.json:z
@@ -96,6 +96,9 @@ services:
       - .:/app
     env_file:
       - ./dev.env
+    environment:
+      # source is mounted from the host above, so reload workers when it changes
+      - UWSGI_PY_AUTORELOAD=1
     depends_on:
       - db
       - redis-master

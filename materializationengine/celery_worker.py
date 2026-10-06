@@ -8,10 +8,9 @@ import time
 import warnings
 from typing import Any, Callable, Dict
 
-import redis
 from celery.app.builtins import add_backend_cleanup_task
 from celery.schedules import crontab
-from celery.signals import after_setup_logger, worker_process_init
+from celery.signals import after_setup_logger, worker_init, worker_process_init
 from celery.utils.log import get_task_logger
 from dateutil import relativedelta
 from marshmallow import ValidationError
@@ -120,8 +119,50 @@ def create_celery(app=None):
         celery.Task.on_failure = post_to_slack_on_task_failure
 
     configure_worker_autoshutdown(app)
+    configure_fork_safe_database_connections(app)
 
     return celery
+
+
+_fork_safe_app = None
+
+
+def configure_fork_safe_database_connections(app):
+    """Keep database connections from being shared across prefork worker processes.
+
+    Building the app (create_app -> init_staging_database) opens database
+    connections in the parent process. The handlers below close them before the
+    pool forks and have each child start with empty client caches.
+    """
+    global _fork_safe_app
+    _fork_safe_app = app
+
+
+@worker_init.connect
+def close_database_connections_before_fork(**kwargs):
+    """Runs in the parent worker process before it forks the pool."""
+    from materializationengine import database
+
+    if _fork_safe_app is None:
+        database.reset_database_connections(close_connections=True)
+        return
+    with _fork_safe_app.app_context():
+        database.reset_database_connections(close_connections=True)
+        try:
+            from materializationengine.app import db
+
+            db.engine.dispose()
+        except Exception as e:
+            celery_logger.warning(f"Could not dispose the Flask-SQLAlchemy engine: {e}")
+    celery_logger.info("[worker_init] closed database connections before forking")
+
+
+@worker_process_init.connect
+def reset_database_connections_after_fork(**kwargs):
+    """Runs in each forked pool process; drops clients inherited from the parent."""
+    from materializationengine import database
+
+    database.reset_database_connections(close_connections=False)
 
 
 def configure_worker_autoshutdown(app):
@@ -488,12 +529,9 @@ def get_activate_tasks():
 
 
 def inspect_locked_tasks(release_locks: bool = False):
-    client = redis.StrictRedis(
-        host=get_config_param("REDIS_HOST"),
-        port=get_config_param("REDIS_PORT"),
-        password=get_config_param("REDIS_PASSWORD"),
-        db=0,
-    )
+    from materializationengine.redis_client import get_redis_client
+
+    client = get_redis_client(0)
 
     locked_tasks = list(client.scan_iter(match="LOCKED_WORKFLOW_TASK*"))
     lock_status_dict = {locked_task: {"locked": True} for locked_task in locked_tasks}

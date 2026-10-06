@@ -2222,17 +2222,10 @@ def append_deltalake_log(
 
 
 def _get_redis_client():
-    """Lazy-create a Redis client for deltalake export progress."""
-    import redis
+    """The shared Redis client, for deltalake export progress."""
+    from materializationengine.redis_client import get_redis_client
 
-    from materializationengine.utils import get_config_param
-
-    return redis.StrictRedis(
-        host=get_config_param("REDIS_HOST"),
-        port=get_config_param("REDIS_PORT"),
-        password=get_config_param("REDIS_PASSWORD"),
-        db=0,
-    )
+    return get_redis_client(0)
 
 
 @contextmanager

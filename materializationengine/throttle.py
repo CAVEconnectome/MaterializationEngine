@@ -1,10 +1,10 @@
 import time
 from typing import List
 
-import redis
 from celery.utils.log import get_task_logger
 
 from materializationengine.celery_init import celery
+from materializationengine.redis_client import get_redis_client
 from materializationengine.utils import get_config_param
 
 celery_logger = get_task_logger(__name__)
@@ -24,12 +24,7 @@ def get_queue_length(queue_name: str = "celery"):
     """
 
     try:
-        r = redis.StrictRedis(
-            host=get_config_param("REDIS_HOST"),
-            port=get_config_param("REDIS_PORT"),
-            password=get_config_param("REDIS_PASSWORD"),
-            db=0,
-        )
+        r = get_redis_client(0)
 
     except Exception as e:
         celery_logger.error(f"Redis connection error: {e}")
@@ -47,12 +42,7 @@ def get_redis_memory_usage():
         int: Bytes of memory used in Redis
     """
     try:
-        r = redis.StrictRedis(
-            host=get_config_param("REDIS_HOST"),
-            port=get_config_param("REDIS_PORT"),
-            password=get_config_param("REDIS_PASSWORD"),
-            db=0,
-        )
+        r = get_redis_client(0)
 
     except Exception as e:
         celery_logger.error("Redis has an error: {e}")

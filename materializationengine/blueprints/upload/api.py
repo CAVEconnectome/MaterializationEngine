@@ -26,7 +26,7 @@ from middle_auth_client import (
     auth_requires_permission,
     auth_required,
 )
-from redis import StrictRedis
+from materializationengine.redis_client import SharedRedis
 
 from materializationengine.config import as_bool
 from materializationengine.blueprints.reset_auth import reset_auth
@@ -45,9 +45,11 @@ from materializationengine.blueprints.upload.storage import (
     StorageService,
 )
 from materializationengine.blueprints.upload.tasks import (
-    cancel_processing_job,
     get_job_status,
+    make_upload_job_id,
     process_and_upload,
+    request_upload_cancel,
+    update_job_status,
 )
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.info_client import get_datastack_info, get_datastacks
@@ -107,12 +109,7 @@ spatial_lookup_status.add_argument(
 )
 
 
-REDIS_CLIENT = StrictRedis(
-    host=get_config_param("REDIS_HOST"),
-    port=get_config_param("REDIS_PORT"),
-    password=get_config_param("REDIS_PASSWORD"),
-    db=0,
-)
+REDIS_CLIENT = SharedRedis(db=0)
 
 
 def is_auth_disabled():
@@ -736,11 +733,30 @@ def start_csv_processing():
             500,
         )
 
+    # Write the job record before enqueueing so it shows up in the job list right
+    # away; the orchestration worker that runs process_and_upload can take minutes
+    # to be scheduled.
+    job_id = make_upload_job_id(
+        datastack_info.get("datastack", "unknown"),
+        file_metadata["metadata"]["table_name"],
+        datetime.datetime.utcnow(),
+    )
+    update_job_status(
+        job_id,
+        {
+            "status": "pending",
+            "phase": "Queued, waiting for a worker",
+            "progress": 0,
+            "user_id": user_id,
+            "datastack_name": datastack_info.get("datastack", "unknown"),
+        },
+    )
+
     result = process_and_upload.s(
-        file_path, file_metadata, datastack_info, user_id=user_id
+        file_path, file_metadata, datastack_info, user_id=user_id, job_id=job_id
     ).apply_async()
 
-    return jsonify({"status": "start", "task_id": result.id})
+    return jsonify({"status": "start", "task_id": result.id, "job_id": job_id})
 
 
 @upload_bp.route("/api/process/status/<job_id>", methods=["GET"])
@@ -891,8 +907,9 @@ def cancel_job(job_id):
                     403,
                 )
 
-        result = cancel_processing_job.delay(job_id)
-        status = result.get(timeout=10)
+        # Just Redis writes, so done here rather than through a task: waiting on a
+        # process-queue worker made cancel time out whenever consumers were scaled down.
+        status = request_upload_cancel(job_id)
 
         return jsonify(
             {"status": "success", "message": "Processing cancelled", "details": status}

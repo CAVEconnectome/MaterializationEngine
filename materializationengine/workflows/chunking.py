@@ -10,6 +10,11 @@ from materializationengine.utils import (
 
 celery_logger = get_task_logger(__name__)
 
+# Aim for about this many rows per grid chunk. Every chunk costs several celery tasks and
+# checkpoint writes however few rows it holds: a fixed 2048 grid split ltv7's 1.02M-row
+# test7 upload into 150,332 chunks of ~7 rows, ~390k tasks and ~2,900 redis commands/s.
+DEFAULT_TARGET_ROWS_PER_CHUNK = 500
+
 
 class ChunkingStrategy:
     """
@@ -19,7 +24,14 @@ class ChunkingStrategy:
     an optimal chunking strategy, and generating chunks for processing.
     """
 
-    def __init__(self, engine, table_name, database, base_chunk_size=1024):
+    def __init__(
+        self,
+        engine,
+        table_name,
+        database,
+        base_chunk_size=1024,
+        target_rows_per_chunk=DEFAULT_TARGET_ROWS_PER_CHUNK,
+    ):
         """
         Initialize a chunking strategy.
 
@@ -27,12 +39,14 @@ class ChunkingStrategy:
             engine: SQLAlchemy engine for database operations
             table_name: Name of the annotation table to process
             database: Database name
-            base_chunk_size: Base size of each chunk in spatial units
+            base_chunk_size: Smallest chunk size in spatial units
+            target_rows_per_chunk: Rows per chunk the grid strategy sizes its chunks for
         """
         self.engine = engine
         self.table_name = table_name
         self.database = database
         self.base_chunk_size = base_chunk_size
+        self.target_rows_per_chunk = target_rows_per_chunk
         self.min_coords = None
         self.max_coords = None
         self.estimated_rows = None
@@ -189,6 +203,12 @@ class ChunkingStrategy:
                 ).fetchone()
                 self.estimated_rows = int(size_info.est_rows) if size_info else 0
                 table_size_bytes = int(size_info.table_size_bytes) if size_info else 0
+                if self.estimated_rows <= 0:
+                    # reltuples is -1 (or 0) until the table is first vacuumed or
+                    # analyzed, which a freshly loaded staging table may not be yet
+                    self.estimated_rows = int(
+                        connection.execute(f'SELECT count(*) FROM "{self.table_name}"').scalar()
+                    )
 
                 celery_logger.info(
                     f"Table {self.table_name} has approximately {self.estimated_rows:,} rows "
@@ -258,12 +278,33 @@ class ChunkingStrategy:
                 return self.strategy_name
 
         # Fall back to grid approach
+        self.actual_chunk_size = self._grid_chunk_size_for_target_rows()
         self._create_grid_chunking()
         self.strategy_name = "grid"
         celery_logger.info(
             f"Using grid approach with {self.total_chunks} chunks of size {self.actual_chunk_size}"
         )
         return self.strategy_name
+
+    def _grid_chunk_size_for_target_rows(self) -> int:
+        """Chunk size giving about target_rows_per_chunk rows per chunk on average.
+
+        Assumes rows are spread evenly over the bounding box, so chunks in dense regions
+        hold more than the target and chunks in empty space hold none. Never smaller
+        than base_chunk_size.
+        """
+        if not self.estimated_rows or self.estimated_rows <= 0 or not self.target_rows_per_chunk:
+            return self.base_chunk_size
+        spans = np.array(self.max_coords, dtype=float) - np.array(self.min_coords, dtype=float)
+        spans = np.maximum(spans, 1.0)  # a flat bounding box still has some volume
+        target_chunks = max(1.0, self.estimated_rows / self.target_rows_per_chunk)
+        size = int(np.ceil(np.cbrt(np.prod(spans) / target_chunks)))
+        chunk_size = max(self.base_chunk_size, size)
+        celery_logger.info(
+            f"Grid chunk size {chunk_size} for {self.estimated_rows:,} rows "
+            f"(target {self.target_rows_per_chunk} rows per chunk, minimum {self.base_chunk_size})"
+        )
+        return chunk_size
 
     def _create_grid_chunking(self):
         """

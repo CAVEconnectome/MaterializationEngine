@@ -29,6 +29,8 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
     CHUNK_STATUS_PENDING,
     CHUNK_STATUS_PROCESSING_SUBTASKS,
     CHUNK_STATUS_ERROR,
+    WORKFLOW_STATUS_CANCELLED,
+    WORKFLOW_STOPPED_STATUSES,
     RedisCheckpointManager,
 )
 from materializationengine.celery_init import celery
@@ -50,6 +52,7 @@ from materializationengine.utils import (
     get_query_columns_by_suffix,
 )
 from materializationengine.workflows.chunking import (
+    DEFAULT_TARGET_ROWS_PER_CHUNK,
     ChunkingStrategy,
     reconstruct_chunk_bounds,
 )
@@ -96,6 +99,9 @@ def _on_connection_error(database_name: str, task_self: Task) -> None:
         with _infra_lock:
             _worker_isolated = True
         hostname = task_self.request.hostname
+        # Pause the queue this task came from. This used to pause "celery", which no
+        # spatial lookup task is routed to, so isolation never took a worker out.
+        queue = _task_queue(task_self)
         celery_logger.critical(
             f"Worker {hostname}: {count} consecutive DB connection failures for "
             f"'{database_name}'. Pausing queue consumption so healthy pods can "
@@ -103,21 +109,30 @@ def _on_connection_error(database_name: str, task_self: Task) -> None:
         )
         try:
             task_self.app.control.cancel_consumer(
-                "celery", destination=[hostname], reply=False
+                queue, destination=[hostname], reply=False
             )
-            celery_logger.warning(f"Worker {hostname}: queue consumer paused.")
+            celery_logger.warning(f"Worker {hostname}: '{queue}' queue consumer paused.")
         except Exception as cancel_err:
             celery_logger.error(
                 f"Worker {hostname}: could not pause consumer: {cancel_err}"
             )
         threading.Thread(
             target=_db_recovery_watcher,
-            args=(database_name, hostname, task_self.app),
+            args=(database_name, hostname, task_self.app, queue),
             daemon=True,
         ).start()
 
 
-def _db_recovery_watcher(database_name: str, hostname: str, app) -> None:
+def _task_queue(task_self: Task) -> str:
+    """The queue a running task was delivered from, falling back to its route."""
+    delivery_info = task_self.request.delivery_info or {}
+    queue = delivery_info.get("routing_key")
+    if queue:
+        return queue
+    return task_self.name.split(":", 1)[0] if ":" in task_self.name else "celery"
+
+
+def _db_recovery_watcher(database_name: str, hostname: str, app, queue: str) -> None:
     """Background thread: poll DB until it becomes available, then re-enable consumer."""
     global _consecutive_infra_failures, _worker_isolated
 
@@ -137,7 +152,7 @@ def _db_recovery_watcher(database_name: str, hostname: str, app) -> None:
                 _worker_isolated = False
             try:
                 app.control.add_consumer(
-                    "celery", destination=[hostname], reply=False
+                    queue, destination=[hostname], reply=False
                 )
                 celery_logger.info(f"[DBRecovery/{hostname}] Queue consumer re-enabled.")
             except Exception as add_err:
@@ -220,7 +235,8 @@ def run_spatial_lookup_workflow(
     should_resume = (
         resume_from_checkpoint
         and existing_workflow
-        and existing_workflow.status not in [CHUNK_STATUS_COMPLETED, "failed"]
+        and existing_workflow.status
+        not in [CHUNK_STATUS_COMPLETED, "failed", WORKFLOW_STATUS_CANCELLED]
     )
 
     if should_resume:
@@ -364,9 +380,17 @@ def process_table_in_chunks(
                 f"Workflow data not found for {workflow_name} in process_table_in_chunks. Aborting."
             )
             checkpoint_manager.update_workflow(
-                workflow_name=workflow_name,
+                table_name=workflow_name,
                 status="failed",
                 last_error="Workflow data missing in dispatcher",
+            )
+            return
+
+        # Cancelled (or failed): dispatch nothing more. Checked before anything below can
+        # reset the status to processing_chunks.
+        if workflow_data.status in WORKFLOW_STOPPED_STATUSES:
+            celery_logger.info(
+                f"Workflow {workflow_name} is {workflow_data.status}; not dispatching more chunks."
             )
             return
 
@@ -375,7 +399,7 @@ def process_table_in_chunks(
                 f"No mat_metadata found for {annotation_table_name}. Cannot proceed."
             )
             checkpoint_manager.update_workflow(
-                workflow_name=workflow_name,
+                table_name=workflow_name,
                 status="failed",
                 last_error=f"Mat metadata missing for {annotation_table_name}",
             )
@@ -404,6 +428,11 @@ def process_table_in_chunks(
                 table_name=annotation_table_name,
                 database=database_name,
                 base_chunk_size=chunk_scale_factor * 1024,
+                target_rows_per_chunk=int(
+                    get_config_param(
+                        "SPATIAL_LOOKUP_TARGET_ROWS_PER_CHUNK", DEFAULT_TARGET_ROWS_PER_CHUNK
+                    )
+                ),
             )
             chunking.select_strategy()
 
@@ -436,7 +465,7 @@ def process_table_in_chunks(
                     f"Failed to update/fetch workflow_data after chunking calculation for {workflow_name}."
                 )
                 checkpoint_manager.update_workflow(
-                    workflow_name=workflow_name,
+                    table_name=workflow_name,
                     status="failed",
                     last_error="Chunking data init failed",
                 )
@@ -663,7 +692,7 @@ def process_table_in_chunks(
 
 
 @celery.task(
-    name="process:process_chunk",
+    name="spatial:process_chunk",
     bind=True,
     acks_late=True,
     max_retries=10,
@@ -691,6 +720,10 @@ def process_chunk(
         raise ValueError("workflow_name and chunk_idx are required for process_chunk")
 
     log_prefix = f"[WF:{workflow_name}, SpChunk:{chunk_idx}, Task:{self.request.id}]"
+
+    if checkpoint_manager.is_workflow_stopped(workflow_name):
+        celery_logger.info(f"{log_prefix} Workflow cancelled or failed; skipping chunk.")
+        return {"status": "skipped_workflow_stopped", "chunk_idx": chunk_idx}
 
     current_chunk_status_data = checkpoint_manager.get_failed_chunk_details(
         workflow_name, chunk_idx
@@ -1222,25 +1255,21 @@ def get_root_ids_from_supervoxels(
         )
 
         if not supervoxels_to_lookup.empty:
-            try:
-                root_ids = np.squeeze(
-                    cg_client.root_ext.get_roots(
-                        supervoxels_to_lookup.to_numpy(),
-                        time_stamp=materialization_time_stamp,
-                    )
+            root_ids = _get_roots_zero_for_missing(
+                cg_client,
+                supervoxels_to_lookup.to_numpy(),
+                materialization_time_stamp,
+                sv_col,
+            )
+            root_ids_df.loc[sv_mask, root_col] = root_ids
+
+            zero_root_idx = supervoxels_to_lookup.index[root_ids == 0]
+            if len(zero_root_idx) > 0:
+                zero_sv_ids = supervoxels_to_lookup.loc[zero_root_idx]
+                celery_logger.warning(
+                    f"Found {len(zero_sv_ids)} supervoxels with no "
+                    f"corresponding root IDs for {sv_col}: {zero_sv_ids.tolist()[:5]}..."
                 )
-
-                root_ids_df.loc[sv_mask, root_col] = root_ids
-
-                zero_root_idx = supervoxels_to_lookup.index[root_ids == 0]
-                if len(zero_root_idx) > 0:
-                    zero_sv_ids = supervoxels_to_lookup.loc[zero_root_idx]
-                    celery_logger.warning(
-                        f"Found {len(zero_sv_ids)} supervoxels with no "
-                        f"corresponding root IDs for {sv_col}: {zero_sv_ids.tolist()[:5]}..."
-                    )
-            except Exception as e:
-                celery_logger.error(f"Error looking up root IDs for {sv_col}: {str(e)}")
 
     total_time = time.time() - start_time
     celery_logger.info(
@@ -1347,6 +1376,29 @@ def convert_array_to_int(value):
         return 0
 
 
+def _get_roots_zero_for_missing(cg_client, supervoxel_ids, time_stamp, sv_col: str) -> np.ndarray:
+    """Root ids for supervoxel_ids, with 0 only for the supervoxels that have no parent.
+
+    get_roots raises KeyError for the whole batch when any one supervoxel has no Parent
+    row at time_stamp. This used to be caught and logged, leaving root id 0 on every row
+    of the sub-batch (seen on ltv7 test8, 2026-10-06). Other errors (e.g. Bigtable
+    unavailable) propagate so the sub-batch task retries instead of writing zeros.
+    """
+    try:
+        root_ids = cg_client.root_ext.get_roots(supervoxel_ids, time_stamp=time_stamp)
+    except KeyError as e:
+        celery_logger.warning(
+            f"Supervoxel {e} has no parent at {time_stamp} ({sv_col}); "
+            f"looking up the other {len(supervoxel_ids) - 1} supervoxels with 0 for missing ones"
+        )
+        root_ids = cg_client.root_ext.get_roots(
+            supervoxel_ids, time_stamp=time_stamp, fail_to_zero=True
+        )
+    # atleast_1d, not squeeze: squeeze turns a single result into a 0-d array, which
+    # pandas cannot use as a mask ("Multi-dimensional indexing ... is no longer supported")
+    return np.atleast_1d(np.asarray(root_ids))
+
+
 def insert_segmentation_data(
     data: pd.DataFrame,
     mat_metadata: dict,
@@ -1382,6 +1434,11 @@ def insert_segmentation_data(
     df = df.infer_objects().fillna(0)
     df = df.reindex(columns=segmentation_dataframe.columns, fill_value=0)
 
+    # Upsert in id order. A row whose points fall in different chunks is written by more
+    # than one sub-batch at once; locking rows in the same order makes them wait for each
+    # other instead of deadlocking (DeadlockDetected on ltv7 test8, 2026-10-06).
+    if "id" in df.columns:
+        df = df.sort_values("id", kind="stable")
     records = df.to_dict(orient="records")
 
     if not records:
@@ -1425,7 +1482,7 @@ def insert_segmentation_data(
 
 
 @celery.task(
-    name="process:process_and_insert_sub_batch",
+    name="spatial:process_and_insert_sub_batch",
     bind=True,
     acks_late=True,
     autoretry_for=(OperationalError, DisconnectionError, ChunkDataValidationError),
@@ -1450,6 +1507,13 @@ def process_and_insert_sub_batch(
     Retries on transient errors. Reports status upon completion or permanent failure.
     """
     log_prefix = f"[WF:{workflow_name}, SpChunk:{original_chunk_idx}, SubBatch:{sub_batch_idx}, Task:{self.request.id}]"
+    if RedisCheckpointManager(database_name).is_workflow_stopped(workflow_name):
+        celery_logger.info(f"{log_prefix} Workflow cancelled or failed; skipping sub-batch.")
+        return {
+            "status": "skipped_workflow_stopped",
+            "rows_processed": 0,
+            "sub_batch_idx": sub_batch_idx,
+        }
     celery_logger.info(
         f"{log_prefix} Starting processing for {len(sub_batch_point_data)} points."
     )

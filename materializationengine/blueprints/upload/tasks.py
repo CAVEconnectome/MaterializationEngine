@@ -7,17 +7,19 @@ import shlex
 
 import pandas as pd
 from celery import chain
+from celery.exceptions import Ignore
 from celery.result import AsyncResult
 from celery.utils.log import get_task_logger
 from flask import current_app
-from redis import Redis
-from sqlalchemy import text
+from materializationengine.redis_client import SharedRedis
+from sqlalchemy import inspect, text
 from dynamicannotationdb.key_utils import build_segmentation_table_name
 from dynamicannotationdb.models import SegmentationMetadata
 
 from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
 from materializationengine.blueprints.upload.processor import SchemaProcessor
 from materializationengine.celery_init import celery
+from materializationengine.cloudsql_admin import CloudSQLAdminError, import_csv
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.index_manager import index_cache
 from materializationengine.shared_tasks import add_index
@@ -28,6 +30,7 @@ from materializationengine.workflows.ingest_new_annotations import (
 )
 from materializationengine.workflows.spatial_lookup import run_spatial_lookup_workflow
 from materializationengine.blueprints.upload.checkpoint_manager import (
+    WORKFLOW_STATUS_CANCELLED,
     CHUNK_STATUS_COMPLETED,
     CHUNK_STATUS_FAILED_PERMANENT,
     CHUNK_STATUS_FAILED_RETRYABLE,
@@ -39,16 +42,72 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
 celery_logger = get_task_logger(__name__)
 
 # Redis client for storing job status
-REDIS_CLIENT = Redis(
-    host=get_config_param("REDIS_HOST"),
-    port=get_config_param("REDIS_PORT"),
-    password=get_config_param("REDIS_PASSWORD"),
-    db=0,
-)
+REDIS_CLIENT = SharedRedis(db=0)
+
+
+CANCEL_KEY_PREFIX = "csv_processing_cancelled:"
+# Longer than any upload, and independent of the job record (1h, rewritten by every step).
+CANCEL_KEY_TTL_SECONDS = 7 * 24 * 3600
+
+
+class UploadCancelled(Ignore):
+    """An upload step found its job cancelled.
+
+    Raising celery's Ignore stops the chain here without marking the task failed.
+    """
+
+
+def is_upload_cancelled(job_id: Optional[str]) -> bool:
+    return bool(job_id) and bool(REDIS_CLIENT.exists(f"{CANCEL_KEY_PREFIX}{job_id}"))
+
+
+def raise_if_upload_cancelled(job_id: Optional[str], step: str) -> None:
+    if is_upload_cancelled(job_id):
+        celery_logger.info(f"Upload {job_id} was cancelled; stopping at {step}.")
+        raise UploadCancelled(f"Upload {job_id} cancelled")
+
+
+def _stop_spatial_workflow(database_name: Optional[str], workflow_name: Optional[str]) -> None:
+    """Mark a running spatial lookup cancelled so its dispatcher and chunk tasks stop."""
+    if not (database_name and workflow_name):
+        return
+    checkpoint_manager = RedisCheckpointManager(database_name)
+    if checkpoint_manager.get_workflow_data(workflow_name):
+        checkpoint_manager.update_workflow(
+            table_name=workflow_name,
+            status=WORKFLOW_STATUS_CANCELLED,
+            last_error="Cancelled by user",
+        )
+
+
+def request_upload_cancel(job_id: str) -> Dict[str, Any]:
+    """Cancel an upload: every later step, and a running spatial lookup, stops on its own.
+
+    Only Redis writes, so the API can call it directly. Steps check for cancellation
+    when they start (process_csv also while it runs); a step already past its last check
+    finishes, but nothing after it starts. Staging tables are left as they are.
+    """
+    REDIS_CLIENT.set(f"{CANCEL_KEY_PREFIX}{job_id}", "1", ex=CANCEL_KEY_TTL_SECONDS)
+    spatial = (get_job_status(job_id) or {}).get("spatial_lookup_config") or {}
+    try:
+        _stop_spatial_workflow(spatial.get("database_name"), spatial.get("table_name"))
+    except Exception as e:
+        # the monitor stops the workflow too when it next sees the cancellation
+        celery_logger.warning(f"Could not mark spatial workflow cancelled for {job_id}: {e}")
+    status_update = {
+        "status": "cancelled",
+        "phase": "Cancelled by user",
+        "error": None,
+    }
+    update_job_status(job_id, status_update)
+    return status_update
 
 
 def update_job_status(job_id: str, status: Dict[str, Any]) -> None:
     """Update job status in Redis"""
+    # Steps still winding down after a cancel must not overwrite it.
+    if status.get("status") != "cancelled" and is_upload_cancelled(job_id):
+        return
     status["last_updated"] = datetime.now(timezone.utc).isoformat()
     existing_status = get_job_status(job_id)
     if existing_status:
@@ -56,10 +115,16 @@ def update_job_status(job_id: str, status: Dict[str, Any]) -> None:
             status["user_id"] = existing_status["user_id"]
         if "datastack_name" in existing_status and "datastack_name" not in status:
             status["datastack_name"] = existing_status["datastack_name"]
+        if "status" in existing_status and "status" not in status:
+            status["status"] = existing_status["status"]
 
     REDIS_CLIENT.set(
         f"csv_processing:{job_id}", json.dumps(status), ex=3600  # Expires in 1 hour
     )
+
+
+def make_upload_job_id(datastack_name: str, table_name: str, time_stamp: datetime) -> str:
+    return f"{datastack_name}_{table_name}_{time_stamp.strftime('%Y%m%d_%H%M%S')}"
 
 
 def get_job_status(job_id: str) -> Dict[str, Any]:
@@ -92,7 +157,14 @@ def process_and_upload(
     reference_table = file_metadata["metadata"].get("reference_table")
     column_mapping = file_metadata["column_mapping"]
     ignored_columns = file_metadata.get("ignored_columns")
-    main_job_id = f"{datastack_name}_{table_name}_{materialization_time_stamp.strftime('%Y%m%d_%H%M%S')}"
+    # the API passes the id of the "pending" record it already created; fall back
+    # to generating one for callers that do not
+    main_job_id = kwargs.get("job_id") or make_upload_job_id(
+        datastack_name, table_name, materialization_time_stamp
+    )
+    if is_upload_cancelled(main_job_id):
+        celery_logger.info(f"Upload {main_job_id} was cancelled before it started.")
+        return {"status": "cancelled"}
 
     workflow = chain(
         process_csv.si(
@@ -122,6 +194,7 @@ def process_and_upload(
             materialization_time_stamp=str(materialization_time_stamp),
             job_id_for_status=main_job_id,
         ),
+        cluster_staging_tables.s(),
         transfer_to_production.s(
             transfer_segmentation=True,
         ),
@@ -182,6 +255,7 @@ def process_csv(
     id_counter_start: int = 0,
 ) -> Dict[str, Any]:
     """Process CSV file in chunks using GCSCsvProcessor"""
+    raise_if_upload_cancelled(job_id_for_status, "CSV processing")
     try:
         update_job_status(
             job_id_for_status,
@@ -220,6 +294,7 @@ def process_csv(
             celery_logger.info(f"Upload formatted progress: {progress:.2f}%")
 
         def progress_callback(progress_details: Dict[str, Any]):
+            raise_if_upload_cancelled(job_id_for_status, "CSV processing")
             celery_logger.info(
                 f"CSV Processing Progress (Job: {job_id_for_status}): "
                 f"{progress_details['progress']:.2f}%, "
@@ -269,6 +344,8 @@ def process_csv(
             "last_assigned_id": last_assigned_id,
             "dropped_rows": dropped_rows,
         }
+    except UploadCancelled:
+        raise
     except Exception as e:
         celery_logger.error(
             f"Error processing CSV for job {job_id_for_status}: {str(e)}", exc_info=True
@@ -288,7 +365,10 @@ def process_csv(
         raise
 
 
-@celery.task(name="process:upload_to_db", bind=True)
+# Long-running (CSV import, then index builds over this worker's connection), so it
+# runs on the workflow queue: the producer is on non-preemptible nodes and drains
+# before scale-down. Acked on receipt: re-running would import the rows twice.
+@celery.task(name="workflow:upload_to_db", bind=True)
 def upload_to_database(
     self,
     process_result: Dict[str, Any],
@@ -300,6 +380,7 @@ def upload_to_database(
     """Upload processed CSV to database"""
 
     job_id_for_status = process_result.get("job_id_for_status")
+    raise_if_upload_cancelled(job_id_for_status, "database upload")
     output_path = process_result.get("output_path")
 
     processed_rows_from_csv = process_result.get("processed_rows", 0)
@@ -330,17 +411,9 @@ def upload_to_database(
         notice_text = file_metadata["metadata"].get("notice_text")
 
         staging_database = current_app.config.get("STAGING_DATABASE_NAME")
-        google_app_creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
 
         if not sql_instance_name:
             error_msg = "SQL_INSTANCE_NAME is not configured or is None."
-            celery_logger.error(error_msg)
-            raise ValueError(error_msg)
-
-        if not google_app_creds:
-            error_msg = (
-                "GOOGLE_APPLICATION_CREDENTIALS environment variable is not set."
-            )
             celery_logger.error(error_msg)
             raise ValueError(error_msg)
 
@@ -414,140 +487,29 @@ def upload_to_database(
         # create table in staging database and drop indices
         index_cache.drop_table_indices(table_name, db_client.database.engine)
 
-        # Activate gcloud service account
-        activate_command = [
-            "gcloud",
-            "auth",
-            "activate-service-account",
-            "--key-file",
-            google_app_creds,
-        ]
+        import_uri = f"gs://{output_path}"
         try:
-            celery_logger.info("Activating service account")
-            update_job_status(
-                job_id_for_status,
-                {"phase": "Uploading to Database: Setting up transfer", "progress": 15},
-            )
-
-            activate_process = subprocess.run(
-                activate_command,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
             celery_logger.info(
-                f"Service account activation stdout: {activate_process.stdout}"
+                f"Importing {import_uri} into {staging_database}.{table_name} "
+                f"on Cloud SQL instance {sql_instance_name}"
             )
-            if activate_process.stderr:
-                celery_logger.warning(
-                    f"Service account activation stderr: {activate_process.stderr}"
-                )
-        except subprocess.CalledProcessError as e:
-            error_msg = f"Failed to activate service account: {e}, stderr: {e.stderr}"
-            celery_logger.error(error_msg)
-            if job_id:
-                update_job_status(
-                    job_id,
-                    {
-                        "status": "error",
-                        "phase": "Service Account Activation",
-                        "progress": 0,
-                        "error": e.stderr or str(e),
-                    },
-                )
-            raise
-        except subprocess.TimeoutExpired as e:
-            error_msg = f"Service account activation timed out: {e}"
-            celery_logger.error(error_msg)
-            if job_id:
-                update_job_status(
-                    job_id,
-                    {
-                        "status": "error",
-                        "phase": "Service Account Activation",
-                        "progress": 0,
-                        "error": "Service account activation timed out",
-                    },
-                )
             update_job_status(
                 job_id_for_status,
                 {
-                    "status": "error",
-                    "phase": "Service Account Activation",
-                    "error": "Service account activation timed out",
-                },
-            )
-
-            raise
-
-        # TODO move to deployment scripts
-        # get sql service account email
-        # get_service_account_command = [
-        #     "gcloud",
-        #     "sql",
-        #     "instances",
-        #     "describe",
-        #     sql_instance_name,
-        #     "--format=json",
-        # ]
-        # try:
-        #     sql_instance_info = subprocess.run(get_service_account_command, check=True, capture_output=True, text=True)
-        #     sql_instance_info = json.loads(sql_instance_info.stdout)
-        #     service_account_email = sql_instance_info["serviceAccountEmailAddress"]
-        # except subprocess.CalledProcessError as e:
-        #     celery_logger.error(f"Database upload failed: {e}")
-        #     raise e
-
-        # auth_command = [
-        #     "gcloud",
-        #     "storage",
-        #     "buckets",
-        #     "add-iam-policy-binding",
-        #     f"gs://{bucket_name}",
-        #     "--member",
-        #     f"serviceAccount:{service_account_email}",
-        #     "--role",
-        #     "roles/storage.objectAdmin",
-        # ]
-
-        load_command = [
-            "gcloud",
-            "sql",
-            "import",
-            "csv",
-            sql_instance_name,
-            f"gs://{output_path}",
-            "--database",
-            staging_database,
-            "--table",
-            table_name,
-            "--user",
-            "postgres",
-            "--quiet",
-        ]
-        try:
-            celery_logger.info(f"Running command: {shlex.join(load_command)}")
-            update_job_status(
-                job_id_for_status,
-                {
-                    "phase": "Uploading to Database: Importing CSV via gcloud",
+                    "phase": "Uploading to Database: Importing CSV into Cloud SQL",
                     "progress": 30,
                 },
             )
-
-            result = subprocess.run(
-                load_command,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=1200,
+            import_csv(
+                sql_instance_name,
+                import_uri,
+                database=staging_database,
+                table=table_name,
+                user="postgres",
+                timeout=current_app.config.get("SQL_IMPORT_TIMEOUT_SECONDS", 1200),
             )
-            celery_logger.info(f"Subprocess output: {result.stdout}")
-            if result.stderr:
-                celery_logger.warning(f"Subprocess stderr: {result.stderr}")
-        except subprocess.CalledProcessError as e:
-            celery_logger.error(f"Database upload failed: {e}, stderr: {e.stderr}")
+        except (CloudSQLAdminError, TimeoutError) as e:
+            celery_logger.error(f"Cloud SQL CSV import failed: {e}")
             if job_id:
                 update_job_status(
                     job_id,
@@ -555,33 +517,19 @@ def upload_to_database(
                         "status": "error",
                         "phase": "Uploading to Database",
                         "progress": 0,
-                        "error": e.stderr or str(e),
+                        "error": str(e),
                     },
                 )
             update_job_status(
                 job_id_for_status,
                 {
                     "status": "error",
-                    "phase": "Uploading to Database (gcloud import)",
-                    "error": e.stderr or str(e),
+                    "phase": "Uploading to Database (Cloud SQL import)",
+                    "error": str(e),
                 },
             )
-
-            raise RuntimeError(
-                f"gcloud sql import csv failed: {e.stderr or str(e)}"
-            ) from e
-        except subprocess.TimeoutExpired as e:
-            celery_logger.error(f"Subprocess timed out: {e}")
-            update_job_status(
-                job_id_for_status,
-                {
-                    "status": "error",
-                    "phase": "Uploading to Database (gcloud import)",
-                    "error": "gcloud sql import timed out",
-                },
-            )
-
-            raise
+            raise RuntimeError(f"Cloud SQL CSV import failed: {e}") from e
+        raise_if_upload_cancelled(job_id_for_status, "index rebuild after import")
         update_job_status(
             job_id_for_status,
             {"phase": "Uploading to Database: Rebuilding Indices", "progress": 80},
@@ -640,6 +588,8 @@ def upload_to_database(
             "table_name": table_name,
             "datastack_info": datastack_info,
         }
+    except UploadCancelled:
+        raise
     except Exception as e:
         celery_logger.error(
             f"Database upload failed for job {job_id_for_status}: {str(e)}",
@@ -672,6 +622,10 @@ def monitor_spatial_workflow_completion(
     """
     workflow_to_monitor = spatial_launch_result.get("workflow_name")
     db_for_monitor = spatial_launch_result.get("database_name")
+
+    if is_upload_cancelled(job_id_for_status):
+        _stop_spatial_workflow(db_for_monitor, workflow_to_monitor)
+        raise_if_upload_cancelled(job_id_for_status, "spatial lookup monitor")
 
     if spatial_launch_result.get("status") == "completed_no_data_found":
         celery_logger.info(
@@ -715,6 +669,11 @@ def monitor_spatial_workflow_completion(
     celery_logger.info(
         f"{log_prefix} Current overall workflow status from Redis: '{current_workflow_status}'"
     )
+
+    if current_workflow_status == WORKFLOW_STATUS_CANCELLED:
+        # cancelled directly on the workflow; cancel the upload with it
+        request_upload_cancel(job_id_for_status)
+        raise_if_upload_cancelled(job_id_for_status, "spatial lookup monitor")
 
     if current_workflow_status == CHUNK_STATUS_COMPLETED:
         celery_logger.info(
@@ -793,8 +752,115 @@ def monitor_spatial_workflow_completion(
             f"Not yet complete. Retrying in 60 seconds."
         )
         raise self.retry(countdown=60)
-    
-@celery.task(name="process:transfer_to_production", bind=True, ack_late=True)
+
+
+def _primary_key_index_name(table_name: str, engine) -> Optional[str]:
+    """Name of the table's primary key index, or None if the table or key is missing."""
+    with engine.connect() as conn:
+        if not engine.dialect.has_table(conn, table_name):
+            return None
+    return inspect(engine).get_pk_constraint(table_name).get("name")
+
+
+def cluster_table_by_id(table_name: str, engine) -> bool:
+    """Rewrite the table in id order with CLUSTER, then ANALYZE it.
+
+    Uses the primary key index when there is one. The staging segmentation table has no
+    indexes at all (the spatial lookup writes it without them, and they are built after
+    the transfer), so for a table without one this builds a temporary index on id,
+    clusters on it and drops it, leaving the table's schema as it was. Skipping such
+    tables left the ltv7 test6 segmentation table in spatial chunk order in production
+    (2026-10-05).
+
+    Returns False without doing anything if the table is missing. CLUSTER holds an
+    ACCESS EXCLUSIVE lock and needs about the table's size again in temporary disk
+    while it rewrites the table and its indexes.
+    """
+    with engine.connect() as conn:
+        if not engine.dialect.has_table(conn, table_name):
+            celery_logger.warning(f"Not clustering '{table_name}': table not found")
+            return False
+    pk_index = _primary_key_index_name(table_name, engine)
+
+    quote = engine.dialect.identifier_preparer.quote
+    with engine.begin() as conn:
+        if pk_index:
+            conn.execute(text(f"CLUSTER {quote(table_name)} USING {quote(pk_index)}"))
+        else:
+            # Index names are limited to 63 bytes
+            temp_index = f"{table_name[:40]}_cluster_id_tmp"
+            conn.execute(text(f"CREATE INDEX {quote(temp_index)} ON {quote(table_name)} (id)"))
+            conn.execute(text(f"CLUSTER {quote(table_name)} USING {quote(temp_index)}"))
+            conn.execute(text(f"DROP INDEX {quote(temp_index)}"))
+        conn.execute(text(f"ANALYZE {quote(table_name)}"))
+    return True
+
+
+def mark_clustered_on_primary_key(table_name: str, engine) -> bool:
+    """Record the primary key as the table's clustering index (metadata only, no rewrite),
+    so a later plain `CLUSTER <table>` keeps rows in id order."""
+    pk_index = _primary_key_index_name(table_name, engine)
+    if not pk_index:
+        return False
+    quote = engine.dialect.identifier_preparer.quote
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE {quote(table_name)} CLUSTER ON {quote(pk_index)}"))
+    return True
+
+
+# Long-running for large tables (the CLUSTER holds this worker's connection), so it
+# runs on the workflow queue. Re-running is harmless, so it is acked late.
+@celery.task(name="workflow:cluster_staging_tables", bind=True, acks_late=True)
+def cluster_staging_tables(self, monitor_result: dict) -> dict:
+    """Physically order the staging annotation and segmentation tables by id.
+
+    transfer_to_production copies each table with pg_dump, which reads rows in physical
+    order, into an emptied production table, so production ends up in id order without
+    running CLUSTER on the production database. The spatial lookup writes segmentation
+    rows in spatial chunk order, so that table in particular is not in id order before this.
+
+    Clustering only changes row order, never the data, so a failure here is logged and the
+    upload carries on to the transfer. Returns monitor_result unchanged for the next task.
+    """
+    datastack_info = monitor_result["datastack_info"]
+    table_name = monitor_result["table_name"]
+    job_id = monitor_result.get("job_id_for_status")
+    raise_if_upload_cancelled(job_id, "clustering staging tables")
+
+    staging_database = get_config_param("STAGING_DATABASE_NAME")
+    engine = db_manager.get_engine(staging_database)
+    pcg_table_name = datastack_info["segmentation_source"].split("/")[-1]
+
+    for staging_table, label in (
+        (table_name, "Annotation Table"),
+        (build_segmentation_table_name(table_name, pcg_table_name), "Segmentation Table"),
+    ):
+        if job_id:
+            update_job_status(
+                job_id,
+                {"status": "processing", "phase": f"Clustering Staging {label} by id"},
+            )
+        try:
+            start = datetime.now(timezone.utc)
+            if cluster_table_by_id(staging_table, engine):
+                elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+                celery_logger.info(
+                    f"Clustered staging table '{staging_table}' by id in {elapsed:.1f}s"
+                )
+        except Exception as e:
+            celery_logger.warning(
+                f"Could not cluster staging table '{staging_table}', transferring unclustered: {e}"
+            )
+
+    return monitor_result
+
+
+# Long-running: the copy streams through this worker (pg_dump | psql) and the index
+# rebuilds run over its connection, so the worker must stay up for the whole task. It
+# runs on the workflow queue (non-preemptible producer that drains before scale-down)
+# rather than the process queue, which is for short, easily retried tasks. Acked late
+# so a lost worker means a rerun, which is safe: each table is truncated before its copy.
+@celery.task(name="workflow:transfer_to_production", bind=True, acks_late=True)
 def transfer_to_production(
     self,
     monitor_result: dict,
@@ -811,6 +877,9 @@ def transfer_to_production(
         materialization_time_stamp_str = monitor_result["materialization_time_stamp"]
         spatial_workflow_status = monitor_result.get("spatial_workflow_final_status", "UNKNOWN")
         job_id_for_ui = monitor_result.get("job_id_for_status")
+        # Checked once, here: a transfer already under way is left to finish rather
+        # than leave production with a half-transferred table.
+        raise_if_upload_cancelled(job_id_for_ui, "transfer to production")
 
         try:
             materialization_time_stamp_dt = datetime.fromisoformat(materialization_time_stamp_str)
@@ -1055,6 +1124,8 @@ def transfer_to_production(
             },
         }
 
+    except UploadCancelled:
+        raise
     except Exception as e:
         celery_logger.error(f"Error during transfer_to_production for table '{monitor_result.get('table_name', 'UNKNOWN')}': {str(e)}", exc_info=True)
         job_id_for_ui = monitor_result.get("job_id_for_status")
@@ -1178,6 +1249,10 @@ def transfer_table_using_pg_dump(
     pg_env = os.environ.copy()
     if db_info["password"]:
         pg_env["PGPASSWORD"] = db_info["password"]
+    # pg_dump copies rows in the source table's physical order, which preserves the id
+    # order cluster_staging_tables put them in. A synchronized scan could start the copy
+    # partway through a large table and wrap around, so turn that off for pg_dump.
+    pg_env["PGOPTIONS"] = f'{pg_env.get("PGOPTIONS", "")} -c synchronize_seqscans=off'.strip()
 
     celery_logger.info(f"Transferring data for {table_name} using pg_dump/psql")
     try:
@@ -1274,6 +1349,10 @@ def transfer_table_using_pg_dump(
             celery_logger.info(f"Adding index: {index}")
             with engine.begin() as conn:
                 conn.execute(text(index))
+        try:
+            mark_clustered_on_primary_key(table_name, engine)
+        except Exception as e:
+            celery_logger.warning(f"Could not mark '{table_name}' clustered on its primary key: {e}")
 
     return row_count
 
@@ -1282,18 +1361,7 @@ def transfer_table_using_pg_dump(
 def cancel_processing_job(job_id: str) -> Dict[str, Any]:
     """Cancel processing job associated with main_job_id."""
     try:
-
-        celery.control.revoke(job_id, terminate=True, signal="SIGUSR1")
-
-        status_update = {
-            "status": "cancelled",
-            "phase": "Job Cancelled by User",
-            "progress": 0,
-            "error": "User initiated cancellation.",
-        }
-        update_job_status(job_id, status_update)  # Update Redis status
-
-        return status_update
+        return request_upload_cancel(job_id)
     except Exception as e:
         celery_logger.error(f"Error cancelling job {job_id}: {str(e)}")
         update_job_status(
