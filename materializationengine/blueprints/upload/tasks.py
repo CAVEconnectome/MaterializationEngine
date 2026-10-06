@@ -129,6 +129,9 @@ def update_job_status(job_id: str, status: Dict[str, Any]) -> None:
             status["datastack_name"] = existing_status["datastack_name"]
         if "status" in existing_status and "status" not in status:
             status["status"] = existing_status["status"]
+        # Set once when the chain is built; the cleanup needs it for the whole upload
+        if "staging_table_name" in existing_status and "staging_table_name" not in status:
+            status["staging_table_name"] = existing_status["staging_table_name"]
 
     REDIS_CLIENT.set(
         f"csv_processing:{job_id}", json.dumps(status), ex=3600  # Expires in 1 hour
@@ -1278,38 +1281,61 @@ def _upload_table_name(job_id: str, job: Optional[dict]) -> Optional[str]:
     return None
 
 
-def _celery_message_mentions(raw: bytes, needles: List[str]) -> bool:
+def _message_body(raw: bytes) -> str:
     try:
         message = json.loads(raw)
         message = message[0] if isinstance(message, list) else message
-        body = base64.b64decode(message["body"]).decode(errors="ignore")
+        return base64.b64decode(message["body"]).decode(errors="ignore")
     except Exception:
-        return False
-    return any(needle in body for needle in needles)
+        return ""
 
 
-def _remove_celery_messages(needles: List[str], dry_run: bool) -> List[str]:
-    """Remove queued and claimed (unacked) celery messages whose arguments mention needles.
+def _message_task(raw: bytes) -> str:
+    try:
+        message = json.loads(raw)
+        message = message[0] if isinstance(message, list) else message
+        return message.get("headers", {}).get("task", "?")
+    except Exception:
+        return "?"
+
+
+CELERY_QUEUES = ("process", "workflow", "orchestration", "spatial", "deltalake", "celery")
+
+
+def _celery_messages() -> List[tuple]:
+    """Every queued and claimed (unacked) celery message: (where, tag or raw, body, task).
+
+    One pass over redis, so a bulk purge checks all its tables against one snapshot
+    rather than scanning the keyspace (~240k keys on ltv7) once per table.
+    """
+    messages = []
+    for key in REDIS_CLIENT.scan_iter("*unacked", count=1000, _type="hash"):
+        for tag, raw in REDIS_CLIENT.hscan_iter(key):
+            messages.append((("hash", key.decode()), tag, _message_body(raw), _message_task(raw)))
+    for queue in CELERY_QUEUES:
+        for raw in REDIS_CLIENT.lrange(queue, 0, -1):
+            messages.append((("list", queue), raw, _message_body(raw), _message_task(raw)))
+    return messages
+
+
+def _remove_celery_messages(needles: List[str], dry_run: bool, messages: Optional[List[tuple]] = None) -> List[str]:
+    """Remove queued and claimed celery messages whose arguments mention any of needles.
 
     A claimed task that is still running carries on; this only stops it being
     redelivered, e.g. a transfer_to_production whose worker was killed.
     """
     removed = []
-    for key in REDIS_CLIENT.scan_iter("*unacked"):
-        if REDIS_CLIENT.type(key) != b"hash":
+    for (kind, key), tag_or_raw, body, task in (_celery_messages() if messages is None else messages):
+        if not any(needle in body for needle in needles):
             continue
-        for tag, raw in list(REDIS_CLIENT.hscan_iter(key)):
-            if _celery_message_mentions(raw, needles):
-                removed.append(json.loads(raw)[0].get("headers", {}).get("task", "?"))
-                if not dry_run:
-                    REDIS_CLIENT.hdel(key, tag)
-                    REDIS_CLIENT.zrem(key.decode() + "_index", tag)
-    for queue in ("process", "workflow", "orchestration", "spatial", "deltalake", "celery"):
-        for raw in REDIS_CLIENT.lrange(queue, 0, -1):
-            if _celery_message_mentions(raw, needles):
-                removed.append(json.loads(raw).get("headers", {}).get("task", "?"))
-                if not dry_run:
-                    REDIS_CLIENT.lrem(queue, 1, raw)
+        removed.append(task)
+        if dry_run:
+            continue
+        if kind == "hash":
+            REDIS_CLIENT.hdel(key, tag_or_raw)
+            REDIS_CLIENT.zrem(f"{key}_index", tag_or_raw)
+        else:
+            REDIS_CLIENT.lrem(key, 1, tag_or_raw)
     return removed
 
 
@@ -1419,8 +1445,9 @@ def purge_failed_uploads(
                     {"age": orphan_min_age_hours * 3600},
                 )
             ]
+        messages = _celery_messages()
         for table in staging_tables:
-            if table in active_tables or _remove_celery_messages([f'"{table}"'], dry_run=True):
+            if table in active_tables or _remove_celery_messages([f'"{table}"'], True, messages):
                 continue
             orphans.append({
                 "table_name": table,

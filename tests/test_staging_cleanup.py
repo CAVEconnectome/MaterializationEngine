@@ -339,3 +339,20 @@ class TestAdminEndpoints:
                                                   "orphan_min_age_hours": 24.0, "dry_run": True}
         assert purge.call_args_list[1].kwargs == {"statuses": ["error"], "include_orphans": True,
                                                   "orphan_min_age_hours": 6.0, "dry_run": False}
+
+
+class TestFollowUps:
+    def test_staging_table_name_survives_later_status_updates(self, redis_clients):
+        # final4: written at "Workflow Chain Initialized", lost at "Processing CSV Data"
+        tasks.update_job_status(JOB, {"status": "processing", "staging_table_name": ANNO, "datastack_name": "ds"})
+        tasks.update_job_status(JOB, {"phase": "Processing CSV Data", "progress": 50})
+        assert tasks.get_job_status(JOB)["staging_table_name"] == ANNO
+
+    def test_bulk_purge_reads_celery_messages_once(self, databases, redis_clients):
+        staging, _ = databases
+        for i in range(5):
+            add_upload_tables(staging, f"old_orphan_{i}", age_hours=48)
+        with mock.patch.object(tasks, "_celery_messages", wraps=tasks._celery_messages) as scan:
+            report = tasks.purge_failed_uploads(dry_run=True)
+        assert len(report["orphaned_staging_tables"]) == 5  # the fixture tables are too new
+        assert scan.call_count == 1
