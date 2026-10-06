@@ -1255,25 +1255,21 @@ def get_root_ids_from_supervoxels(
         )
 
         if not supervoxels_to_lookup.empty:
-            try:
-                root_ids = np.squeeze(
-                    cg_client.root_ext.get_roots(
-                        supervoxels_to_lookup.to_numpy(),
-                        time_stamp=materialization_time_stamp,
-                    )
+            root_ids = _get_roots_zero_for_missing(
+                cg_client,
+                supervoxels_to_lookup.to_numpy(),
+                materialization_time_stamp,
+                sv_col,
+            )
+            root_ids_df.loc[sv_mask, root_col] = root_ids
+
+            zero_root_idx = supervoxels_to_lookup.index[root_ids == 0]
+            if len(zero_root_idx) > 0:
+                zero_sv_ids = supervoxels_to_lookup.loc[zero_root_idx]
+                celery_logger.warning(
+                    f"Found {len(zero_sv_ids)} supervoxels with no "
+                    f"corresponding root IDs for {sv_col}: {zero_sv_ids.tolist()[:5]}..."
                 )
-
-                root_ids_df.loc[sv_mask, root_col] = root_ids
-
-                zero_root_idx = supervoxels_to_lookup.index[root_ids == 0]
-                if len(zero_root_idx) > 0:
-                    zero_sv_ids = supervoxels_to_lookup.loc[zero_root_idx]
-                    celery_logger.warning(
-                        f"Found {len(zero_sv_ids)} supervoxels with no "
-                        f"corresponding root IDs for {sv_col}: {zero_sv_ids.tolist()[:5]}..."
-                    )
-            except Exception as e:
-                celery_logger.error(f"Error looking up root IDs for {sv_col}: {str(e)}")
 
     total_time = time.time() - start_time
     celery_logger.info(
@@ -1380,6 +1376,29 @@ def convert_array_to_int(value):
         return 0
 
 
+def _get_roots_zero_for_missing(cg_client, supervoxel_ids, time_stamp, sv_col: str) -> np.ndarray:
+    """Root ids for supervoxel_ids, with 0 only for the supervoxels that have no parent.
+
+    get_roots raises KeyError for the whole batch when any one supervoxel has no Parent
+    row at time_stamp. This used to be caught and logged, leaving root id 0 on every row
+    of the sub-batch (seen on ltv7 test8, 2026-10-06). Other errors (e.g. Bigtable
+    unavailable) propagate so the sub-batch task retries instead of writing zeros.
+    """
+    try:
+        root_ids = cg_client.root_ext.get_roots(supervoxel_ids, time_stamp=time_stamp)
+    except KeyError as e:
+        celery_logger.warning(
+            f"Supervoxel {e} has no parent at {time_stamp} ({sv_col}); "
+            f"looking up the other {len(supervoxel_ids) - 1} supervoxels with 0 for missing ones"
+        )
+        root_ids = cg_client.root_ext.get_roots(
+            supervoxel_ids, time_stamp=time_stamp, fail_to_zero=True
+        )
+    # atleast_1d, not squeeze: squeeze turns a single result into a 0-d array, which
+    # pandas cannot use as a mask ("Multi-dimensional indexing ... is no longer supported")
+    return np.atleast_1d(np.asarray(root_ids))
+
+
 def insert_segmentation_data(
     data: pd.DataFrame,
     mat_metadata: dict,
@@ -1415,6 +1434,11 @@ def insert_segmentation_data(
     df = df.infer_objects().fillna(0)
     df = df.reindex(columns=segmentation_dataframe.columns, fill_value=0)
 
+    # Upsert in id order. A row whose points fall in different chunks is written by more
+    # than one sub-batch at once; locking rows in the same order makes them wait for each
+    # other instead of deadlocking (DeadlockDetected on ltv7 test8, 2026-10-06).
+    if "id" in df.columns:
+        df = df.sort_values("id", kind="stable")
     records = df.to_dict(orient="records")
 
     if not records:
