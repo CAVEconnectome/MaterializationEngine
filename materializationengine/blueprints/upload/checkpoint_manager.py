@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import hashlib
 import json
@@ -206,7 +207,17 @@ class RedisCheckpointManager:
     def update_workflow(
         self, table_name: str, min_enclosing_bbox: Optional[np.ndarray] = None, **kwargs
     ) -> bool:
-        """Update workflow data."""
+        """Update workflow data, under the same lock as set_chunk_status."""
+        try:
+            with self._workflow_write_lock(table_name):
+                return self._update_workflow_locked(table_name, min_enclosing_bbox, **kwargs)
+        except TimeoutError as e:
+            celery_logger.error(f"{e}; workflow fields {sorted(kwargs)} not updated.")
+            return False
+
+    def _update_workflow_locked(
+        self, table_name: str, min_enclosing_bbox: Optional[np.ndarray] = None, **kwargs
+    ) -> bool:
         key = self._get_workflow_key(table_name)
 
         workflow_data = self.get_workflow_data(table_name)
@@ -323,6 +334,32 @@ class RedisCheckpointManager:
                 f"Error resetting chunk data for {table_name}: {str(e)}"
             )
 
+    @contextlib.contextmanager
+    def _workflow_write_lock(self, table_name: str):
+        """Hold the per-workflow lock taken by every read-modify-write of the workflow key.
+
+        set_chunk_status and update_workflow both read the workflow JSON, change it and
+        write it back. Interleaved, the later write discards the earlier one: on ltv7
+        final3 (2026-10-06) update_workflow's plain SET lost a chunk's completed_chunks
+        increment, leaving 2551/2552 with every chunk COMPLETED. Raises TimeoutError if
+        the lock is not acquired within 120s.
+        """
+        lock = REDIS_CLIENT.lock(
+            f"{self._get_workflow_key(table_name)}:status_lock",
+            timeout=30,
+            blocking_timeout=120,
+        )
+        if not lock.acquire():
+            raise TimeoutError(f"Timed out waiting for the workflow lock for {table_name}")
+        try:
+            yield
+        finally:
+            try:
+                lock.release()
+            except redis.exceptions.LockError:
+                # Held past its 30s timeout; another writer may already have it
+                celery_logger.warning(f"Workflow lock for {table_name} expired before release.")
+
     def set_chunk_status(
         self,
         table_name: str,
@@ -333,33 +370,20 @@ class RedisCheckpointManager:
         """
         Sets the status of a chunk and updates workflow aggregates.
 
-        Chunk status writers take turns on a short per-workflow lock. They all rewrite
-        the one workflow key, and with only WATCH (optimistic locking) ~100 spatial
-        workers collided constantly: ~630 WatchError retries in a 25-minute ltv7
-        upload, and 3 writes dropped after their last attempt, which can leave a
+        Writers take turns on the per-workflow lock (_workflow_write_lock). They all
+        rewrite the one workflow key, and with only WATCH (optimistic locking) ~100
+        spatial workers collided constantly: ~630 WatchError retries in a 25-minute
+        ltv7 upload, and 3 writes dropped after their last attempt, which can leave a
         finished chunk looking unfinished. Under the lock a writer waits instead.
-        WATCH stays for update_workflow, which writes the same key without the lock.
         """
-        lock = REDIS_CLIENT.lock(
-            f"{self._get_workflow_key(table_name)}:status_lock",
-            timeout=30,
-            blocking_timeout=120,
-        )
-        if not lock.acquire():
-            celery_logger.error(
-                f"Timed out waiting to set chunk {chunk_index} of {table_name} to {status}."
-            )
-            return False
         try:
-            return self._set_chunk_status_watched(
-                table_name, chunk_index, status, status_payload
-            )
-        finally:
-            try:
-                lock.release()
-            except redis.exceptions.LockError:
-                # Held past its 30s timeout; another writer may already have it
-                celery_logger.warning(f"Chunk status lock for {table_name} expired before release.")
+            with self._workflow_write_lock(table_name):
+                return self._set_chunk_status_watched(
+                    table_name, chunk_index, status, status_payload
+                )
+        except TimeoutError as e:
+            celery_logger.error(f"{e}; chunk {chunk_index} not set to {status}.")
+            return False
 
     def _set_chunk_status_watched(
         self,
@@ -376,7 +400,8 @@ class RedisCheckpointManager:
         retryable_set_key = self._get_retryable_chunks_set_key(table_name)
         workflow_key = self._get_workflow_key(table_name)
 
-        # Only update_workflow can still collide here (status writers hold the lock)
+        # Writers of the workflow key hold _workflow_write_lock, so WATCH should not
+        # fire; it stays as a guard against any writer that does not take the lock.
         max_retries = 10
         for attempt in range(max_retries):
             try:

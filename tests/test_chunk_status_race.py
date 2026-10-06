@@ -97,3 +97,32 @@ class TestCompletedIsFinal:
         # A chunk whose COMPLETED write landed is COMPLETED; the counter matches
         assert manager.get_workflow_data("synapses").completed_chunks == len(completed)
         assert len(completed) == len(chunks)
+
+
+class TestCountersSurviveConcurrentWorkflowUpdates:
+    def test_completion_during_update_workflow_is_not_overwritten(self, manager):
+        # Deterministic version of the final3 race: pause update_workflow between its
+        # read and its write while another worker completes a chunk.
+        real_get = manager.get_workflow_data
+        paused = threading.Event()
+        completer = threading.Thread(
+            target=manager.set_chunk_status,
+            args=("synapses", 9, cm.CHUNK_STATUS_COMPLETED, {"rows_processed": 7}),
+        )
+
+        def get_then_let_a_chunk_complete(table_name):
+            data = real_get(table_name)
+            if not paused.is_set():
+                paused.set()
+                completer.start()
+                completer.join(timeout=1.0)  # without the lock it lands now
+            return data
+
+        with mock.patch.object(manager, "get_workflow_data", side_effect=get_then_let_a_chunk_complete):
+            manager.update_workflow("synapses", current_pending_scan_cursor=3)
+        completer.join()
+
+        data = manager.get_workflow_data("synapses")
+        assert manager.get_chunk_status("synapses", 9) == cm.CHUNK_STATUS_COMPLETED
+        assert (data.completed_chunks, data.rows_processed) == (1, 7)
+        assert data.current_pending_scan_cursor == 3

@@ -32,6 +32,10 @@ class FakeRedis:
     def delete(self, *keys):
         return sum(self.data.pop(k, None) is not None for k in keys)
 
+    def lock(self, name, timeout=None, blocking_timeout=None):
+        # Single-threaded tests: the workflow write lock never contends
+        return mock.Mock(acquire=mock.Mock(return_value=True))
+
 
 @pytest.fixture
 def redis_clients():
