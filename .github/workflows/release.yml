@@ -48,11 +48,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      # A short-lived installation token for the cave-helm-chart-updater GitHub App,
+      # limited to cave-helm-charts. The app's settings page has no usable token: it
+      # signs with its private key and exchanges that for this token on every run.
+      - name: Get cave-helm-charts token
+        id: helm-charts-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.HELM_CHART_APP_ID }}
+          private-key: ${{ secrets.HELM_CHART_APP_PRIVATE_KEY }}
+          owner: CAVEconnectome
+          repositories: cave-helm-charts
       - name: Checkout cave-helm-charts repo
         uses: actions/checkout@v4
         with:
           repository: CAVEconnectome/cave-helm-charts
-          token: ${{ secrets.HELM_CHART_UPDATE_TOKEN }}
+          token: ${{ steps.helm-charts-token.outputs.token }}
           path: helm-charts
       - name: Get tags
         run: git fetch --tags origin
@@ -180,11 +191,22 @@ jobs:
       - name: Checkout MaterializationEngine repo
         uses: actions/checkout@v4
         
+      # A short-lived installation token for the cave-helm-chart-updater GitHub App,
+      # limited to cave-helm-charts. The app's settings page has no usable token: it
+      # signs with its private key and exchanges that for this token on every run.
+      - name: Get cave-helm-charts token
+        id: helm-charts-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.HELM_CHART_APP_ID }}
+          private-key: ${{ secrets.HELM_CHART_APP_PRIVATE_KEY }}
+          owner: CAVEconnectome
+          repositories: cave-helm-charts
       - name: Checkout cave-helm-charts repo
         uses: actions/checkout@v4
         with:
           repository: CAVEconnectome/cave-helm-charts
-          token: ${{ secrets.HELM_CHART_UPDATE_TOKEN }}
+          token: ${{ steps.helm-charts-token.outputs.token }}
           path: helm-charts
           
       - name: Update Chart.yaml appVersion
