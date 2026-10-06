@@ -45,9 +45,12 @@ from materializationengine.blueprints.upload.storage import (
     StorageService,
 )
 from materializationengine.blueprints.upload.tasks import (
+    FAILED_JOB_STATUSES,
     get_job_status,
     make_upload_job_id,
     process_and_upload,
+    purge_failed_uploads,
+    purge_upload,
     request_upload_cancel,
     update_job_status,
 )
@@ -917,6 +920,72 @@ def cancel_job(job_id):
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+def _flag(name: str, default: bool = False) -> bool:
+    value = request.args.get(name)
+    if value is None and request.is_json:
+        value = (request.get_json(silent=True) or {}).get(name)
+    return default if value is None else as_bool(value)
+
+
+@upload_bp.route("/api/admin/jobs/<job_id>/cleanup", methods=["POST"])
+@auth_requires_admin
+def admin_cleanup_job(job_id):
+    """Remove everything one upload left behind (admin only).
+
+    Its queued and claimed celery messages, job record, cancel key, spatial workflow
+    checkpoints and staging tables. Options (query string or JSON body):
+      dry_run             report what would be removed, change nothing
+      include_production  also drop its tables and metadata from production
+      force               allow an upload that still looks active (stalled), or
+                          dropping a finished upload's production tables
+      table_name          the upload's table, if its job record has expired
+    """
+    try:
+        report = purge_upload(
+            job_id,
+            include_production=_flag("include_production"),
+            force=_flag("force"),
+            dry_run=_flag("dry_run"),
+            table_name=request.args.get("table_name")
+            or (request.get_json(silent=True) or {}).get("table_name"),
+        )
+    except Exception as e:
+        current_app.logger.error(f"Cleanup of upload {job_id} failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    code = 409 if report.get("result") == "refused" else 200
+    return jsonify({"status": "success" if code == 200 else "refused", "report": report}), code
+
+
+@upload_bp.route("/api/admin/jobs/cleanup", methods=["POST"])
+@auth_requires_admin
+def admin_cleanup_failed_jobs():
+    """Remove what failed uploads left behind, and orphaned staging tables (admin only).
+
+    Never touches production. Options (query string or JSON body):
+      dry_run               report what would be removed (default true)
+      statuses              job statuses to purge (default "error,failed,cancelled")
+      include_orphans       also staging tables of no active upload (default true)
+      orphan_min_age_hours  only orphans created longer ago than this (default 24)
+    """
+    body = request.get_json(silent=True) or {}
+    statuses = request.args.get("statuses") or body.get("statuses") or ",".join(FAILED_JOB_STATUSES)
+    if isinstance(statuses, str):
+        statuses = [s.strip() for s in statuses.split(",") if s.strip()]
+    try:
+        report = purge_failed_uploads(
+            statuses=statuses,
+            include_orphans=_flag("include_orphans", default=True),
+            orphan_min_age_hours=float(
+                request.args.get("orphan_min_age_hours") or body.get("orphan_min_age_hours") or 24
+            ),
+            dry_run=_flag("dry_run", default=True),
+        )
+    except Exception as e:
+        current_app.logger.error(f"Cleanup of failed uploads failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    return jsonify({"status": "success", "report": report})
 
 
 @upload_bp.route("/api/process/user-jobs", methods=["GET"])
