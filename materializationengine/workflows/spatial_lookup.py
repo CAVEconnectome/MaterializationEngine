@@ -52,6 +52,7 @@ from materializationengine.utils import (
     get_query_columns_by_suffix,
 )
 from materializationengine.workflows.chunking import (
+    DEFAULT_TARGET_ROWS_PER_CHUNK,
     ChunkingStrategy,
     reconstruct_chunk_bounds,
 )
@@ -427,6 +428,11 @@ def process_table_in_chunks(
                 table_name=annotation_table_name,
                 database=database_name,
                 base_chunk_size=chunk_scale_factor * 1024,
+                target_rows_per_chunk=int(
+                    get_config_param(
+                        "SPATIAL_LOOKUP_TARGET_ROWS_PER_CHUNK", DEFAULT_TARGET_ROWS_PER_CHUNK
+                    )
+                ),
             )
             chunking.select_strategy()
 
