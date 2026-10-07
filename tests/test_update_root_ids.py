@@ -9,6 +9,8 @@ from materializationengine.workflows.update_root_ids import (
 )
 import logging
 
+import pytest
+
 
 mocked_expired_root_id_data = [
     [20000000, 20000001],
@@ -89,3 +91,34 @@ class TestUpdateRootIds:
         supervoxel_chunk = annotation_data["segmentation_data"]
         new_roots = get_new_root_ids.s(supervoxel_chunk, mat_metadata).apply()
         assert new_roots.get() == "Number of rows updated: 3"
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_get_new_roots_records_old_and_new_roots_when_enabled(
+        self, monkeypatch, mat_metadata, annotation_data, enabled
+    ):
+        from materializationengine.workflows import root_id_update_log
+
+        monkeypatch.setattr(
+            "materializationengine.workflows.update_root_ids.lookup_new_root_ids",
+            lambda *args, **kwargs: annotation_data["new_root_ids"],
+        )
+        monkeypatch.setattr(root_id_update_log, "enabled", lambda: enabled)
+        recorded = []
+        monkeypatch.setattr(
+            root_id_update_log,
+            "write_chunk",
+            lambda md, table, task_id: recorded.append((table, task_id)),
+        )
+        supervoxel_chunk = annotation_data["segmentation_data"]
+        old = [row["pre_pt_root_id"] for row in supervoxel_chunk]
+        result = get_new_root_ids.s(supervoxel_chunk, mat_metadata).apply()
+        assert result.get() == "Number of rows updated: 3"
+        if not enabled:
+            assert recorded == []
+            return
+        (table, task_id), = recorded
+        assert task_id == result.id
+        rows = table.to_pylist()
+        assert [r["old_root_id"] for r in rows] == old
+        assert [r["new_root_id"] for r in rows] == annotation_data["new_root_ids"]
+        assert {r["root_column"] for r in rows} == {"pre_pt"}
