@@ -9,6 +9,9 @@
     databases: "/materialize/admin/api/databases",
     repackJobs: "/materialize/admin/api/repack/jobs",
     versions: (ds) => `/materialize/admin/api/datastack/${encodeURIComponent(ds)}/versions`,
+    annotationTables: (ds, v) => `/materialize/admin/api/datastack/${encodeURIComponent(ds)}/version/${encodeURIComponent(v)}/annotation_tables`,
+    virtualTargets: (ds) => `/materialize/admin/api/datastack/${encodeURIComponent(ds)}/virtual_targets`,
+    virtualTarget: (ds, name) => `/materialize/admin/api/datastack/${encodeURIComponent(ds)}/virtual_target/${encodeURIComponent(name)}`,
     versionTables: (ds, v) => `/materialize/admin/api/datastack/${encodeURIComponent(ds)}/version/${encodeURIComponent(v)}/tables`,
     queues: "/materialize/admin/api/queues",
     tableOrder: (db) => `/materialize/api/v2/maintenance/table_order/${encodeURIComponent(db)}`,
@@ -111,7 +114,7 @@
       any = any || show;
     });
     $("no-actions").classList.toggle("d-none", any);
-    if (current.admin) loadDumpVersions();
+    if (current.admin) { loadVersions(); loadVvTargets(); }
     if (caps.superadmin) { loadDatabases(); loadUploads(); }
   }
 
@@ -168,35 +171,190 @@
   }
 
   // ---------------------------------------------------------------- versions (dataset admin)
+  // Virtual versions: every input is chosen from what exists. Tables can also be pasted as a
+  // comma separated list, which is checked against the version's tables.
+  const NEW_DATASTACK = "__new__";
+  let vvTables = [], vvTargets = [], vvStatus = null, vvStatusTimer = null;
+
+  const parseTableList = (text) => [...new Set(text.split(/[\s,]+/).map((t) => t.trim()).filter(Boolean))];
+
+  function regexFrom(input) {
+    const pattern = input.value.trim();
+    input.classList.remove("is-invalid");
+    if (!pattern) return null;
+    try { return new RegExp(pattern, "i"); } catch (e) { input.classList.add("is-invalid"); return undefined; }
+  }
+
+  async function loadVvTables() {
+    const version = $("vv-target").value;
+    vvTables = [];
+    if (version) {
+      $("vv-tables-check").textContent = "Loading tables…";
+      try { vvTables = (await call(API.annotationTables(current.name, version))).tables.map((t) => t.name); }
+      catch (e) { $("vv-tables-check").textContent = `Could not load tables: ${e.message}`; }
+    }
+    renderVvTables();
+    renderTargetStatus();
+  }
+
+  function renderVvTables() {
+    const re = regexFrom($("vv-filter"));
+    if (re === undefined) return;
+    const chosen = new Set(parseTableList($("vv-tables").value));
+    $("vv-table-list").innerHTML = vvTables.filter((t) => !re || re.test(t))
+      .map((t) => `<option value="${esc(t)}"${chosen.has(t) ? " selected" : ""}>${esc(t)}</option>`).join("");
+    checkVvTables();
+  }
+
+  // The list's selection, merged with pasted names that the filter hides.
+  function vvListChanged() {
+    const shown = new Set([...$("vv-table-list").options].map((o) => o.value));
+    const kept = parseTableList($("vv-tables").value).filter((t) => !shown.has(t));
+    const picked = [...$("vv-table-list").selectedOptions].map((o) => o.value);
+    $("vv-tables").value = [...kept, ...picked].join(", ");
+    checkVvTables();
+  }
+
+  function checkVvTables() {
+    const names = parseTableList($("vv-tables").value), known = new Set(vvTables);
+    const unknown = names.filter((t) => !known.has(t));
+    [...$("vv-table-list").options].forEach((o) => { o.selected = names.includes(o.value); });
+    $("vv-tables").classList.toggle("is-invalid", unknown.length > 0);
+    $("vv-tables-check").innerHTML = !vvTables.length ? "" : unknown.length
+      ? `<span class="text-danger">Not in v${esc($("vv-target").value)}: ${unknown.map((t) => `<code>${esc(t)}</code>`).join(", ")}</span>`
+      : `${names.length} of ${vvTables.length} tables chosen`;
+    updateVvButton();
+  }
+
+  async function loadVvTargets() {
+    const select = $("vv-name");
+    select.innerHTML = '<option value="">Loading…</option>';
+    try { vvTargets = (await call(API.virtualTargets(current.name))).targets; }
+    catch (e) { vvTargets = []; select.innerHTML = `<option value="">Could not load datastacks: ${esc(e.message)}</option>`; }
+    select.innerHTML = '<option value="">Choose a datastack</option>' +
+      vvTargets.map((t) => `<option value="${esc(t.name)}">${esc(t.name)}${t.auth_dataset ? ` (auth dataset ${esc(t.auth_dataset)})` : ""}${t.ready ? "" : " – not ready"}</option>`).join("") +
+      `<option value="${NEW_DATASTACK}">New datastack…</option>`;
+    vvTargetChanged();
+  }
+
+  function vvTargetName() {
+    return $("vv-name").value === NEW_DATASTACK ? $("vv-new-name").value.trim() : $("vv-name").value;
+  }
+
+  function vvTargetChanged() {
+    const isNew = $("vv-name").value === NEW_DATASTACK;
+    $("vv-new-name").classList.toggle("d-none", !isNew);
+    vvStatus = isNew ? null : vvTargets.find((t) => t.name === $("vv-name").value) || null;
+    if (isNew) { checkNewTarget(); $("vv-new-name").focus(); } else renderTargetStatus();
+  }
+
+  function checkNewTarget() {
+    clearTimeout(vvStatusTimer);
+    vvStatus = null;
+    const name = vvTargetName();
+    if (!name) { renderTargetStatus(); return; }
+    if (!/^[A-Za-z0-9_]+$/.test(name)) {
+      $("vv-target-status").innerHTML = alertBox("danger", "A datastack name may use only letters, digits and underscores.");
+      updateVvButton();
+      return;
+    }
+    $("vv-target-status").innerHTML = '<span class="muted small">Checking…</span>';
+    vvStatusTimer = setTimeout(async () => {
+      try { vvStatus = await call(API.virtualTarget(current.name, name)); }
+      catch (e) { $("vv-target-status").innerHTML = alertBox("danger", esc(e.message)); return; }
+      if (vvTargetName() === name) renderTargetStatus();
+    }, 400);
+  }
+
+  const mark = (ok) => ok ? '<span class="corr-good">✓</span>' : '<span class="corr-bad">✗</span>';
+
+  function renderTargetStatus() {
+    const area = $("vv-target-status"), s = vvStatus;
+    if (!s) { area.innerHTML = ""; updateVvButton(); return; }
+    const isNew = $("vv-name").value === NEW_DATASTACK, info = s.infoservice || {};
+    const version = Number($("vv-target").value);
+    const duplicate = (s.versions || []).some((v) => v.version === version);
+    const examples = vvTargets.filter((t) => t.auth_dataset).map((t) => `<code>${esc(t.name)}</code> → <code>${esc(t.auth_dataset)}</code>`).join(", ");
+    const infoOk = info.exists && info.aligned_volume_matches;
+    const steps = [
+      `<li>${mark(infoOk)} <b>Infoservice.</b> ${infoOk
+        ? `Registered on aligned volume <code>${esc(info.aligned_volume)}</code>${info.local_server && s.this_server && info.local_server !== s.this_server
+            ? ` <span class="text-warning">(its local server is ${esc(info.local_server)}, not this deployment's ${esc(s.this_server)})</span>` : ""}.`
+        : info.exists
+          ? `Registered on aligned volume <code>${esc(info.aligned_volume)}</code>, but its versions are looked up on <code>${esc(s.aligned_volume)}</code>. It must use the same aligned volume.`
+          : `Add datastack <code>${esc(s.name)}</code> in the <a href="${esc(s.global_server)}/info/admin/" target="_blank" rel="noopener">infoservice admin</a>
+             on aligned volume <code>${esc(s.aligned_volume)}</code>, with a segmentation source (the same PCG table as ${esc(current.name)}, or a copy of it)
+             and local server <code>${esc(s.this_server || "this deployment")}</code>.`}</li>`,
+      `<li>${mark(!!s.auth_dataset)} <b>Auth.</b> ${s.auth_dataset
+        ? `Mapped to auth dataset <code>${esc(s.auth_dataset)}</code>; whoever may view that dataset may read this version.`
+        : `Ask an auth admin to add table <code>${esc(s.name)}</code> to service namespace <code>datastack</code> in the auth service
+           (${esc(s.global_server)}/auth), mapped to an auth dataset, and to give the groups that should read it view permission on that dataset.
+           For a public release, map it to a public dataset.${examples ? ` Here: ${examples}.` : ""}`}</li>`,
+    ];
+    area.innerHTML = `
+      <ol class="small ps-3 mb-1">${steps.join("")}</ol>
+      ${duplicate ? alertBox("danger", `<code>${esc(s.name)}</code> already has a version ${version}. Creating it again would add a duplicate.`) : ""}
+      ${!s.ready ? `<p class="small text-warning mb-1">You can create the version now, but it cannot be queried under ${esc(s.name)} until the steps marked ✗ are done.</p>` : ""}
+      ${isNew ? `<p class="small muted mb-0">It only needs this deployment's datastack list if it should appear on the Materialization home page.</p>` : ""}`;
+    updateVvButton();
+  }
+
+  function vvProblems() {
+    const names = parseTableList($("vv-tables").value), known = new Set(vvTables);
+    const target = vvTargetName(), version = Number($("vv-target").value);
+    const problems = [];
+    if (!version) problems.push("choose a frozen version");
+    if (!names.length) problems.push("choose at least one table");
+    if (names.some((t) => !known.has(t))) problems.push("remove tables that are not in the version");
+    if (!target || !/^[A-Za-z0-9_]+$/.test(target)) problems.push("choose the datastack to publish under");
+    else if (!vvStatus || vvStatus.name !== target) problems.push("wait for the datastack check");
+    else if ((vvStatus.versions || []).some((v) => v.version === version)) problems.push("that datastack already has this version");
+    if (target && target === current.name) problems.push("publish under a different datastack");
+    return problems;
+  }
+
+  function updateVvButton() {
+    const problems = vvProblems();
+    $("vv-run").disabled = problems.length > 0;
+    $("vv-run").title = problems.join("; ");
+  }
+
   function createVirtual() {
-    const target = $("vv-target").value, name = $("vv-name").value.trim();
-    const tables = $("vv-tables").value.split(",").map((t) => t.trim()).filter(Boolean);
-    if (!target || !name || !tables.length) { alert("Frozen version, name and tables are required"); return; }
+    const target = Number($("vv-target").value), name = vvTargetName(), tables = parseTableList($("vv-tables").value);
+    const problems = vvProblems();
+    if (problems.length) { alert(`Before creating: ${problems.join("; ")}`); return; }
+    const notReady = vvStatus && !vvStatus.ready ? `\n\n${name} is not ready to serve it yet (see the steps marked ✗).` : "";
     post("vv-result", API.run(`create_virtual/datastack/${encodeURIComponent(current.name)}`), {
-      body: { target_version: Number(target), virtual_version_name: name, tables_to_include: tables },
-      summary: `Create virtual version "${name}" of ${current.name} v${target} with ${tables.length} table(s)?`,
-    });
+      body: { target_version: target, virtual_version_name: name, tables_to_include: tables },
+      summary: `Publish ${current.name} v${target} under ${name} with ${tables.length} table(s)?\n\n${tables.join(", ")}${notReady}`,
+    }).then(() => { if ($("vv-name").value === NEW_DATASTACK) checkNewTarget(); else loadVvTargets(); });
   }
 
   // The versions whose databases exist, then that version's tables and views, so nothing is guessed.
   let dumpTables = [];
 
-  async function loadDumpVersions() {
-    const select = $("dump-version");
-    select.innerHTML = '<option value="">Loading…</option>';
+  async function loadVersions() {
+    const select = $("dump-version"), vvSelect = $("vv-target");
+    select.innerHTML = vvSelect.innerHTML = '<option value="">Loading…</option>';
     dumpTables = [];
     renderDumpTables();
     let versions;
     try { versions = (await call(API.versions(current.name))).versions; }
-    catch (e) { select.innerHTML = `<option value="">Could not load versions: ${esc(e.message)}</option>`; return; }
+    catch (e) { select.innerHTML = vvSelect.innerHTML = `<option value="">Could not load versions: ${esc(e.message)}</option>`; return; }
+    // A virtual version must point at a valid frozen version.
+    const valid = versions.filter((v) => v.valid);
+    vvSelect.innerHTML = valid.length ? valid.map(versionOption).join("") : '<option value="">No valid frozen versions</option>';
+    loadVvTables();
     if (!versions.length) { select.innerHTML = '<option value="">No frozen versions</option>'; return; }
-    select.innerHTML = versions.map((v) => {
-      const state = v.valid === undefined ? "" : v.valid ? "" : " (not valid)";
-      const made = v.time_stamp ? ` – ${v.time_stamp.slice(0, 10)}` : "";
-      const exp = v.expires_on ? `, expires ${v.expires_on.slice(0, 10)}` : "";
-      return `<option value="${esc(v.version)}">v${esc(v.version)}${made}${exp}${state}</option>`;
-    }).join("");
+    select.innerHTML = versions.map(versionOption).join("");
     loadDumpTables();
+  }
+
+  function versionOption(v) {
+    const state = v.valid === undefined ? "" : v.valid ? "" : " (not valid)";
+    const made = v.time_stamp ? ` – ${v.time_stamp.slice(0, 10)}` : "";
+    const exp = v.expires_on ? `, expires ${v.expires_on.slice(0, 10)}` : "";
+    return `<option value="${esc(v.version)}">v${esc(v.version)}${made}${exp}${state}</option>`;
   }
 
   async function loadDumpTables() {
@@ -424,6 +582,20 @@
     $("ds-select").addEventListener("change", selectDatastack);
     $("ingest-table-run").addEventListener("click", ingestTable);
     $("vv-run").addEventListener("click", createVirtual);
+    $("vv-target").addEventListener("change", loadVvTables);
+    $("vv-tables").addEventListener("input", checkVvTables);
+    $("vv-tables").addEventListener("change", renderVvTables);
+    $("vv-filter").addEventListener("input", renderVvTables);
+    $("vv-table-list").addEventListener("change", vvListChanged);
+    $("vv-select-shown").addEventListener("click", (e) => {
+      e.preventDefault();
+      const shown = [...$("vv-table-list").options].map((o) => o.value);
+      $("vv-tables").value = [...new Set([...parseTableList($("vv-tables").value), ...shown])].join(", ");
+      checkVvTables();
+    });
+    $("vv-clear").addEventListener("click", (e) => { e.preventDefault(); $("vv-tables").value = ""; checkVvTables(); });
+    $("vv-name").addEventListener("change", vvTargetChanged);
+    $("vv-new-name").addEventListener("input", checkNewTarget);
     $("dump-run").addEventListener("click", dumpTable);
     $("dump-version").addEventListener("change", loadDumpTables);
     $("dump-filter").addEventListener("input", renderDumpTables);

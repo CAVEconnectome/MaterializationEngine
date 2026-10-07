@@ -63,14 +63,23 @@
       <div class="row g-3">
         <div class="col-md-6"><div class="card h-100"><div class="card-body">
           <h6 class="card-title">Create a virtual version</h6>
-          <p class="card-text small">A named version that exposes some tables of an existing frozen version.</p>
+          <p class="card-text small">Publish some tables of one of this datastack's frozen versions under another
+            datastack (for example a public release). The other datastack serves it as the same version number.</p>
           <div class="mb-2"><label class="form-label small" for="vv-target">Frozen version</label>
-            <input id="vv-target" class="form-control form-control-sm" type="number"></div>
-          <div class="mb-2"><label class="form-label small" for="vv-name">Virtual version name</label>
-            <input id="vv-name" class="form-control form-control-sm"></div>
-          <div class="mb-2"><label class="form-label small" for="vv-tables">Tables to include (comma separated)</label>
-            <input id="vv-tables" class="form-control form-control-sm"></div>
-          <button id="vv-run" class="btn btn-sm btn-outline-danger">Create</button>
+            <select id="vv-target" class="form-select form-select-sm"><option value="">Loading…</option></select></div>
+          <div class="mb-2"><label class="form-label small" for="vv-tables">Tables to include</label>
+            <textarea id="vv-tables" class="form-control form-control-sm mb-1" rows="2"
+              placeholder="Paste a comma separated list, or pick below"></textarea>
+            <div id="vv-tables-check" class="form-text"></div>
+            <input id="vv-filter" class="form-control form-control-sm mt-1 mb-1" placeholder="Filter by regular expression" autocomplete="off">
+            <select id="vv-table-list" class="form-select form-select-sm" multiple size="8"></select>
+            <div class="form-text">Ctrl/⌘-click to pick several.
+              <a href="#" id="vv-select-shown">Add all shown</a> · <a href="#" id="vv-clear">Clear</a></div></div>
+          <div class="mb-2"><label class="form-label small" for="vv-name">Publish under datastack</label>
+            <select id="vv-name" class="form-select form-select-sm"><option value="">Loading…</option></select>
+            <input id="vv-new-name" class="form-control form-control-sm mt-1 d-none" placeholder="new_datastack_name" autocomplete="off">
+            <div id="vv-target-status" class="mt-2"></div></div>
+          <button id="vv-run" class="btn btn-sm btn-outline-danger" disabled>Create</button>
           <div id="vv-result" class="mt-2"></div>
         </div></div></div>
         <div class="col-md-6"><div class="card h-100"><div class="card-body">
