@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from celery.utils.log import get_task_logger
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from materializationengine.celery_init import celery
 from materializationengine.database import db_manager
@@ -348,6 +348,45 @@ def list_databases(with_sizes: bool = True) -> List[Dict[str, Any]]:
             entry.update(versions.get(name) or {"datastack": frozen["datastack"], "version": int(frozen["version"])})
         result.append(entry)
     return result
+
+
+def list_frozen_versions(datastack: str) -> List[Dict[str, Any]]:
+    """The frozen versions of a datastack whose databases exist, newest first."""
+    frozen = [d for d in list_databases(with_sizes=False) if d["kind"] == "frozen" and d.get("datastack") == datastack]
+    for d in frozen:
+        d.pop("size_gb", None)
+    return sorted(frozen, key=lambda d: d["version"], reverse=True)
+
+
+# Bookkeeping tables of dynamicannotationdb and the upload blueprint, not annotation data.
+_METADATA_TABLES = (
+    "analysisdatabase", "analysisversion", "analysistables", "analysisviews", "version_error",
+    "materializedmetadata", "annotation_table_metadata", "segmentation_table_metadata",
+    "combined_table_metadata", "upload_metadata", "alembic_version",
+)
+_RELATION_KINDS = {"r": "table", "p": "table", "v": "view", "m": "materialized view"}
+
+
+def list_relations(database: str) -> List[Dict[str, Any]]:
+    """Tables and views of a database's public schema that hold annotation data: everything
+    except the metadata tables and what extensions own (PostGIS's spatial_ref_sys, geometry_columns, ...)."""
+    with db_manager.get_engine(check_database(database)).connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT c.relname, c.relkind, c.reltuples::bigint FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public' "
+                "WHERE c.relkind IN ('r', 'p', 'v', 'm') AND NOT c.relispartition "
+                "AND c.relname NOT IN :metadata "
+                "AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass "
+                "AND d.objid = c.oid AND d.deptype = 'e') "
+                "ORDER BY c.relname"
+            ).bindparams(bindparam("metadata", expanding=True)),
+            {"metadata": list(_METADATA_TABLES)},
+        ).fetchall()
+    return [
+        {"name": r[0], "kind": _RELATION_KINDS[r[1]], "rows": r[2] if r[1] != "v" and r[2] >= 0 else None}
+        for r in rows
+    ]
 
 
 def list_repack_jobs(limit: int = 50) -> List[Dict[str, Any]]:

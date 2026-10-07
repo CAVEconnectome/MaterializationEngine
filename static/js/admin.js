@@ -8,6 +8,8 @@
     capabilities: "/materialize/admin/api/capabilities",
     databases: "/materialize/admin/api/databases",
     repackJobs: "/materialize/admin/api/repack/jobs",
+    versions: (ds) => `/materialize/admin/api/datastack/${encodeURIComponent(ds)}/versions`,
+    versionTables: (ds, v) => `/materialize/admin/api/datastack/${encodeURIComponent(ds)}/version/${encodeURIComponent(v)}/tables`,
     queues: "/materialize/admin/api/queues",
     tableOrder: (db) => `/materialize/api/v2/maintenance/table_order/${encodeURIComponent(db)}`,
     repack: (db, table) => `/materialize/api/v2/maintenance/repack/${encodeURIComponent(db)}/${encodeURIComponent(table)}`,
@@ -109,6 +111,7 @@
       any = any || show;
     });
     $("no-actions").classList.toggle("d-none", any);
+    if (current.admin) loadDumpVersions();
     if (caps.superadmin) { loadDatabases(); loadUploads(); }
   }
 
@@ -175,9 +178,56 @@
     });
   }
 
+  // The versions whose databases exist, then that version's tables and views, so nothing is guessed.
+  let dumpTables = [];
+
+  async function loadDumpVersions() {
+    const select = $("dump-version");
+    select.innerHTML = '<option value="">Loading…</option>';
+    dumpTables = [];
+    renderDumpTables();
+    let versions;
+    try { versions = (await call(API.versions(current.name))).versions; }
+    catch (e) { select.innerHTML = `<option value="">Could not load versions: ${esc(e.message)}</option>`; return; }
+    if (!versions.length) { select.innerHTML = '<option value="">No frozen versions</option>'; return; }
+    select.innerHTML = versions.map((v) => {
+      const state = v.valid === undefined ? "" : v.valid ? "" : " (not valid)";
+      const made = v.time_stamp ? ` – ${v.time_stamp.slice(0, 10)}` : "";
+      const exp = v.expires_on ? `, expires ${v.expires_on.slice(0, 10)}` : "";
+      return `<option value="${esc(v.version)}">v${esc(v.version)}${made}${exp}${state}</option>`;
+    }).join("");
+    loadDumpTables();
+  }
+
+  async function loadDumpTables() {
+    const version = $("dump-version").value;
+    dumpTables = [];
+    if (!version) { renderDumpTables(); return; }
+    $("dump-table-count").textContent = "Loading tables…";
+    try { dumpTables = (await call(API.versionTables(current.name, version))).tables; }
+    catch (e) { $("dump-table").innerHTML = ""; $("dump-table-count").textContent = `Could not load tables: ${e.message}`; return; }
+    renderDumpTables();
+  }
+
+  function renderDumpTables() {
+    const select = $("dump-table"), selected = select.value, pattern = $("dump-filter").value.trim();
+    let re = null;
+    $("dump-filter").classList.remove("is-invalid");
+    if (pattern) {
+      try { re = new RegExp(pattern, "i"); } catch (e) { $("dump-filter").classList.add("is-invalid"); return; }
+    }
+    const shown = dumpTables.filter((t) => !re || re.test(t.name));
+    select.innerHTML = shown.map((t) => {
+      const detail = [t.kind !== "table" && t.kind, t.rows !== null && `${Number(t.rows).toLocaleString()} rows`].filter(Boolean).join(", ");
+      return `<option value="${esc(t.name)}"${t.name === selected ? " selected" : ""}>${esc(t.name)}${detail ? ` (${esc(detail)})` : ""}</option>`;
+    }).join("");
+    if (!select.value && shown.length === 1) select.value = shown[0].name;
+    $("dump-table-count").textContent = dumpTables.length ? `${shown.length} of ${dumpTables.length} tables and views` : "";
+  }
+
   function dumpTable() {
-    const version = $("dump-version").value, table = $("dump-table").value.trim();
-    if (!version || !table) { alert("Version and table are required"); return; }
+    const version = $("dump-version").value, table = $("dump-table").value;
+    if (!version || !table) { alert("Choose a version and a table"); return; }
     post("dump-result", API.run(`dump_csv_table/datastack/${encodeURIComponent(current.name)}/version/${encodeURIComponent(version)}/table_name/${encodeURIComponent(table)}/`),
       { summary: `Dump ${current.name} v${version} ${table} to CSV?` });
   }
@@ -375,6 +425,8 @@
     $("ingest-table-run").addEventListener("click", ingestTable);
     $("vv-run").addEventListener("click", createVirtual);
     $("dump-run").addEventListener("click", dumpTable);
+    $("dump-version").addEventListener("change", loadDumpTables);
+    $("dump-filter").addEventListener("input", renderDumpTables);
     $("load-tables").addEventListener("click", loadTables);
     $("rp-dry").addEventListener("click", () => startRepack(true));
     $("rp-run").addEventListener("click", () => startRepack(false));

@@ -105,6 +105,41 @@ def databases():
     return jsonify({"databases": dbs})
 
 
+def _require_datastack_admin(datastack: str):
+    """403 unless the user is a superadmin or admin of this configured datastack."""
+    entry = next((d for d in capabilities()["datastacks"] if d["name"] == datastack), None)
+    if not (entry and entry["admin"]):
+        abort(403, f"Requires admin of datastack {datastack}.")
+
+
+@admin_bp.route("/api/datastack/<string:datastack>/versions")
+@reset_auth
+@auth_required
+def frozen_versions(datastack: str):
+    """Frozen versions of the datastack whose databases exist (for choosing one to export)."""
+    from materializationengine.workflows.table_maintenance import list_frozen_versions
+
+    _require_datastack_admin(datastack)
+    return jsonify({"versions": list_frozen_versions(datastack)})
+
+
+@admin_bp.route("/api/datastack/<string:datastack>/version/<int:version>/tables")
+@reset_auth
+@auth_required
+def version_tables(datastack: str, version: int):
+    """Tables and views of one frozen version's database."""
+    from sqlalchemy.exc import OperationalError
+
+    from materializationengine.workflows.table_maintenance import RepackRefused, list_relations
+
+    _require_datastack_admin(datastack)
+    database = f"{datastack}__mat{version}"
+    try:
+        return jsonify({"database": database, "tables": list_relations(database)})
+    except (RepackRefused, OperationalError):
+        abort(404, f"Version {version} of {datastack} has no database.")
+
+
 @admin_bp.route("/api/repack/jobs")
 @reset_auth
 @auth_requires_admin
