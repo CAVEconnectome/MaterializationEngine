@@ -1,4 +1,5 @@
 import datetime
+import itertools
 from functools import lru_cache
 
 import numpy as np
@@ -19,6 +20,7 @@ from materializationengine.shared_tasks import (
 )
 from materializationengine.throttle import throttle_celery
 from materializationengine.utils import create_segmentation_model
+from materializationengine.workflows import root_id_update_log
 from requests import HTTPError
 from sqlalchemy.sql import or_, text
 
@@ -77,6 +79,18 @@ def update_root_ids_workflow(mat_metadata: dict):
     if not chunked_ids:
         return fin.si()
 
+    record_updates = root_id_update_log.enabled()
+    if record_updates:
+        # Describe the run up front, but only when there is something to update.
+        chunked_ids = iter(chunked_ids)
+        first = next(chunked_ids, None)
+        if first is None:
+            record_updates = False
+            chunked_ids = []
+        else:
+            chunked_ids = itertools.chain([first], chunked_ids)
+            root_id_update_log.start(mat_metadata)
+
     update_root_workflow = chain(
         chord(
             [
@@ -88,6 +102,8 @@ def update_root_ids_workflow(mat_metadata: dict):
         update_metadata.si(mat_metadata),
     ).apply_async()
     tasks_completed = monitor_workflow_state(update_root_workflow)
+    if record_updates:
+        root_id_update_log.finalize(mat_metadata)
     if tasks_completed:
         return workflow_complete.si("update_root_ids_workflow")
 
@@ -310,6 +326,9 @@ def get_new_root_ids(self, supervoxel_data, mat_metadata):
 
     del supervoxel_data
 
+    record_updates = root_id_update_log.enabled()
+    if record_updates:
+        old_roots = root_ids_df[root_id_col_name[0]].copy()
     root_ids_df.loc[supervoxel_df.index, root_id_col_name[0]] = root_id_array
     root_ids_df.drop(columns=[supervoxel_col_name[0]])
 
@@ -323,6 +342,10 @@ def get_new_root_ids(self, supervoxel_data, mat_metadata):
         except Exception as e:
             raise self.retry(exc=e, countdown=3)
 
+    if record_updates:
+        root_id_update_log.record_chunk(
+            mat_metadata, root_ids_df, old_roots, root_id_col_name[0], supervoxel_col_name[0], self.request.id
+        )
     return f"Number of rows updated: {len(data)}"
 
 
