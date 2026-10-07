@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import hashlib
 import json
@@ -72,6 +73,13 @@ class WorkflowData:
 
     processing_rate: Optional[str] = None
     total_row_estimate: Optional[int] = None
+    # Points to look up: rows x point columns with a supervoxel column (2 for a synapse
+    # table). rows_processed counts points, so this, not total_row_estimate, is what it
+    # runs up to.
+    total_point_estimate: Optional[int] = None
+    # Recent (iso time, rows_processed) samples, for a rate that follows the current
+    # throughput rather than the average since the start (which includes scale-up)
+    rate_samples: Optional[List[List[Any]]] = None
 
     min_enclosing_bbox: Optional[List[List[float]]] = None
     bbox_hash: Optional[str] = None
@@ -94,6 +102,53 @@ class WorkflowData:
         if self.total_chunks <= 0:
             return 0.0
         return (self.completed_chunks / self.total_chunks) * 100
+
+
+RATE_WINDOW_SECONDS = 300
+RATE_SAMPLE_SPACING_SECONDS = 15
+
+
+def _progress_estimate(workflow_data: "WorkflowData", rows_processed: int, now_iso: str) -> dict:
+    """processing_rate, estimated_completion and rate_samples after a chunk completes.
+
+    rows_processed counts looked-up points, so the remaining work is measured against
+    total_point_estimate. It used to be measured against total_row_estimate (rows,
+    half the points of a synapse table), so the estimate reached zero halfway through
+    and read "done now" from then on (ltv7, 2026-10-06).
+    The rate is taken over the last RATE_WINDOW_SECONDS, falling back to the average
+    since the start while the window is still filling.
+    """
+    now_dt = datetime.datetime.fromisoformat(now_iso)
+    samples = [
+        s for s in (workflow_data.rate_samples or [])
+        if (now_dt - datetime.datetime.fromisoformat(s[0])).total_seconds() <= RATE_WINDOW_SECONDS
+    ]
+    if not samples or (now_dt - datetime.datetime.fromisoformat(samples[-1][0])).total_seconds() >= RATE_SAMPLE_SPACING_SECONDS:
+        samples.append([now_iso, rows_processed])
+    result: Dict[str, Any] = {"rate_samples": samples}
+
+    oldest_dt = datetime.datetime.fromisoformat(samples[0][0])
+    window_seconds = (now_dt - oldest_dt).total_seconds()
+    if window_seconds >= 60:
+        rate = (rows_processed - samples[0][1]) / window_seconds
+    elif workflow_data.start_time:
+        elapsed = (now_dt - datetime.datetime.fromisoformat(workflow_data.start_time)).total_seconds()
+        rate = rows_processed / elapsed if elapsed > 0 else 0.0
+    else:
+        rate = 0.0
+    if rate > 0:
+        result["processing_rate"] = f"{rate * 60:.2f} rows/minute"
+
+    total = workflow_data.total_point_estimate
+    if total and total > 0:
+        remaining = total - rows_processed
+        if remaining <= 0:
+            result["estimated_completion"] = now_iso
+        elif rate > 0:
+            result["estimated_completion"] = (
+                now_dt + datetime.timedelta(seconds=remaining / rate)
+            ).isoformat()
+    return result
 
 
 class RedisCheckpointManager:
@@ -206,7 +261,17 @@ class RedisCheckpointManager:
     def update_workflow(
         self, table_name: str, min_enclosing_bbox: Optional[np.ndarray] = None, **kwargs
     ) -> bool:
-        """Update workflow data."""
+        """Update workflow data, under the same lock as set_chunk_status."""
+        try:
+            with self._workflow_write_lock(table_name):
+                return self._update_workflow_locked(table_name, min_enclosing_bbox, **kwargs)
+        except TimeoutError as e:
+            celery_logger.error(f"{e}; workflow fields {sorted(kwargs)} not updated.")
+            return False
+
+    def _update_workflow_locked(
+        self, table_name: str, min_enclosing_bbox: Optional[np.ndarray] = None, **kwargs
+    ) -> bool:
         key = self._get_workflow_key(table_name)
 
         workflow_data = self.get_workflow_data(table_name)
@@ -323,6 +388,32 @@ class RedisCheckpointManager:
                 f"Error resetting chunk data for {table_name}: {str(e)}"
             )
 
+    @contextlib.contextmanager
+    def _workflow_write_lock(self, table_name: str):
+        """Hold the per-workflow lock taken by every read-modify-write of the workflow key.
+
+        set_chunk_status and update_workflow both read the workflow JSON, change it and
+        write it back. Interleaved, the later write discards the earlier one: on ltv7
+        final3 (2026-10-06) update_workflow's plain SET lost a chunk's completed_chunks
+        increment, leaving 2551/2552 with every chunk COMPLETED. Raises TimeoutError if
+        the lock is not acquired within 120s.
+        """
+        lock = REDIS_CLIENT.lock(
+            f"{self._get_workflow_key(table_name)}:status_lock",
+            timeout=30,
+            blocking_timeout=120,
+        )
+        if not lock.acquire():
+            raise TimeoutError(f"Timed out waiting for the workflow lock for {table_name}")
+        try:
+            yield
+        finally:
+            try:
+                lock.release()
+            except redis.exceptions.LockError:
+                # Held past its 30s timeout; another writer may already have it
+                celery_logger.warning(f"Workflow lock for {table_name} expired before release.")
+
     def set_chunk_status(
         self,
         table_name: str,
@@ -332,7 +423,29 @@ class RedisCheckpointManager:
     ):
         """
         Sets the status of a chunk and updates workflow aggregates.
+
+        Writers take turns on the per-workflow lock (_workflow_write_lock). They all
+        rewrite the one workflow key, and with only WATCH (optimistic locking) ~100
+        spatial workers collided constantly: ~630 WatchError retries in a 25-minute
+        ltv7 upload, and 3 writes dropped after their last attempt, which can leave a
+        finished chunk looking unfinished. Under the lock a writer waits instead.
         """
+        try:
+            with self._workflow_write_lock(table_name):
+                return self._set_chunk_status_watched(
+                    table_name, chunk_index, status, status_payload
+                )
+        except TimeoutError as e:
+            celery_logger.error(f"{e}; chunk {chunk_index} not set to {status}.")
+            return False
+
+    def _set_chunk_status_watched(
+        self,
+        table_name: str,
+        chunk_index: int,
+        status: str,
+        status_payload: Optional[dict] = None,
+    ):
         if status_payload is None:
             status_payload = {}
 
@@ -341,7 +454,9 @@ class RedisCheckpointManager:
         retryable_set_key = self._get_retryable_chunks_set_key(table_name)
         workflow_key = self._get_workflow_key(table_name)
 
-        max_retries = 3
+        # Writers of the workflow key hold _workflow_write_lock, so WATCH should not
+        # fire; it stays as a guard against any writer that does not take the lock.
+        max_retries = 10
         for attempt in range(max_retries):
             try:
                 with REDIS_CLIENT.pipeline() as pipe:
@@ -360,6 +475,22 @@ class RedisCheckpointManager:
                     old_status = (
                         old_status_bytes.decode("utf-8") if old_status_bytes else None
                     )
+
+                    # COMPLETED is final within a run (initialize_workflow resets the
+                    # statuses for a new one). process_chunk records PROCESSING_SUBTASKS
+                    # after dispatching its sub-batches, so a small chunk's finalize can
+                    # mark it COMPLETED first; overwriting that left chunk 2541 of ltv7
+                    # final2 "in progress" until stale recovery re-ran it 10 min later.
+                    if (
+                        old_status == CHUNK_STATUS_COMPLETED
+                        and status != CHUNK_STATUS_COMPLETED
+                    ):
+                        pipe.unwatch()
+                        celery_logger.info(
+                            f"Chunk {chunk_index} of {table_name} is already COMPLETED; "
+                            f"not setting it to {status}."
+                        )
+                        return False
 
                     processing_subtasks_ts_key = self._get_processing_subtasks_timestamps_key(table_name)
                     processing_ts_key = self._get_processing_timestamps_key(table_name)
@@ -424,55 +555,14 @@ class RedisCheckpointManager:
                                 )
                             )
 
-                        if workflow_data.start_time:
-                            start_dt = datetime.datetime.fromisoformat(
-                                workflow_data.start_time
+                        current_rows_processed = updated_workflow_fields.get(
+                            "rows_processed", workflow_data.rows_processed
+                        )
+                        updated_workflow_fields.update(
+                            _progress_estimate(
+                                workflow_data, current_rows_processed, current_time_iso
                             )
-                            now_dt = datetime.datetime.fromisoformat(current_time_iso)
-                            elapsed_seconds = (now_dt - start_dt).total_seconds()
-
-                            if elapsed_seconds > 0:
-                                current_rows_processed = updated_workflow_fields.get(
-                                    "rows_processed", workflow_data.rows_processed
-                                )
-                                if "rows_processed" in status_payload:
-                                    current_rows_processed = (
-                                        workflow_data.rows_processed
-                                        + status_payload["rows_processed"]
-                                    )
-                                else:
-                                    current_rows_processed = (
-                                        workflow_data.rows_processed
-                                    )
-
-                                rows_per_second = (
-                                    current_rows_processed / elapsed_seconds
-                                )
-                                updated_workflow_fields["processing_rate"] = (
-                                    f"{rows_per_second * 60:.2f} rows/minute"
-                                )
-
-                                if (
-                                    workflow_data.total_row_estimate
-                                    and workflow_data.total_row_estimate > 0
-                                ):
-                                    remaining_rows = (
-                                        workflow_data.total_row_estimate
-                                        - current_rows_processed
-                                    )
-                                    if remaining_rows > 0 and rows_per_second > 0:
-                                        seconds_left = remaining_rows / rows_per_second
-                                        estimated_completion_dt = (
-                                            now_dt
-                                            + datetime.timedelta(seconds=seconds_left)
-                                        )
-                                        updated_workflow_fields[
-                                            "estimated_completion"
-                                        ] = estimated_completion_dt.isoformat()
-                                    elif remaining_rows <= 0:
-                                        updated_workflow_fields[
-                                            "estimated_completion"
-                                        ] = current_time_iso
+                        )
 
                     elif status in [
                         CHUNK_STATUS_FAILED_RETRYABLE,
@@ -585,7 +675,7 @@ class RedisCheckpointManager:
                         f"Failed to set chunk status for {chunk_index} after {max_retries} retries due to WatchError."
                     )
                     return False
-                time.sleep(random.uniform(0.1, 0.5) * (attempt + 1))
+                time.sleep(random.uniform(0.1, 0.5) * min(attempt + 1, 4))
             except Exception as e:
                 celery_logger.error(
                     f"Error setting chunk status for {table_name}, chunk {chunk_index}: {str(e)}"

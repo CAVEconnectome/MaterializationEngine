@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import subprocess
@@ -29,6 +30,7 @@ from materializationengine.workflows.ingest_new_annotations import (
     create_segmentation_model,
 )
 from materializationengine.workflows.spatial_lookup import run_spatial_lookup_workflow
+from materializationengine.blueprints.upload import checkpoint_manager as checkpoint_manager_module
 from materializationengine.blueprints.upload.checkpoint_manager import (
     WORKFLOW_STATUS_CANCELLED,
     CHUNK_STATUS_COMPLETED,
@@ -80,15 +82,25 @@ def _stop_spatial_workflow(database_name: Optional[str], workflow_name: Optional
         )
 
 
+# Long enough for chunk tasks already running when an upload is cancelled to finish
+STAGING_DISCARD_DELAY_SECONDS = 120
+
+
 def request_upload_cancel(job_id: str) -> Dict[str, Any]:
     """Cancel an upload: every later step, and a running spatial lookup, stops on its own.
 
     Only Redis writes, so the API can call it directly. Steps check for cancellation
     when they start (process_csv also while it runs); a step already past its last check
-    finishes, but nothing after it starts. Staging tables are left as they are.
+    finishes, but nothing after it starts. The upload's staging tables are discarded a
+    couple of minutes later, once tasks already running have stopped.
     """
     REDIS_CLIENT.set(f"{CANCEL_KEY_PREFIX}{job_id}", "1", ex=CANCEL_KEY_TTL_SECONDS)
-    spatial = (get_job_status(job_id) or {}).get("spatial_lookup_config") or {}
+    job = get_job_status(job_id) or {}
+    if job.get("staging_table_name") and job.get("status") != "done":
+        discard_upload_staging.si(
+            table_name=job["staging_table_name"], job_id=job_id, reason="cancelled"
+        ).apply_async(countdown=STAGING_DISCARD_DELAY_SECONDS)
+    spatial = job.get("spatial_lookup_config") or {}
     try:
         _stop_spatial_workflow(spatial.get("database_name"), spatial.get("table_name"))
     except Exception as e:
@@ -117,6 +129,9 @@ def update_job_status(job_id: str, status: Dict[str, Any]) -> None:
             status["datastack_name"] = existing_status["datastack_name"]
         if "status" in existing_status and "status" not in status:
             status["status"] = existing_status["status"]
+        # Set once when the chain is built; the cleanup needs it for the whole upload
+        if "staging_table_name" in existing_status and "staging_table_name" not in status:
+            status["staging_table_name"] = existing_status["staging_table_name"]
 
     REDIS_CLIENT.set(
         f"csv_processing:{job_id}", json.dumps(status), ex=3600  # Expires in 1 hour
@@ -198,14 +213,25 @@ def process_and_upload(
         transfer_to_production.s(
             transfer_segmentation=True,
         ),
+        # A chain stops at the first task that raises, so this only runs once every
+        # step above, including the transfer, has succeeded.
+        cleanup_staging_tables.s(),
     )
 
-    result = workflow.apply_async()
+    # Runs if any step fails for good (not on retries, and not on cancel, which raises
+    # Ignore; request_upload_cancel discards staging itself). A failed upload is redone
+    # from the start, so its staging tables are of no further use.
+    result = workflow.apply_async(
+        link_error=discard_upload_staging.si(
+            table_name=table_name, job_id=main_job_id, reason="failed"
+        )
+    )
     update_job_status(
         main_job_id,
         {
             "phase": "Workflow Chain Initialized",
             "chain_id": result.id,
+            "staging_table_name": table_name,
             "user_id": user_id,
             "datastack_name": datastack_name,
         },
@@ -1114,6 +1140,7 @@ def transfer_to_production(
         return {
             "status": "success",
             "message": f"Transfer completed for table '{table_name_to_transfer}'.",
+            "job_id_for_status": job_id_for_ui,
             "tables_transferred": {
                 "annotation_table": {
                     "name": table_name_to_transfer,
@@ -1142,6 +1169,296 @@ def transfer_to_production(
             except Exception as update_err:
                 celery_logger.error(f"Failed to update job status after transfer error: {update_err}")
         raise
+
+def drop_upload_tables(table_name: str, engine, dry_run: bool = False) -> List[str]:
+    """Drop an annotation table and its segmentation tables, with their metadata rows.
+
+    That is the annotation table, every segmentation table registered against it, and
+    a combined table built from it, all in one transaction, in the database `engine`
+    points at (staging, or production for an admin purge). Returns the tables that
+    existed; with dry_run nothing is changed.
+    """
+    quote = engine.dialect.identifier_preparer.quote
+    with engine.begin() as conn:
+        segmentation_tables = [
+            row[0]
+            for row in conn.execute(
+                text("SELECT table_name FROM segmentation_table_metadata WHERE annotation_table = :t"),
+                {"t": table_name},
+            )
+        ]
+        existing = {
+            row[0]
+            for row in conn.execute(
+                text("SELECT tablename FROM pg_tables WHERE tablename = ANY(:names)"),
+                {"names": [table_name, *segmentation_tables]},
+            )
+        }
+        if dry_run:
+            return sorted(existing)
+        conn.execute(
+            text("DELETE FROM segmentation_table_metadata WHERE annotation_table = :t"),
+            {"t": table_name},
+        )
+        conn.execute(
+            text("DELETE FROM combined_table_metadata WHERE annotation_table = :t"),
+            {"t": table_name},
+        )
+        conn.execute(
+            text("DELETE FROM annotation_table_metadata WHERE table_name = :t"),
+            {"t": table_name},
+        )
+        for name in [*segmentation_tables, table_name]:
+            conn.execute(text(f"DROP TABLE IF EXISTS {quote(name)}"))
+    return sorted(existing)
+
+
+def _note_on_job(job_id: Optional[str], **fields) -> None:
+    """Add fields to a job record, keeping the rest (update_job_status replaces it)."""
+    if job_id:
+        update_job_status(job_id, {**(get_job_status(job_id) or {}), **fields})
+
+
+def _discard_staging(table_name: str, job_id: Optional[str], reason: str) -> dict:
+    staging_database = get_config_param("STAGING_DATABASE_NAME")
+    try:
+        dropped = drop_upload_tables(table_name, db_manager.get_engine(staging_database))
+    except Exception as e:
+        celery_logger.warning(
+            f"Could not discard staging tables for '{table_name}' ({reason} upload): {e}"
+        )
+        _note_on_job(job_id, staging_cleanup=f"failed: {e}")
+        return {"status": "error", "error": str(e)}
+    celery_logger.info(
+        f"Dropped staging tables {dropped} from '{staging_database}' ({reason} upload)"
+    )
+    _note_on_job(job_id, staging_cleanup="done")
+    return {"status": "success", "dropped": dropped}
+
+
+# Last step of the upload chain. DROP ... IF EXISTS makes a redelivered run harmless.
+@celery.task(name="workflow:cleanup_staging_tables", bind=True, acks_late=True)
+def cleanup_staging_tables(self, transfer_result: dict) -> dict:
+    """Remove the upload's tables from the staging database once it is in production.
+
+    Without this every upload left its staging tables behind (~500MB for 1M
+    synapses). A failure here is logged and recorded on the job as staging_cleanup;
+    the job stays "done", since the data is already in production.
+    """
+    if transfer_result.get("status") != "success":
+        celery_logger.warning(f"Not cleaning up staging: transfer status was {transfer_result.get('status')!r}")
+        return {"status": "skipped", "reason": "transfer not successful"}
+    table_name = (transfer_result.get("tables_transferred", {}).get("annotation_table") or {}).get("name")
+    if not table_name:
+        return {"status": "skipped", "reason": "no annotation table in transfer result"}
+    return _discard_staging(table_name, transfer_result.get("job_id_for_status"), "completed")
+
+
+@celery.task(name="workflow:discard_upload_staging", acks_late=True)
+def discard_upload_staging(table_name: str, job_id: Optional[str] = None, reason: str = "failed") -> dict:
+    """Remove a failed or cancelled upload's tables from the staging database.
+
+    Attached as the upload chain's error callback and scheduled by a cancel. Such an
+    upload is redone from the start, so nothing in staging is worth keeping.
+    """
+    return _discard_staging(table_name, job_id, reason)
+
+
+# ---------------------------------------------------------------------------
+# Admin cleanup: remove everything an upload left behind, for stalled or failed
+# uploads that the automatic cleanup did not reach (worker killed mid-task, redis
+# restarted, failures before this cleanup existed).
+# ---------------------------------------------------------------------------
+ACTIVE_JOB_STATUSES = {"pending", "processing"}
+FAILED_JOB_STATUSES = ("error", "failed", "cancelled")
+
+
+def _upload_table_name(job_id: str, job: Optional[dict]) -> Optional[str]:
+    """The upload's annotation table name, from its job record or its job id."""
+    job = job or {}
+    if job.get("staging_table_name"):
+        return job["staging_table_name"]
+    # job ids are "<datastack>_<table>_<YYYYmmdd_HHMMSS>" (make_upload_job_id)
+    datastack = job.get("datastack_name")
+    if datastack and job_id.startswith(f"{datastack}_") and len(job_id) > len(datastack) + 17:
+        return job_id[len(datastack) + 1 : -16]
+    return None
+
+
+def _message_body(raw: bytes) -> str:
+    try:
+        message = json.loads(raw)
+        message = message[0] if isinstance(message, list) else message
+        return base64.b64decode(message["body"]).decode(errors="ignore")
+    except Exception:
+        return ""
+
+
+def _message_task(raw: bytes) -> str:
+    try:
+        message = json.loads(raw)
+        message = message[0] if isinstance(message, list) else message
+        return message.get("headers", {}).get("task", "?")
+    except Exception:
+        return "?"
+
+
+CELERY_QUEUES = ("process", "workflow", "orchestration", "spatial", "deltalake", "celery")
+
+
+def _celery_messages() -> List[tuple]:
+    """Every queued and claimed (unacked) celery message: (where, tag or raw, body, task).
+
+    One pass over redis, so a bulk purge checks all its tables against one snapshot
+    rather than scanning the keyspace (~240k keys on ltv7) once per table.
+    """
+    messages = []
+    for key in REDIS_CLIENT.scan_iter("*unacked", count=1000, _type="hash"):
+        for tag, raw in REDIS_CLIENT.hscan_iter(key):
+            messages.append((("hash", key.decode()), tag, _message_body(raw), _message_task(raw)))
+    for queue in CELERY_QUEUES:
+        for raw in REDIS_CLIENT.lrange(queue, 0, -1):
+            messages.append((("list", queue), raw, _message_body(raw), _message_task(raw)))
+    return messages
+
+
+def _remove_celery_messages(needles: List[str], dry_run: bool, messages: Optional[List[tuple]] = None) -> List[str]:
+    """Remove queued and claimed celery messages whose arguments mention any of needles.
+
+    A claimed task that is still running carries on; this only stops it being
+    redelivered, e.g. a transfer_to_production whose worker was killed.
+    """
+    removed = []
+    for (kind, key), tag_or_raw, body, task in (_celery_messages() if messages is None else messages):
+        if not any(needle in body for needle in needles):
+            continue
+        removed.append(task)
+        if dry_run:
+            continue
+        if kind == "hash":
+            REDIS_CLIENT.hdel(key, tag_or_raw)
+            REDIS_CLIENT.zrem(f"{key}_index", tag_or_raw)
+        else:
+            REDIS_CLIENT.lrem(key, 1, tag_or_raw)
+    return removed
+
+
+def purge_upload(
+    job_id: str,
+    include_production: bool = False,
+    force: bool = False,
+    dry_run: bool = False,
+    table_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Remove everything an upload left behind. Returns what was (or would be) removed.
+
+    Its queued and claimed celery messages, its job record, cancel key and spatial
+    workflow checkpoints, and its staging tables. With include_production, also its
+    tables and metadata in the production database. Refuses (without force) an upload
+    that still looks active, and dropping a finished upload's production tables.
+    """
+    job = get_job_status(job_id)
+    table_name = table_name or _upload_table_name(job_id, job)
+    status = (job or {}).get("status")
+    report: Dict[str, Any] = {"job_id": job_id, "table_name": table_name, "job_status": status, "dry_run": dry_run}
+    if not table_name:
+        return {**report, "result": "refused", "reason": "could not tell the upload's table name; pass table_name"}
+    if status in ACTIVE_JOB_STATUSES and not force:
+        return {**report, "result": "refused", "reason": f"upload is {status!r}; pass force=true if it has stalled"}
+    if include_production and status == "done" and not force:
+        return {**report, "result": "refused", "reason": "upload finished; pass force=true to drop its production tables"}
+
+    report["celery_messages_removed"] = _remove_celery_messages([job_id, f'"{table_name}"'], dry_run)
+
+    staging_database = get_config_param("STAGING_DATABASE_NAME")
+    checkpoint_redis = checkpoint_manager_module.REDIS_CLIENT
+    checkpoint_keys = [
+        k for k in checkpoint_redis.scan_iter(f"workflow:{staging_database}:{table_name}*")
+        if k.decode() == f"workflow:{staging_database}:{table_name}"
+        or k.decode().startswith(f"workflow:{staging_database}:{table_name}:")
+    ]
+    job_keys = [k for k in (f"csv_processing:{job_id}", f"{CANCEL_KEY_PREFIX}{job_id}") if REDIS_CLIENT.exists(k)]
+    report["redis_keys_deleted"] = [k if isinstance(k, str) else k.decode() for k in job_keys + checkpoint_keys]
+    if not dry_run:
+        if checkpoint_keys:
+            checkpoint_redis.delete(*checkpoint_keys)
+        if job_keys:
+            REDIS_CLIENT.delete(*job_keys)
+
+    report["staging_tables_dropped"] = drop_upload_tables(
+        table_name, db_manager.get_engine(staging_database), dry_run=dry_run
+    )
+    if include_production:
+        datastack = (job or {}).get("datastack_name")
+        if not datastack:
+            report["production_tables_dropped"] = []
+            report["production_error"] = "job record has no datastack; drop production tables by hand"
+        else:
+            from materializationengine.info_client import get_datastack_info
+
+            aligned_volume = get_datastack_info(datastack)["aligned_volume"]["name"]
+            report["production_tables_dropped"] = drop_upload_tables(
+                table_name, db_manager.get_engine(aligned_volume), dry_run=dry_run
+            )
+    celery_logger.info(f"Purged upload {job_id}: {report}")
+    return {**report, "result": "would remove" if dry_run else "removed"}
+
+
+def purge_failed_uploads(
+    statuses=FAILED_JOB_STATUSES,
+    include_orphans: bool = True,
+    orphan_min_age_hours: float = 24,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Purge every upload whose job status is in statuses, and orphaned staging tables.
+
+    Job records expire an hour after their last update, so most failed uploads have
+    none left; their staging tables are found as orphans: annotation tables in staging
+    that belong to no pending or processing upload. Staging only holds uploads in
+    progress, so anything else there is left over. An orphan must also be older than
+    orphan_min_age_hours (by its metadata's created time) and have no celery message
+    in flight, so a long import whose job record expired is not mistaken for one.
+    Never touches production.
+    """
+    jobs = {}
+    for key in REDIS_CLIENT.scan_iter("csv_processing:*"):
+        raw = REDIS_CLIENT.get(key)
+        if raw:
+            jobs[key.decode().split(":", 1)[1]] = json.loads(raw)
+    purged = [
+        purge_upload(job_id, dry_run=dry_run, table_name=_upload_table_name(job_id, job))
+        for job_id, job in jobs.items()
+        if job.get("status") in set(statuses)
+    ]
+    orphans = []
+    if include_orphans:
+        active_tables = {
+            _upload_table_name(job_id, job)
+            for job_id, job in jobs.items()
+            if job.get("status") in ACTIVE_JOB_STATUSES
+        }
+        engine = db_manager.get_engine(get_config_param("STAGING_DATABASE_NAME"))
+        with engine.connect() as conn:
+            staging_tables = [
+                r[0]
+                for r in conn.execute(
+                    text(
+                        "SELECT table_name FROM annotation_table_metadata"
+                        " WHERE created < now() - make_interval(secs => :age)"
+                    ),
+                    {"age": orphan_min_age_hours * 3600},
+                )
+            ]
+        messages = _celery_messages()
+        for table in staging_tables:
+            if table in active_tables or _remove_celery_messages([f'"{table}"'], True, messages):
+                continue
+            orphans.append({
+                "table_name": table,
+                "staging_tables_dropped": drop_upload_tables(table, engine, dry_run=dry_run),
+            })
+    return {"dry_run": dry_run, "purged_jobs": purged, "orphaned_staging_tables": orphans}
+
 
 def get_db_connection_info(db_url):
     """Extract connection information from SQLAlchemy URL object."""
