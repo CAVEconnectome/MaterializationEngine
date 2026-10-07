@@ -164,3 +164,5 @@ def reset_state_for_tests():
     global _db_last_ok, _db_consecutive_failures
     _db_last_ok = None
     _db_consecutive_failures = 0
+
+# Build-cache check: a code-only change rebuilds only the final COPY layer.
