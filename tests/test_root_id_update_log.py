@@ -11,6 +11,8 @@ from deltalake import DeltaTable
 from materializationengine.workflows import root_id_update_log as log
 
 RUN_TS = "2026-10-07 15:01:02.123456"
+# celery task ids, which name the chunk files
+TASK = {k: f"{i:08x}-0000-4000-8000-000000000000" for i, k in enumerate("abc")}
 
 
 def metadata(table="synapses", **extra):
@@ -85,15 +87,18 @@ class TestRecord:
         md = metadata(lookup_all_root_ids=False)
         log.start(md)
         assert json.loads((run_dir(tmp_path) / "_run.json").read_text())["state"] == "running"
-        self.write(md, [1, 2], [10, 20], [11, 21], "task-a")
-        self.write(md, [1, 2], [10, 20], [12, 22], "task-b", side="post_pt")
-        self.write(md, [3], [30], [31], "task-c")
+        self.write(md, [1, 2], [10, 20], [11, 21], TASK["a"])
+        self.write(md, [1, 2], [10, 20], [12, 22], TASK["b"], side="post_pt")
+        self.write(md, [3], [30], [31], TASK["c"])
         log.finalize(md)
 
         rows = DeltaTable(str(run_dir(tmp_path))).to_pyarrow_table()
         assert rows.num_rows == 5 and rows.schema == log.SCHEMA
         manifest = json.loads((run_dir(tmp_path) / "_run.json").read_text())
-        assert manifest["state"] == "done" and manifest["rows"] == 5 and manifest["files"] == 3
+        assert manifest["state"] == "done" and manifest["rows"] == 5 and manifest["chunk_files"] == 3
+        # the three chunks were compacted into one file of the table
+        assert manifest["files"] == 1 and manifest["compaction"] == {"numFilesAdded": 1, "numFilesRemoved": 3}
+        assert len(DeltaTable(str(run_dir(tmp_path))).file_uris()) == 1
         assert manifest["root_columns"] == ["post_pt", "pre_pt"]
         assert manifest["annotation_table"] == "synapses" and manifest["segmentation_table"] == "synapses__minnie3_v1"
         assert manifest["materialization_time_stamp"] == RUN_TS and manifest["lookup_all_root_ids"] is False
@@ -101,8 +106,8 @@ class TestRecord:
     def test_a_retried_task_overwrites_its_own_file(self, bucket):
         tmp_path, _ = bucket
         md = metadata()
-        self.write(md, [1, 2], [10, 20], [11, 21], "task-a")
-        self.write(md, [1, 2], [10, 20], [11, 21], "task-a")
+        self.write(md, [1, 2], [10, 20], [11, 21], TASK["a"])
+        self.write(md, [1, 2], [10, 20], [11, 21], TASK["a"])
         assert len(list(run_dir(tmp_path).glob("*.parquet"))) == 1
         assert pq.read_table(next(run_dir(tmp_path).glob("*.parquet"))).num_rows == 2
 
@@ -114,19 +119,23 @@ class TestRecord:
     def test_finalize_twice_keeps_one_table(self, bucket):
         tmp_path, _ = bucket
         md = metadata()
-        self.write(md, [1], [10], [11], "task-a")
+        self.write(md, [1], [10], [11], TASK["a"])
+        self.write(md, [2], [20], [21], TASK["b"])
         log.finalize(md)
         log.finalize(md)
-        assert DeltaTable(str(run_dir(tmp_path))).to_pyarrow_table().num_rows == 1
+        assert DeltaTable(str(run_dir(tmp_path))).to_pyarrow_table().num_rows == 2
+        manifest = json.loads((run_dir(tmp_path) / "_run.json").read_text())
+        # compacted files are not counted as chunks
+        assert manifest["rows"] == 2 and manifest["chunk_files"] == 2 and manifest["root_columns"] == ["pre_pt"]
 
     def test_failures_are_logged_not_raised(self, bucket):
         md = metadata()
         with mock.patch.object(log.pq, "write_table", side_effect=OSError("bucket down")), \
                 mock.patch.object(log.celery_logger, "warning") as warning:
-            assert self.write(md, [1], [10], [11], "task-a") is None
+            assert self.write(md, [1], [10], [11], TASK["a"]) is None
         assert "bucket down" in warning.call_args[0][0]
         with mock.patch.object(log, "updates_frame", side_effect=ValueError("bad row")):
-            assert self.write(md, [1], [10], [11], "task-a") is None
+            assert self.write(md, [1], [10], [11], TASK["a"]) is None
         with mock.patch.object(log, "_filesystem", side_effect=OSError("bucket down")):
             log.start(md)
             log.finalize(md)
