@@ -12,6 +12,7 @@ celery = Celery(
         "materializationengine.workflows.periodic_materialization",
         "materializationengine.workflows.spatial_lookup",
         "materializationengine.workflows.deltalake_export",
+        "materializationengine.workflows.table_maintenance",
         "materializationengine.shared_tasks",
         "materializationengine.views",
         "materializationengine.monitor",
