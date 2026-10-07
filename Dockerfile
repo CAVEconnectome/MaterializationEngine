@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y gcc curl ca-certificates gnupg lsb-rele
        https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
        > /etc/apt/sources.list.d/pgdg.list' \
   && apt-get update \
-  && apt-get install -y postgresql-client-18
+  && apt-get install -y postgresql-client-18 postgresql-18-repack
 RUN pip install uv
 # Enable bytecode compilation
 ENV UV_COMPILE_BYTECODE=1
