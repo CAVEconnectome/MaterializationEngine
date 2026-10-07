@@ -138,6 +138,10 @@ class BaseConfig:
     STAGING_DATABASE_NAME = "staging"
     MATERIALIZATION_UPLOAD_BUCKET_PATH = "test_annotation_csv_upload"
 
+    # Record each update_root_ids run's updates under
+    # MATERIALIZATION_DUMP_BUCKET/root_id_updates (workflows/root_id_update_log.py).
+    ROOT_ID_UPDATE_LOG = False
+
     # Delta Lake export settings
     DELTALAKE_OUTPUT_BUCKET = os.environ.get("DELTALAKE_OUTPUT_BUCKET", "")
     DELTALAKE_FLUSH_THRESHOLD_BYTES = int(
