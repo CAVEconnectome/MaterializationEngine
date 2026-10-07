@@ -99,6 +99,9 @@ class TestRecord:
         # the three chunks were compacted into one file of the table
         assert manifest["files"] == 1 and manifest["compaction"] == {"numFilesAdded": 1, "numFilesRemoved": 3}
         assert len(DeltaTable(str(run_dir(tmp_path))).file_uris()) == 1
+        # ...and the chunk files deleted
+        assert manifest["vacuumed_files"] == 3 and not list(run_dir(tmp_path).glob("part-pre_pt-*"))
+        assert len(list(run_dir(tmp_path).glob("*.parquet"))) == 1
         assert manifest["root_columns"] == ["post_pt", "pre_pt"]
         assert manifest["annotation_table"] == "synapses" and manifest["segmentation_table"] == "synapses__minnie3_v1"
         assert manifest["materialization_time_stamp"] == RUN_TS and manifest["lookup_all_root_ids"] is False
@@ -125,8 +128,10 @@ class TestRecord:
         log.finalize(md)
         assert DeltaTable(str(run_dir(tmp_path))).to_pyarrow_table().num_rows == 2
         manifest = json.loads((run_dir(tmp_path) / "_run.json").read_text())
-        # compacted files are not counted as chunks
+        # the second run finds no chunk files (deleted) and keeps what the first recorded
         assert manifest["rows"] == 2 and manifest["chunk_files"] == 2 and manifest["root_columns"] == ["pre_pt"]
+        assert manifest["files"] == 1 and manifest["vacuumed_files"] == 2
+        assert manifest["compaction"] == {"numFilesAdded": 1, "numFilesRemoved": 2}
 
     def test_failures_are_logged_not_raised(self, bucket):
         md = metadata()
