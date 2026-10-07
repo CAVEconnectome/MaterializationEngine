@@ -8,6 +8,7 @@ permission (/materialize/api/v2/..., /materialize/upload/api/admin/...).
 """
 
 import json
+import re
 import time
 
 from cachetools import TTLCache, cached
@@ -22,6 +23,7 @@ from materializationengine.redis_client import get_redis_client
 admin_bp = Blueprint("mat_admin", __name__, url_prefix="/materialize/admin")
 
 CELERY_QUEUES = ("process", "spatial", "workflow", "orchestration", "deltalake", "celery")
+_SAFE_DATASTACK = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 def is_superadmin() -> bool:
@@ -138,6 +140,111 @@ def version_tables(datastack: str, version: int):
         return jsonify({"database": database, "tables": list_relations(database)})
     except (RepackRefused, OperationalError):
         abort(404, f"Version {version} of {datastack} has no database.")
+
+
+@admin_bp.route("/api/datastack/<string:datastack>/version/<int:version>/annotation_tables")
+@reset_auth
+@auth_required
+def version_annotation_tables(datastack: str, version: int):
+    """The annotation tables recorded for a frozen version (what a virtual version may include)."""
+    from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
+
+    from materializationengine.database import db_manager
+    from materializationengine.info_client import get_relevant_datastack_info
+
+    _require_datastack_admin(datastack)
+    aligned_volume, _ = get_relevant_datastack_info(datastack)
+    with db_manager.session_scope(aligned_volume) as session:
+        rows = (
+            session.query(AnalysisTable.table_name, AnalysisTable.schema)
+            .join(AnalysisVersion, AnalysisTable.analysisversion_id == AnalysisVersion.id)
+            .filter(AnalysisVersion.datastack == datastack, AnalysisVersion.version == version)
+            .filter(AnalysisTable.valid == True)  # noqa: E712
+            .order_by(AnalysisTable.table_name)
+            .all()
+        )
+    return jsonify({"tables": [{"name": r[0], "schema": r[1]} for r in rows]})
+
+
+def virtual_target_status(source: str, name: str) -> dict:
+    """Whether datastack `name` can serve virtual versions of `source`'s frozen versions.
+
+    A virtual version is an analysisversion row under `name` that points at a frozen version
+    of `source`. Queries to it work only once `name` is in the infoservice on the same
+    aligned volume (that is where its analysisversion rows are looked up) and is mapped to
+    an auth dataset (which decides who may read it).
+    """
+    from dynamicannotationdb.models import AnalysisVersion
+
+    from materializationengine.database import db_manager
+    from materializationengine.info_client import get_datastack_info, get_relevant_datastack_info
+
+    from flask import current_app
+
+    aligned_volume, _ = get_relevant_datastack_info(source)
+    status = {"name": name, "aligned_volume": aligned_volume, "this_server": current_app.config.get("LOCAL_SERVER_URL"),
+              "global_server": current_app.config.get("GLOBAL_SERVER_URL")}
+    try:
+        info = get_datastack_info(name)
+        status["infoservice"] = {
+            "exists": True,
+            "aligned_volume": info["aligned_volume"]["name"],
+            "aligned_volume_matches": info["aligned_volume"]["name"] == aligned_volume,
+            "segmentation_source": info.get("segmentation_source"),
+            "local_server": info.get("local_server"),
+        }
+    except Exception:
+        status["infoservice"] = {"exists": False}
+    try:
+        status["auth_dataset"] = _dataset_for(name)
+    except Exception:
+        status["auth_dataset"] = None
+    with db_manager.session_scope(aligned_volume) as session:
+        rows = (
+            session.query(AnalysisVersion.version, AnalysisVersion.parent_version)
+            .filter(AnalysisVersion.datastack == name)
+            .order_by(AnalysisVersion.version.desc())
+            .all()
+        )
+    status["versions"] = [{"version": r[0], "virtual": r[1] is not None} for r in rows]
+    status["ready"] = bool(
+        status["infoservice"].get("aligned_volume_matches") and status["auth_dataset"]
+    )
+    return status
+
+
+@admin_bp.route("/api/datastack/<string:datastack>/virtual_targets")
+@reset_auth
+@auth_required
+def virtual_targets(datastack: str):
+    """Other datastacks on this datastack's aligned volume, which can hold its virtual versions."""
+    from caveclient.auth import AuthClient
+    from caveclient.infoservice import InfoServiceClient
+    from flask import current_app
+
+    from materializationengine.info_client import get_relevant_datastack_info
+
+    _require_datastack_admin(datastack)
+    aligned_volume, _ = get_relevant_datastack_info(datastack)
+    server = current_app.config["GLOBAL_SERVER_URL"]
+    info = InfoServiceClient(
+        server_address=server,
+        auth_client=AuthClient(server_address=server, token=current_app.config["AUTH_TOKEN"]),
+        api_version=current_app.config.get("INFO_API_VERSION", 2),
+    )
+    names = [n for n in info.get_datastacks_by_aligned_volume(aligned_volume) if n != datastack]
+    return jsonify({"aligned_volume": aligned_volume, "targets": [virtual_target_status(datastack, n) for n in sorted(names)]})
+
+
+@admin_bp.route("/api/datastack/<string:datastack>/virtual_target/<string:name>")
+@reset_auth
+@auth_required
+def virtual_target(datastack: str, name: str):
+    """Readiness of one (possibly new) datastack name to hold virtual versions."""
+    _require_datastack_admin(datastack)
+    if not _SAFE_DATASTACK.match(name):
+        abort(400, "A datastack name may use only letters, digits and underscores.")
+    return jsonify(virtual_target_status(datastack, name))
 
 
 @admin_bp.route("/api/repack/jobs")

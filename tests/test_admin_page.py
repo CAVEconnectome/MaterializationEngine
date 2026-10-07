@@ -275,6 +275,107 @@ class TestDumpChoices:
         assert getattr(missing.value, "code", None) == 404
 
 
+class TestVirtualVersions:
+    """Choices for a virtual version: the frozen version's tables, and target datastacks with readiness."""
+
+    SOURCE = "minnie65_phase3_v1"
+
+    @pytest.fixture
+    def versions(self, app, aligned_volume_name):
+        """A frozen version of the source with two valid tables and one invalid, and a virtual
+        version of it already published under minnie65_public."""
+        import datetime
+
+        from dynamicannotationdb.models import AnalysisTable, AnalysisVersion
+
+        from materializationengine.database import db_manager
+
+        now = datetime.datetime.utcnow()
+        with app.app_context(), db_manager.session_scope(aligned_volume_name) as session:
+            frozen = AnalysisVersion(datastack=self.SOURCE, version=905, time_stamp=now, valid=True,
+                                     expires_on=now + datetime.timedelta(days=5), status="AVAILABLE")
+            session.add(frozen)
+            session.flush()
+            for name, valid in (("synapses", True), ("cells", True), ("old_table", False)):
+                session.add(AnalysisTable(aligned_volume=aligned_volume_name, schema="synapse", table_name=name,
+                                          valid=valid, created=now, analysisversion_id=frozen.id))
+            session.add(AnalysisVersion(datastack="minnie65_public", version=905, time_stamp=now, valid=True,
+                                        expires_on=now, status="AVAILABLE", parent_version=frozen.id))
+        with mock.patch("materializationengine.info_client.get_relevant_datastack_info", return_value=(aligned_volume_name, "pcg")):
+            yield aligned_volume_name
+        with app.app_context(), db_manager.session_scope(aligned_volume_name) as session:
+            ids = [v.id for v in session.query(AnalysisVersion).filter(AnalysisVersion.version == 905)]
+            session.query(AnalysisTable).filter(AnalysisTable.analysisversion_id.in_(ids)).delete(synchronize_session=False)
+            session.query(AnalysisVersion).filter(AnalysisVersion.version == 905).delete(synchronize_session=False)
+
+    @pytest.fixture
+    def app(self, permission_app, database_uri):
+        permission_app.config.update(SQLALCHEMY_DATABASE_URI=database_uri, LOCAL_SERVER_URL="https://minnie.example.org", GLOBAL_SERVER_URL="https://global.example.org", AUTH_TOKEN="t")
+        permission_app.register_blueprint(admin_api.admin_bp)
+        return permission_app
+
+    def call(self, app, user, view, **kwargs):
+        ctx = _as(app, user)
+        try:
+            return inspect.unwrap(view)(**kwargs)
+        finally:
+            ctx.pop()
+
+    ADMIN = {"admin": False, "datasets_admin": ["minnie65"], "permissions_v2": {}}
+
+    def test_annotation_tables_of_a_version_are_its_valid_tables(self, app, versions):
+        r = self.call(app, self.ADMIN, admin_api.version_annotation_tables, datastack=self.SOURCE, version=905)
+        assert [t["name"] for t in r.json["tables"]] == ["cells", "synapses"]
+
+    def status(self, app, versions, name, info=None, dataset=None):
+        def get_info(ds):
+            if info is None:
+                raise RuntimeError("not found")
+            return info
+        lookup = mock.Mock(side_effect=RuntimeError("no mapping")) if dataset is None else mock.Mock(return_value=dataset)
+        with mock.patch("materializationengine.info_client.get_datastack_info", side_effect=get_info), \
+                mock.patch.object(admin_api, "_dataset_for", lookup):
+            ctx = _as(app, self.ADMIN)
+            try:
+                return admin_api.virtual_target_status(self.SOURCE, name)
+            finally:
+                ctx.pop()
+
+    def test_registered_and_mapped_datastack_is_ready_and_lists_its_versions(self, app, versions):
+        s = self.status(app, versions, "minnie65_public", info={"aligned_volume": {"name": versions}, "local_server": "https://minnie.example.org"},
+                        dataset="microns_public")
+        assert s["ready"] and s["auth_dataset"] == "microns_public" and s["infoservice"]["aligned_volume_matches"]
+        assert s["versions"] == [{"version": 905, "virtual": True}]
+        assert s["this_server"] == "https://minnie.example.org" and s["global_server"] == "https://global.example.org"
+
+    def test_new_name_is_not_ready(self, app, versions):
+        s = self.status(app, versions, "brand_new_release")
+        assert not s["ready"] and s["infoservice"] == {"exists": False} and s["auth_dataset"] is None and s["versions"] == []
+
+    def test_other_aligned_volume_is_not_ready(self, app, versions):
+        s = self.status(app, versions, "elsewhere", info={"aligned_volume": {"name": "other_volume"}}, dataset="d")
+        assert not s["ready"] and s["infoservice"]["aligned_volume_matches"] is False
+
+    def test_targets_are_the_other_datastacks_on_the_aligned_volume(self, app, versions):
+        info = mock.Mock()
+        info.get_datastacks_by_aligned_volume.return_value = ["minnie65_public", self.SOURCE, "minnie65_sandbox"]
+        with mock.patch("caveclient.infoservice.InfoServiceClient", return_value=info), mock.patch("caveclient.auth.AuthClient"), \
+                mock.patch.object(admin_api, "virtual_target_status", side_effect=lambda src, n: {"name": n}):
+            r = self.call(app, self.ADMIN, admin_api.virtual_targets, datastack=self.SOURCE)
+        info.get_datastacks_by_aligned_volume.assert_called_once_with(versions)
+        assert [t["name"] for t in r.json["targets"]] == ["minnie65_public", "minnie65_sandbox"]
+
+    def test_target_check_rejects_unsafe_names_and_other_datastacks(self, app):
+        with pytest.raises(Exception) as bad:
+            self.call(app, self.ADMIN, admin_api.virtual_target, datastack=self.SOURCE, name="x; drop")
+        assert getattr(bad.value, "code", None) == 400
+        for view, kwargs in ((admin_api.virtual_target, {"name": "x"}), (admin_api.virtual_targets, {}),
+                             (admin_api.version_annotation_tables, {"version": 1})):
+            with pytest.raises(Exception) as refused:
+                self.call(app, self.ADMIN, view, datastack="zheng_ca3", **kwargs)
+            assert getattr(refused.value, "code", None) == 403
+
+
 class TestDatabasesFilter:
     def test_filters_to_the_datastacks_live_and_frozen_databases(self):
         app = Flask(__name__)
