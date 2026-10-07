@@ -86,6 +86,29 @@ class TestListDatabases:
         live, _, _ = scratch_dbs
         assert {d["name"]: d for d in tm.list_databases(with_sizes=False)}[live]["size_gb"] is None
 
+    def test_frozen_versions_of_one_datastack_newest_first(self, scratch_dbs):
+        _, frozen, stray = scratch_dbs
+        versions = tm.list_frozen_versions(frozen.rsplit("__mat", 1)[0])
+        assert [(v["name"], v["version"]) for v in versions] == [(stray, 8), (frozen, 7)]
+        assert versions[1]["valid"] is True and "size_gb" not in versions[1]
+        assert tm.list_frozen_versions("no_such_datastack") == []
+
+    def test_relations_are_tables_and_views_without_metadata_or_extension_objects(self, scratch_dbs):
+        _, frozen, _ = scratch_dbs
+        with tm.db_manager.get_engine(frozen).begin() as conn:
+            conn.execute("CREATE EXTENSION postgis")  # spatial_ref_sys, geometry_columns, ...
+            conn.execute("CREATE TABLE materializedmetadata (id serial PRIMARY KEY, table_name varchar)")
+            conn.execute("CREATE TABLE synapses (id bigint PRIMARY KEY)")
+            conn.execute("INSERT INTO synapses SELECT generate_series(1, 1000)")
+            conn.execute("CREATE VIEW synapses_view AS SELECT id FROM synapses")
+            conn.execute("CREATE MATERIALIZED VIEW synapses_mv AS SELECT id FROM synapses")
+            conn.execute("ANALYZE synapses")
+        relations = {r["name"]: r for r in tm.list_relations(frozen)}
+        assert set(relations) == {"synapses", "synapses_view", "synapses_mv"}
+        assert relations["synapses"]["kind"] == "table" and relations["synapses"]["rows"] == 1000
+        assert relations["synapses_view"]["kind"] == "view" and relations["synapses_view"]["rows"] is None
+        assert relations["synapses_mv"]["kind"] == "materialized view"
+
 
 class TestListings:
     def test_repack_jobs_newest_first(self, real_redis):
@@ -210,6 +233,46 @@ class TestCapabilities:
         app = Flask(__name__)
         with app.test_request_context("/"):
             assert not admin_api.can_see_admin_page()
+
+
+class TestDumpChoices:
+    """The versions and tables routes that fill the CSV dump form: datastack admins only."""
+
+    @pytest.fixture
+    def app(self, permission_app):
+        permission_app.register_blueprint(admin_api.admin_bp)
+        return permission_app
+
+    def call(self, app, user, view, **kwargs):
+        ctx = _as(app, user)
+        try:
+            return inspect.unwrap(view)(**kwargs)
+        finally:
+            ctx.pop()
+
+    def test_dataset_admin_gets_versions_and_tables_of_their_datastack(self, app):
+        user = {"admin": False, "datasets_admin": ["minnie65"], "permissions_v2": {}}
+        with mock.patch.object(tm, "list_frozen_versions", return_value=[{"version": 3}]) as versions, \
+                mock.patch.object(tm, "list_relations", return_value=[{"name": "synapses"}]) as relations:
+            assert self.call(app, user, admin_api.frozen_versions, datastack="minnie65_phase3_v1").json == {"versions": [{"version": 3}]}
+            versions.assert_called_once_with("minnie65_phase3_v1")
+            r = self.call(app, user, admin_api.version_tables, datastack="minnie65_phase3_v1", version=3)
+            assert r.json == {"database": "minnie65_phase3_v1__mat3", "tables": [{"name": "synapses"}]}
+            relations.assert_called_once_with("minnie65_phase3_v1__mat3")
+
+    @pytest.mark.parametrize("datastack", ["zheng_ca3", "not_configured"])
+    def test_other_datastacks_are_refused(self, app, datastack):
+        user = {"admin": False, "datasets_admin": ["minnie65"], "permissions_v2": {"zheng-mouse-hc": ["edit"]}}
+        for view, kwargs in ((admin_api.frozen_versions, {}), (admin_api.version_tables, {"version": 3})):
+            with pytest.raises(Exception) as refused:
+                self.call(app, user, view, datastack=datastack, **kwargs)
+            assert getattr(refused.value, "code", None) == 403
+
+    def test_missing_version_is_not_found(self, app):
+        with mock.patch.object(tm, "list_relations", side_effect=tm.RepackRefused("database does not exist")):
+            with pytest.raises(Exception) as missing:
+                self.call(app, {"admin": True}, admin_api.version_tables, datastack="minnie65_phase3_v1", version=99)
+        assert getattr(missing.value, "code", None) == 404
 
 
 class TestDatabasesFilter:

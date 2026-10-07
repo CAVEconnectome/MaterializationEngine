@@ -77,9 +77,11 @@
           <h6 class="card-title">Dump a table to CSV</h6>
           <p class="card-text small">Export a table of a frozen version to the materialization dump bucket.</p>
           <div class="mb-2"><label class="form-label small" for="dump-version">Version</label>
-            <input id="dump-version" class="form-control form-control-sm" type="number"></div>
-          <div class="mb-2"><label class="form-label small" for="dump-table">Table</label>
-            <input id="dump-table" class="form-control form-control-sm"></div>
+            <select id="dump-version" class="form-select form-select-sm"><option value="">Loading…</option></select></div>
+          <div class="mb-2"><label class="form-label small" for="dump-filter">Table or view</label>
+            <input id="dump-filter" class="form-control form-control-sm mb-1" placeholder="Filter by regular expression, e.g. ^synapse.*v1$" autocomplete="off">
+            <select id="dump-table" class="form-select form-select-sm" size="8"></select>
+            <div id="dump-table-count" class="form-text"></div></div>
           <button id="dump-run" class="btn btn-sm btn-outline-danger">Dump</button>
           <div id="dump-result" class="mt-2"></div>
           <hr>
