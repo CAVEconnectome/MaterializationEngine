@@ -281,3 +281,63 @@ def repack_table(
     finally:
         if REDIS_CLIENT.get(lock_key) in (job_id, job_id.encode()):
             REDIS_CLIENT.delete(lock_key)
+
+
+_FROZEN_NAME = re.compile(r"^(?P<datastack>.+)__mat(?P<version>\d+)$")
+
+
+def list_databases(with_sizes: bool = True) -> List[Dict[str, Any]]:
+    """Databases on this instance, live and frozen, with frozen versions' validity and expiry.
+
+    Frozen (materialized) databases are named <datastack>__mat<version>; their details come
+    from the analysisversion table of the live database that holds them.
+    """
+    with db_manager.get_engine("postgres").connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT datname, " + ("pg_database_size(datname)" if with_sizes else "NULL")
+                + " FROM pg_database WHERE NOT datistemplate ORDER BY datname"
+            )
+        ).fetchall()
+    names = [r[0] for r in rows if r[0] not in _EXCLUDED_DATABASES]
+    sizes = {r[0]: r[1] for r in rows}
+
+    versions: Dict[str, Dict[str, Any]] = {}
+    for name in names:
+        if _FROZEN_NAME.match(name):
+            continue
+        try:
+            with db_manager.get_engine(name).connect() as conn:
+                if not conn.execute(text("SELECT to_regclass('public.analysisversion')")).scalar():
+                    continue
+                for v in conn.execute(text(
+                    "SELECT datastack, version, valid, expires_on, status, time_stamp FROM analysisversion"
+                )):
+                    versions[f"{v[0]}__mat{v[1]}"] = {
+                        "live_database": name, "datastack": v[0], "version": v[1], "valid": v[2],
+                        "expires_on": v[3].isoformat() if v[3] else None, "status": v[4],
+                        "time_stamp": v[5].isoformat() if v[5] else None,
+                    }
+        except Exception as e:  # a database we cannot read is still listed
+            celery_logger.warning(f"Could not read analysisversion in {name}: {e}")
+
+    result = []
+    for name in names:
+        frozen = _FROZEN_NAME.match(name)
+        entry = {"name": name, "kind": "frozen" if frozen else "live",
+                 "size_gb": None if sizes.get(name) is None else round(sizes[name] / 1e9, 1)}
+        if frozen:
+            entry.update(versions.get(name) or {"datastack": frozen["datastack"], "version": int(frozen["version"])})
+        result.append(entry)
+    return result
+
+
+def list_repack_jobs(limit: int = 50) -> List[Dict[str, Any]]:
+    """Recent repack jobs, newest first (status records are kept for 7 days)."""
+    jobs = []
+    for key in REDIS_CLIENT.scan_iter(f"{STATUS_KEY_PREFIX}*", count=1000):
+        raw = REDIS_CLIENT.get(key)
+        if raw:
+            jobs.append(json.loads(raw))
+    jobs.sort(key=lambda j: j.get("updated_at", ""), reverse=True)
+    return jobs[:limit]

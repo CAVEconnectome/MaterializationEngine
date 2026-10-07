@@ -34,6 +34,11 @@
             <li>
                 <a href="/materialize/api/doc">API doc</a>
             </li>
+            {% if show_admin_link %}
+            <li>
+                <a href="{{ url_for('mat_admin.admin_page') }}">Admin</a>
+            </li>
+            {% endif %}
         </ul>
     </nav>
     <main class="container">

@@ -14,6 +14,7 @@ from materializationengine.admin import setup_admin
 from materializationengine.blueprints.client.api import client_bp
 from materializationengine.blueprints.client.api2 import client_bp as client_bp2
 from materializationengine.blueprints.deltalake.api import deltalake_bp
+from materializationengine.blueprints.admin.api import admin_bp, can_see_admin_page
 from materializationengine.blueprints.materialize.api import mat_bp
 from materializationengine.blueprints.upload.api import spatial_lookup_bp, upload_bp
 from materializationengine.blueprints.upload.models import init_staging_database
@@ -125,6 +126,16 @@ def create_app(config_name: str = None):
         app.register_blueprint(views_bp)
         app.register_blueprint(upload_bp)
         app.register_blueprint(deltalake_bp)
+        app.register_blueprint(admin_bp)
+
+        # The nav shows the Admin link to superadmins and datastack admins; the page shows
+        # each only what they may do, and every endpoint checks its own permission.
+        @app.context_processor
+        def inject_admin_link():
+            try:
+                return {"show_admin_link": can_see_admin_page()}
+            except Exception:
+                return {"show_admin_link": False}
         # /health/ready and /health/live. Registered alongside the others so both probe paths
         # exist even though /health below is kept for backward compatibility.
         app.register_blueprint(health_bp)
