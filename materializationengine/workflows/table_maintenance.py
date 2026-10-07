@@ -68,10 +68,15 @@ def check_database(database: str) -> str:
     return database
 
 
+# Live databases list their tables in annotation_table_metadata and
+# segmentation_table_metadata. Frozen (materialized) databases leave those empty and list
+# their annotation tables in materializedmetadata instead; a segmentation table there is
+# named <annotation table>__<pcg table>. {frozen_join} and {frozen_*} are filled in only
+# when the database has materializedmetadata.
 _ORDER_REPORT_SQL = """
 SELECT c.relname AS table_name,
-       CASE WHEN a.table_name IS NOT NULL THEN 'annotation'
-            WHEN g.table_name IS NOT NULL THEN 'segmentation' ELSE 'other' END AS kind,
+       CASE WHEN a.table_name IS NOT NULL {frozen_annotation} THEN 'annotation'
+            WHEN g.table_name IS NOT NULL {frozen_segmentation} THEN 'segmentation' ELSE 'other' END AS kind,
        c.reltuples::bigint AS rows,
        pg_table_size(c.oid) AS table_bytes,
        pg_indexes_size(c.oid) AS index_bytes,
@@ -87,10 +92,21 @@ LEFT JOIN pg_stats s ON s.schemaname = 'public' AND s.tablename = c.relname AND 
 LEFT JOIN pg_stat_user_tables st ON st.relid = c.oid
 LEFT JOIN annotation_table_metadata a ON a.table_name = c.relname
 LEFT JOIN segmentation_table_metadata g ON g.table_name = c.relname
+{frozen_join}
 WHERE c.relkind = 'r' AND c.reltuples >= :min_rows
-  AND (a.table_name IS NOT NULL OR g.table_name IS NOT NULL)
+  AND (a.table_name IS NOT NULL OR g.table_name IS NOT NULL {frozen_annotation} {frozen_segmentation})
 ORDER BY c.reltuples DESC
 """
+
+_FROZEN_PARTS = {
+    "frozen_join": (
+        "LEFT JOIN materializedmetadata m ON m.table_name = c.relname\n"
+        "LEFT JOIN materializedmetadata ms ON position('__' in c.relname) > 0"
+        " AND ms.table_name = split_part(c.relname, '__', 1)"
+    ),
+    "frozen_annotation": "OR m.table_name IS NOT NULL",
+    "frozen_segmentation": "OR ms.table_name IS NOT NULL",
+}
 
 
 def table_order_report(
@@ -103,7 +119,9 @@ def table_order_report(
     below it (or never analyzed) are listed.
     """
     with db_manager.get_engine(check_database(database)).connect() as conn:
-        rows = conn.execute(text(_ORDER_REPORT_SQL), {"min_rows": min_rows}).fetchall()
+        frozen = conn.execute(text("SELECT to_regclass('public.materializedmetadata')")).scalar()
+        parts = _FROZEN_PARTS if frozen else {k: "" for k in _FROZEN_PARTS}
+        rows = conn.execute(text(_ORDER_REPORT_SQL.format(**parts)), {"min_rows": min_rows}).fetchall()
     report = []
     for r in rows:
         corr = r["id_correlation"]

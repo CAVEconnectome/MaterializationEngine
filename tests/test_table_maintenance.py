@@ -73,6 +73,17 @@ class TestOrderReport:
         name, _ = scratch_db
         assert [t["table_name"] for t in tm.table_order_report(name, min_rows=1000, max_correlation=0.5)] == ["synapses"]
 
+    def test_frozen_database_lists_tables_from_materializedmetadata(self, scratch_db):
+        # A frozen copy leaves the live metadata tables empty and lists its tables here.
+        name, engine = scratch_db
+        with engine.begin() as conn:
+            conn.execute("DELETE FROM annotation_table_metadata")
+            conn.execute("DELETE FROM segmentation_table_metadata")
+            conn.execute("CREATE TABLE materializedmetadata (id serial PRIMARY KEY, table_name varchar, row_count bigint)")
+            conn.execute("INSERT INTO materializedmetadata (table_name, row_count) VALUES ('synapses', 20000)")
+        report = {t["table_name"]: t["kind"] for t in tm.table_order_report(name, min_rows=1000)}
+        assert report == {"synapses": "annotation", "synapses__v1": "segmentation"}
+
     @pytest.mark.parametrize("database", ["postgres", "cloudsqladmin", "bad;name", ""])
     def test_refuses_system_and_unsafe_database_names(self, database):
         with pytest.raises(tm.RepackRefused):
