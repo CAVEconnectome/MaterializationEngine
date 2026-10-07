@@ -137,6 +137,83 @@ class LockedTasksResource(Resource):
         return {str(k): v for k, v in ltdict.items()}
 
 
+maintenance_parser = reqparse.RequestParser()
+maintenance_parser.add_argument("min_rows", type=int, default=100000, location="args")
+maintenance_parser.add_argument("max_correlation", type=float, default=None, location="args")
+
+repack_parser = reqparse.RequestParser()
+repack_parser.add_argument("dry_run", type=inputs.boolean, default=True, location="args",
+                           help="report what pg_repack would do without changing anything (default true)")
+repack_parser.add_argument("order_by", type=str, default="id", location="args")
+repack_parser.add_argument("jobs", type=int, default=2, location="args",
+                           help="parallel index builds (connections)")
+repack_parser.add_argument("fillfactor", type=int, default=None, location="args",
+                           help="set before repacking, e.g. 90 for tables whose rows are updated")
+repack_parser.add_argument("force", type=inputs.boolean, default=False, location="args",
+                           help="allow tables larger than max_table_gb")
+repack_parser.add_argument("max_table_gb", type=float, default=100, location="args")
+repack_parser.add_argument("wait_timeout", type=int, default=60, location="args",
+                           help="seconds pg_repack waits for its brief locks before giving up")
+
+
+@mat_bp.route("/maintenance/table_order/<string:database>")
+class TableOrderResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.expect(maintenance_parser)
+    @mat_bp.doc("Report how well tables are ordered by id", security="apikey")
+    def get(self, database: str):
+        """Annotation and segmentation tables with size and id correlation (1.0 = in id order)
+
+        Args:
+            database (str): a live (aligned volume) or frozen database on this instance
+        """
+        from materializationengine.workflows.table_maintenance import RepackRefused, table_order_report
+
+        args = maintenance_parser.parse_args()
+        try:
+            return {"database": database, "tables": table_order_report(
+                database, min_rows=args["min_rows"], max_correlation=args["max_correlation"])}
+        except RepackRefused as e:
+            abort(400, str(e))
+
+
+@mat_bp.route("/maintenance/repack/<string:database>/<string:table_name>")
+class RepackTableResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.expect(repack_parser)
+    @mat_bp.doc("Reorder a table by id with pg_repack", security="apikey")
+    def post(self, database: str, table_name: str):
+        """Queue a pg_repack of one table (dry run unless dry_run=false). Returns a job id.
+
+        The table stays readable and writable; pg_repack takes an exclusive lock only
+        briefly at the start and at the swap, and gives up rather than cancel queries
+        holding the table. It needs free disk for a full copy of the table and indexes.
+        """
+        from materializationengine.workflows.table_maintenance import RepackRefused, start_repack
+
+        args = repack_parser.parse_args()
+        try:
+            return start_repack(database, table_name, **args)
+        except RepackRefused as e:
+            abort(400, str(e))
+
+
+@mat_bp.route("/maintenance/repack/status/<string:job_id>")
+class RepackStatusResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc("Status of a pg_repack job", security="apikey")
+    def get(self, job_id: str):
+        from materializationengine.workflows.table_maintenance import get_repack_status
+
+        status = get_repack_status(job_id)
+        if status is None:
+            abort(404, f"no repack job {job_id}")
+        return status
+
+
 @mat_bp.route("/celery/status/queue")
 class QueueResource(Resource):
     @reset_auth
