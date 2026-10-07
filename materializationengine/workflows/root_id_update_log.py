@@ -5,7 +5,8 @@ Off unless ROOT_ID_UPDATE_LOG is set. Each annotation table updated in a run get
     {MATERIALIZATION_DUMP_BUCKET}/root_id_updates/{datastack}/{run_id}/{annotation_table}/
         part-{root_column}-{task_id}.parquet   one per get_new_root_ids task
         _delta_log/                            added once every chunk is done, when the
-                                               chunks are also compacted into a few files
+                                               chunks are compacted into a few files and
+                                               then deleted
         _run.json                              what is the same for every row
 
 run_id is the run's materialization timestamp, which every table in the run shares, so a
@@ -160,10 +161,9 @@ def start(mat_metadata: dict) -> None:
 
 def finalize(mat_metadata: dict) -> None:
     """Once every chunk is written: make the folder a Delta table, compact its many small
-    chunk files into a few large ones, and complete _run.json.
+    chunk files into a few large ones, delete the chunk files (vacuum), and complete _run.json.
 
-    Compaction rewrites the rows into new files in the same Delta table; the chunk files
-    stay in the folder (no longer part of the table) until a vacuum removes them.
+    Safe to run again: counts already recorded are kept when the chunk files are gone.
     """
     try:
         uri = run_uri(mat_metadata)
@@ -171,28 +171,46 @@ def finalize(mat_metadata: dict) -> None:
             return
         filesystem, path = _filesystem(uri)
         listing = filesystem.get_file_info(fs.FileSelector(path, allow_not_found=True))
+        names = {f.base_name for f in listing}
         chunks = [f for f in listing if f.type == fs.FileType.File and _CHUNK_FILE.match(f.base_name)]
-        if not chunks and not any(f.base_name == MANIFEST for f in listing):
+        has_table = "_delta_log" in names
+        if not chunks and not has_table and MANIFEST not in names:
             return  # nothing was updated, and nothing started a record
+        previous = {}
+        if MANIFEST in names:
+            with filesystem.open_input_stream(f"{path}/{MANIFEST}") as f:
+                previous = json.loads(f.read())
         manifest = {
             **_manifest(mat_metadata),
             "state": "done",
-            "chunk_files": len(chunks),
-            "root_columns": sorted({_CHUNK_FILE.match(f.base_name)["root_column"] for f in chunks}),
+            "chunk_files": len(chunks) or previous.get("chunk_files", 0),
+            "root_columns": sorted({_CHUNK_FILE.match(f.base_name)["root_column"] for f in chunks})
+            or previous.get("root_columns", []),
             "rows": 0,
         }
-        if chunks:
+        for key in ("compaction", "vacuumed_files"):
+            if key in previous:
+                manifest[key] = previous[key]
+        if chunks or has_table:
             from deltalake import DeltaTable, convert_to_deltalake
 
-            convert_to_deltalake(uri, mode="ignore")
-            table = DeltaTable(uri)
-            compacted = table.optimize.compact()
+            if not has_table:
+                convert_to_deltalake(uri)
+            compacted = DeltaTable(uri).optimize.compact()
+            if compacted.get("numFilesRemoved"):
+                manifest["compaction"] = {k: compacted.get(k) for k in ("numFilesAdded", "numFilesRemoved")}
+            # The chunk files now hold nothing the compacted files do not; nobody reads the
+            # table while its run is still finishing, so no retention period is needed.
+            deleted = DeltaTable(uri).vacuum(retention_hours=0, enforce_retention_duration=False, dry_run=False)
+            # vacuum also lists files an earlier run already deleted; count only real deletions
+            removed = {d.rsplit("/", 1)[-1] for d in deleted} & {f.base_name for f in chunks}
+            if removed:
+                manifest["vacuumed_files"] = manifest.get("vacuumed_files", 0) + len(removed)
             table = DeltaTable(uri)
             manifest.update(
                 delta_table=uri,
                 rows=sum(table.get_add_actions(flatten=True).column("num_records").to_pylist()),
                 files=len(table.file_uris()),
-                compaction={k: compacted.get(k) for k in ("numFilesAdded", "numFilesRemoved")},
             )
         _write_manifest(filesystem, path, manifest)
         celery_logger.info(f"Recorded {manifest['rows']} root ID updates in {uri}")
