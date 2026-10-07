@@ -4,7 +4,8 @@ Off unless ROOT_ID_UPDATE_LOG is set. Each annotation table updated in a run get
 
     {MATERIALIZATION_DUMP_BUCKET}/root_id_updates/{datastack}/{run_id}/{annotation_table}/
         part-{root_column}-{task_id}.parquet   one per get_new_root_ids task
-        _delta_log/                            added once every chunk is done
+        _delta_log/                            added once every chunk is done, when the
+                                               chunks are also compacted into a few files
         _run.json                              what is the same for every row
 
 run_id is the run's materialization timestamp, which every table in the run shares, so a
@@ -17,6 +18,7 @@ Writing is best effort: failures are logged and never stop the root ID update.
 
 import datetime
 import json
+import re
 from typing import Optional
 
 import pyarrow as pa
@@ -38,6 +40,8 @@ SCHEMA = pa.schema(
     ]
 )
 MANIFEST = "_run.json"
+# part-<root_column>-<celery task id>.parquet, as write_chunk names them
+_CHUNK_FILE = re.compile(r"^part-(?P<root_column>[A-Za-z0-9_]+)-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\.parquet$")
 
 
 def enabled() -> bool:
@@ -155,24 +159,41 @@ def start(mat_metadata: dict) -> None:
 
 
 def finalize(mat_metadata: dict) -> None:
-    """Once every chunk is written: make the folder a Delta table and complete _run.json."""
+    """Once every chunk is written: make the folder a Delta table, compact its many small
+    chunk files into a few large ones, and complete _run.json.
+
+    Compaction rewrites the rows into new files in the same Delta table; the chunk files
+    stay in the folder (no longer part of the table) until a vacuum removes them.
+    """
     try:
         uri = run_uri(mat_metadata)
         if uri is None:
             return
         filesystem, path = _filesystem(uri)
         listing = filesystem.get_file_info(fs.FileSelector(path, allow_not_found=True))
-        files = [f for f in listing if f.type == fs.FileType.File and f.base_name.endswith(".parquet")]
-        if not files and not any(f.base_name == MANIFEST for f in listing):
+        chunks = [f for f in listing if f.type == fs.FileType.File and _CHUNK_FILE.match(f.base_name)]
+        if not chunks and not any(f.base_name == MANIFEST for f in listing):
             return  # nothing was updated, and nothing started a record
-        manifest = {**_manifest(mat_metadata), "state": "done", "files": len(files)}
-        manifest["rows"] = sum(pq.ParquetFile(f.path, filesystem=filesystem).metadata.num_rows for f in files)
-        manifest["root_columns"] = sorted({f.base_name.split("-")[1] for f in files})
-        if files:
-            from deltalake import convert_to_deltalake
+        manifest = {
+            **_manifest(mat_metadata),
+            "state": "done",
+            "chunk_files": len(chunks),
+            "root_columns": sorted({_CHUNK_FILE.match(f.base_name)["root_column"] for f in chunks}),
+            "rows": 0,
+        }
+        if chunks:
+            from deltalake import DeltaTable, convert_to_deltalake
 
             convert_to_deltalake(uri, mode="ignore")
-            manifest["delta_table"] = uri
+            table = DeltaTable(uri)
+            compacted = table.optimize.compact()
+            table = DeltaTable(uri)
+            manifest.update(
+                delta_table=uri,
+                rows=sum(table.get_add_actions(flatten=True).column("num_records").to_pylist()),
+                files=len(table.file_uris()),
+                compaction={k: compacted.get(k) for k in ("numFilesAdded", "numFilesRemoved")},
+            )
         _write_manifest(filesystem, path, manifest)
         celery_logger.info(f"Recorded {manifest['rows']} root ID updates in {uri}")
     except Exception as e:
