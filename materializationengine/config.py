@@ -140,6 +140,7 @@ class BaseConfig:
 
     # Record each update_root_ids run's updates under
     # MATERIALIZATION_DUMP_BUCKET/root_id_updates (workflows/root_id_update_log.py).
+    # True for every table, or {datastack: [annotation tables] or "*"} for some.
     ROOT_ID_UPDATE_LOG = False
 
     # Delta Lake export settings

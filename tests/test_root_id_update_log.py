@@ -65,7 +65,31 @@ class TestPaths:
     def test_enabled_reads_bools_and_env_strings(self, bucket, value, expected):
         _, config = bucket
         config["ROOT_ID_UPDATE_LOG"] = value
-        assert log.enabled() is expected
+        assert log.enabled(metadata()) is expected
+
+    @pytest.mark.parametrize("value", [
+        {"minnie65_phase3_v1": ["synapses"]},
+        {"minnie65_phase3_v1": "synapses"},
+        '{"minnie65_phase3_v1": ["synapses"]}',  # from the environment
+    ])
+    def test_enabled_for_chosen_tables_of_chosen_datastacks(self, bucket, value):
+        _, config = bucket
+        config["ROOT_ID_UPDATE_LOG"] = value
+        assert log.enabled(metadata("synapses"))
+        assert not log.enabled(metadata("cells"))
+        assert not log.enabled({**metadata("synapses"), "datastack": "zheng_ca3"})
+
+    @pytest.mark.parametrize("tables", ["*", ["*"]])
+    def test_star_means_every_table_of_that_datastack(self, bucket, tables):
+        _, config = bucket
+        config["ROOT_ID_UPDATE_LOG"] = {"minnie65_phase3_v1": tables}
+        assert log.enabled(metadata("synapses")) and log.enabled(metadata("cells"))
+        assert not log.enabled({**metadata("synapses"), "datastack": "zheng_ca3"})
+
+    def test_bad_json_is_off(self, bucket):
+        _, config = bucket
+        config["ROOT_ID_UPDATE_LOG"] = '{"minnie65_phase3_v1": [synapses]}'
+        assert not log.enabled(metadata())
 
 
 class TestRows:

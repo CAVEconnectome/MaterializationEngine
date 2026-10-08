@@ -79,7 +79,7 @@ def update_root_ids_workflow(mat_metadata: dict):
     if not chunked_ids:
         return fin.si()
 
-    record_updates = root_id_update_log.enabled()
+    record_updates = root_id_update_log.enabled(mat_metadata)
     if record_updates:
         # Describe the run up front, but only when there is something to update.
         chunked_ids = iter(chunked_ids)
@@ -326,7 +326,7 @@ def get_new_root_ids(self, supervoxel_data, mat_metadata):
 
     del supervoxel_data
 
-    record_updates = root_id_update_log.enabled()
+    record_updates = root_id_update_log.enabled(mat_metadata)
     if record_updates:
         old_roots = root_ids_df[root_id_col_name[0]].copy()
     root_ids_df.loc[supervoxel_df.index, root_id_col_name[0]] = root_id_array
