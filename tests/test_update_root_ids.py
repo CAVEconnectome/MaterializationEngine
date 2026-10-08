@@ -115,7 +115,7 @@ class TestUpdateRootIds:
             "materializationengine.workflows.update_root_ids.lookup_new_root_ids",
             lambda *args, **kwargs: annotation_data["new_root_ids"],
         )
-        monkeypatch.setattr(root_id_update_log, "enabled", lambda: enabled)
+        monkeypatch.setattr(root_id_update_log, "enabled", lambda md: enabled)
         recorded = []
         monkeypatch.setattr(
             root_id_update_log,
