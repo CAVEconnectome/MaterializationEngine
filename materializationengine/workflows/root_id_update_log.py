@@ -1,6 +1,7 @@
 """A record of the root ID updates each run of update_root_ids makes, as Parquet and Delta Lake.
 
-Off unless ROOT_ID_UPDATE_LOG is set. Each annotation table updated in a run gets a folder
+Off unless ROOT_ID_UPDATE_LOG is set, for everything or for chosen datastacks and tables
+(see enabled). Each annotation table updated in a run gets a folder
 
     {MATERIALIZATION_DUMP_BUCKET}/root_id_updates/{datastack}/{run_id}/{annotation_table}/
         part-{root_column}-{task_id}.parquet   one per get_new_root_ids task
@@ -45,11 +46,35 @@ MANIFEST = "_run.json"
 _CHUNK_FILE = re.compile(r"^part-(?P<root_column>[A-Za-z0-9_]+)-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\.parquet$")
 
 
-def enabled() -> bool:
+def enabled(mat_metadata: dict) -> bool:
+    """Whether to record this table's updates.
+
+    ROOT_ID_UPDATE_LOG is either a bool (every table of every datastack), or a mapping of
+    datastack to the annotation tables to record, "*" meaning all of that datastack's:
+
+        ROOT_ID_UPDATE_LOG = {"minnie65_phase3_v1": ["synapses_pni_2"], "zheng_ca3": "*"}
+
+    From the environment it may be "true"/"false" or that mapping as JSON.
+    """
     value = get_config_param("ROOT_ID_UPDATE_LOG", False)
     if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "yes")
-    return bool(value)
+        text = value.strip()
+        if text.startswith("{"):
+            try:
+                value = json.loads(text)
+            except ValueError:
+                celery_logger.warning(f"ROOT_ID_UPDATE_LOG is not valid JSON: {text!r}")
+                return False
+        else:
+            return text.lower() in ("1", "true", "yes")
+    if not isinstance(value, dict):
+        return bool(value)
+    tables = value.get(mat_metadata.get("datastack"))
+    if tables in ("*", ["*"]):
+        return True
+    if isinstance(tables, str):
+        tables = [tables]
+    return mat_metadata.get("annotation_table_name") in (tables or [])
 
 
 def run_id(materialization_time_stamp: str) -> str:
