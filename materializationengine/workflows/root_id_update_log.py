@@ -348,7 +348,12 @@ def migrate_old_layout(datastack_uri: str, dry_run: bool = True) -> list:
             if not DeltaTable.is_deltatable(old_uri):
                 report.append({**entry, "result": f"no updates (rows={run_info.get('rows', 0)}), skipped"})
                 continue
-            rows = DeltaTable(old_uri).to_pyarrow_table()
+            # Read the data files with pyarrow's GCS client: deltalake's own reader was seen
+            # to hang on these buckets from outside the cluster, and this is faster anyway.
+            files = DeltaTable(old_uri).file_uris()
+            rows = pa.concat_tables(
+                [pq.read_table(_filesystem(u)[1], filesystem=filesystem) for u in files]
+            ) if files else SCHEMA.empty_table()
             unique = pl.from_arrow(rows).unique(maintain_order=True).to_arrow().cast(SCHEMA)
             removed = rows.num_rows - unique.num_rows
             entry.update(rows=rows.num_rows, unique_rows=unique.num_rows, duplicate_rows_removed=removed)
