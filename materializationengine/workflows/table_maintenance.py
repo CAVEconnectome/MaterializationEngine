@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from celery.utils.log import get_task_logger
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from materializationengine.celery_init import celery
 from materializationengine.database import db_manager
@@ -68,10 +68,15 @@ def check_database(database: str) -> str:
     return database
 
 
+# Live databases list their tables in annotation_table_metadata and
+# segmentation_table_metadata. Frozen (materialized) databases leave those empty and list
+# their annotation tables in materializedmetadata instead; a segmentation table there is
+# named <annotation table>__<pcg table>. {frozen_join} and {frozen_*} are filled in only
+# when the database has materializedmetadata.
 _ORDER_REPORT_SQL = """
 SELECT c.relname AS table_name,
-       CASE WHEN a.table_name IS NOT NULL THEN 'annotation'
-            WHEN g.table_name IS NOT NULL THEN 'segmentation' ELSE 'other' END AS kind,
+       CASE WHEN a.table_name IS NOT NULL {frozen_annotation} THEN 'annotation'
+            WHEN g.table_name IS NOT NULL {frozen_segmentation} THEN 'segmentation' ELSE 'other' END AS kind,
        c.reltuples::bigint AS rows,
        pg_table_size(c.oid) AS table_bytes,
        pg_indexes_size(c.oid) AS index_bytes,
@@ -87,10 +92,21 @@ LEFT JOIN pg_stats s ON s.schemaname = 'public' AND s.tablename = c.relname AND 
 LEFT JOIN pg_stat_user_tables st ON st.relid = c.oid
 LEFT JOIN annotation_table_metadata a ON a.table_name = c.relname
 LEFT JOIN segmentation_table_metadata g ON g.table_name = c.relname
+{frozen_join}
 WHERE c.relkind = 'r' AND c.reltuples >= :min_rows
-  AND (a.table_name IS NOT NULL OR g.table_name IS NOT NULL)
+  AND (a.table_name IS NOT NULL OR g.table_name IS NOT NULL {frozen_annotation} {frozen_segmentation})
 ORDER BY c.reltuples DESC
 """
+
+_FROZEN_PARTS = {
+    "frozen_join": (
+        "LEFT JOIN materializedmetadata m ON m.table_name = c.relname\n"
+        "LEFT JOIN materializedmetadata ms ON position('__' in c.relname) > 0"
+        " AND ms.table_name = split_part(c.relname, '__', 1)"
+    ),
+    "frozen_annotation": "OR m.table_name IS NOT NULL",
+    "frozen_segmentation": "OR ms.table_name IS NOT NULL",
+}
 
 
 def table_order_report(
@@ -103,7 +119,9 @@ def table_order_report(
     below it (or never analyzed) are listed.
     """
     with db_manager.get_engine(check_database(database)).connect() as conn:
-        rows = conn.execute(text(_ORDER_REPORT_SQL), {"min_rows": min_rows}).fetchall()
+        frozen = conn.execute(text("SELECT to_regclass('public.materializedmetadata')")).scalar()
+        parts = _FROZEN_PARTS if frozen else {k: "" for k in _FROZEN_PARTS}
+        rows = conn.execute(text(_ORDER_REPORT_SQL.format(**parts)), {"min_rows": min_rows}).fetchall()
     report = []
     for r in rows:
         corr = r["id_correlation"]
@@ -281,3 +299,102 @@ def repack_table(
     finally:
         if REDIS_CLIENT.get(lock_key) in (job_id, job_id.encode()):
             REDIS_CLIENT.delete(lock_key)
+
+
+_FROZEN_NAME = re.compile(r"^(?P<datastack>.+)__mat(?P<version>\d+)$")
+
+
+def list_databases(with_sizes: bool = True) -> List[Dict[str, Any]]:
+    """Databases on this instance, live and frozen, with frozen versions' validity and expiry.
+
+    Frozen (materialized) databases are named <datastack>__mat<version>; their details come
+    from the analysisversion table of the live database that holds them.
+    """
+    with db_manager.get_engine("postgres").connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT datname, " + ("pg_database_size(datname)" if with_sizes else "NULL")
+                + " FROM pg_database WHERE NOT datistemplate ORDER BY datname"
+            )
+        ).fetchall()
+    names = [r[0] for r in rows if r[0] not in _EXCLUDED_DATABASES]
+    sizes = {r[0]: r[1] for r in rows}
+
+    versions: Dict[str, Dict[str, Any]] = {}
+    for name in names:
+        if _FROZEN_NAME.match(name):
+            continue
+        try:
+            with db_manager.get_engine(name).connect() as conn:
+                if not conn.execute(text("SELECT to_regclass('public.analysisversion')")).scalar():
+                    continue
+                for v in conn.execute(text(
+                    "SELECT datastack, version, valid, expires_on, status, time_stamp FROM analysisversion"
+                )):
+                    versions[f"{v[0]}__mat{v[1]}"] = {
+                        "live_database": name, "datastack": v[0], "version": v[1], "valid": v[2],
+                        "expires_on": v[3].isoformat() if v[3] else None, "status": v[4],
+                        "time_stamp": v[5].isoformat() if v[5] else None,
+                    }
+        except Exception as e:  # a database we cannot read is still listed
+            celery_logger.warning(f"Could not read analysisversion in {name}: {e}")
+
+    result = []
+    for name in names:
+        frozen = _FROZEN_NAME.match(name)
+        entry = {"name": name, "kind": "frozen" if frozen else "live",
+                 "size_gb": None if sizes.get(name) is None else round(sizes[name] / 1e9, 1)}
+        if frozen:
+            entry.update(versions.get(name) or {"datastack": frozen["datastack"], "version": int(frozen["version"])})
+        result.append(entry)
+    return result
+
+
+def list_frozen_versions(datastack: str) -> List[Dict[str, Any]]:
+    """The frozen versions of a datastack whose databases exist, newest first."""
+    frozen = [d for d in list_databases(with_sizes=False) if d["kind"] == "frozen" and d.get("datastack") == datastack]
+    for d in frozen:
+        d.pop("size_gb", None)
+    return sorted(frozen, key=lambda d: d["version"], reverse=True)
+
+
+# Bookkeeping tables of dynamicannotationdb and the upload blueprint, not annotation data.
+_METADATA_TABLES = (
+    "analysisdatabase", "analysisversion", "analysistables", "analysisviews", "version_error",
+    "materializedmetadata", "annotation_table_metadata", "segmentation_table_metadata",
+    "combined_table_metadata", "upload_metadata", "alembic_version",
+)
+_RELATION_KINDS = {"r": "table", "p": "table", "v": "view", "m": "materialized view"}
+
+
+def list_relations(database: str) -> List[Dict[str, Any]]:
+    """Tables and views of a database's public schema that hold annotation data: everything
+    except the metadata tables and what extensions own (PostGIS's spatial_ref_sys, geometry_columns, ...)."""
+    with db_manager.get_engine(check_database(database)).connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT c.relname, c.relkind, c.reltuples::bigint FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public' "
+                "WHERE c.relkind IN ('r', 'p', 'v', 'm') AND NOT c.relispartition "
+                "AND c.relname NOT IN :metadata "
+                "AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass "
+                "AND d.objid = c.oid AND d.deptype = 'e') "
+                "ORDER BY c.relname"
+            ).bindparams(bindparam("metadata", expanding=True)),
+            {"metadata": list(_METADATA_TABLES)},
+        ).fetchall()
+    return [
+        {"name": r[0], "kind": _RELATION_KINDS[r[1]], "rows": r[2] if r[1] != "v" and r[2] >= 0 else None}
+        for r in rows
+    ]
+
+
+def list_repack_jobs(limit: int = 50) -> List[Dict[str, Any]]:
+    """Recent repack jobs, newest first (status records are kept for 7 days)."""
+    jobs = []
+    for key in REDIS_CLIENT.scan_iter(f"{STATUS_KEY_PREFIX}*", count=1000):
+        raw = REDIS_CLIENT.get(key)
+        if raw:
+            jobs.append(json.loads(raw))
+    jobs.sort(key=lambda j: j.get("updated_at", ""), reverse=True)
+    return jobs[:limit]

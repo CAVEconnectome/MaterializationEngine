@@ -1,0 +1,200 @@
+{% extends 'base.html' %}
+
+{% block title %}Admin{% endblock %}
+
+{% block html_head %}
+<style>
+  .corr-bad { color: #b02a37; font-weight: 600; }
+  .corr-mid { color: #997404; font-weight: 600; }
+  .corr-good { color: #146c43; }
+  .table-sm td, .table-sm th { vertical-align: middle; }
+  pre.output { max-height: 18rem; overflow: auto; background: #f8f9fa; padding: .5rem; font-size: .8rem; }
+  .muted { color: #6c757d; }
+  .section { margin-bottom: 2rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<h2 class="mt-3">Admin</h2>
+<p class="muted">Signed in as {{ current_user.get('name', '') }}. You see the datastacks and actions your permissions allow.
+  Actions change production data; those that can, offer a dry run first.</p>
+
+<ul class="nav nav-tabs" role="tablist">
+  <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-datastack" type="button">Datastack</button></li>
+  <li class="nav-item d-none" id="deployment-tab-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-deployment" type="button">Deployment</button></li>
+</ul>
+
+<div class="tab-content pt-3">
+  <!-- ============================================================ Datastack -->
+  <div class="tab-pane fade show active" id="tab-datastack">
+    <div class="row g-2 mb-4">
+      <div class="col-md-5">
+        <label class="form-label" for="ds-select">Datastack</label>
+        <select id="ds-select" class="form-select"><option>Loading…</option></select>
+      </div>
+      <div class="col-md-7 d-flex align-items-end"><span id="ds-rights" class="muted"></span></div>
+    </div>
+
+    <!-- superadmin -->
+    <div class="section d-none" data-needs="superadmin">
+      <h4>Materialization workflows</h4>
+      <p class="muted">Run on the celery workers; follow them under Deployment → Queues &amp; workers.</p>
+      <div id="workflow-cards" class="row g-3"></div>
+    </div>
+
+    <!-- edit -->
+    <div class="section d-none" data-needs="edit">
+      <h4>Tables</h4>
+      <div class="card"><div class="card-body">
+        <h6 class="card-title">Ingest new annotations in one table</h6>
+        <p class="card-text small">Look up supervoxel and root IDs for annotations added to one table since the last run.</p>
+        <div class="row g-2 align-items-end">
+          <div class="col-md-6"><label class="form-label small" for="ingest-table">Table</label>
+            <input id="ingest-table" class="form-control form-control-sm"></div>
+          <div class="col-md-3"><button id="ingest-table-run" class="btn btn-sm btn-outline-danger">Start</button></div>
+        </div>
+        <div id="ingest-table-result" class="mt-2"></div>
+      </div></div>
+    </div>
+
+    <!-- dataset admin -->
+    <div class="section d-none" data-needs="admin">
+      <h4>Versions</h4>
+      <div class="row g-3">
+        <div class="col-md-6"><div class="card h-100"><div class="card-body">
+          <h6 class="card-title">Create a virtual version</h6>
+          <p class="card-text small">Publish some tables of one of this datastack's frozen versions under another
+            datastack (for example a public release). The other datastack serves it as the same version number.</p>
+          <div class="mb-2"><label class="form-label small" for="vv-target">Frozen version</label>
+            <select id="vv-target" class="form-select form-select-sm"><option value="">Loading…</option></select></div>
+          <div class="mb-2"><label class="form-label small" for="vv-tables">Tables to include</label>
+            <textarea id="vv-tables" class="form-control form-control-sm mb-1" rows="2"
+              placeholder="Paste a comma separated list, or pick below"></textarea>
+            <div id="vv-tables-check" class="form-text"></div>
+            <input id="vv-filter" class="form-control form-control-sm mt-1 mb-1" placeholder="Filter by regular expression" autocomplete="off">
+            <select id="vv-table-list" class="form-select form-select-sm" multiple size="8"></select>
+            <div class="form-text">Ctrl/⌘-click to pick several.
+              <a href="#" id="vv-select-shown">Add all shown</a> · <a href="#" id="vv-clear">Clear</a></div></div>
+          <div class="mb-2"><label class="form-label small" for="vv-name">Publish under datastack</label>
+            <select id="vv-name" class="form-select form-select-sm"><option value="">Loading…</option></select>
+            <input id="vv-new-name" class="form-control form-control-sm mt-1 d-none" placeholder="new_datastack_name" autocomplete="off">
+            <div id="vv-target-status" class="mt-2"></div></div>
+          <button id="vv-run" class="btn btn-sm btn-outline-danger" disabled>Create</button>
+          <div id="vv-result" class="mt-2"></div>
+        </div></div></div>
+        <div class="col-md-6"><div class="card h-100"><div class="card-body">
+          <h6 class="card-title">Dump a table to CSV</h6>
+          <p class="card-text small">Export a table of a frozen version to the materialization dump bucket.</p>
+          <div class="mb-2"><label class="form-label small" for="dump-version">Version</label>
+            <select id="dump-version" class="form-select form-select-sm"><option value="">Loading…</option></select></div>
+          <div class="mb-2"><label class="form-label small" for="dump-filter">Table or view</label>
+            <input id="dump-filter" class="form-control form-control-sm mb-1" placeholder="Filter by regular expression, e.g. ^synapse.*v1$" autocomplete="off">
+            <select id="dump-table" class="form-select form-select-sm" size="8"></select>
+            <div id="dump-table-count" class="form-text"></div></div>
+          <button id="dump-run" class="btn btn-sm btn-outline-danger">Dump</button>
+          <div id="dump-result" class="mt-2"></div>
+          <hr>
+          <p class="small mb-0">For Delta Lake exports use the <a href="{{ url_for('deltalake.wizard_step', step_number=1) }}">Delta Lake export wizard</a>.</p>
+        </div></div></div>
+      </div>
+    </div>
+
+    <!-- superadmin -->
+    <div class="section d-none" data-needs="superadmin">
+      <h4>Table maintenance</h4>
+      <p>Tables whose rows are not stored in <code>id</code> order make <code>id</code> joins slow or spill to disk.
+        A repack rewrites a table in <code>id</code> order with <code>pg_repack</code> while it stays readable and writable,
+        and needs free disk for a full copy of the table and its indexes. Frozen versions can be repacked too.</p>
+      <div class="row g-2 align-items-end mb-3">
+        <div class="col-md-6"><label class="form-label" for="db-select">Database</label>
+          <select id="db-select" class="form-select"><option>Choose a datastack</option></select></div>
+        <div class="col-md-2"><label class="form-label" for="min-rows">Min rows</label>
+          <input id="min-rows" class="form-control" type="number" value="100000"></div>
+        <div class="col-md-2"><label class="form-label" for="max-corr">Max |correlation|</label>
+          <input id="max-corr" class="form-control" type="number" step="0.05" placeholder="all"></div>
+        <div class="col-md-2"><button id="load-tables" class="btn btn-primary w-100">Show tables</button></div>
+      </div>
+      <div id="tables-area"></div>
+      <h6 class="mt-3">Recent repack jobs</h6>
+      <div id="jobs-area" class="muted">Loading…</div>
+    </div>
+
+    <!-- superadmin -->
+    <div class="section d-none" data-needs="superadmin">
+      <h4>Uploads <button id="refresh-uploads" class="btn btn-sm btn-outline-secondary ms-2">Refresh</button></h4>
+      <p class="muted">Upload jobs for this datastack. Job records expire an hour after their last update;
+        older failed uploads are found by Deployment → Clean up failed uploads.</p>
+      <div id="uploads-area" class="muted">Loading…</div>
+    </div>
+
+    <p id="no-actions" class="muted d-none">You have no admin actions for this datastack.</p>
+  </div>
+
+  <!-- ============================================================ Deployment (superadmin) -->
+  <div class="tab-pane fade" id="tab-deployment">
+    <div class="card mb-4"><div class="card-body">
+      <h5 class="card-title">Clean up failed uploads</h5>
+      <p class="card-text">Removes what failed or cancelled uploads left behind (queued and claimed tasks, job
+        records, checkpoints, staging tables), and staging tables that belong to no active upload. Never touches production.</p>
+      <div class="row g-2 align-items-end">
+        <div class="col-md-4"><label class="form-label" for="cleanup-statuses">Job statuses</label>
+          <input id="cleanup-statuses" class="form-control" value="error,failed,cancelled"></div>
+        <div class="col-md-3"><label class="form-label" for="orphan-age">Orphans older than (hours)</label>
+          <input id="orphan-age" class="form-control" type="number" value="24"></div>
+        <div class="col-md-2 form-check ms-2 mb-2"><input id="include-orphans" class="form-check-input" type="checkbox" checked>
+          <label class="form-check-label" for="include-orphans">Include orphans</label></div>
+        <div class="col-md-2"><button id="bulk-dry-run" class="btn btn-outline-primary w-100">Dry run</button></div>
+      </div>
+      <div id="bulk-report" class="mt-3"></div>
+    </div></div>
+
+    <h5>Celery queues <button id="refresh-queues" class="btn btn-sm btn-outline-secondary ms-2">Refresh</button></h5>
+    <div id="queues-area" class="muted">Loading…</div>
+
+    <h5 class="mt-4">Active tasks <button id="refresh-active" class="btn btn-sm btn-outline-secondary ms-2">Refresh</button></h5>
+    <p class="muted">Tasks the running workers report as executing now.</p>
+    <div id="active-area" class="muted">Not loaded.</div>
+
+    <h5 class="mt-4">Task locks
+      <button id="refresh-locks" class="btn btn-sm btn-outline-secondary ms-2">Refresh</button>
+      <button id="release-locks" class="btn btn-sm btn-outline-danger ms-1">Release locks</button></h5>
+    <p class="muted">Locks that stop a workflow being started twice. Release only if a workflow died holding one.</p>
+    <div id="locks-area" class="muted">Not loaded.</div>
+
+    <h5 class="mt-4">Workers <button id="refresh-workers" class="btn btn-sm btn-outline-secondary ms-2">Refresh</button></h5>
+    <div id="workers-area" class="muted">Not loaded.</div>
+  </div>
+</div>
+
+<!-- Repack dialog -->
+<div class="modal fade" id="repack-modal" tabindex="-1">
+  <div class="modal-dialog modal-lg"><div class="modal-content">
+    <div class="modal-header"><h5 class="modal-title">Repack <code id="rp-table"></code></h5>
+      <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+    <div class="modal-body">
+      <p id="rp-summary"></p>
+      <div class="row g-2">
+        <div class="col-md-3"><label class="form-label" for="rp-fillfactor">fillfactor</label>
+          <input id="rp-fillfactor" class="form-control" type="number" min="10" max="100" placeholder="unchanged"></div>
+        <div class="col-md-3"><label class="form-label" for="rp-jobs">Parallel index builds</label>
+          <input id="rp-jobs" class="form-control" type="number" min="1" max="8" value="2"></div>
+        <div class="col-md-3"><label class="form-label" for="rp-wait">Lock wait (s)</label>
+          <input id="rp-wait" class="form-control" type="number" value="60"></div>
+        <div class="col-md-3 form-check mt-4 ps-5"><input id="rp-force" class="form-check-input" type="checkbox">
+          <label class="form-check-label" for="rp-force">Over 100 GB (force)</label></div>
+      </div>
+      <p class="muted mt-2 mb-0">fillfactor 90 is recommended for segmentation tables, whose rows are rewritten by root ID updates.
+        Repack a segmentation table while no materialization is running.</p>
+      <div id="rp-result" class="mt-3"></div>
+    </div>
+    <div class="modal-footer">
+      <button id="rp-dry" class="btn btn-outline-primary">Dry run</button>
+      <button id="rp-run" class="btn btn-danger">Repack</button>
+    </div>
+  </div></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/admin.js') }}"></script>
+{% endblock %}
