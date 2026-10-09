@@ -129,6 +129,25 @@ class TestListings:
         assert 590 <= claimed["oldest_claim_seconds"] <= 610
 
 
+class TestUploadJobs:
+    """The admin page's upload list: every user's jobs, unlike /upload/api/process/user-jobs."""
+
+    def test_all_users_jobs_of_one_datastack_newest_first(self, real_redis):
+        from materializationengine.blueprints.upload import api as upload_api
+
+        jobs = {
+            "a1": {"datastack_name": "minnie65_phase3_v1", "user_id": "1", "last_updated": "2026-10-09T01:00:00"},
+            "a2": {"datastack_name": "minnie65_phase3_v1", "user_id": "2", "last_updated": "2026-10-09T03:00:00"},
+            "b1": {"datastack_name": "zheng_ca3", "user_id": "1", "last_updated": "2026-10-09T02:00:00"},
+        }
+        for job_id, job in jobs.items():
+            real_redis.set(f"csv_processing:{job_id}", json.dumps(job))
+        real_redis.set("csv_processing:broken", "not json")
+        with mock.patch.object(upload_api, "REDIS_CLIENT", real_redis):
+            assert [j["job_id"] for j in admin_api.upload_jobs("minnie65_phase3_v1")] == ["a2", "a1"]
+            assert {j["job_id"] for j in admin_api.upload_jobs()} == {"a1", "a2", "b1"}
+
+
 class TestAdminRoutes:
     @pytest.fixture
     def client(self):
@@ -145,6 +164,11 @@ class TestAdminRoutes:
             dbs.assert_called_once_with(with_sizes=False)
             assert client.get("/materialize/admin/api/repack/jobs").json == {"jobs": []}
             assert client.get("/materialize/admin/api/queues").json == {"queues": {}, "claimed": {}}
+
+    def test_uploads_route_filters_by_datastack(self, client):
+        with mock.patch.object(admin_api, "upload_jobs", return_value=[{"job_id": "a2"}]) as listing:
+            assert client.get("/materialize/admin/api/uploads?datastack=minnie65_phase3_v1").json == {"jobs": [{"job_id": "a2"}]}
+            listing.assert_called_once_with("minnie65_phase3_v1")
 
     def test_datastacks_route(self, client):
         with mock.patch("materializationengine.utils.get_config_param", return_value=["minnie65_phase3_v1", "zheng_ca3"]):

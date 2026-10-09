@@ -20,7 +20,9 @@
     active: "/materialize/api/v2/workflow/status/active",
     locks: "/materialize/api/v2/workflow/status/locks",
     workers: "/materialize/api/v2/celery/status/info",
-    uploadJobs: "/materialize/upload/api/process/user-jobs",
+    // Every datastack's upload jobs: /upload/api/process/user-jobs only returns the
+    // caller's own jobs and those of datastacks with a legacy view permission.
+    uploadJobs: "/materialize/admin/api/uploads",
     bulkCleanup: "/materialize/upload/api/admin/jobs/cleanup",
     jobCleanup: (id) => `/materialize/upload/api/admin/jobs/${encodeURIComponent(id)}/cleanup`,
   };
@@ -61,6 +63,10 @@
 
   let caps = { superadmin: false, datastacks: [] };
   let current = null; // the selected datastack's capability entry
+  // Loaders await and then write shared controls; a response that comes back after the
+  // user switched datastack (or version) must be dropped, or it would fill B's controls
+  // with A's databases or versions.
+  const stillOn = (datastack) => current !== null && current.name === datastack;
 
   function esc(value) {
     return String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -186,12 +192,21 @@
   }
 
   async function loadVvTables() {
-    const version = $("vv-target").value;
+    const ds = current.name, version = $("vv-target").value;
     vvTables = [];
     if (version) {
       $("vv-tables-check").textContent = "Loading tables…";
-      try { vvTables = (await call(API.annotationTables(current.name, version))).tables.map((t) => t.name); }
-      catch (e) { $("vv-tables-check").textContent = `Could not load tables: ${e.message}`; }
+      $("vv-table-list").innerHTML = "";
+      let tables;
+      try { tables = (await call(API.annotationTables(ds, version))).tables.map((t) => t.name); }
+      catch (e) {
+        if (!stillOn(ds) || $("vv-target").value !== version) return;
+        $("vv-tables-check").textContent = `Could not load tables: ${e.message}`;
+        updateVvButton();
+        return;
+      }
+      if (!stillOn(ds) || $("vv-target").value !== version) return;
+      vvTables = tables;
     }
     renderVvTables();
     renderTargetStatus();
@@ -227,10 +242,24 @@
   }
 
   async function loadVvTargets() {
-    const select = $("vv-name");
+    const ds = current.name, select = $("vv-name");
     select.innerHTML = '<option value="">Loading…</option>';
-    try { vvTargets = (await call(API.virtualTargets(current.name))).targets; }
-    catch (e) { vvTargets = []; select.innerHTML = `<option value="">Could not load datastacks: ${esc(e.message)}</option>`; }
+    vvTargets = [];
+    vvStatus = null;
+    renderTargetStatus();
+    let targets;
+    try { targets = (await call(API.virtualTargets(ds))).targets; }
+    catch (e) {
+      if (!stillOn(ds)) return;
+      // Keep the error visible: no "Choose a datastack" / "New datastack…" menu that would
+      // read as "there are no existing targets".
+      select.innerHTML = `<option value="">Could not load datastacks: ${esc(e.message)}</option>`;
+      $("vv-new-name").classList.add("d-none");
+      updateVvButton();
+      return;
+    }
+    if (!stillOn(ds)) return;
+    vvTargets = targets;
     select.innerHTML = '<option value="">Choose a datastack</option>' +
       vvTargets.map((t) => `<option value="${esc(t.name)}">${esc(t.name)}${t.auth_dataset ? ` (auth dataset ${esc(t.auth_dataset)})` : ""}${t.ready ? "" : " – not ready"}</option>`).join("") +
       `<option value="${NEW_DATASTACK}">New datastack…</option>`;
@@ -259,10 +288,17 @@
       return;
     }
     $("vv-target-status").innerHTML = '<span class="muted small">Checking…</span>';
+    const ds = current.name;
     vvStatusTimer = setTimeout(async () => {
-      try { vvStatus = await call(API.virtualTarget(current.name, name)); }
-      catch (e) { $("vv-target-status").innerHTML = alertBox("danger", esc(e.message)); return; }
-      if (vvTargetName() === name) renderTargetStatus();
+      let status;
+      try { status = await call(API.virtualTarget(ds, name)); }
+      catch (e) {
+        if (stillOn(ds) && vvTargetName() === name) $("vv-target-status").innerHTML = alertBox("danger", esc(e.message));
+        return;
+      }
+      if (!stillOn(ds) || vvTargetName() !== name) return;
+      vvStatus = status;
+      renderTargetStatus();
     }, 400);
   }
 
@@ -338,9 +374,14 @@
     select.innerHTML = vvSelect.innerHTML = '<option value="">Loading…</option>';
     dumpTables = [];
     renderDumpTables();
+    const ds = current.name;
     let versions;
-    try { versions = (await call(API.versions(current.name))).versions; }
-    catch (e) { select.innerHTML = vvSelect.innerHTML = `<option value="">Could not load versions: ${esc(e.message)}</option>`; return; }
+    try { versions = (await call(API.versions(ds))).versions; }
+    catch (e) {
+      if (stillOn(ds)) select.innerHTML = vvSelect.innerHTML = `<option value="">Could not load versions: ${esc(e.message)}</option>`;
+      return;
+    }
+    if (!stillOn(ds)) return;
     // A virtual version must point at a valid frozen version.
     const valid = versions.filter((v) => v.valid);
     vvSelect.innerHTML = valid.length ? valid.map(versionOption).join("") : '<option value="">No valid frozen versions</option>';
@@ -361,9 +402,17 @@
     const version = $("dump-version").value;
     dumpTables = [];
     if (!version) { renderDumpTables(); return; }
+    const ds = current.name;
     $("dump-table-count").textContent = "Loading tables…";
-    try { dumpTables = (await call(API.versionTables(current.name, version))).tables; }
-    catch (e) { $("dump-table").innerHTML = ""; $("dump-table-count").textContent = `Could not load tables: ${e.message}`; return; }
+    $("dump-table").innerHTML = "";
+    let tables;
+    try { tables = (await call(API.versionTables(ds, version))).tables; }
+    catch (e) {
+      if (stillOn(ds) && $("dump-version").value === version) $("dump-table-count").textContent = `Could not load tables: ${e.message}`;
+      return;
+    }
+    if (!stillOn(ds) || $("dump-version").value !== version) return;
+    dumpTables = tables;
     renderDumpTables();
   }
 
@@ -391,14 +440,17 @@
   }
 
   // ---------------------------------------------------------------- table maintenance (superadmin)
-  let currentTables = [];
+  let currentTables = [], currentTablesDb = null; // the report and the database it is for
 
   async function loadDatabases() {
     const select = $("db-select");
     select.innerHTML = "<option>Loading…</option>";
+    $("tables-area").innerHTML = "";
+    const ds = current.name;
     let dbs;
-    try { dbs = (await call(API.databases, { query: { datastack: current.name } })).databases; }
-    catch (e) { select.innerHTML = `<option>Could not load databases: ${esc(e.message)}</option>`; return; }
+    try { dbs = (await call(API.databases, { query: { datastack: ds } })).databases; }
+    catch (e) { if (stillOn(ds)) select.innerHTML = `<option>Could not load databases: ${esc(e.message)}</option>`; return; }
+    if (!stillOn(ds)) return;
     const live = dbs.filter((d) => d.kind === "live");
     const frozen = dbs.filter((d) => d.kind === "frozen").sort((a, b) => (b.version || 0) - (a.version || 0));
     const option = (d) => {
@@ -417,9 +469,15 @@
   async function loadTables() {
     const db = $("db-select").value, area = $("tables-area");
     area.innerHTML = '<p class="muted">Loading…</p>';
+    const fresh = () => $("db-select").value === db;
+    let tables;
     try {
-      currentTables = (await call(API.tableOrder(db), { query: { min_rows: $("min-rows").value, max_correlation: $("max-corr").value } })).tables;
-    } catch (e) { area.innerHTML = alertBox("danger", esc(e.message)); return; }
+      tables = (await call(API.tableOrder(db), { query: { min_rows: $("min-rows").value, max_correlation: $("max-corr").value } })).tables;
+    } catch (e) { if (fresh()) area.innerHTML = alertBox("danger", esc(e.message)); return; }
+    // The Repack buttons act on the database chosen when the report was requested.
+    if (!fresh()) return;
+    currentTables = tables;
+    currentTablesDb = db;
     if (!currentTables.length) { area.innerHTML = '<p class="muted">No tables match.</p>'; return; }
     currentTables.sort((a, b) => Math.abs(a.id_correlation ?? 0) - Math.abs(b.id_correlation ?? 0));
     area.innerHTML = `
@@ -441,7 +499,7 @@
   const repackModal = () => bootstrap.Modal.getOrCreateInstance($("repack-modal"));
 
   function openRepack(table) {
-    repackTarget = { db: $("db-select").value, table };
+    repackTarget = { db: currentTablesDb, table };
     const total = table.table_gb + table.index_gb;
     $("rp-table").textContent = `${repackTarget.db}.${table.table_name}`;
     $("rp-summary").innerHTML = `${Number(table.rows).toLocaleString()} rows, ${total.toFixed(2)} GB of table and indexes, ` +
@@ -495,9 +553,11 @@
 
   // ---------------------------------------------------------------- uploads (superadmin)
   async function loadUploads() {
+    const ds = current.name;
     let jobs;
-    try { jobs = ((await call(API.uploadJobs)).jobs || []).filter((j) => !current || j.datastack_name === current.name); }
-    catch (e) { $("uploads-area").innerHTML = alertBox("danger", esc(e.message)); return; }
+    try { jobs = (await call(API.uploadJobs, { query: { datastack: ds } })).jobs || []; }
+    catch (e) { if (stillOn(ds)) $("uploads-area").innerHTML = alertBox("danger", esc(e.message)); return; }
+    if (!stillOn(ds)) return;
     if (!jobs.length) { $("uploads-area").innerHTML = '<p class="muted">No upload job records for this datastack.</p>'; return; }
     $("uploads-area").innerHTML = `
       <table class="table table-sm"><thead><tr><th>Job</th><th>Status</th><th>Phase</th><th>Staging cleanup</th><th></th></tr></thead>
@@ -600,6 +660,8 @@
     $("dump-version").addEventListener("change", loadDumpTables);
     $("dump-filter").addEventListener("input", renderDumpTables);
     $("load-tables").addEventListener("click", loadTables);
+    // A report (and its Repack buttons) belongs to one database; drop it when that changes.
+    $("db-select").addEventListener("change", () => { $("tables-area").innerHTML = ""; currentTables = []; currentTablesDb = null; });
     $("rp-dry").addEventListener("click", () => startRepack(true));
     $("rp-run").addEventListener("click", () => startRepack(false));
     $("refresh-uploads").addEventListener("click", loadUploads);

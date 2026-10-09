@@ -247,6 +247,39 @@ def virtual_target(datastack: str, name: str):
     return jsonify(virtual_target_status(datastack, name))
 
 
+def upload_jobs(datastack: str = None) -> list:
+    """Every bulk-upload job record, optionally of one datastack, newest first.
+
+    The upload blueprint's /api/process/user-jobs returns only the caller's own jobs and
+    those of datastacks granting a legacy `<datastack>_view` permission, so a superadmin
+    would not see other users' uploads there.
+    """
+    from materializationengine.blueprints.upload.api import REDIS_CLIENT as UPLOAD_REDIS
+
+    jobs = []
+    for key in UPLOAD_REDIS.scan_iter("csv_processing:*", count=1000):
+        raw = UPLOAD_REDIS.get(key)
+        if not raw:
+            continue
+        try:
+            job = json.loads(raw)
+        except ValueError:
+            continue
+        if datastack and job.get("datastack_name") != datastack:
+            continue
+        job["job_id"] = (key.decode() if isinstance(key, bytes) else key).split(":", 1)[1]
+        jobs.append(job)
+    jobs.sort(key=lambda j: str(j.get("last_updated") or j.get("start_time") or ""), reverse=True)
+    return jobs
+
+
+@admin_bp.route("/api/uploads")
+@reset_auth
+@auth_requires_admin
+def uploads():
+    return jsonify({"jobs": upload_jobs(request.args.get("datastack") or None)})
+
+
 @admin_bp.route("/api/repack/jobs")
 @reset_auth
 @auth_requires_admin
