@@ -1,19 +1,22 @@
-"""The record of root ID updates written for each update_root_ids run (Parquet + Delta Lake)."""
+"""The root ID update log: one append-only Delta table per annotation table, one commit per run."""
 
 import json
+import shutil
 from unittest import mock
 
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 from deltalake import DeltaTable
 
 from materializationengine.workflows import root_id_update_log as log
 
 RUN_TS = "2026-10-07 15:01:02.123456"
+RUN_ID = "20261007T150102.123456Z"
+LATER_TS = "2026-10-07 16:01:02.000000"
+LATER_ID = "20261007T160102.000000Z"
 # celery task ids, which name the chunk files
-TASK = {k: f"{i:08x}-0000-4000-8000-000000000000" for i, k in enumerate("abc")}
+TASK = {k: f"{i:08x}-0000-4000-8000-000000000000" for i, k in enumerate("abcd")}
 
 
 def metadata(table="synapses", **extra):
@@ -44,37 +47,32 @@ def chunk(ids, old, new, side="pre_pt"):
     return df, pd.Series(old, dtype=object)
 
 
-RUN_ID = "20261007T150102.123456Z"
+def write(md, ids, task, side="pre_pt"):
+    df, old = chunk(ids, [i * 10 for i in ids], [i * 10 + 1 for i in ids], side)
+    log.record_chunk(md, df, old, f"{side}_root_id", f"{side}_supervoxel_id", task)
 
 
 def table_dir(tmp_path, table="synapses"):
     return tmp_path / "root_id_updates" / "minnie65_phase3_v1" / table
 
 
-def run_dir(tmp_path, table="synapses"):
-    return table_dir(tmp_path, table) / RUN_ID
-
-
-def manifest_rows(tmp_path, table="synapses"):
-    return DeltaTable(str(table_dir(tmp_path, table) / "_manifest")).to_pyarrow_table().to_pylist()
+def staging_dir(tmp_path, run=RUN_ID, table="synapses"):
+    return tmp_path / "root_id_updates" / "_staging" / "minnie65_phase3_v1" / table / run
 
 
 class TestPaths:
-    def test_folders_are_by_table_then_run(self, bucket):
+    def test_one_table_per_annotation_table_and_staging_outside_it(self, bucket):
         tmp_path, _ = bucket
         assert log.table_uri(metadata()) == str(table_dir(tmp_path))
-        assert log.run_uri(metadata()) == str(run_dir(tmp_path))
-        assert log.run_uri(metadata()) == log.run_uri(metadata())
+        assert log.staging_uri(metadata()) == str(staging_dir(tmp_path))
         # the ISO form of the same timestamp names the same run
-        assert log.run_uri(metadata(materialization_time_stamp="2026-10-07T15:01:02.123456")) == str(run_dir(tmp_path))
-        # another run of the table sits in the same table folder
-        later = log.run_uri(metadata(materialization_time_stamp="2026-10-07 16:01:02.000000"))
-        assert later == str(table_dir(tmp_path) / "20261007T160102.000000Z")
+        assert log.staging_uri(metadata(materialization_time_stamp="2026-10-07T15:01:02.123456")) == str(staging_dir(tmp_path))
+        assert not str(staging_dir(tmp_path)).startswith(str(table_dir(tmp_path)))
 
-    def test_no_bucket_no_folder(self, bucket):
+    def test_no_bucket_no_paths(self, bucket):
         _, config = bucket
         del config["MATERIALIZATION_DUMP_BUCKET"]
-        assert log.run_uri(metadata()) is None
+        assert log.table_uri(metadata()) is None and log.staging_uri(metadata()) is None
 
     @pytest.mark.parametrize("value, expected", [(True, True), (False, False), ("True", True), ("false", False), ("1", True), (None, False)])
     def test_enabled_reads_bools_and_env_strings(self, bucket, value, expected):
@@ -116,148 +114,137 @@ class TestRows:
         assert table.to_pylist()[1] == {"id": 2, "root_column": "pre_pt", "supervoxel_id": 20, "old_root_id": None, "new_root_id": 202}
 
 
-class TestRecord:
-    def write(self, md, ids, old, new, task_id, side="pre_pt"):
-        df, old_roots = chunk(ids, old, new, side)
-        return log.record_chunk(md, df, old_roots, f"{side}_root_id", f"{side}_supervoxel_id", task_id)
-
-    def test_run_is_one_delta_table_per_annotation_table_with_metadata_beside_it(self, bucket):
+class TestRuns:
+    def test_each_run_is_one_commit_in_its_partition_with_its_details(self, bucket):
         tmp_path, _ = bucket
         md = metadata(lookup_all_root_ids=False)
         log.start(md)
-        assert json.loads((run_dir(tmp_path) / "_run.json").read_text())["state"] == "running"
-        self.write(md, [1, 2], [10, 20], [11, 21], TASK["a"])
-        self.write(md, [1, 2], [10, 20], [12, 22], TASK["b"], side="post_pt")
-        self.write(md, [3], [30], [31], TASK["c"])
+        assert json.loads((staging_dir(tmp_path) / "_run.json").read_text())["state"] == "running"
+        write(md, [1, 2], TASK["a"])
+        write(md, [1, 2], TASK["b"], side="post_pt")
+        write(md, [2], TASK["c"])  # a retried batch under a new task id: duplicate rows
         log.finalize(md)
 
-        rows = DeltaTable(str(run_dir(tmp_path))).to_pyarrow_table()
-        assert rows.num_rows == 5 and rows.schema == log.SCHEMA
-        manifest = json.loads((run_dir(tmp_path) / "_run.json").read_text())
-        assert manifest["state"] == "done" and manifest["rows"] == 5 and manifest["chunk_files"] == 3
-        # the three chunks were compacted into one file of the table
-        assert manifest["files"] == 1 and manifest["compaction"] == {"numFilesAdded": 1, "numFilesRemoved": 3}
-        assert len(DeltaTable(str(run_dir(tmp_path))).file_uris()) == 1
-        # ...and the chunk files deleted
-        assert manifest["vacuumed_files"] == 3 and not list(run_dir(tmp_path).glob("part-pre_pt-*"))
-        assert len(list(run_dir(tmp_path).glob("*.parquet"))) == 1
-        assert manifest["root_columns"] == ["post_pt", "pre_pt"]
-        assert manifest["annotation_table"] == "synapses" and manifest["segmentation_table"] == "synapses__minnie3_v1"
-        assert manifest["materialization_time_stamp"] == RUN_TS and manifest["lookup_all_root_ids"] is False
+        table = DeltaTable(str(table_dir(tmp_path)))
+        rows = table.to_pyarrow_table()
+        assert rows.num_rows == 4  # 5 written, 1 exact duplicate removed
+        assert set(rows.column("run_id").to_pylist()) == {RUN_ID}
+        assert {t.isoformat() for t in rows.column("end_time_stamp").to_pylist()} == {"2026-10-07T15:01:02.123456+00:00"}
+        assert all(p.startswith(f"run_id={RUN_ID}/") for p in table.get_add_actions(flatten=True).column("path").to_pylist())
+        (run,) = log.runs(str(table_dir(tmp_path)))
+        assert run["run_id"] == RUN_ID and run["rows"] == "4" and run["chunk_files"] == "3"
+        assert run["duplicate_rows_removed"] == "1" and run["lookup_all_root_ids"] == "false"
+        assert run["start_time_stamp"].startswith("2026-10-07T14:01:00") and run["end_time_stamp"].startswith("2026-10-07T15:01:02.123456")
+        assert run["segmentation_table"] == "synapses__minnie3_v1"
+        assert not staging_dir(tmp_path).exists()
 
-    def test_a_retried_task_overwrites_its_own_file(self, bucket):
+    def test_finalize_again_adds_no_commit(self, bucket):
         tmp_path, _ = bucket
         md = metadata()
-        self.write(md, [1, 2], [10, 20], [11, 21], TASK["a"])
-        self.write(md, [1, 2], [10, 20], [11, 21], TASK["a"])
-        assert len(list(run_dir(tmp_path).glob("*.parquet"))) == 1
-        assert pq.read_table(next(run_dir(tmp_path).glob("*.parquet"))).num_rows == 2
+        write(md, [1], TASK["a"])
+        log.finalize(md)
+        write(md, [1], TASK["a"])  # the same run's chunk shows up again
+        log.finalize(md)
+        assert len(log.runs(str(table_dir(tmp_path)))) == 1
+        assert DeltaTable(str(table_dir(tmp_path))).to_pyarrow_table().num_rows == 1
 
-    def test_nothing_updated_writes_nothing(self, bucket):
-        tmp_path, _ = bucket
-        log.finalize(metadata())
-        assert not (tmp_path / "root_id_updates").exists()
-
-    def test_finalize_twice_keeps_one_table(self, bucket):
+    def test_a_run_without_updates_makes_no_commit(self, bucket):
         tmp_path, _ = bucket
         md = metadata()
-        self.write(md, [1], [10], [11], TASK["a"])
-        self.write(md, [2], [20], [21], TASK["b"])
+        log.start(md)
         log.finalize(md)
+        assert not table_dir(tmp_path).exists() and not staging_dir(tmp_path).exists()
+
+    def test_the_table_is_append_only_and_keeps_its_log(self, bucket):
+        tmp_path, _ = bucket
+        md = metadata()
+        write(md, [1], TASK["a"])
         log.finalize(md)
-        assert DeltaTable(str(run_dir(tmp_path))).to_pyarrow_table().num_rows == 2
-        manifest = json.loads((run_dir(tmp_path) / "_run.json").read_text())
-        # the second run finds no chunk files (deleted) and keeps what the first recorded
-        assert manifest["rows"] == 2 and manifest["chunk_files"] == 2 and manifest["root_columns"] == ["pre_pt"]
-        assert manifest["files"] == 1 and manifest["vacuumed_files"] == 2
-        assert manifest["compaction"] == {"numFilesAdded": 1, "numFilesRemoved": 2}
+        table = DeltaTable(str(table_dir(tmp_path)))
+        assert table.metadata().configuration["delta.appendOnly"] == "true"
+        assert table.metadata().configuration["delta.enableExpiredLogCleanup"] == "false"
+        with pytest.raises(Exception, match="append-only"):
+            table.delete("id = 1")
+
+    def test_a_mirror_needs_only_the_new_commits_files(self, bucket, tmp_path):
+        tmp, _ = bucket
+        first, second = metadata(), metadata(materialization_time_stamp=LATER_TS, last_updated_time_stamp=RUN_TS)
+        write(first, [1, 2], TASK["a"])
+        log.finalize(first)
+        mirror = tmp_path / "mirror"
+        shutil.copytree(table_dir(tmp), mirror)
+        version = DeltaTable(str(mirror)).version()
+
+        write(second, [3], TASK["b"])
+        log.finalize(second)
+        new = log.added_files(str(table_dir(tmp)), after_version=version)
+        assert new and all(p.startswith(f"run_id={LATER_ID}/") for p in new)
+        # bring the mirror up to date with just those files and the new log entries
+        for p in new:
+            (mirror / p).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(table_dir(tmp) / p, mirror / p)
+        for entry in (table_dir(tmp) / "_delta_log").iterdir():
+            if not (mirror / "_delta_log" / entry.name).exists():
+                shutil.copy(entry, mirror / "_delta_log" / entry.name)
+        assert sorted(DeltaTable(str(mirror)).to_pyarrow_table().column("id").to_pylist()) == [1, 2, 3]
+        assert [r["run_id"] for r in log.runs(str(mirror))] == [RUN_ID, LATER_ID]
+        # windows chain: the second run starts where the first ended
+        runs = log.runs(str(mirror))
+        assert runs[1]["start_time_stamp"] == runs[0]["end_time_stamp"]
+
+    def test_a_large_run_is_streamed_into_one_commit(self, bucket, monkeypatch):
+        tmp_path, _ = bucket
+        monkeypatch.setattr(log, "STREAM_GROUP_FILES", 2)
+        md = metadata()
+        for i, t in enumerate("abcd"):
+            write(md, [i * 10 + 1, i * 10 + 2], TASK[t])
+        log.finalize(md)
+        (run,) = log.runs(str(table_dir(tmp_path)))
+        assert run["rows"] == "8" and run["duplicate_rows_removed"] == "" and run["chunk_files"] == "4"
+        assert DeltaTable(str(table_dir(tmp_path))).to_pyarrow_table().num_rows == 8
 
     def test_failures_are_logged_not_raised(self, bucket):
         md = metadata()
         with mock.patch.object(log.pq, "write_table", side_effect=OSError("bucket down")), \
                 mock.patch.object(log.celery_logger, "warning") as warning:
-            assert self.write(md, [1], [10], [11], TASK["a"]) is None
+            assert log.record_chunk(md, *chunk([1], [10], [11]), "pre_pt_root_id", "pre_pt_supervoxel_id", TASK["a"]) is None
         assert "bucket down" in warning.call_args[0][0]
         with mock.patch.object(log, "updates_frame", side_effect=ValueError("bad row")):
-            assert self.write(md, [1], [10], [11], TASK["a"]) is None
+            assert log.record_chunk(md, *chunk([1], [10], [11]), "pre_pt_root_id", "pre_pt_supervoxel_id", TASK["a"]) is None
         with mock.patch.object(log, "_filesystem", side_effect=OSError("bucket down")):
             log.start(md)
             log.finalize(md)
 
 
-class TestManifest:
-    def write(self, md, ids, task, side="pre_pt"):
-        df, old = chunk(ids, [i * 10 for i in ids], [i * 10 + 1 for i in ids], side)
-        log.record_chunk(md, df, old, f"{side}_root_id", f"{side}_supervoxel_id", task)
-
-    def test_each_finished_run_is_listed_once_with_its_window(self, bucket):
-        tmp_path, _ = bucket
-        first = metadata(lookup_all_root_ids=False)
-        self.write(first, [1, 2], TASK["a"])
-        log.finalize(first)
-        log.finalize(first)  # again: no second row
-        second = metadata(materialization_time_stamp="2026-10-07 16:01:02.000000",
-                          last_updated_time_stamp=RUN_TS)
-        self.write(second, [3], TASK["b"], side="post_pt")
-        log.finalize(second)
-        rows = sorted(manifest_rows(tmp_path), key=lambda r: r["run_id"])
-        assert [r["run_id"] for r in rows] == [RUN_ID, "20261007T160102.000000Z"]
-        assert [r["path"] for r in rows] == [r["run_id"] for r in rows]
-        assert rows[0]["rows"] == 2 and rows[0]["files"] == 1 and rows[0]["root_columns"] == ["pre_pt"]
-        assert rows[0]["start_time_stamp"].isoformat().startswith("2026-10-07T14:01:00")
-        assert rows[0]["end_time_stamp"].isoformat().startswith("2026-10-07T15:01:02.123456")
-        # windows chain: the second run starts where the first ended
-        assert rows[1]["start_time_stamp"] == rows[0]["end_time_stamp"]
-        assert rows[1]["root_columns"] == ["post_pt"] and rows[1]["duplicate_rows_removed"] is None
-
-    def test_a_run_without_updates_is_not_listed(self, bucket):
-        tmp_path, _ = bucket
-        md = metadata()
-        log.start(md)
-        log.finalize(md)
-        assert not (table_dir(tmp_path) / "_manifest").exists()
-
-
-class TestMigrateOldLayout:
-    def old_run(self, tmp_path, run_id, table, rows, last_updated):
-        """A run as the old code wrote it: {datastack}/{run_id}/{table}/ Delta table + _run.json."""
+class TestMigrateRunsToTable:
+    def per_run_folder(self, tmp_path, run, ts, rows, dups=0):
+        """A run as the previous layout stored it: {table}/{run_id}/ Delta table + _run.json."""
         from deltalake import write_deltalake
 
-        path = tmp_path / "root_id_updates" / "minnie65_phase3_v1" / run_id / table
+        path = table_dir(tmp_path) / run
         write_deltalake(str(path), pa.Table.from_pylist(rows, schema=log.SCHEMA))
-        info = {"state": "done", "rows": len(rows), "files": 1, "root_columns": ["pre_pt"],
-                "materialization_time_stamp": f"{run_id[:4]}-{run_id[4:6]}-{run_id[6:8]} {run_id[9:11]}:{run_id[11:13]}:{run_id[13:15]}.{run_id[16:22]}",
-                "last_updated_time_stamp": last_updated, "lookup_all_root_ids": False}
-        (path / "_run.json").write_text(json.dumps(info))
+        (path / "_run.json").write_text(json.dumps({
+            "state": "done", "rows": len(rows), "materialization_time_stamp": ts,
+            "last_updated_time_stamp": "2026-10-07 14:01:00.000000", "duplicate_rows_removed": dups,
+            "datastack": "minnie65_phase3_v1", "annotation_table": "synapses"}))
         return path
 
-    def test_copies_deduplicated_runs_by_table_and_lists_them(self, tmp_path):
+    def test_one_commit_per_run_oldest_first_idempotent_and_sources_kept(self, tmp_path):
         row = lambda i: {"id": i, "root_column": "pre_pt", "supervoxel_id": i, "old_root_id": 10, "new_root_id": 11}
-        old = self.old_run(tmp_path, RUN_ID, "synapses", [row(1), row(2), row(2), row(3), row(3)],
-                           "2026-10-07 14:01:00.000000")
-        self.old_run(tmp_path, "20261007T160102.000000Z", "synapses", [row(4)], "2026-10-07 15:01:02.123456")
-        empty = tmp_path / "root_id_updates" / "minnie65_phase3_v1" / RUN_ID / "cells"
-        empty.mkdir(parents=True)
-        (empty / "_run.json").write_text(json.dumps({"state": "done", "rows": 0}))
-        uri = str(tmp_path / "root_id_updates" / "minnie65_phase3_v1")
+        later = self.per_run_folder(tmp_path, LATER_ID, LATER_TS, [row(3)])
+        first = self.per_run_folder(tmp_path, RUN_ID, RUN_TS, [row(1), row(2)], dups=5)
+        uri = str(table_dir(tmp_path))
 
-        plan = log.migrate_old_layout(uri)  # dry run: writes nothing
-        assert {(p["table"], p["result"]) for p in plan} == {("synapses", "would copy"), ("cells", "no updates (rows=0), skipped")}
-        assert not table_dir(tmp_path).exists()
+        plan = log.migrate_runs_to_table(uri)
+        assert [(p["run_id"], p["result"]) for p in plan] == [(RUN_ID, "would commit"), (LATER_ID, "would commit")]
+        assert not DeltaTable.is_deltatable(uri)
 
-        report = log.migrate_old_layout(uri, dry_run=False)
-        first = next(p for p in report if p["run_id"] == RUN_ID and p["table"] == "synapses")
-        assert first["result"] == "copied" and first["rows"] == 5 and first["duplicate_rows_removed"] == 2
-        assert DeltaTable(str(run_dir(tmp_path))).to_pyarrow_table().num_rows == 3
-        info = json.loads((run_dir(tmp_path) / "_run.json").read_text())
-        assert info["rows"] == 3 and info["duplicate_rows_removed"] == 2 and info["migrated_from"] == str(old)
-        rows = sorted(manifest_rows(tmp_path), key=lambda r: r["run_id"])
-        assert [(r["run_id"], r["rows"], r["duplicate_rows_removed"]) for r in rows] == [
-            (RUN_ID, 3, 2), ("20261007T160102.000000Z", 1, 0)]
-        assert not (table_dir(tmp_path, "cells")).exists()
-        # the old layout is untouched
-        assert DeltaTable(str(old)).to_pyarrow_table().num_rows == 5
+        report = log.migrate_runs_to_table(uri, dry_run=False)
+        assert [p["result"] for p in report] == ["committed", "committed"]
+        runs = log.runs(uri)
+        assert [(r["run_id"], r["rows"], r["duplicate_rows_removed"]) for r in runs] == [(RUN_ID, "2", "5"), (LATER_ID, "1", "0")]
+        assert DeltaTable(uri).to_pyarrow_table().num_rows == 3
+        assert first.exists() and later.exists()  # the previous layout is left in place
 
-        again = log.migrate_old_layout(uri, dry_run=False)
-        assert {p["result"] for p in again if p["table"] == "synapses"} == {"already copied"}
-        assert len(manifest_rows(tmp_path)) == 2
+        again = log.migrate_runs_to_table(uri, dry_run=False)
+        assert {p["result"] for p in again} == {"already committed"} and len(log.runs(uri)) == 2
