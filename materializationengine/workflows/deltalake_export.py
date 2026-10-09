@@ -1610,6 +1610,30 @@ def _flush_buffer(
         _release_freed_heap()
 
 
+def _table_geometry_columns(
+    connection_string: str,
+    source: TableSource,
+    output_specs: list[DeltaLakeOutputSpec],
+) -> list[str]:
+    """Every geometry column the export decodes from WKB into ``{col}_x/_y/_z``.
+
+    That is all PostGIS geometry columns of the exported table(s), not only the
+    one a Morton spec partitions on: :func:`discover_default_output_specs` keeps
+    at most one spatial column (``ctr`` > ``post`` > ``pre`` ...), and decoding
+    only that one left a synapse table's ``pre_pt_position`` and
+    ``post_pt_position`` as raw WKB. Views already decode every geometry column
+    (see :func:`export_view_to_deltalake`).
+    """
+    columns = {
+        spec.source_geometry_column
+        for spec in output_specs
+        if spec.source_geometry_column is not None
+    }
+    for name in source.table_names:
+        columns.update(_get_geometry_columns(connection_string, name))
+    return sorted(columns)
+
+
 def export_table_to_deltalake(
     connection_string: str,
     source: TableSource,
@@ -1659,14 +1683,7 @@ def export_table_to_deltalake(
     """
     if row_limit is not None and total_rows is not None:
         total_rows = min(total_rows, row_limit)
-    # Collect geometry columns that need WKB → x/y/z decoding.
-    geometry_columns = sorted(
-        {
-            spec.source_geometry_column
-            for spec in output_specs
-            if spec.source_geometry_column is not None
-        }
-    )
+    geometry_columns = _table_geometry_columns(connection_string, source, output_specs)
 
     buffer: list[pa.RecordBatch] = []
     buffer_bytes = 0

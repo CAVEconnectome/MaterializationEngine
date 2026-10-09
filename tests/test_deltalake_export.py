@@ -45,6 +45,7 @@ from materializationengine.workflows.deltalake_export import (
     resolve_n_partitions,
 )
 from materializationengine.workflows.deltalake_export import _serial_optimize_runner
+from materializationengine.workflows.deltalake_export import _table_geometry_columns
 
 # ---------------------------------------------------------------------------
 # 4.1  discover_default_output_specs
@@ -849,6 +850,18 @@ class TestMortonCodeLocality:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def no_table_geometry():
+    """export_table_to_deltalake looks up the tables' geometry columns in Postgres;
+    these tests use a fake connection string and tables without geometry."""
+    with patch(
+        "materializationengine.workflows.deltalake_export._get_geometry_columns",
+        return_value=[],
+    ) as lookup:
+        yield lookup
+
+
+@pytest.mark.usefixtures("no_table_geometry")
 class TestExportTableToDeltalake:
     """End-to-end test of export_table_to_deltalake with mocked DB."""
 
@@ -960,12 +973,67 @@ class TestExportTableToDeltalake:
         # Two batches, each exceeds 1-byte threshold → 2 flushes
         assert mock_write.call_count == 2
 
+    @patch("deltalake.DeltaTable")
+    @patch("deltalake.write_deltalake")
+    @patch("materializationengine.workflows.deltalake_export.stream_table_to_arrow")
+    def test_every_geometry_column_is_decoded_not_only_the_morton_one(
+        self, mock_stream, mock_write, _mock_dt, no_table_geometry
+    ):
+        """A synapse table has three points but a Morton spec on only one (ctr);
+        pre and post must still come out as x/y/z, not raw WKB."""
+        coords = {"pre_pt_position": (1, 2, 3), "ctr_pt_position": (4, 5, 6), "post_pt_position": (7, 8, 9)}
+        batch = pa.RecordBatch.from_pydict(
+            {"id": [1], **{c: [shapely.to_wkb(shapely.Point(*xyz))] for c, xyz in coords.items()}}
+        )
+        mock_stream.return_value = iter([batch])
+        no_table_geometry.side_effect = lambda conn, name: {
+            "synapses": list(coords), "synapses__seg": []}[name]
+        spec = DeltaLakeOutputSpec(
+            name="ctr_pt_position_morton",
+            partition_by="ctr_pt_position_morton",
+            partition_strategy="uniform_range",
+            n_partitions=2,
+            bounds=[1],
+            source_geometry_column="ctr_pt_position",
+        )
+
+        export_table_to_deltalake(
+            connection_string="unused",
+            source=TableSource(annotation_table="synapses", segmentation_table="synapses__seg"),
+            output_specs=[spec],
+            output_uri_base="gs://bucket/test",
+            flush_threshold_bytes=10 * 1024 * 1024 * 1024,
+        )
+
+        # both physical tables were asked for their geometry columns
+        assert [c.args[1] for c in no_table_geometry.call_args_list] == ["synapses", "synapses__seg"]
+        written = pl.from_arrow(mock_write.call_args_list[0][0][1])
+        for col, (x, y, z) in coords.items():
+            assert col not in written.columns
+            assert written.select(f"{col}_x", f"{col}_y", f"{col}_z").row(0) == (x, y, z)
+        assert "ctr_pt_position_morton" in written.columns
+        assert "pre_pt_position_morton" not in written.columns
+
+
+class TestTableGeometryColumns:
+    @patch("materializationengine.workflows.deltalake_export._get_geometry_columns")
+    def test_all_geometry_columns_of_every_table_plus_spec_columns(self, lookup):
+        lookup.side_effect = lambda conn, name: {"a": ["pre_pt_position", "post_pt_position"], "b": []}[name]
+        specs = [
+            DeltaLakeOutputSpec(name="ctr_pt_position_morton", partition_by="ctr_pt_position_morton",
+                                source_geometry_column="ctr_pt_position"),
+            DeltaLakeOutputSpec(name="id", partition_by="id"),
+        ]
+        assert _table_geometry_columns("conn", TableSource("a", "b"), specs) == [
+            "ctr_pt_position", "post_pt_position", "pre_pt_position"]
+
 
 # ===========================================================================
 # Section 7 — Tests: Delta Lake Optimization
 # ===========================================================================
 
 
+@pytest.mark.usefixtures("no_table_geometry")
 class TestOptimizeDeltalake:
     """optimize_deltalake should z-order, apply bloom filters, and vacuum."""
 
@@ -1058,6 +1126,7 @@ class TestOptimizeDeltalake:
         mock_dt.vacuum.assert_called_once()
 
 
+@pytest.mark.usefixtures("no_table_geometry")
 class TestSkipOptimize:
     """skip_optimize hands the optimize pass to the caller.
 
