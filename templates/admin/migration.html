@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Migrations</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+</head>
+<body>
+    <div class="container mt-5">
+        <h1 class="mb-4">Database Migrations</h1>
+        
+        <div class="card mb-4">
+            <div class="card-header">
+                Migrate Static Schemas
+            </div>
+            <div class="card-body">
+                <form method="post" action="{{ url_for('migrationview.migrate_static_schemas') }}">
+                    <div class="form-group">
+                        <label for="sql_url">SQL URL:</label>
+                        <input type="text" class="form-control" id="sql_url" name="sql_url" value="{{ config['SQLALCHEMY_DATABASE_URI'] }}">
+                    </div>
+                    <div class="form-group">
+                        <label for="aligned_volume">Aligned Volume:</label>
+                        <select class="form-control" id="aligned_volume" name="aligned_volume">
+                            {% for volume in aligned_volumes %}
+                                <option value="{{ volume }}">{{ volume }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Migrate Static Schemas</button>
+                </form>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header">
+                Migrate Annotation Schemas
+            </div>
+            <div class="card-body">
+                <form method="post" action="{{ url_for('migrationview.migrate_annotation_schemas') }}">
+                    <div class="form-group">
+                        <label for="sql_url">SQL URL:</label>
+                        <input type="text" class="form-control" id="sql_url" name="sql_url" value="{{ config['SQLALCHEMY_DATABASE_URI'] }}">
+                    </div>
+                    <div class="form-group">
+                        <label for="aligned_volume">Aligned Volume:</label>
+                        <select class="form-control" id="aligned_volume" name="aligned_volume">
+                            {% for volume in aligned_volumes %}
+                                <option value="{{ volume }}">{{ volume }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="form-group form-check">
+                        <input type="checkbox" class="form-check-input" id="dry_run" name="dry_run" value="true" checked>
+                        <label class="form-check-label" for="dry_run">Dry Run</label>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Migrate Annotation Schemas</button>
+                </form>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header">
+                Alter Foreign Key Constraints
+            </div>
+            <div class="card-body">
+                <form method="post" action="{{ url_for('migrationview.migrate_foreign_key_constraints') }}">
+                    <div class="form-group">
+                        <label for="sql_url">SQL URL:</label>
+                        <input type="text" class="form-control" id="sql_url" name="sql_url" value="{{ config['SQLALCHEMY_DATABASE_URI'] }}">
+                    </div>
+                    <div class="form-group">
+                        <label for="aligned_volume">Aligned Volume:</label>
+                        <select class="form-control" id="aligned_volume" name="aligned_volume">
+                            {% for volume in aligned_volumes %}
+                                <option value="{{ volume }}">{{ volume }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="form-group form-check">
+                        <input type="checkbox" class="form-check-input" id="dry_run" name="dry_run" value="true" checked>
+                        <label class="form-check-label" for="dry_run">Dry Run</label>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Alter Foreign Key Constraints</button>
+                </form>
+            </div>
+        </div>
+
+        {% if message %}
+            <div class="alert alert-info mt-4">
+                <h3>Migration Result:</h3>
+                <pre>{{ message }}</pre>
+            </div>
+        {% endif %}
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.5.3/dist/umd/popper.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+</body>
+</html>
