@@ -4,6 +4,7 @@ import json
 from unittest import mock
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from deltalake import DeltaTable
@@ -43,18 +44,32 @@ def chunk(ids, old, new, side="pre_pt"):
     return df, pd.Series(old, dtype=object)
 
 
+RUN_ID = "20261007T150102.123456Z"
+
+
+def table_dir(tmp_path, table="synapses"):
+    return tmp_path / "root_id_updates" / "minnie65_phase3_v1" / table
+
+
 def run_dir(tmp_path, table="synapses"):
-    return tmp_path / "root_id_updates" / "minnie65_phase3_v1" / "20261007T150102.123456Z" / table
+    return table_dir(tmp_path, table) / RUN_ID
+
+
+def manifest_rows(tmp_path, table="synapses"):
+    return DeltaTable(str(table_dir(tmp_path, table) / "_manifest")).to_pyarrow_table().to_pylist()
 
 
 class TestPaths:
-    def test_folder_is_deterministic_per_run_and_shared_by_its_tables(self, bucket):
+    def test_folders_are_by_table_then_run(self, bucket):
         tmp_path, _ = bucket
+        assert log.table_uri(metadata()) == str(table_dir(tmp_path))
         assert log.run_uri(metadata()) == str(run_dir(tmp_path))
         assert log.run_uri(metadata()) == log.run_uri(metadata())
         # the ISO form of the same timestamp names the same run
         assert log.run_uri(metadata(materialization_time_stamp="2026-10-07T15:01:02.123456")) == str(run_dir(tmp_path))
-        assert log.run_uri(metadata("cells")).rsplit("/", 1)[0] == log.run_uri(metadata()).rsplit("/", 1)[0]
+        # another run of the table sits in the same table folder
+        later = log.run_uri(metadata(materialization_time_stamp="2026-10-07 16:01:02.000000"))
+        assert later == str(table_dir(tmp_path) / "20261007T160102.000000Z")
 
     def test_no_bucket_no_folder(self, bucket):
         _, config = bucket
@@ -168,3 +183,81 @@ class TestRecord:
         with mock.patch.object(log, "_filesystem", side_effect=OSError("bucket down")):
             log.start(md)
             log.finalize(md)
+
+
+class TestManifest:
+    def write(self, md, ids, task, side="pre_pt"):
+        df, old = chunk(ids, [i * 10 for i in ids], [i * 10 + 1 for i in ids], side)
+        log.record_chunk(md, df, old, f"{side}_root_id", f"{side}_supervoxel_id", task)
+
+    def test_each_finished_run_is_listed_once_with_its_window(self, bucket):
+        tmp_path, _ = bucket
+        first = metadata(lookup_all_root_ids=False)
+        self.write(first, [1, 2], TASK["a"])
+        log.finalize(first)
+        log.finalize(first)  # again: no second row
+        second = metadata(materialization_time_stamp="2026-10-07 16:01:02.000000",
+                          last_updated_time_stamp=RUN_TS)
+        self.write(second, [3], TASK["b"], side="post_pt")
+        log.finalize(second)
+        rows = sorted(manifest_rows(tmp_path), key=lambda r: r["run_id"])
+        assert [r["run_id"] for r in rows] == [RUN_ID, "20261007T160102.000000Z"]
+        assert [r["path"] for r in rows] == [r["run_id"] for r in rows]
+        assert rows[0]["rows"] == 2 and rows[0]["files"] == 1 and rows[0]["root_columns"] == ["pre_pt"]
+        assert rows[0]["start_time_stamp"].isoformat().startswith("2026-10-07T14:01:00")
+        assert rows[0]["end_time_stamp"].isoformat().startswith("2026-10-07T15:01:02.123456")
+        # windows chain: the second run starts where the first ended
+        assert rows[1]["start_time_stamp"] == rows[0]["end_time_stamp"]
+        assert rows[1]["root_columns"] == ["post_pt"] and rows[1]["duplicate_rows_removed"] is None
+
+    def test_a_run_without_updates_is_not_listed(self, bucket):
+        tmp_path, _ = bucket
+        md = metadata()
+        log.start(md)
+        log.finalize(md)
+        assert not (table_dir(tmp_path) / "_manifest").exists()
+
+
+class TestMigrateOldLayout:
+    def old_run(self, tmp_path, run_id, table, rows, last_updated):
+        """A run as the old code wrote it: {datastack}/{run_id}/{table}/ Delta table + _run.json."""
+        from deltalake import write_deltalake
+
+        path = tmp_path / "root_id_updates" / "minnie65_phase3_v1" / run_id / table
+        write_deltalake(str(path), pa.Table.from_pylist(rows, schema=log.SCHEMA))
+        info = {"state": "done", "rows": len(rows), "files": 1, "root_columns": ["pre_pt"],
+                "materialization_time_stamp": f"{run_id[:4]}-{run_id[4:6]}-{run_id[6:8]} {run_id[9:11]}:{run_id[11:13]}:{run_id[13:15]}.{run_id[16:22]}",
+                "last_updated_time_stamp": last_updated, "lookup_all_root_ids": False}
+        (path / "_run.json").write_text(json.dumps(info))
+        return path
+
+    def test_copies_deduplicated_runs_by_table_and_lists_them(self, tmp_path):
+        row = lambda i: {"id": i, "root_column": "pre_pt", "supervoxel_id": i, "old_root_id": 10, "new_root_id": 11}
+        old = self.old_run(tmp_path, RUN_ID, "synapses", [row(1), row(2), row(2), row(3), row(3)],
+                           "2026-10-07 14:01:00.000000")
+        self.old_run(tmp_path, "20261007T160102.000000Z", "synapses", [row(4)], "2026-10-07 15:01:02.123456")
+        empty = tmp_path / "root_id_updates" / "minnie65_phase3_v1" / RUN_ID / "cells"
+        empty.mkdir(parents=True)
+        (empty / "_run.json").write_text(json.dumps({"state": "done", "rows": 0}))
+        uri = str(tmp_path / "root_id_updates" / "minnie65_phase3_v1")
+
+        plan = log.migrate_old_layout(uri)  # dry run: writes nothing
+        assert {(p["table"], p["result"]) for p in plan} == {("synapses", "would copy"), ("cells", "no updates (rows=0), skipped")}
+        assert not table_dir(tmp_path).exists()
+
+        report = log.migrate_old_layout(uri, dry_run=False)
+        first = next(p for p in report if p["run_id"] == RUN_ID and p["table"] == "synapses")
+        assert first["result"] == "copied" and first["rows"] == 5 and first["duplicate_rows_removed"] == 2
+        assert DeltaTable(str(run_dir(tmp_path))).to_pyarrow_table().num_rows == 3
+        info = json.loads((run_dir(tmp_path) / "_run.json").read_text())
+        assert info["rows"] == 3 and info["duplicate_rows_removed"] == 2 and info["migrated_from"] == str(old)
+        rows = sorted(manifest_rows(tmp_path), key=lambda r: r["run_id"])
+        assert [(r["run_id"], r["rows"], r["duplicate_rows_removed"]) for r in rows] == [
+            (RUN_ID, 3, 2), ("20261007T160102.000000Z", 1, 0)]
+        assert not (table_dir(tmp_path, "cells")).exists()
+        # the old layout is untouched
+        assert DeltaTable(str(old)).to_pyarrow_table().num_rows == 5
+
+        again = log.migrate_old_layout(uri, dry_run=False)
+        assert {p["result"] for p in again if p["table"] == "synapses"} == {"already copied"}
+        assert len(manifest_rows(tmp_path)) == 2
