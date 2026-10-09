@@ -6,19 +6,61 @@ from functools import partial
 
 import numpy as np
 import pandas as pd
+import psycopg2
 import shapely
+from flask import abort
 from geoalchemy2.elements import WKBElement
 from geoalchemy2.shape import to_shape
 from geoalchemy2.types import Geometry
 from multiwrapper import multiprocessing_utils as mu
-from sqlalchemy import func, not_
+from sqlalchemy import func, not_, text
 from sqlalchemy.orm import Query
 from sqlalchemy.orm.util import AliasedClass
 from sqlalchemy.sql.schema import Table
 from sqlalchemy.sql.selectable import Alias
 from sqlalchemy.sql.sqltypes import Boolean, DateTime, Integer, BigInteger, Float, String
 
+from materializationengine.utils import get_config_param
+
 DEFAULT_SUFFIX_LIST = ["x", "y", "z", "xx", "yy", "zz", "xxx", "yyy", "zzz"]
+
+
+def statement_timeout_ms() -> int:
+    """Postgres statement_timeout for the query and precomputed endpoints, in ms (0 = none).
+
+    An abandoned request (uwsgi harakiri, the ingress, or a client such as Neuroglancer
+    dropping a precomputed tile) does not stop the Postgres query behind it. On 2026-10-08
+    58 abandoned precomputed-tile queries ran for up to 11 hours, held the Minnie instance at
+    85-96% memory, and got a pg_repack cancelled twice by Cloud SQL's memory watchdog. Keep
+    this below uwsgi's harakiri so the query ends with its request.
+    """
+    seconds = get_config_param("QUERY_STATEMENT_TIMEOUT_SECONDS", 480)
+    try:
+        return max(0, int(float(seconds) * 1000))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _set_local_statement_timeout(execute) -> None:
+    """SET LOCAL: applies to the current transaction only, so the pooled connection is
+    back to the server default once the request's transaction ends."""
+    timeout = statement_timeout_ms()
+    if timeout:
+        execute(f"SET LOCAL statement_timeout = {timeout}")
+
+
+def _abort_if_timed_out(exc: Exception) -> None:
+    cause, seen = exc, set()
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause, psycopg2.errors.QueryCanceled):
+            abort(
+                504,
+                f"Query exceeded the {statement_timeout_ms() // 1000}s limit and was "
+                "cancelled. Narrow it (filters, a smaller bounding box, fewer columns) "
+                "or use a bulk export.",
+            )
+        cause = getattr(cause, "orig", None) or cause.__cause__ or cause.__context__
 
 dtype_map = {
     Boolean: pd.BooleanDtype(),
@@ -256,8 +298,13 @@ def read_sql_tmpfile(query, db_engine):
             query=query, head="HEADER"
         )
         conn = db_engine.raw_connection()
-        cur = conn.cursor()
-        cur.copy_expert(copy_sql, tmpfile)
+        try:
+            cur = conn.cursor()
+            _set_local_statement_timeout(cur.execute)
+            cur.copy_expert(copy_sql, tmpfile)
+        finally:
+            # Back to the pool, which rolls back the transaction (and with it SET LOCAL).
+            conn.close()
         tmpfile.seek(0)
         df = pd.read_csv(tmpfile)
         return df
@@ -328,12 +375,29 @@ def _execute_query(
         Dataframe with query results
     """
     # logging.info(query.statement)
+    try:
+        return _execute_query_unguarded(
+            session, engine, query, fix_wkb=fix_wkb, fix_decimal=fix_decimal,
+            n_threads=n_threads, index_col=index_col, get_count=get_count,
+            direct_sql_pandas=direct_sql_pandas,
+        )
+    except Exception as e:
+        _abort_if_timed_out(e)
+        raise
 
+
+def _execute_query_unguarded(
+    session, engine, query, fix_wkb, fix_decimal, n_threads, index_col, get_count,
+    direct_sql_pandas,
+):
     if get_count:
+        _set_local_statement_timeout(lambda sql: session.execute(text(sql)))
         count = query.count()
         df = pd.DataFrame({"count": [count]})
     else:
         if direct_sql_pandas:
+            # pd.read_sql runs in the session's transaction, so SET LOCAL there covers it.
+            _set_local_statement_timeout(lambda sql: session.execute(text(sql)))
             statement = str(query.statement.compile(engine, compile_kwargs={"literal_binds": True}))
             dtypes = {}
             for k in query.statement.columns.keys():

@@ -69,6 +69,9 @@ class BaseConfig:
     MASTER_NAME = os.environ.get("MASTER_NAME", None)
     MATERIALIZATION_ROW_CHUNK_SIZE = 500
     QUERY_LIMIT_SIZE = 200000
+    # Postgres statement_timeout for the query and precomputed endpoints (0 disables);
+    # keep it below uwsgi's harakiri so an abandoned request's query stops too.
+    QUERY_STATEMENT_TIMEOUT_SECONDS = 480
     PRECOMPUTED_OVERVIEW_MAX_SIZE = 10000
     PRECOMPUTED_SPATIAL_INDEX_LIMIT = 10000
     HASH_SAMPLING_THRESHOLD_PERCENT = 5.0
