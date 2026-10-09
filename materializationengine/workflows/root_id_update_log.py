@@ -1,25 +1,34 @@
-"""A record of the root ID updates each run of update_root_ids makes, as Parquet and Delta Lake.
+"""A record of the root ID updates each run of update_root_ids makes, as one append-only Delta
+table per annotation table.
 
 Off unless ROOT_ID_UPDATE_LOG is set, for everything or for chosen datastacks and tables
-(see enabled). Updates are organized by table, then by run:
+(see enabled).
 
-    {MATERIALIZATION_DUMP_BUCKET}/root_id_updates/{datastack}/{annotation_table}/
-        _manifest/                             append-only Delta table, one row per run
-                                               with updates (see MANIFEST_SCHEMA)
-        {run_id}/                              one run's updates: a Delta table
-            part-{root_column}-{task_id}.parquet   one per get_new_root_ids task, until
-                                                   the run finishes; then compacted into
-                                                   a few files and deleted
-            _delta_log/
-            _run.json                          what is the same for every row
+    {MATERIALIZATION_DUMP_BUCKET}/root_id_updates/{datastack}/{annotation_table}/   the Delta table
+        _delta_log/                          one commit per run, with the run's details as
+                                             commit metadata (DeltaTable(...).history())
+        run_id=20261009T173330.002540Z/      that run's updates, a few Parquet files
 
-run_id is the run's materialization timestamp (20261009T141120.121393Z), shared by every
-table updated in that run. Rows hold only what varies per update (see SCHEMA).
+    {MATERIALIZATION_DUMP_BUCKET}/root_id_updates/_staging/{datastack}/{annotation_table}/{run_id}/
+        part-{root_column}-{task_id}.parquet one per get_new_root_ids task while the run is in
+        _run.json                            progress; outside the table so mirrors never see them
 
-Records written before 2026-10-09 used {datastack}/{run_id}/{annotation_table}/; see
-migrate_old_layout for copying them into this layout.
-A retried task reuses its id and overwrites its own file; if a whole chunk is redone under
-new task ids, its rows appear twice with the same values (deduplicate on root_column, id).
+run_id is the run's materialization timestamp (20261009T173330.002540Z), the one timestamp
+every lookup in the run used, shared by every table updated in that run. Rows hold only what
+varies per update plus that timestamp (SCHEMA); the window start and the rest of the run's
+details are in the commit metadata (COMMIT_KEYS).
+
+The table is append-only (delta.appendOnly, enforced by the writer) and keeps its whole log,
+so it can be mirrored and kept up to date by fetching only what is new:
+
+    gcloud storage rsync -r gs://.../root_id_updates/{datastack}/{table} ./{table}
+        # files are never rewritten: each sync copies only new commits and their files
+    added_files(uri, after_version=N)
+        # or exactly the files the commits after version N added
+    DeltaTable("./{table}").to_pandas(), pl.read_delta(...), duckdb delta_scan(...)
+
+Never OPTIMIZE, z-order, vacuum or overwrite these tables: each run is deduplicated and
+written as a few large files before its single commit.
 
 Writing is best effort: failures are logged and never stop the root ID update.
 """
@@ -38,6 +47,7 @@ from materializationengine.utils import get_config_param
 
 celery_logger = get_task_logger(__name__)
 
+# The update columns, as get_new_root_ids writes them to the staging chunk files.
 SCHEMA = pa.schema(
     [
         ("id", pa.int64()),
@@ -47,26 +57,34 @@ SCHEMA = pa.schema(
         ("new_root_id", pa.int64()),
     ]
 )
+# The table's columns: the updates, the run's lookup timestamp, and run_id (the partition).
+TABLE_SCHEMA = pa.schema(
+    list(SCHEMA)
+    + [("end_time_stamp", pa.timestamp("us", tz="UTC")), ("run_id", pa.string())]
+)
+PARTITION = "run_id"
+TABLE_PROPERTIES = {
+    "delta.appendOnly": "true",
+    # Incremental sync replays every commit: keep the whole log (delta-rs would otherwise
+    # delete log entries older than 30 days when it checkpoints).
+    "delta.enableExpiredLogCleanup": "false",
+    "delta.logRetentionDuration": "interval 36500 days",
+}
+TARGET_FILE_BYTES = 256 * 1024 * 1024
+# Above this many chunk files (a dense lookup), finalize streams them in groups of this size
+# into the one commit instead of reading the whole run into memory; duplicates are then
+# removed within each group only (since the expired-root dedup, they come only from retries).
+STREAM_GROUP_FILES = 5000
 RUN_FILE = "_run.json"
-MANIFEST_DIR = "_manifest"
-# One row per run with updates, appended by finalize; the way to list a table's updates.
-MANIFEST_SCHEMA = pa.schema(
-    [
-        ("run_id", pa.string()),
-        ("path", pa.string()),  # the run's folder, relative to the table folder
-        ("start_time_stamp", pa.timestamp("us", tz="UTC")),  # last_updated_time_stamp: window start
-        ("end_time_stamp", pa.timestamp("us", tz="UTC")),  # materialization_time_stamp: window end
-        ("recorded_at", pa.timestamp("us", tz="UTC")),
-        ("rows", pa.int64()),
-        ("files", pa.int32()),
-        ("root_columns", pa.list_(pa.string())),
-        ("lookup_all_root_ids", pa.bool_()),
-        ("find_all_expired_roots", pa.bool_()),
-        ("duplicate_rows_removed", pa.int64()),  # set when a migrated run was deduplicated
-    ]
+# The commit metadata each run carries (all strings; read back with DeltaTable.history()).
+COMMIT_KEYS = (
+    "run_id", "start_time_stamp", "end_time_stamp", "rows", "chunk_files", "duplicate_rows_removed",
+    "lookup_all_root_ids", "find_all_expired_roots", "datastack", "annotation_table",
+    "segmentation_table", "pcg_table",
 )
 # part-<root_column>-<celery task id>.parquet, as write_chunk names them
 _CHUNK_FILE = re.compile(r"^part-(?P<root_column>[A-Za-z0-9_]+)-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\.parquet$")
+_RUN_ID = re.compile(r"^\d{8}T\d{6}\.\d{6}Z$")
 
 
 def enabled(mat_metadata: dict) -> bool:
@@ -106,22 +124,30 @@ def run_id(materialization_time_stamp: str) -> str:
     return ts.strftime("%Y%m%dT%H%M%S.%fZ")
 
 
-def table_uri(mat_metadata: dict) -> Optional[str]:
-    """The folder holding every recorded run of this table, or None without a dump bucket."""
+def _base(mat_metadata: dict) -> Optional[str]:
     bucket = get_config_param("MATERIALIZATION_DUMP_BUCKET")
     if not bucket:
         return None
-    return "/".join(
-        [str(bucket).rstrip("/"), "root_id_updates", mat_metadata["datastack"], mat_metadata["annotation_table_name"]]
-    )
+    return f"{str(bucket).rstrip('/')}/root_id_updates"
 
 
-def run_uri(mat_metadata: dict) -> Optional[str]:
-    """The folder for this table's updates in this run, or None without a dump bucket."""
-    base = table_uri(mat_metadata)
+def table_uri(mat_metadata: dict) -> Optional[str]:
+    """This annotation table's Delta table of root ID updates, or None without a dump bucket."""
+    base = _base(mat_metadata)
     if base is None:
         return None
-    return f"{base}/{run_id(mat_metadata['materialization_time_stamp'])}"
+    return f"{base}/{mat_metadata['datastack']}/{mat_metadata['annotation_table_name']}"
+
+
+def staging_uri(mat_metadata: dict) -> Optional[str]:
+    """Where this run's chunk files collect until finalize commits them, or None."""
+    base = _base(mat_metadata)
+    if base is None:
+        return None
+    return "/".join(
+        [base, "_staging", mat_metadata["datastack"], mat_metadata["annotation_table_name"],
+         run_id(mat_metadata["materialization_time_stamp"])]
+    )
 
 
 def _utc(value) -> Optional[datetime.datetime]:
@@ -129,37 +155,6 @@ def _utc(value) -> Optional[datetime.datetime]:
         return None
     ts = value if isinstance(value, datetime.datetime) else datetime.datetime.fromisoformat(str(value))
     return ts.replace(tzinfo=datetime.timezone.utc) if ts.tzinfo is None else ts.astimezone(datetime.timezone.utc)
-
-
-def manifest_entry(run_info: dict, run_folder: str, duplicate_rows_removed: int = None) -> dict:
-    """The manifest row for a finished run, from its _run.json content."""
-    return {
-        "run_id": run_folder,
-        "path": run_folder,
-        "start_time_stamp": _utc(run_info.get("last_updated_time_stamp")),
-        "end_time_stamp": _utc(run_info.get("materialization_time_stamp")),
-        "recorded_at": datetime.datetime.now(datetime.timezone.utc),
-        "rows": int(run_info.get("rows") or 0),
-        "files": int(run_info.get("files") or 0),
-        "root_columns": list(run_info.get("root_columns") or []),
-        "lookup_all_root_ids": bool(run_info.get("lookup_all_root_ids", False)),
-        "find_all_expired_roots": bool(run_info.get("find_all_expired_roots", False)),
-        "duplicate_rows_removed": duplicate_rows_removed,
-    }
-
-
-def append_manifest(table_folder_uri: str, entry: dict) -> bool:
-    """Append *entry* to the table's manifest unless its run is already listed (so finalizing
-    or migrating a run again adds nothing). Returns whether a row was added."""
-    from deltalake import DeltaTable, write_deltalake
-
-    uri = f"{table_folder_uri}/{MANIFEST_DIR}"
-    if DeltaTable.is_deltatable(uri):
-        listed = DeltaTable(uri).to_pyarrow_table(columns=["run_id"]).column("run_id").to_pylist()
-        if entry["run_id"] in listed:
-            return False
-    write_deltalake(uri, pa.Table.from_pylist([entry], schema=MANIFEST_SCHEMA), mode="append")
-    return True
 
 
 def updates_frame(root_ids_df, old_roots, root_id_col: str, supervoxel_col: str) -> pa.Table:
@@ -189,7 +184,7 @@ def _filesystem(uri: str):
 
 def write_chunk(mat_metadata: dict, table: pa.Table, task_id: str) -> Optional[str]:
     try:
-        uri = run_uri(mat_metadata)
+        uri = staging_uri(mat_metadata)
         if uri is None or table.num_rows == 0:
             return None
         filesystem, path = _filesystem(uri)
@@ -224,21 +219,19 @@ def _run_info(mat_metadata: dict) -> dict:
         "last_updated_time_stamp": mat_metadata.get("last_updated_time_stamp"),
         "lookup_all_root_ids": bool(mat_metadata.get("lookup_all_root_ids", False)),
         "find_all_expired_roots": bool(mat_metadata.get("find_all_expired_roots", False)),
-        "schema": [{"name": f.name, "type": str(f.type)} for f in SCHEMA],
     }
 
 
-def _write_run_file(filesystem, path: str, manifest: dict):
+def _write_run_file(filesystem, path: str, info: dict):
     filesystem.create_dir(path, recursive=True)
     with filesystem.open_output_stream(f"{path}/{RUN_FILE}") as out:
-        out.write(json.dumps(manifest, indent=1).encode())
+        out.write(json.dumps(info, indent=1).encode())
 
 
 def start(mat_metadata: dict) -> None:
-    """Describe the run before its chunks are written, so a run that dies partway still
-    explains its files."""
+    """Describe the run in its staging folder before its chunks are written."""
     try:
-        uri = run_uri(mat_metadata)
+        uri = staging_uri(mat_metadata)
         if uri is None:
             return
         filesystem, path = _filesystem(uri)
@@ -247,133 +240,191 @@ def start(mat_metadata: dict) -> None:
         celery_logger.warning(f"Could not start the root ID update record for {mat_metadata.get('annotation_table_name')}: {e}")
 
 
-def finalize(mat_metadata: dict) -> None:
-    """Once every chunk is written: make the folder a Delta table, compact its many small
-    chunk files into a few large ones, delete the chunk files (vacuum), and complete _run.json.
+def _app_id(run: str) -> str:
+    return f"root_id_update_log:{run}"
 
-    Safe to run again: counts already recorded are kept when the chunk files are gone.
-    """
+
+def is_committed(table_folder_uri: str, run: str) -> bool:
+    """Whether the run is already in the table (each commit carries an app transaction)."""
+    from deltalake import DeltaTable
+
+    if not DeltaTable.is_deltatable(table_folder_uri):
+        return False
+    return DeltaTable(table_folder_uri).transaction_version(_app_id(run)) is not None
+
+
+def _dedupe(rows: pa.Table) -> pa.Table:
+    import polars as pl
+
+    return pl.from_arrow(rows).unique(maintain_order=True).to_arrow().cast(SCHEMA)
+
+
+def _with_run_columns(rows: pa.Table, run: str, end) -> pa.Table:
+    n = rows.num_rows
+    return rows.cast(SCHEMA).append_column(
+        "end_time_stamp", pa.array([end] * n, type=TABLE_SCHEMA.field("end_time_stamp").type)
+    ).append_column("run_id", pa.array([run] * n, type=pa.string()))
+
+
+def append_run(table_folder_uri: str, run: str, rows, info: dict, n_rows: int = None,
+               duplicate_rows_removed=0) -> bool:
+    """Commit one run's (already deduplicated) update rows to the table as one commit, unless
+    it is already there. *rows* is a pa.Table, or an iterable of them (streamed into the same
+    commit; then pass *n_rows*). *info* is the run's _run.json content. Returns whether a
+    commit was made."""
+    from deltalake import CommitProperties, PostCommitHookProperties, Transaction, write_deltalake
+
+    if is_committed(table_folder_uri, run):
+        return False
+    end = _utc(info.get("materialization_time_stamp"))
+    if isinstance(rows, pa.Table):
+        n_rows = rows.num_rows
+        data = _with_run_columns(rows, run, end)
+    else:
+        parts = (_with_run_columns(t, run, end) for t in rows)
+        data = pa.RecordBatchReader.from_batches(
+            TABLE_SCHEMA, (batch for t in parts for batch in t.to_batches())
+        )
+    start = _utc(info.get("last_updated_time_stamp"))
+    metadata = {
+        "run_id": run,
+        "start_time_stamp": start.isoformat() if start else "",
+        "end_time_stamp": end.isoformat() if end else "",
+        "rows": "" if n_rows is None else str(n_rows),
+        "chunk_files": str(info.get("chunk_files", "")),
+        "duplicate_rows_removed": "" if duplicate_rows_removed is None else str(duplicate_rows_removed),
+        "lookup_all_root_ids": str(bool(info.get("lookup_all_root_ids", False))).lower(),
+        "find_all_expired_roots": str(bool(info.get("find_all_expired_roots", False))).lower(),
+        "datastack": str(info.get("datastack") or ""),
+        "annotation_table": str(info.get("annotation_table") or ""),
+        "segmentation_table": str(info.get("segmentation_table") or ""),
+        "pcg_table": str(info.get("pcg_table") or ""),
+    }
+    write_deltalake(
+        table_folder_uri,
+        data,
+        mode="append",
+        partition_by=[PARTITION],
+        configuration=TABLE_PROPERTIES,
+        target_file_size=TARGET_FILE_BYTES,
+        commit_properties=CommitProperties(
+            custom_metadata=metadata, app_transactions=[Transaction(app_id=_app_id(run), version=1)]
+        ),
+        post_commithook_properties=PostCommitHookProperties(cleanup_expired_logs=False),
+    )
+    return True
+
+
+def _read_files(filesystem, paths) -> pa.Table:
+    if not paths:
+        return SCHEMA.empty_table()
+    return pa.concat_tables([pq.read_table(p, filesystem=filesystem).cast(SCHEMA) for p in paths])
+
+
+def _delete_dir(filesystem, path: str):
     try:
-        uri = run_uri(mat_metadata)
-        if uri is None:
-            return
-        filesystem, path = _filesystem(uri)
-        listing = filesystem.get_file_info(fs.FileSelector(path, allow_not_found=True))
-        names = {f.base_name for f in listing}
-        chunks = [f for f in listing if f.type == fs.FileType.File and _CHUNK_FILE.match(f.base_name)]
-        has_table = "_delta_log" in names
-        if not chunks and not has_table and RUN_FILE not in names:
-            return  # nothing was updated, and nothing started a record
-        previous = {}
-        if RUN_FILE in names:
-            with filesystem.open_input_stream(f"{path}/{RUN_FILE}") as f:
-                previous = json.loads(f.read())
-        manifest = {
-            **_run_info(mat_metadata),
-            "state": "done",
-            "chunk_files": len(chunks) or previous.get("chunk_files", 0),
-            "root_columns": sorted({_CHUNK_FILE.match(f.base_name)["root_column"] for f in chunks})
-            or previous.get("root_columns", []),
-            "rows": 0,
-        }
-        for key in ("compaction", "vacuumed_files"):
-            if key in previous:
-                manifest[key] = previous[key]
-        if chunks or has_table:
-            from deltalake import DeltaTable, convert_to_deltalake
+        filesystem.delete_dir(path)
+    except (OSError, FileNotFoundError):
+        pass
 
-            if not has_table:
-                convert_to_deltalake(uri)
-            compacted = DeltaTable(uri).optimize.compact()
-            if compacted.get("numFilesRemoved"):
-                manifest["compaction"] = {k: compacted.get(k) for k in ("numFilesAdded", "numFilesRemoved")}
-            # The chunk files now hold nothing the compacted files do not; nobody reads the
-            # table while its run is still finishing, so no retention period is needed.
-            deleted = DeltaTable(uri).vacuum(retention_hours=0, enforce_retention_duration=False, dry_run=False)
-            # vacuum also lists files an earlier run already deleted; count only real deletions
-            removed = {d.rsplit("/", 1)[-1] for d in deleted} & {f.base_name for f in chunks}
-            if removed:
-                manifest["vacuumed_files"] = manifest.get("vacuumed_files", 0) + len(removed)
-            table = DeltaTable(uri)
-            manifest.update(
-                delta_table=uri,
-                rows=sum(table.get_add_actions(flatten=True).column("num_records").to_pylist()),
-                files=len(table.file_uris()),
-            )
-        _write_run_file(filesystem, path, manifest)
-        if manifest.get("delta_table"):
-            append_manifest(table_uri(mat_metadata), manifest_entry(manifest, uri.rsplit("/", 1)[1]))
-        celery_logger.info(f"Recorded {manifest['rows']} root ID updates in {uri}")
+
+def finalize(mat_metadata: dict) -> None:
+    """Once every chunk is written: commit the run's deduplicated updates to the table as one
+    commit, then delete its staging folder. Safe to run again (the commit is not repeated)."""
+    try:
+        staging = staging_uri(mat_metadata)
+        if staging is None:
+            return
+        table_folder = table_uri(mat_metadata)
+        run = staging.rsplit("/", 1)[1]
+        filesystem, path = _filesystem(staging)
+        listing = filesystem.get_file_info(fs.FileSelector(path, allow_not_found=True))
+        chunks = [f for f in listing if f.type == fs.FileType.File and _CHUNK_FILE.match(f.base_name)]
+        if chunks and not is_committed(table_folder, run):
+            info = {**_run_info(mat_metadata), "chunk_files": len(chunks)}
+            paths = [f.path for f in chunks]
+            if len(paths) <= STREAM_GROUP_FILES:
+                rows = _read_files(filesystem, paths)
+                unique = _dedupe(rows)
+                append_run(table_folder, run, unique, info, duplicate_rows_removed=rows.num_rows - unique.num_rows)
+                celery_logger.info(f"Recorded {unique.num_rows} root ID updates of run {run} in {table_folder}")
+            else:
+                # Row count from the files' footers; duplicates removed per group, not counted.
+                total = sum(pq.ParquetFile(p, filesystem=filesystem).metadata.num_rows for p in paths)
+                groups = (
+                    _dedupe(_read_files(filesystem, paths[i:i + STREAM_GROUP_FILES]))
+                    for i in range(0, len(paths), STREAM_GROUP_FILES)
+                )
+                append_run(table_folder, run, groups, info, n_rows=total, duplicate_rows_removed=None)
+                celery_logger.info(f"Recorded about {total} root ID updates of run {run} in {table_folder} (streamed)")
+        _delete_dir(filesystem, path)
     except Exception as e:
         celery_logger.warning(f"Could not finish the root ID update record for {mat_metadata.get('annotation_table_name')}: {e}")
 
 
-_RUN_ID = re.compile(r"^\d{8}T\d{6}\.\d{6}Z$")
+def runs(table_folder_uri: str) -> list:
+    """Every committed run, oldest first: its commit metadata plus the table version."""
+    from deltalake import DeltaTable
+
+    if not DeltaTable.is_deltatable(table_folder_uri):
+        return []
+    out = []
+    for commit in DeltaTable(table_folder_uri).history():
+        if commit.get("run_id"):
+            out.append({"version": commit["version"], **{k: commit.get(k) for k in COMMIT_KEYS}})
+    return sorted(out, key=lambda c: c["version"])
 
 
-def migrate_old_layout(datastack_uri: str, dry_run: bool = True) -> list:
-    """Copy records from the old {datastack}/{run_id}/{table}/ layout into
-    {datastack}/{table}/{run_id}/, without exact duplicate rows, and list them in each
-    table's manifest. The old folders are left as they are.
+def added_files(table_folder_uri: str, after_version: int = -1) -> list:
+    """The data files (relative to the table) added by the commits after *after_version*:
+    exactly what a mirror at that version needs, besides the new _delta_log entries."""
+    from deltalake import DeltaTable
 
-    *datastack_uri* is e.g. gs://bucket/root_id_updates/wclee_aedes_brain. Safe to run
-    again: a run already in the new layout is not rewritten, and the manifest skips runs
-    it already lists. Runs that recorded no updates (no Delta table) are reported, not
-    copied. Returns one report dict per old run folder and table.
+    table = DeltaTable(table_folder_uri)
+    now = set(table.get_add_actions(flatten=True).column("path").to_pylist())
+    if after_version < 0:
+        return sorted(now)
+    before = set(DeltaTable(table_folder_uri, version=after_version).get_add_actions(flatten=True).column("path").to_pylist())
+    return sorted(now - before)
+
+
+def migrate_runs_to_table(table_folder_uri: str, dry_run: bool = True) -> list:
+    """Commit the per-run folders of the previous layout ({table}/{run_id}/: a Delta table plus
+    _run.json, written 2026-10-09) into the table at *table_folder_uri*, one commit per run,
+    oldest first. Leaves those folders in place; safe to run again. Returns one report per run.
     """
-    import polars as pl
-    from deltalake import DeltaTable, write_deltalake
+    from deltalake import DeltaTable
 
-    datastack_uri = datastack_uri.rstrip("/")
-    filesystem, base = _filesystem(datastack_uri)
+    table_folder_uri = table_folder_uri.rstrip("/")
+    filesystem, base = _filesystem(table_folder_uri)
     report = []
     run_dirs = sorted(
         f.base_name
-        for f in filesystem.get_file_info(fs.FileSelector(base))
+        for f in filesystem.get_file_info(fs.FileSelector(base, allow_not_found=True))
         if f.type == fs.FileType.Directory and _RUN_ID.match(f.base_name)
     )
-    for run_folder in run_dirs:
-        for t in filesystem.get_file_info(fs.FileSelector(f"{base}/{run_folder}")):
-            if t.type != fs.FileType.Directory:
-                continue
-            table, old_uri = t.base_name, f"{datastack_uri}/{run_folder}/{t.base_name}"
-            new_table_uri, new_uri = f"{datastack_uri}/{table}", f"{datastack_uri}/{table}/{run_folder}"
-            entry = {"run_id": run_folder, "table": table, "old": old_uri, "new": new_uri}
-            try:
-                with filesystem.open_input_stream(f"{t.path}/{RUN_FILE}") as f:
-                    run_info = json.loads(f.read())
-            except (OSError, FileNotFoundError):
-                report.append({**entry, "result": "no _run.json, skipped"})
-                continue
-            if not DeltaTable.is_deltatable(old_uri):
-                report.append({**entry, "result": f"no updates (rows={run_info.get('rows', 0)}), skipped"})
-                continue
-            # Read the data files with pyarrow's GCS client: deltalake's own reader was seen
-            # to hang on these buckets from outside the cluster, and this is faster anyway.
-            files = DeltaTable(old_uri).file_uris()
-            rows = pa.concat_tables(
-                [pq.read_table(_filesystem(u)[1], filesystem=filesystem) for u in files]
-            ) if files else SCHEMA.empty_table()
-            unique = pl.from_arrow(rows).unique(maintain_order=True).to_arrow().cast(SCHEMA)
-            removed = rows.num_rows - unique.num_rows
-            entry.update(rows=rows.num_rows, unique_rows=unique.num_rows, duplicate_rows_removed=removed)
-            if dry_run:
-                report.append({**entry, "result": "would copy"})
-                continue
-            if DeltaTable.is_deltatable(new_uri):
-                result = "already copied"
-            else:
-                write_deltalake(new_uri, unique, mode="error")
-                result = "copied"
-            new_info = {
-                **run_info,
-                "rows": unique.num_rows,
-                "files": len(DeltaTable(new_uri).file_uris()),
-                "delta_table": new_uri,
-                "migrated_from": old_uri,
-                "duplicate_rows_removed": removed,
-            }
-            _write_run_file(filesystem, _filesystem(new_uri)[1], new_info)
-            added = append_manifest(new_table_uri, manifest_entry(new_info, run_folder, duplicate_rows_removed=removed))
-            report.append({**entry, "result": result, "manifest_row_added": added})
+    for run in run_dirs:
+        source = f"{table_folder_uri}/{run}"
+        entry = {"run_id": run, "source": source}
+        try:
+            with filesystem.open_input_stream(f"{base}/{run}/{RUN_FILE}") as f:
+                info = json.loads(f.read())
+        except (OSError, FileNotFoundError):
+            report.append({**entry, "result": "no _run.json, skipped"})
+            continue
+        if not DeltaTable.is_deltatable(source):
+            report.append({**entry, "result": "no updates, skipped"})
+            continue
+        if is_committed(table_folder_uri, run):
+            report.append({**entry, "result": "already committed"})
+            continue
+        rows = _read_files(filesystem, [_filesystem(u)[1] for u in DeltaTable(source).file_uris()])
+        unique = _dedupe(rows)
+        removed = int(info.get("duplicate_rows_removed") or 0) + rows.num_rows - unique.num_rows
+        entry.update(rows=unique.num_rows, duplicate_rows_removed=removed)
+        if dry_run:
+            report.append({**entry, "result": "would commit"})
+            continue
+        append_run(table_folder_uri, run, unique, info, duplicate_rows_removed=removed)
+        report.append({**entry, "result": "committed"})
     return report
