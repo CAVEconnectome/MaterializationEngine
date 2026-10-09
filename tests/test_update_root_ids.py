@@ -9,6 +9,8 @@ from materializationengine.workflows.update_root_ids import (
 )
 import logging
 
+import numpy as np
+
 
 mocked_expired_root_id_data = [
     [20000000, 20000001],
@@ -58,6 +60,18 @@ class TestUpdateRootIds:
             logging.info(root_id)
             assert root_id == mocked_expired_root_id_data[index]
             index += 1
+
+    def test_expired_root_ids_are_deduplicated_before_chunking(self, monkeypatch, mat_metadata):
+        # the chunkedgraph can list one old root twice; it must land in exactly one chunk
+        roots = [20000003, 20000001, 20000003, 20000002, 20000001, 20000004]
+        monkeypatch.setattr(
+            "materializationengine.workflows.update_root_ids.lookup_expired_root_ids",
+            lambda *args, **kwargs: np.array(roots),
+        )
+        chunks = list(get_expired_root_ids_from_pcg(mat_metadata, 2))
+        flat = [r for chunk in chunks for r in chunk]
+        assert sorted(flat) == [20000001, 20000002, 20000003, 20000004]
+        assert len(flat) == len(set(flat))
 
     def test_get_supervoxel_ids(self, annotation_data, mat_metadata):
         expired_roots = annotation_data["expired_root_ids"]
