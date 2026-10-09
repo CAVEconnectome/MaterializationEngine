@@ -133,8 +133,15 @@ def get_expired_root_ids_from_pcg(mat_metadata: dict, expired_chunk_size: int = 
         celery_logger.info(f"No root ids have expired since {str(last_updated_ts)}")
         return None
     else:
-        celery_logger.info(f"Amount of expired root ids: {len(old_roots)}")
-        yield from generate_chunked_root_ids(old_roots, expired_chunk_size)
+        # get_delta_roots can list an old root more than once (on wclee_aedes_brain, 119 of
+        # 1295 in one window). Two chunks holding the same root run in parallel, both find its
+        # rows before either commits, and both look them up and write them again.
+        unique_roots = np.unique(np.asarray(old_roots))
+        celery_logger.info(
+            f"Amount of expired root ids: {len(unique_roots)}"
+            + (f" ({len(old_roots) - len(unique_roots)} duplicates dropped)" if len(unique_roots) < len(old_roots) else "")
+        )
+        yield from generate_chunked_root_ids(unique_roots, expired_chunk_size)
 
 
 def generate_chunked_root_ids(old_roots, expired_chunk_size):
