@@ -81,11 +81,12 @@ def update_root_ids_workflow(mat_metadata: dict):
 
     record_updates = root_id_update_log.enabled(mat_metadata)
     if record_updates:
-        # Describe the run up front, but only when there is something to update.
+        # Describe the run up front when there is something to update. A run that finds
+        # nothing is still finalized (a manifest row with no updates), so the recorded
+        # windows chain without gaps.
         chunked_ids = iter(chunked_ids)
         first = next(chunked_ids, None)
         if first is None:
-            record_updates = False
             chunked_ids = []
         else:
             chunked_ids = itertools.chain([first], chunked_ids)
@@ -103,7 +104,7 @@ def update_root_ids_workflow(mat_metadata: dict):
     ).apply_async()
     tasks_completed = monitor_workflow_state(update_root_workflow)
     if record_updates:
-        root_id_update_log.finalize(mat_metadata)
+        root_id_update_log.finalize(mat_metadata, succeeded=bool(tasks_completed))
     if tasks_completed:
         return workflow_complete.si("update_root_ids_workflow")
 
