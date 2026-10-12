@@ -132,8 +132,11 @@ class TestRuns:
         table = DeltaTable(str(table_dir(tmp_path)))
         rows = table.to_pyarrow_table()
         assert rows.num_rows == 4  # 5 written, 1 exact duplicate removed
-        assert rows.column_names == ["id", "root_column", "supervoxel_id", "old_root_id", "new_root_id", "run_id"]
+        assert rows.column_names == ["id", "root_column", "supervoxel_id", "old_root_id", "new_root_id",
+                                     "start_time_stamp", "end_time_stamp", "run_id"]
         assert set(rows.column("run_id").to_pylist()) == {RUN_ID}
+        assert set(rows.column("start_time_stamp").to_pylist()) == {log._utc("2026-10-07 14:01:00")}
+        assert set(rows.column("end_time_stamp").to_pylist()) == {log._utc(RUN_TS)}
         assert all(p.startswith(f"run_id={RUN_ID}/") for p in table.get_add_actions(flatten=True).column("path").to_pylist())
         (row,) = manifest_rows(tmp_path)
         assert row["run_id"] == RUN_ID and row["rows"] == 4 and row["chunk_files"] == 3
@@ -208,6 +211,38 @@ class TestRuns:
                 assert path.endswith(".zstd.parquet")
                 assert pq.ParquetFile(path).metadata.row_group(0).column(0).compression == "ZSTD"
 
+    def test_rows_are_sorted_with_id_delta_encoded_in_small_row_groups(self, bucket, monkeypatch):
+        import pyarrow.parquet as pq
+
+        tmp_path, _ = bucket
+        monkeypatch.setattr(log, "ROW_GROUP_ROWS", 4)
+        md = metadata()
+        write(md, [9, 3, 7], TASK["a"], side="pre_pt")
+        write(md, [8, 2, 6, 4, 5, 1], TASK["b"], side="post_pt")
+        log.finalize(md)
+        (path,) = [f.replace("file://", "") for f in DeltaTable(str(table_dir(tmp_path))).file_uris()]
+        stored = pq.read_table(path)
+        assert list(zip(stored.column("root_column").to_pylist(), stored.column("id").to_pylist())) == [
+            ("post_pt", i) for i in range(1, 9) if i not in (3, 7, 9)] + [("pre_pt", 3), ("pre_pt", 7), ("pre_pt", 9)]
+        md_ = pq.ParquetFile(path).metadata
+        assert [md_.row_group(r).num_rows for r in range(md_.num_row_groups)] == [4, 4, 1]
+        assert "DELTA_BINARY_PACKED" in md_.row_group(0).column(0).encodings
+        # the log's per-file stats hold each run's window, so readers skip runs on time alone
+        stats = DeltaTable(str(table_dir(tmp_path))).get_add_actions(flatten=True)
+        assert stats.column("max.end_time_stamp").to_pylist() == [log._utc(RUN_TS)]
+
+    def test_a_time_filter_reads_only_the_runs_in_the_window(self, bucket):
+        import polars as pl
+
+        tmp_path, _ = bucket
+        first, second = metadata(), metadata(materialization_time_stamp=LATER_TS, last_updated_time_stamp=RUN_TS)
+        write(first, [1, 2], TASK["a"])
+        log.finalize(first)
+        write(second, [2], TASK["b"])
+        log.finalize(second)
+        after = pl.scan_delta(str(table_dir(tmp_path))).filter(pl.col("end_time_stamp") > log._utc(RUN_TS))
+        assert after.select("id", "run_id").collect().rows() == [(2, LATER_ID)]
+
     def test_a_mirror_needs_only_the_new_files(self, bucket, tmp_path):
         tmp, _ = bucket
         first, second = metadata(), metadata(materialization_time_stamp=LATER_TS, last_updated_time_stamp=RUN_TS)
@@ -281,3 +316,41 @@ class TestRebuildTable:
         assert [(r["run_id"], r["rows"], r["table_version"], r["duplicate_rows_removed"]) for r in rows] == [
             (RUN_ID, 2, 0, 2), (LATER_ID, 1, 1, 2)]
         assert DeltaTable(str(source)).version() == 1  # untouched
+
+    def test_copies_a_lean_table_with_its_manifest_including_runs_that_changed_nothing(self, tmp_path):
+        """The 2026-10-10 tables: lean rows (no time columns) and a _manifest."""
+        from deltalake import CommitProperties, write_deltalake
+
+        source = str(tmp_path / "lean")
+        lean = pa.schema(list(log.SCHEMA) + [("run_id", pa.string())])
+        failed_ts, failed_id = "2026-10-07 17:01:02.000000", "20261007T170102.000000Z"
+        windows = [(RUN_ID, "2026-10-07 14:01:00", RUN_TS, [2, 1]), (LATER_ID, RUN_TS, LATER_TS, None),
+                   (failed_id, LATER_TS, failed_ts, [3])]
+        version = -1
+        for run, start, end, ids in windows:
+            info = {"last_updated_time_stamp": start, "materialization_time_stamp": end, "chunk_files": 1,
+                    "datastack": "minnie65_phase3_v1", "annotation_table": "synapses"}
+            table_version = None
+            if ids:
+                rows = pa.Table.from_pylist([{"id": i, "root_column": "pre_pt", "supervoxel_id": i, "old_root_id": 10,
+                                              "new_root_id": 11, "run_id": run} for i in ids], schema=lean)
+                write_deltalake(source, rows, mode="append", partition_by=["run_id"], commit_properties=CommitProperties(
+                    custom_metadata={"run_id": run, "rows": str(len(ids)), "start_time_stamp": log._utc(start).isoformat(),
+                                     "end_time_stamp": log._utc(end).isoformat()}))
+                version += 1
+                table_version = version
+            log.append_manifest_row(source, run, info, rows=len(ids or []), table_version=table_version,
+                                    succeeded=run != failed_id, duplicate_rows_removed=0)
+        target = str(tmp_path / "new")
+        report = log.rebuild_table(source, target, dry_run=False)
+        assert [(r["run_id"], r["rows"], r["target_version"]) for r in report] == [
+            (RUN_ID, 2, 0), (LATER_ID, 0, None), (failed_id, 1, 1)]
+        rows = DeltaTable(target).to_pyarrow_table().sort_by("run_id")
+        assert rows.column_names == list(log.TABLE_SCHEMA.names)
+        assert rows.column("id").to_pylist() == [1, 2, 3]
+        assert rows.column("start_time_stamp").to_pylist()[2] == log._utc(LATER_TS)
+        old, new = log.manifest(source).to_pylist(), log.manifest(target).to_pylist()
+        assert [{**r, "table_version": None} for r in old] == [{**r, "table_version": None} for r in new]
+        assert [r["table_version"] for r in new] == [0, None, 1]
+        assert log.rebuild_table(source, target, dry_run=False)[0]["target_version"] == 0  # again: nothing added
+        assert DeltaTable(target).version() == 1 and len(log.manifest(target)) == 3
