@@ -5,6 +5,7 @@ document.addEventListener("alpine:init", () => {
     tableName: Alpine.store("dlWizard").state.tableName || "",
     targetPartitionSizeMb: Alpine.store("dlWizard").state.targetPartitionSizeMb || 256,
     bloomFilterFpp: Alpine.store("dlWizard").state.bloomFilterFpp || 0.001,
+    maxRowGroupSize: Alpine.store("dlWizard").state.maxRowGroupSize ?? null,
     versions: [],
     tables: [],
     loadingVersions: false,
@@ -15,11 +16,27 @@ document.addEventListener("alpine:init", () => {
     checkingExists: false,
 
     init() {
+      if (this.maxRowGroupSize == null) {
+        this.loadDefaults();
+      }
       if (this.datastack) {
         this.fetchVersions();
       }
       if (this.version) {
         this.fetchTables();
+      }
+    },
+
+    async loadDefaults() {
+      // Start from the deployment's setting; the field stays editable.
+      try {
+        const resp = await fetch("/materialize/deltalake/api/defaults");
+        if (resp.ok) {
+          const data = await resp.json();
+          if (this.maxRowGroupSize == null) this.maxRowGroupSize = data.max_row_group_size;
+        }
+      } catch (e) {
+        console.warn("[DeltaLake] could not load defaults:", e);
       }
     },
 
@@ -151,6 +168,7 @@ document.addEventListener("alpine:init", () => {
         store.state.tableName = this.tableName;
         store.state.targetPartitionSizeMb = this.targetPartitionSizeMb;
         store.state.bloomFilterFpp = this.bloomFilterFpp;
+        store.state.maxRowGroupSize = this.maxRowGroupSize || null;
         store.state.rowCount = data.row_count;
         store.state.bytesPerRow = data.bytes_per_row;
         store.state.availableColumns = data.available_columns || [];

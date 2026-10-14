@@ -20,6 +20,8 @@ document.addEventListener("alpine:init", () => {
       availableColumns: [],
       geometryColumns: [],
       bloomFilterFpp: 0.001,
+      // Rows per Parquet row group; null: the deployment default (DELTALAKE_MAX_ROW_GROUP_SIZE).
+      maxRowGroupSize: null,
       specs: [],
       // Export key for monitoring
       exports: [],
@@ -69,6 +71,7 @@ document.addEventListener("alpine:init", () => {
       this.state.availableColumns = [];
       this.state.geometryColumns = [];
       this.state.bloomFilterFpp = 0.001;
+      this.state.maxRowGroupSize = null;
       this.state.specs = [];
       this.state.exports = [];
     },

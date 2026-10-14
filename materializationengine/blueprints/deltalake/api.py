@@ -118,6 +118,7 @@ def wizard_step(step_number):
                 access_denied_message="dataset_admin permission is required. You do not have dataset_admin access for any datastacks.",
                 target_partition_size_mb=get_config_param("DELTALAKE_TARGET_PARTITION_SIZE_MB", 256),
                 bloom_filter_fpp=get_config_param("DELTALAKE_BLOOM_FILTER_FPP", 0.001),
+                max_row_group_size=get_config_param("DELTALAKE_MAX_ROW_GROUP_SIZE", None),
                 output_bucket=get_config_param("DELTALAKE_OUTPUT_BUCKET", ""),
             ), 403
 
@@ -134,6 +135,7 @@ def wizard_step(step_number):
             "DELTALAKE_TARGET_PARTITION_SIZE_MB", 256
         ),
         bloom_filter_fpp=get_config_param("DELTALAKE_BLOOM_FILTER_FPP", 0.001),
+        max_row_group_size=get_config_param("DELTALAKE_MAX_ROW_GROUP_SIZE", None),
         output_bucket=get_config_param("DELTALAKE_OUTPUT_BUCKET", ""),
     )
 
@@ -154,6 +156,10 @@ def running_exports_page():
 # ---------------------------------------------------------------------------
 
 
+def _optional_int(value):
+    return int(value) if value not in (None, "") else None
+
+
 @deltalake_bp.route("/api/defaults", methods=["GET"])
 @reset_auth
 @auth_required
@@ -167,6 +173,10 @@ def get_defaults():
             "output_bucket": get_config_param("DELTALAKE_OUTPUT_BUCKET", ""),
             "bloom_filter_fpp": float(
                 get_config_param("DELTALAKE_BLOOM_FILTER_FPP", 0.001)
+            ),
+            # null: delta-rs's default
+            "max_row_group_size": _optional_int(
+                get_config_param("DELTALAKE_MAX_ROW_GROUP_SIZE", None)
             ),
         }
     )

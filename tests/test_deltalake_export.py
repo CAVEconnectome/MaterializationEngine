@@ -45,6 +45,7 @@ from materializationengine.workflows.deltalake_export import (
     resolve_n_partitions,
 )
 from materializationengine.workflows.deltalake_export import _serial_optimize_runner
+from materializationengine.workflows.deltalake_export import apply_default_row_group_size
 from materializationengine.workflows.deltalake_export import _table_geometry_columns
 
 # ---------------------------------------------------------------------------
@@ -1216,6 +1217,80 @@ class TestSerialOptimizeRunner:
         assert kwargs["zorder_columns"] == ["x", "y"]
         assert kwargs["bloom_filter_columns"] == ["id"]
         assert kwargs["fpp"] == 0.05
+
+
+class TestRowGroupSize:
+    """max_row_group_size: per spec, else DELTALAKE_MAX_ROW_GROUP_SIZE, else delta-rs's default."""
+
+    @pytest.mark.parametrize("zorder_columns", [["key"], None])  # z_order and compact
+    def test_optimize_writes_row_groups_of_at_most_the_size(self, tmp_path, zorder_columns):
+        import pyarrow.parquet as pq
+        from deltalake import DeltaTable, write_deltalake
+
+        uri = str(tmp_path / "lake")
+        for start in range(0, 1000, 250):  # several small files for optimize to merge
+            keys = list(range(start, start + 250))
+            write_deltalake(uri, pa.table({"key": keys, "value": [k * 2 for k in keys]}), mode="append")
+        optimize_deltalake(uri, zorder_columns=zorder_columns, max_row_group_size=100)
+
+        dt = DeltaTable(uri)
+        sizes = []
+        for f in dt.file_uris():
+            md = pq.ParquetFile(f.replace("file://", "")).metadata
+            sizes += [md.row_group(r).num_rows for r in range(md.num_row_groups)]
+        assert len(dt.file_uris()) == 1 and sum(sizes) == 1000
+        assert max(sizes) == 100
+        assert sorted(dt.to_pyarrow_table().column("key").to_pylist()) == list(range(1000))
+
+    @patch("deltalake.DeltaTable")
+    def test_row_group_size_alone_sets_writer_properties(self, MockDeltaTable):
+        mock_dt = MagicMock()
+        MockDeltaTable.return_value = mock_dt
+        optimize_deltalake("/tmp/test", zorder_columns=["a"], max_row_group_size=16384)
+        props = mock_dt.optimize.z_order.call_args.kwargs["writer_properties"]
+        assert props is not None and props.max_row_group_size == 16384
+
+    @patch("deltalake.DeltaTable")
+    def test_row_group_size_with_bloom_filters(self, MockDeltaTable):
+        mock_dt = MagicMock()
+        MockDeltaTable.return_value = mock_dt
+        optimize_deltalake("/tmp/test", bloom_filter_columns=["id"], max_row_group_size=4096)
+        props = mock_dt.optimize.compact.call_args.kwargs["writer_properties"]
+        assert props.max_row_group_size == 4096 and "id" in props.column_properties
+
+    @pytest.mark.parametrize("value", [0, -1, "16384", 1.5, True])
+    def test_spec_rejects_a_bad_size(self, value):
+        with pytest.raises(ValueError, match="max_row_group_size"):
+            DeltaLakeOutputSpec(name="a", max_row_group_size=value)
+
+    def test_default_fills_only_specs_without_their_own(self):
+        own, unset = DeltaLakeOutputSpec(name="a", max_row_group_size=4096), DeltaLakeOutputSpec(name="b")
+        apply_default_row_group_size([own, unset], "16384")  # from the environment: a string
+        assert (own.max_row_group_size, unset.max_row_group_size) == (4096, 16384)
+
+    def test_no_default_leaves_specs_alone(self):
+        spec = DeltaLakeOutputSpec(name="a")
+        apply_default_row_group_size([spec], None)
+        assert spec.max_row_group_size is None
+
+    @patch("materializationengine.workflows.deltalake_export.optimize_deltalake")
+    def test_serial_runner_forwards_the_size(self, mock_optimize):
+        _serial_optimize_runner([(DeltaLakeOutputSpec(name="a", max_row_group_size=8192), "gs://b/a")], {}, None)
+        assert mock_optimize.call_args.kwargs["max_row_group_size"] == 8192
+
+    @pytest.mark.parametrize("configured, expected", [("16384", 16384), (None, None)])
+    def test_wizard_defaults_include_the_size(self, configured, expected):
+        import middle_auth_client.decorators as auth
+        from flask import Flask
+        from materializationengine.blueprints.deltalake import api as dl_api
+
+        app = Flask(__name__)
+        app.register_blueprint(dl_api.deltalake_bp)
+        config = {"DELTALAKE_MAX_ROW_GROUP_SIZE": configured}
+        with patch.object(auth, "AUTH_DISABLED", True), \
+                patch.object(dl_api, "get_config_param", side_effect=lambda k, d=None: config.get(k, d)):
+            body = app.test_client().get("/materialize/deltalake/api/defaults").json
+        assert body["max_row_group_size"] == expected
 
 
 # ===========================================================================

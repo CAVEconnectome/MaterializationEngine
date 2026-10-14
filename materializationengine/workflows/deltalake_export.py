@@ -91,10 +91,26 @@ class DeltaLakeOutputSpec:
     source_table: str | None = None
     bounds: list | None = None
     target_file_size_mb: int | None = None
+    # Rows per Parquet row group; None uses DELTALAKE_MAX_ROW_GROUP_SIZE, then delta-rs's
+    # default (see apply_default_row_group_size).
+    max_row_group_size: int | None = None
 
     def __post_init__(self):
         if not self.name:
             raise ValueError("DeltaLakeOutputSpec.name must be a non-empty string")
+        if self.max_row_group_size is not None:
+            if isinstance(self.max_row_group_size, bool) or not isinstance(self.max_row_group_size, int) \
+                    or self.max_row_group_size < 1:
+                raise ValueError("DeltaLakeOutputSpec.max_row_group_size must be a positive integer")
+
+
+def apply_default_row_group_size(specs: list[DeltaLakeOutputSpec], default: int | None) -> None:
+    """Give every spec without its own max_row_group_size the deployment default."""
+    if not default:
+        return
+    for spec in specs:
+        if spec.max_row_group_size is None:
+            spec.max_row_group_size = int(default)
 
 
 # Spatial column prefix priority (lower index = higher priority) used when a
@@ -1749,6 +1765,7 @@ def export_table_to_deltalake(
             max_concurrent_tasks=optimize_max_concurrent_tasks,
             target_size=optimize_target_size,
             max_spill_size=optimize_max_spill_size,
+            max_row_group_size=spec.max_row_group_size,
         )
         if optimize_callback is not None:
             optimize_callback(spec.name, "vacuum")
@@ -1976,6 +1993,7 @@ def _repartition_view_spec_from_lake(
         max_concurrent_tasks=optimize_max_concurrent_tasks,
         target_size=optimize_target_size,
         max_spill_size=optimize_max_spill_size,
+        max_row_group_size=spec.max_row_group_size,
     )
 
 
@@ -2041,6 +2059,7 @@ def export_view_to_deltalake(
         max_concurrent_tasks=optimize_max_concurrent_tasks,
         target_size=optimize_target_size,
         max_spill_size=optimize_max_spill_size,
+        max_row_group_size=flat_spec.max_row_group_size if flat_spec else None,
     )
     if optimize_callback is not None:
         optimize_callback(base_name, "vacuum")
@@ -2080,6 +2099,7 @@ def optimize_deltalake(
     max_concurrent_tasks: int = 1,
     target_size: int | None = None,
     max_spill_size: int | None = None,
+    max_row_group_size: int | None = None,
 ) -> None:
     """Z-order, add bloom filters, and vacuum a completed Delta Lake.
 
@@ -2104,6 +2124,9 @@ def optimize_deltalake(
     max_spill_size
         Maximum bytes allowed in memory before spilling to disk.
         If ``None``, uses DataFusion's default.
+    max_row_group_size
+        Maximum rows per Parquet row group in the rewritten files.  If
+        ``None``, uses the delta-rs default.
     """
     from deltalake import DeltaTable
     from deltalake.writer import (
@@ -2114,19 +2137,21 @@ def optimize_deltalake(
 
     dt = DeltaTable(uri)
 
-    writer_properties = None
+    properties: dict = {}
     if bloom_filter_columns:
         bloom = BloomFilterProperties(set_bloom_filter_enabled=True, fpp=fpp)
         col_props = ColumnProperties(bloom_filter_properties=bloom)
-        writer_properties = WriterProperties(
-            column_properties={col: col_props for col in bloom_filter_columns}
-        )
+        properties["column_properties"] = {col: col_props for col in bloom_filter_columns}
+    if max_row_group_size:
+        properties["max_row_group_size"] = int(max_row_group_size)
+    writer_properties = WriterProperties(**properties) if properties else None
 
     celery_logger.info(
-        "Optimizing Delta Lake at %s (z-order: %s, bloom filters: %s)",
+        "Optimizing Delta Lake at %s (z-order: %s, bloom filters: %s, row group rows: %s)",
         uri,
         zorder_columns or "none",
         bloom_filter_columns or "none",
+        max_row_group_size or "default",
     )
     optimize_kwargs: dict = {
         "max_concurrent_tasks": max_concurrent_tasks,
@@ -2459,6 +2484,7 @@ def _serial_optimize_runner(
             zorder_columns=spec.zorder_columns or None,
             bloom_filter_columns=spec.bloom_filter_columns or None,
             fpp=spec.bloom_filter_fpp or 0.001,
+            max_row_group_size=spec.max_row_group_size,
             **optimize_kwargs,
         )
         if optimize_callback is not None:
@@ -2634,11 +2660,15 @@ def run_deltalake_export(
             )
             resolved_specs = discover_default_output_specs(source, engine)
 
+        apply_default_row_group_size(
+            resolved_specs, get_config_param("DELTALAKE_MAX_ROW_GROUP_SIZE", None)
+        )
         for spec in resolved_specs:
             celery_logger.info(
-                "  - partition_by: %s, strategy: %s",
+                "  - partition_by: %s, strategy: %s, row group rows: %s",
                 spec.partition_by,
                 spec.partition_strategy,
+                spec.max_row_group_size or "default",
             )
 
         if not resolved_specs:

@@ -56,6 +56,8 @@ document.addEventListener("alpine:init", () => {
               const { _editable, ...spec } = s;
               return {
                 ...spec,
+                // the spec's own value, else the wizard's; null leaves it to the server default
+                max_row_group_size: spec.max_row_group_size || state.maxRowGroupSize || null,
                 bloom_filter_fpp: spec.bloom_filter_columns?.length
                   ? (spec.bloom_filter_fpp || state.bloomFilterFpp)
                   : null,
