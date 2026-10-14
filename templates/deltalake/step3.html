@@ -33,6 +33,7 @@
                 <th>Strategy</th>
                 <th>N Partitions</th>
                 <th>File Size (MB)</th>
+                <th>Row Group Size</th>
                 <th>Destination</th>
             </tr>
         </thead>
@@ -43,6 +44,7 @@
                     <td x-text="spec.partition_strategy"></td>
                     <td x-text="spec.n_partitions"></td>
                     <td x-text="spec.target_file_size_mb || $store.dlWizard.state.targetPartitionSizeMb"></td>
+                    <td x-text="(spec.max_row_group_size || $store.dlWizard.state.maxRowGroupSize || 'default').toLocaleString()"></td>
                     <td class="text-muted small" x-text="outputUri(spec)"></td>
                 </tr>
             </template>

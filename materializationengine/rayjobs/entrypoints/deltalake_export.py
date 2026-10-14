@@ -173,7 +173,7 @@ def _build_ray_optimize_runner(memory_bytes, max_concurrent_tasks: int):
     from materializationengine.workflows.deltalake_export import optimize_deltalake
 
     @ray.remote(max_retries=3)
-    def _optimize_one(uri, zorder_columns, bloom_filter_columns, fpp, kwargs) -> str:
+    def _optimize_one(uri, zorder_columns, bloom_filter_columns, fpp, max_row_group_size, kwargs) -> str:
         # max_retries covers preemption: workers run on the preemptible
         # mesh-pool, and optimize is idempotent -- it rewrites files and commits
         # a new version, so re-running after a lost node converges rather than
@@ -183,6 +183,7 @@ def _build_ray_optimize_runner(memory_bytes, max_concurrent_tasks: int):
             zorder_columns=zorder_columns,
             bloom_filter_columns=bloom_filter_columns,
             fpp=fpp,
+            max_row_group_size=max_row_group_size,
             **kwargs,
         )
         return uri
@@ -219,6 +220,7 @@ def _build_ray_optimize_runner(memory_bytes, max_concurrent_tasks: int):
                 spec.zorder_columns or None,
                 spec.bloom_filter_columns or None,
                 spec.bloom_filter_fpp or 0.001,
+                spec.max_row_group_size,
                 kwargs,
             )
             pending[ref] = spec

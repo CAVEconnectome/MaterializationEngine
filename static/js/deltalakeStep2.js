@@ -179,6 +179,7 @@ document.addEventListener("alpine:init", () => {
         partition_strategy: "percentile_range",
         n_partitions: null,
         target_file_size_mb: null,
+        max_row_group_size: null,
         bloom_filter_fpp: null,
         zorder_columns: [],
         bloom_filter_columns: [],

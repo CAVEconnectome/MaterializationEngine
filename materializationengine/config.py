@@ -157,6 +157,15 @@ class BaseConfig:
         if "DELTALAKE_OPTIMIZE_TARGET_SIZE_BYTES" in os.environ
         else None
     )
+    # Rows per Parquet row group in the exported files (set when optimize rewrites them).
+    # Smaller row groups let a reader fetch less for a lookup by the partition column: one
+    # root of synapses_pni_2 reads ~5 MB with ~540k-row groups, ~0.2 MB with 16k. Unset
+    # keeps delta-rs's default. Output specs (and the export wizard) can override it.
+    DELTALAKE_MAX_ROW_GROUP_SIZE = (
+        int(os.environ["DELTALAKE_MAX_ROW_GROUP_SIZE"])
+        if os.environ.get("DELTALAKE_MAX_ROW_GROUP_SIZE")
+        else None
+    )
     # this one should help with memory during optimize if it is still a problem,
     # but has not been tested on the mesh worker nodes. im not sure how spilling to 
     # disk on those will work out of the box

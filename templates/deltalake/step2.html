@@ -18,6 +18,10 @@
             <div class="col-auto">
                 <strong>Default FPP:</strong> <span x-text="$store.dlWizard.state.bloomFilterFpp"></span>
             </div>
+            <div class="col-auto">
+                <strong>Default row group size:</strong>
+                <span x-text="$store.dlWizard.state.maxRowGroupSize ? $store.dlWizard.state.maxRowGroupSize.toLocaleString() + ' rows' : 'delta-rs default'"></span>
+            </div>
         </div>
     </div>
 
@@ -47,7 +51,7 @@
                         </div>
                         <!-- Row 1: Partition params -->
                         <div class="row g-2 pb-3 mb-3" style="border-bottom: 1px solid #dee2e6">
-                            <div class="col-md-3">
+                            <div class="col-md">
                                 <label class="form-label small fw-semibold text-start d-block">Partition By</label>
                                 <select class="form-select form-select-sm"
                                         @change="onPartitionChange(idx, $event.target.value)">
@@ -65,7 +69,7 @@
                                     </small>
                                 </template>
                             </div>
-                            <div class="col-md-3">
+                            <div class="col-md">
                                 <label class="form-label small fw-semibold text-start d-block">Strategy</label>
                                 <select class="form-select form-select-sm"
                                         x-model="spec.partition_strategy"
@@ -76,7 +80,7 @@
                                     <option value="hash">hash</option>
                                 </select>
                             </div>
-                            <div class="col-md-3">
+                            <div class="col-md">
                                 <label class="form-label small fw-semibold text-start d-block">N Partitions</label>
                                 <input type="number" class="form-control form-control-sm"
                                        x-model.number="spec.n_partitions" min="1"
@@ -85,12 +89,20 @@
                                        @change="syncStore()">
                                 <small class="form-text text-muted">Leave empty to auto-calculate from target file size</small>
                             </div>
-                            <div class="col-md-3">
+                            <div class="col-md">
                                 <label class="form-label small fw-semibold text-start d-block">Target File Size (MB)</label>
                                 <input type="number" class="form-control form-control-sm"
                                        x-model.number="spec.target_file_size_mb"
                                        :placeholder="$store.dlWizard.state.targetPartitionSizeMb + ' (default)'"
                                        min="1"
+                                       @change="syncStore()">
+                            </div>
+                            <div class="col-md">
+                                <label class="form-label small fw-semibold text-start d-block">Row Group Size (rows)</label>
+                                <input type="number" class="form-control form-control-sm"
+                                       x-model.number="spec.max_row_group_size"
+                                       :placeholder="($store.dlWizard.state.maxRowGroupSize || 'delta-rs') + ' (default)'"
+                                       min="1" step="1"
                                        @change="syncStore()">
                             </div>
                         </div>
