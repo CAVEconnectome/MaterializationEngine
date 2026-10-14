@@ -158,9 +158,11 @@ class BaseConfig:
         else None
     )
     # Rows per Parquet row group in the exported files (set when optimize rewrites them).
-    # Smaller row groups let a reader fetch less for a lookup by the partition column: one
-    # root of synapses_pni_2 reads ~5 MB with ~540k-row groups, ~0.2 MB with 16k. Unset
-    # keeps delta-rs's default. Output specs (and the export wizard) can override it.
+    # Smaller row groups let a reader fetch less for a lookup by the partition column:
+    # delta-rs's default (1,048,576 rows) puts each ~1.1M-row synapses_pni_2 file in one row
+    # group, so one root reads its whole file (~10 MB for four columns); 50k-row groups cut
+    # that ~20x. Unset keeps delta-rs's default. Output specs (and the export wizard) can
+    # override it.
     DELTALAKE_MAX_ROW_GROUP_SIZE = (
         int(os.environ["DELTALAKE_MAX_ROW_GROUP_SIZE"])
         if os.environ.get("DELTALAKE_MAX_ROW_GROUP_SIZE")
