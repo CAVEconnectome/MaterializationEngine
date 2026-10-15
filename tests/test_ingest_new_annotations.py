@@ -336,8 +336,8 @@ MODULE = "materializationengine.workflows.ingest_new_annotations"
 
 
 class TestMissingRootIdEntryPoints:
-    """The dense / sparse lookup endpoints run a regular root id update now, which fills
-    NULL root ids (and is logged and keeps last_updated right)."""
+    """The dense / sparse lookup endpoints fill NULL root ids as a repair
+    (update_root_ids_workflow with only_missing_roots)."""
 
     def test_dense_updates_every_table_with_a_segmentation_table(self, mat_metadata):
         tables = [dict(mat_metadata, segmentation_table_name="a__seg"), dict(mat_metadata, segmentation_table_name=None)]
@@ -345,14 +345,14 @@ class TestMissingRootIdEntryPoints:
                 mock.patch("materializationengine.workflows.update_root_ids.update_root_ids_workflow") as update:
             process_dense_missing_roots_workflow({"datastack": "minnie65_phase3_v1"})
         assert [c.args[0]["segmentation_table_name"] for c in update.call_args_list] == ["a__seg"]
-        assert info.call_args.kwargs["materialization_time_stamp"] is not None
+        assert update.call_args.args[0]["only_missing_roots"] is True
 
     def test_sparse_updates_the_one_table(self, mat_metadata):
         with mock.patch(f"{MODULE}.get_materialization_info", return_value=[dict(mat_metadata)]) as info, \
                 mock.patch("materializationengine.workflows.update_root_ids.update_root_ids_workflow") as update:
             process_sparse_missing_roots_workflow({"datastack": "minnie65_phase3_v1"}, "synapses")
         assert info.call_args.kwargs["table_name"] == "synapses"
-        update.assert_called_once()
+        assert update.call_args.args[0]["only_missing_roots"] is True
 
 
 class TestBatchMissingRootIds:

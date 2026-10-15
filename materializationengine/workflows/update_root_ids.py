@@ -62,15 +62,26 @@ def expired_root_id_workflow(datastack_info: dict, **kwargs):
     return True
 
 
-def update_root_ids_workflow(mat_metadata: dict):
-    """Update the root ids of a segmentation table to their values at the run's
-    materialization time stamp, then set the table's last_updated to that time.
+def as_of_last_update(mat_metadata: dict) -> dict:
+    """The metadata with its time stamp set to the table's last update (now if it has none)."""
+    last_updated = mat_metadata.get("last_updated_time_stamp")
+    when = datetime.datetime.fromisoformat(str(last_updated)) if last_updated else datetime.datetime.utcnow()
+    return {**mat_metadata, "materialization_time_stamp": when.strftime("%Y-%m-%d %H:%M:%S.%f")}
 
-    Which rows are looked up:
-        - the rows of every root that expired since the table's last update, and the rows
-          whose root id is NULL (with a supervoxel id), in a chunk of their own; or
-        - with lookup_all_root_ids, every row of the table (a full re-lookup, for when
-          roots may be stale without knowing which).
+
+def update_root_ids_workflow(mat_metadata: dict):
+    """Update the root ids of a segmentation table.
+
+    A regular update looks up, as of the run's materialization time stamp, the rows of
+    every root that expired since the table's last update and the rows whose root id is
+    NULL (with a supervoxel id, in a chunk of their own), then sets the table's
+    last_updated to that time.
+
+    A repair leaves last_updated as it is and looks up as of it (as of now if the table
+    has none), so the next regular update still covers everything that expired since:
+        - lookup_all_root_ids: every row of the table, for when roots may be stale without
+          knowing which;
+        - only_missing_roots: only the rows whose root id is NULL.
 
     Each row is looked up from its supervoxel id, and only rows whose root changed are
     written. Chunk tasks are queued as earlier ones finish (at most
@@ -84,26 +95,36 @@ def update_root_ids_workflow(mat_metadata: dict):
     """
 
     celery_logger.info("Setup expired root id workflow...")
+    repair = bool(mat_metadata.get("lookup_all_root_ids") or mat_metadata.get("only_missing_roots"))
+    if repair:
+        mat_metadata = as_of_last_update(mat_metadata)
     if mat_metadata.get("lookup_all_root_ids"):
         chunks = generate_chunked_model_ids({**mat_metadata, "chunk_size": LOOKUP_ALL_CHUNK_ROWS})
+    elif mat_metadata.get("only_missing_roots"):
+        chunks = [MISSING_ROOTS]
     else:
         chunks = itertools.chain(get_expired_root_ids_from_pcg(mat_metadata) or [], [MISSING_ROOTS])
 
     sent = run_with_limit(
         (update_root_ids.si(chunk, mat_metadata) for chunk in chunks), _max_chunks_in_flight()
     )
-    celery_logger.info(f"Looked up root ids of '{mat_metadata.get('segmentation_table_name')}' in {sent} chunks")
-    monitor_task_states([update_metadata.si(mat_metadata).apply_async().id])
+    celery_logger.info(
+        f"Looked up root ids of '{mat_metadata.get('segmentation_table_name')}' in {sent} chunks, "
+        f"as of {mat_metadata['materialization_time_stamp']}"
+    )
+    if not repair:
+        monitor_task_states([update_metadata.si(mat_metadata).apply_async().id])
     return workflow_complete.si("update_root_ids_workflow")
 
 
 @celery.task(name="workflow:lookup_all_root_ids_workflow")
 def lookup_all_root_ids_workflow(datastack_info: dict, table_name: str, **kwargs):
-    """Look up every root id of one table from its supervoxel ids, as of now.
+    """Look up every root id of one table from its supervoxel ids.
 
     For a table whose root ids may be stale without knowing which: every row is looked
-    up, only rows whose root changed are written, and the table's last_updated becomes
-    the time of this lookup. Run it when the datastack's regular updates are not running.
+    up as of the table's last update (now if it has none), only rows whose root changed
+    are written, and last_updated is left as it is, so the next regular update covers
+    whatever expired since.
     """
     mat_metadata = get_materialization_info(
         datastack_info=datastack_info,

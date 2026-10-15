@@ -201,12 +201,12 @@ def ingest_new_annotations(
 
 @celery.task(name="workflow:process_dense_missing_roots_workflow")
 def process_dense_missing_roots_workflow(datastack_info: dict, **kwargs):
-    """Fill in the NULL root ids of every table of a datastack, now.
+    """Fill in the NULL root ids of every table of a datastack.
 
-    Runs a regular root id update for each table (update_root_ids_workflow), which looks
-    up every row with a supervoxel id and a NULL root id, along with the rows of roots
-    that expired since the table's last update, and writes only what changed. To look up
-    every root id instead, use lookup_all_root_ids_workflow.
+    For each table, looks up the rows with a supervoxel id and a NULL root id as of the
+    table's last update (now if it has none), and leaves last_updated as it is
+    (update_root_ids_workflow with only_missing_roots). To look up every root id instead,
+    use lookup_all_root_ids_workflow.
     """
     from materializationengine.workflows.update_root_ids import update_root_ids_workflow
 
@@ -216,13 +216,13 @@ def process_dense_missing_roots_workflow(datastack_info: dict, **kwargs):
     )
     for mat_metadata in mat_info:
         if mat_metadata.get("segmentation_table_name"):
-            update_root_ids_workflow(mat_metadata)
+            update_root_ids_workflow({**mat_metadata, "only_missing_roots": True})
     return True
 
 
 @celery.task(name="workflow:process_sparse_missing_roots_workflow")
 def process_sparse_missing_roots_workflow(datastack_info: dict, table_name: str, **kwargs):
-    """Fill in the NULL root ids of one table, now (see process_dense_missing_roots_workflow)."""
+    """Fill in the NULL root ids of one table (see process_dense_missing_roots_workflow)."""
     from materializationengine.workflows.update_root_ids import update_root_ids_workflow
 
     mat_metadata = get_materialization_info(
@@ -230,7 +230,7 @@ def process_sparse_missing_roots_workflow(datastack_info: dict, table_name: str,
         materialization_time_stamp=datetime.datetime.utcnow(),
         table_name=table_name,
     )[0]
-    update_root_ids_workflow(mat_metadata)
+    update_root_ids_workflow({**mat_metadata, "only_missing_roots": True})
     return True
 
 
