@@ -150,28 +150,56 @@ class TestUpdateRootIdsWorkflow:
         with mock.patch(f"{WORKFLOW}.get_expired_root_ids_from_pcg", return_value=expired), \
                 mock.patch(f"{WORKFLOW}.generate_chunked_model_ids", return_value=model_chunks) as chunker, \
                 mock.patch(f"{WORKFLOW}.run_with_limit",
-                           side_effect=lambda sigs, limit: sent.extend(s.args[0] for s in sigs) or len(sent)), \
+                           side_effect=lambda sigs, limit: sent.extend((s.args[0], s.args[1]) for s in sigs) or len(sent)), \
                 mock.patch(f"{WORKFLOW}.update_metadata") as update_metadata, \
                 mock.patch(f"{WORKFLOW}.monitor_task_states") as monitor:
             update_root_ids_workflow(mat_metadata)
         return sent, chunker, update_metadata, monitor
 
+    REGULAR = {"last_updated_time_stamp": "2026-10-15 17:00:40.014233",
+               "materialization_time_stamp": "2026-10-15 20:30:41.000001"}
+
     def test_expired_roots_then_one_chunk_of_null_roots(self, mat_metadata):
-        sent, _, update_metadata, monitor = self._run(mat_metadata, expired=iter([[1, 2], [3]]))
-        assert sent == [[1, 2], [3], MISSING_ROOTS]
-        update_metadata.si.assert_called_once()
+        sent, _, update_metadata, monitor = self._run(dict(mat_metadata, **self.REGULAR), expired=iter([[1, 2], [3]]))
+        assert [chunk for chunk, _ in sent] == [[1, 2], [3], MISSING_ROOTS]
+        assert {md["materialization_time_stamp"] for _, md in sent} == {"2026-10-15 20:30:41.000001"}
+        update_metadata.si.assert_called_once()  # last_updated moves to the run's time
         monitor.assert_called_once()
 
     def test_null_roots_are_filled_even_when_nothing_expired(self, mat_metadata):
-        sent, _, update_metadata, _ = self._run(mat_metadata, expired=None)
-        assert sent == [MISSING_ROOTS]
+        sent, _, update_metadata, _ = self._run(dict(mat_metadata, **self.REGULAR), expired=None)
+        assert [chunk for chunk, _ in sent] == [MISSING_ROOTS]
         update_metadata.si.assert_called_once()
 
-    def test_lookup_all_chunks_the_whole_table_in_large_chunks(self, mat_metadata):
-        metadata = dict(mat_metadata, lookup_all_root_ids=True)
-        sent, chunker, _, _ = self._run(metadata, model_chunks=iter([[1, 50001], [50001, None]]))
-        assert sent == [[1, 50001], [50001, None]]  # no separate NULL chunk: every row is looked up
+    def test_lookup_all_is_a_repair_as_of_the_last_update(self, mat_metadata):
+        metadata = dict(mat_metadata, **self.REGULAR, lookup_all_root_ids=True)
+        sent, chunker, update_metadata, _ = self._run(metadata, model_chunks=iter([[1, 50001], [50001, None]]))
+        assert [chunk for chunk, _ in sent] == [[1, 50001], [50001, None]]  # every row; no separate NULL chunk
         assert chunker.call_args.args[0]["chunk_size"] == LOOKUP_ALL_CHUNK_ROWS
+        assert {md["materialization_time_stamp"] for _, md in sent} == {"2026-10-15 17:00:40.014233"}
+        update_metadata.si.assert_not_called()  # last_updated stays where it was
+
+    def test_only_missing_roots_is_a_repair_of_the_null_rows(self, mat_metadata):
+        metadata = dict(mat_metadata, **self.REGULAR, only_missing_roots=True)
+        with mock.patch(f"{WORKFLOW}.get_expired_root_ids_from_pcg") as expired:
+            sent, _, update_metadata, _ = self._run(metadata, expired=iter([[1]]))
+        assert [chunk for chunk, _ in sent] == [MISSING_ROOTS]
+        assert {md["materialization_time_stamp"] for _, md in sent} == {"2026-10-15 17:00:40.014233"}
+        update_metadata.si.assert_not_called()
+
+    def test_a_repair_of_a_table_never_updated_uses_now(self, mat_metadata):
+        metadata = dict(mat_metadata, last_updated_time_stamp=None, only_missing_roots=True)
+        sent, _, update_metadata, _ = self._run(metadata)
+        (ts,) = {md["materialization_time_stamp"] for _, md in sent}
+        import datetime
+        assert abs(datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S.%f") - datetime.datetime.utcnow()).total_seconds() < 60
+        update_metadata.si.assert_not_called()
+
+    def test_a_last_update_without_microseconds_is_read(self, mat_metadata):
+        from materializationengine.workflows.update_root_ids import as_of_last_update
+
+        md = as_of_last_update(dict(mat_metadata, last_updated_time_stamp="2026-10-15 17:00:40"))
+        assert md["materialization_time_stamp"] == "2026-10-15 17:00:40.000000"
 
     def test_a_failed_chunk_leaves_last_updated_alone(self, mat_metadata):
         import pytest
