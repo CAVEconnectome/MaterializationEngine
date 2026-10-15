@@ -18,6 +18,8 @@ try:
     from materializationengine.workflows.ingest_new_annotations import (
         create_missing_segmentation_table,
         get_annotations_with_missing_supervoxel_ids,
+        batch_missing_root_ids_query,
+        find_dense_missing_root_ids_workflow,
         find_missing_root_ids_workflow,
         get_cloudvolume_supervoxel_ids,
         get_ids_with_missing_roots,
@@ -339,3 +341,94 @@ class TestLookupMissingRootIds:
             mat_metadata, last_modified_time_stamp=None, last_updated_time_stamp=None
         )
         assert table_modified_since_last_update(metadata) is True
+
+
+MODULE = "materializationengine.workflows.ingest_new_annotations"
+
+
+class TestDenseMissingRootIds:
+    """The dense lookup (run on purpose, e.g. after clearing stale roots)."""
+
+    def test_scans_even_an_unmodified_table_throttled_at_its_last_update(self, mat_metadata):
+        metadata = dict(
+            mat_metadata,
+            last_modified_time_stamp="2022-10-25 19:24:28.559914",
+            last_updated_time_stamp="2026-10-15 17:00:40.014233",
+            materialization_time_stamp="2026-10-15 17:31:02.000000",
+            throttle_queues=False,
+        )
+        with mock.patch(f"{MODULE}.get_ids_with_missing_roots", return_value="query") as query, \
+                mock.patch(f"{MODULE}.batch_missing_root_ids_query", return_value=["t1", "t2"]) as batch, \
+                mock.patch(f"{MODULE}.monitor_task_states") as monitor, \
+                mock.patch(f"{MODULE}.update_metadata") as update_metadata:
+            find_dense_missing_root_ids_workflow(metadata)
+        query.assert_called_once()
+        sent = batch.call_args.args[1]
+        assert sent["throttle_queues"] is True
+        # looked up as of the table's last update, which is left as it is
+        assert sent["materialization_time_stamp"] == "2026-10-15 17:00:40.014233"
+        monitor.assert_called_once_with(["t1", "t2"])
+        update_metadata.si.assert_not_called()
+        assert metadata["materialization_time_stamp"] == "2026-10-15 17:31:02.000000"  # caller's dict untouched
+
+    def test_nothing_missing_queues_nothing(self, mat_metadata):
+        with mock.patch(f"{MODULE}.get_ids_with_missing_roots"), \
+                mock.patch(f"{MODULE}.batch_missing_root_ids_query", return_value=[]), \
+                mock.patch(f"{MODULE}.monitor_task_states") as monitor:
+            find_dense_missing_root_ids_workflow(dict(mat_metadata))
+        monitor.assert_not_called()
+
+    def test_batches_wait_for_the_process_queue_and_carry_plain_id_lists(self, mat_metadata):
+        batches = [[(1,), (2,)], [(5,)], []]
+        proxy = mock.MagicMock()
+        proxy.fetchmany.side_effect = batches
+        engine = mock.MagicMock()
+        engine.connect.return_value.__enter__.return_value.execution_options.return_value.execute.return_value = proxy
+        order = []
+        with mock.patch(f"{MODULE}.db_manager.get_engine", return_value=engine), \
+                mock.patch(f"{MODULE}.throttle_celery.wait_if_queue_full",
+                           side_effect=lambda queue_name: order.append(("wait", queue_name))), \
+                mock.patch(f"{MODULE}.lookup_root_ids") as lookup:
+            lookup.si.side_effect = lambda md, ids: order.append(("queue", ids)) or mock.MagicMock(id=f"task{len(order)}")
+            tasks = batch_missing_root_ids_query("SELECT 1", dict(mat_metadata, throttle_queues=True, chunk_size=2))
+        # the queue is checked before every batch, and each batch is a JSON-able list of ids
+        assert order == [("wait", "process"), ("queue", [1, 2]), ("wait", "process"), ("queue", [5]), ("wait", "process")]
+        assert len(tasks) == 2
+
+
+class TestMonitorTaskStates:
+    def _states(self, sequences):
+        """AsyncResult stand-in: each task id walks through its list of states, one per poll."""
+        calls = []
+
+        def result(task_id, app=None):
+            calls.append(task_id)
+            states = sequences[task_id]
+            r = mock.MagicMock()
+            r.state = states.pop(0) if len(states) > 1 else states[0]
+            r.traceback = f"{task_id} failed"
+            return r
+
+        return result, calls
+
+    def test_polls_only_tasks_still_pending(self):
+        from materializationengine import shared_tasks
+
+        result, calls = self._states({"a": ["SUCCESS"], "b": ["PENDING", "PENDING", "SUCCESS"]})
+        with mock.patch.object(shared_tasks, "AsyncResult", side_effect=result), mock.patch.object(shared_tasks.time, "sleep"):
+            assert shared_tasks.monitor_task_states(["a", "b"]) is True
+        assert calls == ["a", "b", "b", "b"]
+
+    def test_raises_on_a_failure(self):
+        import pytest
+        from materializationengine import shared_tasks
+
+        result, _ = self._states({"a": ["PENDING", "FAILURE"]})
+        with mock.patch.object(shared_tasks, "AsyncResult", side_effect=result), mock.patch.object(shared_tasks.time, "sleep"), \
+                pytest.raises(Exception, match="a failed"):
+            shared_tasks.monitor_task_states(["a"])
+
+    def test_no_tasks_is_done(self):
+        from materializationengine import shared_tasks
+
+        assert shared_tasks.monitor_task_states([]) is True

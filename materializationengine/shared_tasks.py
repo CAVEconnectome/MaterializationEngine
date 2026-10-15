@@ -443,21 +443,26 @@ def add_index(self, database: str, command: str):
 
 
 def monitor_task_states(task_ids: List, polling_rate: int = 0.2):
-    while True:
-        results = [AsyncResult(task_id, app=celery) for task_id in task_ids]
-        celery_logger.debug(f"Celery results {results}")
-        result_status = []
-        for result in results:
-            if result.state == "FAILURE":
+    """Wait until every task has succeeded; raise on the first failure.
+
+    Only the tasks still pending are polled again, so a long list of mostly finished
+    tasks does not cost a Redis lookup per task every poll.
+    """
+    pending = list(task_ids)
+    while pending:
+        still_pending = []
+        for task_id in pending:
+            result = AsyncResult(task_id, app=celery)
+            state = result.state
+            if state == "FAILURE":
                 raise Exception(result.traceback)
-            result_status.append(result.state)
-
-        celery_logger.debug(f"Celery task status: {result_status}")
-
-        if all(x == "SUCCESS" for x in result_status):
-            return True
-
-        time.sleep(polling_rate)
+            if state != "SUCCESS":
+                still_pending.append(task_id)
+        celery_logger.debug(f"{len(still_pending)} of {len(task_ids)} tasks pending")
+        pending = still_pending
+        if pending:
+            time.sleep(polling_rate)
+    return True
 
 
 def monitor_workflow_state(workflow: AsyncResult, polling_rate: int = 0.2):
