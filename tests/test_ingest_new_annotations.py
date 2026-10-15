@@ -19,8 +19,9 @@ try:
         create_missing_segmentation_table,
         get_annotations_with_missing_supervoxel_ids,
         batch_missing_root_ids_query,
-        find_dense_missing_root_ids_workflow,
         find_missing_root_ids_workflow,
+        process_dense_missing_roots_workflow,
+        process_sparse_missing_roots_workflow,
         get_cloudvolume_supervoxel_ids,
         get_ids_with_missing_roots,
         get_new_root_ids,
@@ -346,38 +347,27 @@ class TestLookupMissingRootIds:
 MODULE = "materializationengine.workflows.ingest_new_annotations"
 
 
-class TestDenseMissingRootIds:
-    """The dense lookup (run on purpose, e.g. after clearing stale roots)."""
+class TestMissingRootIdEntryPoints:
+    """The dense / sparse lookup endpoints run a regular root id update now, which fills
+    NULL root ids (and is logged and keeps last_updated right)."""
 
-    def test_scans_even_an_unmodified_table_throttled_at_its_last_update(self, mat_metadata):
-        metadata = dict(
-            mat_metadata,
-            last_modified_time_stamp="2022-10-25 19:24:28.559914",
-            last_updated_time_stamp="2026-10-15 17:00:40.014233",
-            materialization_time_stamp="2026-10-15 17:31:02.000000",
-            throttle_queues=False,
-        )
-        with mock.patch(f"{MODULE}.get_ids_with_missing_roots", return_value="query") as query, \
-                mock.patch(f"{MODULE}.batch_missing_root_ids_query", return_value=["t1", "t2"]) as batch, \
-                mock.patch(f"{MODULE}.monitor_task_states") as monitor, \
-                mock.patch(f"{MODULE}.update_metadata") as update_metadata:
-            find_dense_missing_root_ids_workflow(metadata)
-        query.assert_called_once()
-        sent = batch.call_args.args[1]
-        assert sent["throttle_queues"] is True
-        # looked up as of the table's last update, which is left as it is
-        assert sent["materialization_time_stamp"] == "2026-10-15 17:00:40.014233"
-        monitor.assert_called_once_with(["t1", "t2"])
-        update_metadata.si.assert_not_called()
-        assert metadata["materialization_time_stamp"] == "2026-10-15 17:31:02.000000"  # caller's dict untouched
+    def test_dense_updates_every_table_with_a_segmentation_table(self, mat_metadata):
+        tables = [dict(mat_metadata, segmentation_table_name="a__seg"), dict(mat_metadata, segmentation_table_name=None)]
+        with mock.patch(f"{MODULE}.get_materialization_info", return_value=tables) as info, \
+                mock.patch("materializationengine.workflows.update_root_ids.update_root_ids_workflow") as update:
+            process_dense_missing_roots_workflow({"datastack": "minnie65_phase3_v1"})
+        assert [c.args[0]["segmentation_table_name"] for c in update.call_args_list] == ["a__seg"]
+        assert info.call_args.kwargs["materialization_time_stamp"] is not None
 
-    def test_nothing_missing_queues_nothing(self, mat_metadata):
-        with mock.patch(f"{MODULE}.get_ids_with_missing_roots"), \
-                mock.patch(f"{MODULE}.batch_missing_root_ids_query", return_value=[]), \
-                mock.patch(f"{MODULE}.monitor_task_states") as monitor:
-            find_dense_missing_root_ids_workflow(dict(mat_metadata))
-        monitor.assert_not_called()
+    def test_sparse_updates_the_one_table(self, mat_metadata):
+        with mock.patch(f"{MODULE}.get_materialization_info", return_value=[dict(mat_metadata)]) as info, \
+                mock.patch("materializationengine.workflows.update_root_ids.update_root_ids_workflow") as update:
+            process_sparse_missing_roots_workflow({"datastack": "minnie65_phase3_v1"}, "synapses")
+        assert info.call_args.kwargs["table_name"] == "synapses"
+        update.assert_called_once()
 
+
+class TestBatchMissingRootIds:
     def test_batches_wait_for_the_process_queue_and_carry_plain_id_lists(self, mat_metadata):
         batches = [[(1,), (2,)], [(5,)], []]
         proxy = mock.MagicMock()
@@ -432,3 +422,37 @@ class TestMonitorTaskStates:
         from materializationengine import shared_tasks
 
         assert shared_tasks.monitor_task_states([]) is True
+
+
+class TestRunWithLimit:
+    def test_never_more_than_the_limit_in_flight(self):
+        from materializationengine import shared_tasks
+
+        done_after = {}
+        polls = {"n": 0}
+        in_flight_max = {"n": 0}
+        live = set()
+
+        class Sig:
+            def __init__(self, i):
+                self.i = i
+
+            def apply_async(self):
+                live.add(self.i)
+                in_flight_max["n"] = max(in_flight_max["n"], len(live))
+                done_after[self.i] = polls["n"] + 2  # finishes two polls later
+                return mock.MagicMock(id=self.i)
+
+        def result(task_id, app=None):
+            polls["n"] += 1
+            r = mock.MagicMock()
+            r.state = "SUCCESS" if polls["n"] >= done_after[task_id] else "PENDING"
+            if r.state == "SUCCESS":
+                live.discard(task_id)
+            return r
+
+        with mock.patch.object(shared_tasks, "AsyncResult", side_effect=result), \
+                mock.patch.object(shared_tasks.time, "sleep"):
+            assert shared_tasks.run_with_limit((Sig(i) for i in range(10)), max_in_flight=3) == 10
+        assert in_flight_max["n"] <= 3
+        assert not live
