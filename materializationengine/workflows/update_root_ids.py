@@ -21,6 +21,7 @@ from materializationengine.shared_tasks import (
 )
 from materializationengine.throttle import throttle_celery
 from materializationengine.utils import create_segmentation_model, get_config_param
+from materializationengine.workflows import root_id_update_log
 from requests import HTTPError
 from sqlalchemy.sql import and_, or_, text
 
@@ -105,15 +106,29 @@ def update_root_ids_workflow(mat_metadata: dict):
     else:
         chunks = itertools.chain(get_expired_root_ids_from_pcg(mat_metadata) or [], [MISSING_ROOTS])
 
-    sent = run_with_limit(
-        (update_root_ids.si(chunk, mat_metadata) for chunk in chunks), _max_chunks_in_flight()
-    )
-    celery_logger.info(
-        f"Looked up root ids of '{mat_metadata.get('segmentation_table_name')}' in {sent} chunks, "
-        f"as of {mat_metadata['materialization_time_stamp']}"
-    )
-    if not repair:
-        monitor_task_states([update_metadata.si(mat_metadata).apply_async().id])
+    # Every regular run is recorded, including one that changes nothing (a manifest row
+    # with no updates), so the recorded windows chain without gaps. A repair is not: it is
+    # as of the last update, a time a run already recorded.
+    if repair:
+        mat_metadata = {**mat_metadata, "root_id_update_log": False}
+    record_updates = root_id_update_log.enabled(mat_metadata)
+    if record_updates:
+        root_id_update_log.start(mat_metadata)
+    succeeded = False
+    try:
+        sent = run_with_limit(
+            (update_root_ids.si(chunk, mat_metadata) for chunk in chunks), _max_chunks_in_flight()
+        )
+        celery_logger.info(
+            f"Looked up root ids of '{mat_metadata.get('segmentation_table_name')}' in {sent} chunks, "
+            f"as of {mat_metadata['materialization_time_stamp']}"
+        )
+        if not repair:
+            monitor_task_states([update_metadata.si(mat_metadata).apply_async().id])
+        succeeded = True
+    finally:
+        if record_updates:
+            root_id_update_log.finalize(mat_metadata, succeeded=succeeded)
     return workflow_complete.si("update_root_ids_workflow")
 
 
@@ -361,10 +376,10 @@ def get_new_root_ids(self, supervoxel_data, mat_metadata):
 
     old_roots = root_ids_df[root_id_col_name[0]].copy()
     root_ids_df.loc[supervoxel_df.index, root_id_col_name[0]] = root_id_array
-    root_ids_df = root_ids_df.drop(columns=[supervoxel_col_name[0]])
-    # only rows whose root changed are written (a full re-lookup finds most unchanged)
+    # only rows whose root changed are written and recorded (a full re-lookup finds most
+    # unchanged)
     changed = (old_roots.isna() | (old_roots != root_ids_df[root_id_col_name[0]])).to_numpy()
-    root_ids_df = root_ids_df[changed]
+    root_ids_df, old_roots = root_ids_df[changed], old_roots[changed]
     if root_ids_df.empty:
         return "Number of rows updated: 0"
 
@@ -373,11 +388,15 @@ def get_new_root_ids(self, supervoxel_data, mat_metadata):
 
     with db_manager.session_scope(aligned_volume) as session:
         try:
-            data = root_ids_df.to_dict(orient="records")
+            data = root_ids_df.drop(columns=[supervoxel_col_name[0]]).to_dict(orient="records")
             session.bulk_update_mappings(SegmentationModel, data)
         except Exception as e:
             raise self.retry(exc=e, countdown=3)
 
+    if root_id_update_log.enabled(mat_metadata):
+        root_id_update_log.record_chunk(
+            mat_metadata, root_ids_df, old_roots, root_id_col_name[0], supervoxel_col_name[0], self.request.id
+        )
     return f"Number of rows updated: {len(data)}"
 
 
