@@ -13,6 +13,8 @@ from materializationengine.workflows.update_root_ids import (
 import logging
 from unittest import mock
 
+import pytest
+
 import numpy as np
 
 
@@ -141,6 +143,58 @@ class TestUpdateRootIds:
         assert all("pre_pt_supervoxel_id" not in r for r in written)
 
 
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_get_new_roots_records_old_and_new_roots_when_enabled(
+        self, monkeypatch, mat_metadata, annotation_data, enabled
+    ):
+        from materializationengine.workflows import root_id_update_log
+
+        monkeypatch.setattr(
+            "materializationengine.workflows.update_root_ids.lookup_new_root_ids",
+            lambda *args, **kwargs: annotation_data["new_root_ids"],
+        )
+        monkeypatch.setattr(root_id_update_log, "enabled", lambda md: enabled)
+        recorded = []
+        monkeypatch.setattr(
+            root_id_update_log,
+            "write_chunk",
+            lambda md, table, task_id: recorded.append((table, task_id)),
+        )
+        supervoxel_chunk = annotation_data["segmentation_data"]
+        old = [row["pre_pt_root_id"] for row in supervoxel_chunk]
+        result = get_new_root_ids.s(supervoxel_chunk, mat_metadata).apply()
+        assert result.get() == "Number of rows updated: 3"
+        if not enabled:
+            assert recorded == []
+            return
+        (table, task_id), = recorded
+        assert task_id == result.id
+        rows = table.to_pylist()
+        assert [r["old_root_id"] for r in rows] == old
+        assert [r["new_root_id"] for r in rows] == annotation_data["new_root_ids"]
+        assert {r["root_column"] for r in rows} == {"pre_pt"}
+
+    def test_unchanged_rows_are_not_recorded(self, monkeypatch, mat_metadata):
+        from materializationengine.workflows import root_id_update_log
+
+        rows = [{"id": 1, "pre_pt_root_id": 101, "pre_pt_supervoxel_id": 11},
+                {"id": 2, "pre_pt_root_id": 102, "pre_pt_supervoxel_id": 12}]
+        monkeypatch.setattr("materializationengine.workflows.update_root_ids.lookup_new_root_ids",
+                            lambda *a, **k: np.array([101, 202]))
+        monkeypatch.setattr(root_id_update_log, "enabled", lambda md: True)
+        recorded = []
+        monkeypatch.setattr(root_id_update_log, "write_chunk", lambda md, table, task_id: recorded.append(table))
+        session = mock.MagicMock()
+        scope = mock.MagicMock()
+        scope.return_value.__enter__.return_value = session
+        monkeypatch.setattr("materializationengine.workflows.update_root_ids.db_manager.session_scope", scope)
+        monkeypatch.setattr("materializationengine.workflows.update_root_ids.create_segmentation_model", mock.MagicMock())
+        get_new_root_ids.s(rows, mat_metadata).apply().get()
+        (table,) = recorded
+        assert table.to_pylist() == [{"id": 2, "root_column": "pre_pt", "supervoxel_id": 12,
+                                      "old_root_id": 102, "new_root_id": 202}]
+
+
 WORKFLOW = "materializationengine.workflows.update_root_ids"
 
 
@@ -182,3 +236,22 @@ class TestUpdateRootIdsWorkflow:
                 pytest.raises(Exception, match="chunk failed"):
             update_root_ids_workflow(mat_metadata)
         update_metadata.si.assert_not_called()
+
+    @pytest.mark.parametrize("fails", [False, True])
+    def test_every_run_is_recorded_and_a_failed_one_as_failed(self, mat_metadata, fails):
+        from materializationengine.workflows import root_id_update_log
+
+        with mock.patch(f"{WORKFLOW}.get_expired_root_ids_from_pcg", return_value=None), \
+                mock.patch(f"{WORKFLOW}.run_with_limit",
+                           side_effect=Exception("chunk failed") if fails else (lambda sigs, limit: len(list(sigs)))), \
+                mock.patch(f"{WORKFLOW}.update_metadata"), mock.patch(f"{WORKFLOW}.monitor_task_states"), \
+                mock.patch.object(root_id_update_log, "enabled", return_value=True), \
+                mock.patch.object(root_id_update_log, "start") as start, \
+                mock.patch.object(root_id_update_log, "finalize") as finalize:
+            if fails:
+                with pytest.raises(Exception, match="chunk failed"):
+                    update_root_ids_workflow(mat_metadata)
+            else:
+                update_root_ids_workflow(mat_metadata)
+        start.assert_called_once()
+        assert finalize.call_args.kwargs["succeeded"] is (not fails)
