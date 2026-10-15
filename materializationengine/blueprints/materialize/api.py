@@ -368,6 +368,33 @@ class LookupSparseMissingRootIdsResource(Resource):
 
 
 @mat_bp.route(
+    "/materialize/run/lookup_all_root_ids/datastack/<string:datastack_name>/table/<string:table_name>"
+)
+class LookupAllRootIdsResource(Resource):
+    @reset_auth
+    @auth_requires_admin
+    @mat_bp.doc(
+        "Look up every root id of a table from its supervoxel ids", security="apikey"
+    )
+    def post(self, datastack_name: str, table_name: str):
+        """Look up every root id of a table from its supervoxel ids, as of now, and write
+        the ones that changed: for a table whose root ids may be stale without knowing
+        which. Run it when the datastack's regular updates are not running.
+
+        Args:
+            datastack_name (str): name of datastack from infoservice
+            table_name (str): name of table
+        """
+        from materializationengine.workflows.update_root_ids import (
+            lookup_all_root_ids_workflow,
+        )
+
+        datastack_info = get_datastack_info(datastack_name)
+        lookup_all_root_ids_workflow.s(datastack_info, table_name).apply_async()
+        return 200
+
+
+@mat_bp.route(
     "/materialize/run/remove_bad_root_ids/datastack/<string:datastack_name>/table/<string:table_name>"
 )
 class SetBadRootsToNullResource(Resource):
