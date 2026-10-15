@@ -21,7 +21,6 @@ from materializationengine.workflows.create_frozen_database import (
 )
 from materializationengine.workflows.ingest_new_annotations import (
     ingest_new_annotations_workflow,
-    find_missing_root_ids_workflow
 )
 from materializationengine.task import LockedTask, RedisLease
 from materializationengine.workflows.update_root_ids import (
@@ -110,9 +109,8 @@ def _run_complete_workflow(
         if mat_metadata.get("segmentation_table_name"):
             workflow = chain(
                 ingest_new_annotations_workflow(mat_metadata),
-                # rows posted through the API get a supervoxel_id but no root_id,
-                # and ingest only handles rows with no segmentation row at all
-                find_missing_root_ids_workflow(mat_metadata),
+                # update_root_ids also fills NULL root ids (e.g. rows posted through the API
+                # with a supervoxel_id but no root_id)
                 update_root_ids_workflow(mat_metadata),
             )
         else:
