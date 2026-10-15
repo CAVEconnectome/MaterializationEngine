@@ -14,7 +14,10 @@ import numpy as np
 from materializationengine.workflows.ingest_new_annotations import (
     create_missing_segmentation_table,
     get_annotations_with_missing_supervoxel_ids,
+    batch_missing_root_ids_query,
     find_missing_root_ids_workflow,
+    process_dense_missing_roots_workflow,
+    process_sparse_missing_roots_workflow,
     get_cloudvolume_supervoxel_ids,
     get_ids_with_missing_roots,
     get_new_root_ids,
@@ -327,3 +330,117 @@ class TestLookupMissingRootIds:
             mat_metadata, last_modified_time_stamp=None, last_updated_time_stamp=None
         )
         assert table_modified_since_last_update(metadata) is True
+
+
+MODULE = "materializationengine.workflows.ingest_new_annotations"
+
+
+class TestMissingRootIdEntryPoints:
+    """The dense / sparse lookup endpoints fill NULL root ids as a repair
+    (update_root_ids_workflow with only_missing_roots)."""
+
+    def test_dense_updates_every_table_with_a_segmentation_table(self, mat_metadata):
+        tables = [dict(mat_metadata, segmentation_table_name="a__seg"), dict(mat_metadata, segmentation_table_name=None)]
+        with mock.patch(f"{MODULE}.get_materialization_info", return_value=tables) as info, \
+                mock.patch("materializationengine.workflows.update_root_ids.update_root_ids_workflow") as update:
+            process_dense_missing_roots_workflow({"datastack": "minnie65_phase3_v1"})
+        assert [c.args[0]["segmentation_table_name"] for c in update.call_args_list] == ["a__seg"]
+        assert update.call_args.args[0]["only_missing_roots"] is True
+
+    def test_sparse_updates_the_one_table(self, mat_metadata):
+        with mock.patch(f"{MODULE}.get_materialization_info", return_value=[dict(mat_metadata)]) as info, \
+                mock.patch("materializationengine.workflows.update_root_ids.update_root_ids_workflow") as update:
+            process_sparse_missing_roots_workflow({"datastack": "minnie65_phase3_v1"}, "synapses")
+        assert info.call_args.kwargs["table_name"] == "synapses"
+        assert update.call_args.args[0]["only_missing_roots"] is True
+
+
+class TestBatchMissingRootIds:
+    def test_batches_wait_for_the_process_queue_and_carry_plain_id_lists(self, mat_metadata):
+        batches = [[(1,), (2,)], [(5,)], []]
+        proxy = mock.MagicMock()
+        proxy.fetchmany.side_effect = batches
+        engine = mock.MagicMock()
+        engine.connect.return_value.__enter__.return_value.execution_options.return_value.execute.return_value = proxy
+        order = []
+        with mock.patch(f"{MODULE}.db_manager.get_engine", return_value=engine), \
+                mock.patch(f"{MODULE}.throttle_celery.wait_if_queue_full",
+                           side_effect=lambda queue_name: order.append(("wait", queue_name))), \
+                mock.patch(f"{MODULE}.lookup_root_ids") as lookup:
+            lookup.si.side_effect = lambda md, ids: order.append(("queue", ids)) or mock.MagicMock(id=f"task{len(order)}")
+            tasks = batch_missing_root_ids_query("SELECT 1", dict(mat_metadata, throttle_queues=True, chunk_size=2))
+        # the queue is checked before every batch, and each batch is a JSON-able list of ids
+        assert order == [("wait", "process"), ("queue", [1, 2]), ("wait", "process"), ("queue", [5]), ("wait", "process")]
+        assert len(tasks) == 2
+
+
+class TestMonitorTaskStates:
+    def _states(self, sequences):
+        """AsyncResult stand-in: each task id walks through its list of states, one per poll."""
+        calls = []
+
+        def result(task_id, app=None):
+            calls.append(task_id)
+            states = sequences[task_id]
+            r = mock.MagicMock()
+            r.state = states.pop(0) if len(states) > 1 else states[0]
+            r.traceback = f"{task_id} failed"
+            return r
+
+        return result, calls
+
+    def test_polls_only_tasks_still_pending(self):
+        from materializationengine import shared_tasks
+
+        result, calls = self._states({"a": ["SUCCESS"], "b": ["PENDING", "PENDING", "SUCCESS"]})
+        with mock.patch.object(shared_tasks, "AsyncResult", side_effect=result), mock.patch.object(shared_tasks.time, "sleep"):
+            assert shared_tasks.monitor_task_states(["a", "b"]) is True
+        assert calls == ["a", "b", "b", "b"]
+
+    def test_raises_on_a_failure(self):
+        import pytest
+        from materializationengine import shared_tasks
+
+        result, _ = self._states({"a": ["PENDING", "FAILURE"]})
+        with mock.patch.object(shared_tasks, "AsyncResult", side_effect=result), mock.patch.object(shared_tasks.time, "sleep"), \
+                pytest.raises(Exception, match="a failed"):
+            shared_tasks.monitor_task_states(["a"])
+
+    def test_no_tasks_is_done(self):
+        from materializationengine import shared_tasks
+
+        assert shared_tasks.monitor_task_states([]) is True
+
+
+class TestRunWithLimit:
+    def test_never_more_than_the_limit_in_flight(self):
+        from materializationengine import shared_tasks
+
+        done_after = {}
+        polls = {"n": 0}
+        in_flight_max = {"n": 0}
+        live = set()
+
+        class Sig:
+            def __init__(self, i):
+                self.i = i
+
+            def apply_async(self):
+                live.add(self.i)
+                in_flight_max["n"] = max(in_flight_max["n"], len(live))
+                done_after[self.i] = polls["n"] + 2  # finishes two polls later
+                return mock.MagicMock(id=self.i)
+
+        def result(task_id, app=None):
+            polls["n"] += 1
+            r = mock.MagicMock()
+            r.state = "SUCCESS" if polls["n"] >= done_after[task_id] else "PENDING"
+            if r.state == "SUCCESS":
+                live.discard(task_id)
+            return r
+
+        with mock.patch.object(shared_tasks, "AsyncResult", side_effect=result), \
+                mock.patch.object(shared_tasks.time, "sleep"):
+            assert shared_tasks.run_with_limit((Sig(i) for i in range(10)), max_in_flight=3) == 10
+        assert in_flight_max["n"] <= 3
+        assert not live

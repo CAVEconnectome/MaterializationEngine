@@ -1,4 +1,5 @@
 import datetime
+import itertools
 from functools import lru_cache
 
 import numpy as np
@@ -13,16 +14,29 @@ from materializationengine.shared_tasks import (
     get_materialization_info,
     monitor_task_states,
     monitor_workflow_state,
+    run_with_limit,
     update_metadata,
     workflow_complete,
     generate_chunked_model_ids,
 )
 from materializationengine.throttle import throttle_celery
-from materializationengine.utils import create_segmentation_model
+from materializationengine.utils import create_segmentation_model, get_config_param
 from requests import HTTPError
-from sqlalchemy.sql import or_, text
+from sqlalchemy.sql import and_, or_, text
 
 celery_logger = get_task_logger(__name__)
+
+# The chunk that stands for "every row with a supervoxel id and a NULL root id": each run
+# looks those up once, in a chunk of their own, next to the expired roots.
+MISSING_ROOTS = "missing"
+# Rows per chunk task when every root id is looked up (each task then streams its rows in
+# batches of the usual chunk_size), and how many chunk tasks may be unfinished at a time.
+LOOKUP_ALL_CHUNK_ROWS = 50_000
+DEFAULT_MAX_CHUNKS_IN_FLIGHT = 20
+
+
+def _max_chunks_in_flight() -> int:
+    return int(get_config_param("UPDATE_ROOT_IDS_MAX_IN_FLIGHT", DEFAULT_MAX_CHUNKS_IN_FLIGHT))
 
 
 @celery.task(name="workflow:update_root_ids_task")
@@ -48,48 +62,77 @@ def expired_root_id_workflow(datastack_info: dict, **kwargs):
     return True
 
 
+def as_of_last_update(mat_metadata: dict) -> dict:
+    """The metadata with its time stamp set to the table's last update (now if it has none)."""
+    last_updated = mat_metadata.get("last_updated_time_stamp")
+    when = datetime.datetime.fromisoformat(str(last_updated)) if last_updated else datetime.datetime.utcnow()
+    return {**mat_metadata, "materialization_time_stamp": when.strftime("%Y-%m-%d %H:%M:%S.%f")}
+
+
 def update_root_ids_workflow(mat_metadata: dict):
-    """Celery workflow that updates expired root ids in a
-    segmentation table.
+    """Update the root ids of a segmentation table.
 
-    Workflow:
-        - Lookup supervoxel id associated with expired root id
-        - Lookup new root id for the supervoxel
-        - Update database row with new root id
+    A regular update looks up, as of the run's materialization time stamp, the rows of
+    every root that expired since the table's last update and the rows whose root id is
+    NULL (with a supervoxel id, in a chunk of their own), then sets the table's
+    last_updated to that time.
 
-    Once all root ids in a given table are updated the associated entry in the
-    metadata data will also be updated.
+    A repair leaves last_updated as it is and looks up as of it (as of now if the table
+    has none), so the next regular update still covers everything that expired since:
+        - lookup_all_root_ids: every row of the table, for when roots may be stale without
+          knowing which;
+        - only_missing_roots: only the rows whose root id is NULL.
+
+    Each row is looked up from its supervoxel id, and only rows whose root changed are
+    written. Chunk tasks are queued as earlier ones finish (at most
+    UPDATE_ROOT_IDS_MAX_IN_FLIGHT at a time), so a large table never floods the broker.
 
     Args:
         mat_metadata (dict): datastack info for the aligned_volume derived from the infoservice
-        chunked_roots (List[int]): chunks of expired root ids to lookup
 
     Returns:
-        chain: chain of celery tasks
+        celery signature
     """
 
     celery_logger.info("Setup expired root id workflow...")
+    repair = bool(mat_metadata.get("lookup_all_root_ids") or mat_metadata.get("only_missing_roots"))
+    if repair:
+        mat_metadata = as_of_last_update(mat_metadata)
     if mat_metadata.get("lookup_all_root_ids"):
-        chunked_ids = generate_chunked_model_ids(mat_metadata)
+        chunks = generate_chunked_model_ids({**mat_metadata, "chunk_size": LOOKUP_ALL_CHUNK_ROWS})
+    elif mat_metadata.get("only_missing_roots"):
+        chunks = [MISSING_ROOTS]
     else:
-        chunked_ids = get_expired_root_ids_from_pcg(mat_metadata)
+        chunks = itertools.chain(get_expired_root_ids_from_pcg(mat_metadata) or [], [MISSING_ROOTS])
 
-    if not chunked_ids:
-        return fin.si()
+    sent = run_with_limit(
+        (update_root_ids.si(chunk, mat_metadata) for chunk in chunks), _max_chunks_in_flight()
+    )
+    celery_logger.info(
+        f"Looked up root ids of '{mat_metadata.get('segmentation_table_name')}' in {sent} chunks, "
+        f"as of {mat_metadata['materialization_time_stamp']}"
+    )
+    if not repair:
+        monitor_task_states([update_metadata.si(mat_metadata).apply_async().id])
+    return workflow_complete.si("update_root_ids_workflow")
 
-    update_root_workflow = chain(
-        chord(
-            [
-                group(update_root_ids.si(root_ids, mat_metadata))
-                for root_ids in chunked_ids
-            ],
-            fin.si(),
-        ),
-        update_metadata.si(mat_metadata),
-    ).apply_async()
-    tasks_completed = monitor_workflow_state(update_root_workflow)
-    if tasks_completed:
-        return workflow_complete.si("update_root_ids_workflow")
+
+@celery.task(name="workflow:lookup_all_root_ids_workflow")
+def lookup_all_root_ids_workflow(datastack_info: dict, table_name: str, **kwargs):
+    """Look up every root id of one table from its supervoxel ids.
+
+    For a table whose root ids may be stale without knowing which: every row is looked
+    up as of the table's last update (now if it has none), only rows whose root changed
+    are written, and last_updated is left as it is, so the next regular update covers
+    whatever expired since.
+    """
+    mat_metadata = get_materialization_info(
+        datastack_info=datastack_info,
+        materialization_time_stamp=datetime.datetime.utcnow(),
+        table_name=table_name,
+    )[0]
+    update_root_ids_workflow({**mat_metadata, "lookup_all_root_ids": True})
+    return True
 
 
 def get_expired_root_ids_from_pcg(mat_metadata: dict, expired_chunk_size: int = 100):
@@ -202,18 +245,17 @@ def get_supervoxel_id_queries(root_id_chunk: list, mat_metadata: dict):
                 root_id_att,
                 sv_id_att,
             )
-            if mat_metadata.get("lookup_all_root_ids", False):
-                if root_id_chunk[1] is None:
-                    root_id_chunk[1] = mat_metadata.get("max_id")
-                stmt = sv_ids_query.filter(
-                    or_(SegmentationModel.id).between(
-                        int(root_id_chunk[0]), int(root_id_chunk[1])
-                    )
-                )
+            if root_id_chunk == MISSING_ROOTS:
+                # rows with nothing to look up yet (no supervoxel id) are left alone
+                stmt = sv_ids_query.filter(and_(root_id_att.is_(None), sv_id_att.isnot(None)))
+            elif mat_metadata.get("lookup_all_root_ids", False):
+                start, end = root_id_chunk
+                if end is None:  # the last chunk runs to the end of the table
+                    stmt = sv_ids_query.filter(SegmentationModel.id >= int(start))
+                else:
+                    stmt = sv_ids_query.filter(SegmentationModel.id.between(int(start), int(end)))
             else:
-                stmt = sv_ids_query.filter(
-                    or_(or_(root_id_att).in_(root_id_chunk), root_id_att == None)
-                )
+                stmt = sv_ids_query.filter(root_id_att.in_(root_id_chunk))
 
             sv_ids_query = stmt.statement.compile(compile_kwargs={"literal_binds": True})
             supervoxel_queries.append({f"{root_id_column}": str(sv_ids_query)})
@@ -317,12 +359,18 @@ def get_new_root_ids(self, supervoxel_data, mat_metadata):
 
     del supervoxel_data
 
+    old_roots = root_ids_df[root_id_col_name[0]].copy()
     root_ids_df.loc[supervoxel_df.index, root_id_col_name[0]] = root_id_array
-    root_ids_df.drop(columns=[supervoxel_col_name[0]])
+    root_ids_df = root_ids_df.drop(columns=[supervoxel_col_name[0]])
+    # only rows whose root changed are written (a full re-lookup finds most unchanged)
+    changed = (old_roots.isna() | (old_roots != root_ids_df[root_id_col_name[0]])).to_numpy()
+    root_ids_df = root_ids_df[changed]
+    if root_ids_df.empty:
+        return "Number of rows updated: 0"
 
     SegmentationModel = create_segmentation_model(mat_metadata)
     aligned_volume = mat_metadata.get("aligned_volume")
-    
+
     with db_manager.session_scope(aligned_volume) as session:
         try:
             data = root_ids_df.to_dict(orient="records")

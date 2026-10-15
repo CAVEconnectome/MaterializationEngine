@@ -16,7 +16,6 @@ from materializationengine.shared_tasks import (
     generate_chunked_model_ids,
     fin,
     query_id_range,
-    create_chunks,
     update_metadata,
     get_materialization_info,
     monitor_workflow_state,
@@ -202,54 +201,37 @@ def ingest_new_annotations(
 
 @celery.task(name="workflow:process_dense_missing_roots_workflow")
 def process_dense_missing_roots_workflow(datastack_info: dict, **kwargs):
-    """Chunk supervoxel ids and lookup root ids in batches
-    for all tables in the database.
+    """Fill in the NULL root ids of every table of a datastack.
 
-
-    -> workflow :
-        find missing root_ids >
-        lookup supervoxel ids from sql >
-        get root_ids >
-        merge root_ids list >
-        insert root_ids
-
-
-    Parameters
-    ----------
-    aligned_volume_name : str
-        [description]
-    segmentation_source : dict
-        [description]
+    For each table, looks up the rows with a supervoxel id and a NULL root id as of the
+    table's last update (now if it has none), and leaves last_updated as it is
+    (update_root_ids_workflow with only_missing_roots). To look up every root id instead,
+    use lookup_all_root_ids_workflow.
     """
-    materialization_time_stamp = datetime.datetime.utcnow()
+    from materializationengine.workflows.update_root_ids import update_root_ids_workflow
 
     mat_info = get_materialization_info(
         datastack_info=datastack_info,
-        materialization_time_stamp=materialization_time_stamp,
+        materialization_time_stamp=datetime.datetime.utcnow(),
     )
-    # filter for missing root ids (min/max ids)
     for mat_metadata in mat_info:
         if mat_metadata.get("segmentation_table_name"):
-            find_dense_missing_root_ids_workflow(mat_metadata)
+            update_root_ids_workflow({**mat_metadata, "only_missing_roots": True})
+    return True
 
 
 @celery.task(name="workflow:process_sparse_missing_roots_workflow")
 def process_sparse_missing_roots_workflow(datastack_info: dict, table_name: str, **kwargs):
-    """Find missing (ie NULL) root ids in the segmentation table. If missing root ids
-    are found, lookup root ids. Uses last updated time stamp to find missing
-    root ids.
-    
-    Parameters
-    ----------
-    datastack_info : dict
-        datastack to run this workflow on
-    table_name : str
-        individual table to run this workflow on
+    """Fill in the NULL root ids of one table (see process_dense_missing_roots_workflow)."""
+    from materializationengine.workflows.update_root_ids import update_root_ids_workflow
 
-    """
-    mat_metadata = get_materialization_info(datastack_info, table_name=table_name)[0]
-    mat_metadata["materialization_time_stamp"] = mat_metadata["last_updated_time_stamp"] # override materialization time stamp
-    find_missing_root_ids_workflow(mat_metadata)
+    mat_metadata = get_materialization_info(
+        datastack_info=datastack_info,
+        materialization_time_stamp=datetime.datetime.utcnow(),
+        table_name=table_name,
+    )[0]
+    update_root_ids_workflow({**mat_metadata, "only_missing_roots": True})
+    return True
 
 
 def batch_missing_root_ids_query(query, mat_metadata):
@@ -368,115 +350,6 @@ def get_ids_with_missing_roots(mat_metadata: dict):
         stmt = query.statement.compile(compile_kwargs={"literal_binds": True})
 
         return stmt
-
-
-def find_dense_missing_root_ids_workflow(mat_metadata: dict):
-    """Find missing root ids in the segmentation table. If missing root ids
-    are found, lookup supervoxel ids and root ids in batches.
-
-    Parameters
-    ----------
-    mat_metadata : dict
-        Materialization metadata
-
-    Returns
-    -------
-    celery task
-
-    """
-    missing_root_id_chunks = get_dense_ids_with_missing_roots(mat_metadata)
-    seg_table = mat_metadata.get("segmentation_table_name")
-    if missing_root_id_chunks:
-        missing_root_id_chunks = [c for c in missing_root_id_chunks]
-        process_chunks_workflow = chain(
-            lookup_dense_missing_root_ids_workflow(mat_metadata, missing_root_id_chunks)
-        ).apply_async()
-        tasks_completed = monitor_workflow_state(process_chunks_workflow)
-        if tasks_completed:
-            return fin.si()
-    else:
-        celery_logger.debug(
-            f"Skipped missing root id lookup for '{seg_table}', no missing root ids found"
-        )
-        return fin.si()
-
-
-def get_dense_ids_with_missing_roots(mat_metadata: dict) -> List:
-    """Get a chunk generator of the primary key ids for rows that contain
-    at least one missing root id. Finds the min and max primary key id values
-    globally across the table where a missing root id is present in a column.
-
-    Args:
-        mat_metadata (dict): materialization metadata
-
-    Returns:
-        List: generator of chunked primary key ids.
-    """
-    SegmentationModel = create_segmentation_model(mat_metadata)
-    aligned_volume = mat_metadata.get("aligned_volume")
-
-    with db_manager.session_scope(aligned_volume) as session:
-
-        columns = [seg_column.name for seg_column in SegmentationModel.__table__.columns]
-        root_id_columns = [
-            root_column for root_column in columns if "root_id" in root_column
-        ]
-        query_columns = [
-            getattr(SegmentationModel, root_id_column).is_(None)
-            for root_id_column in root_id_columns
-        ]
-        max_id = (
-            session.query(func.max(SegmentationModel.id))
-            .filter(or_(*query_columns))
-            .scalar()
-        )
-        min_id = (
-            session.query(func.min(SegmentationModel.id))
-            .filter(or_(*query_columns))
-            .scalar()
-        )
-        if min_id and max_id:
-            if min_id < max_id:
-                id_range = range(min_id, max_id + 1)
-                return create_chunks(id_range, 500)
-            elif min_id == max_id:
-                return [min_id, min_id]
-        else:
-            celery_logger.info(
-                f"No missing root_ids found in '{SegmentationModel.__table__.name}'"
-            )
-            return None
-
-
-def lookup_dense_missing_root_ids_workflow(
-    mat_metadata: dict, missing_root_id_chunks: List[int]
-):
-    """Celery workflow that finds and looks up missing root ids.
-
-    Workflow:
-                - Lookup supervoxel id(s)
-                - Get root ids from supervoxels
-                - insert into segmentation table
-
-        Args:
-            mat_metadata (dict): datastack info for the aligned_volume derived from the infoservice
-            missing_root_id_chunks (List[int]): list of pk ids that have a missing root_id
-
-        Returns:
-            chain: chain of celery tasks
-    """
-    return chain(
-        chord(
-            [
-                group(
-                    lookup_root_ids_chunk.si(mat_metadata, missing_root_id_chunk),
-                )
-                for missing_root_id_chunk in missing_root_id_chunks
-            ],
-            fin.si(),
-        ),
-        update_metadata.si(mat_metadata),
-    )
 
 
 @celery.task(

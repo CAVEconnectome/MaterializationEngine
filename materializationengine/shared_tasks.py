@@ -442,22 +442,51 @@ def add_index(self, database: str, command: str):
     return f"Index {command} added to table"
 
 
+def _still_pending(task_ids: List) -> List:
+    """The tasks that have not finished; raises on the first one that failed."""
+    pending = []
+    for task_id in task_ids:
+        result = AsyncResult(task_id, app=celery)
+        state = result.state
+        if state == "FAILURE":
+            raise Exception(result.traceback)
+        if state != "SUCCESS":
+            pending.append(task_id)
+    return pending
+
+
 def monitor_task_states(task_ids: List, polling_rate: int = 0.2):
-    while True:
-        results = [AsyncResult(task_id, app=celery) for task_id in task_ids]
-        celery_logger.debug(f"Celery results {results}")
-        result_status = []
-        for result in results:
-            if result.state == "FAILURE":
-                raise Exception(result.traceback)
-            result_status.append(result.state)
+    """Wait until every task has succeeded; raise on the first failure.
 
-        celery_logger.debug(f"Celery task status: {result_status}")
+    Only the tasks still pending are polled again, so a long list of mostly finished
+    tasks does not cost a Redis lookup per task every poll.
+    """
+    pending = list(task_ids)
+    while pending:
+        pending = _still_pending(pending)
+        celery_logger.debug(f"{len(pending)} of {len(task_ids)} tasks pending")
+        if pending:
+            time.sleep(polling_rate)
+    return True
 
-        if all(x == "SUCCESS" for x in result_status):
-            return True
 
-        time.sleep(polling_rate)
+def run_with_limit(signatures, max_in_flight: int, polling_rate: float = 1.0) -> int:
+    """Send celery signatures with at most max_in_flight unfinished at a time, and wait
+    for all of them. Raises on the first failure; returns how many were sent.
+
+    The producer pattern: a task is only queued once an earlier one has finished, so a
+    workflow over a large table never puts all of its messages on the broker at once.
+    """
+    pending, sent = [], 0
+    for signature in signatures:
+        while len(pending) >= max_in_flight:
+            pending = _still_pending(pending)
+            if len(pending) >= max_in_flight:
+                time.sleep(polling_rate)
+        pending.append(signature.apply_async().id)
+        sent += 1
+    monitor_task_states(pending, polling_rate)
+    return sent
 
 
 def monitor_workflow_state(workflow: AsyncResult, polling_rate: int = 0.2):
