@@ -34,3 +34,14 @@ class TestUploadTaskRouting:
     )
     def test_other_upload_tasks_keep_their_queues(self, task):
         assert TaskRouter().route_for_task(task.name)["queue"] in {"orchestration", "process"}
+
+    @pytest.mark.parametrize(
+        "task",
+        [tasks.process_csv_part, tasks.count_csv_part],
+        ids=["process_csv_part", "count_csv_part"],
+    )
+    def test_csv_part_tasks_are_short_retryable_process_tasks(self, task):
+        # each part runs for about a minute and overwrites its own output, so the
+        # process queue's 300 s visibility timeout and a redelivery are both fine
+        assert TaskRouter().route_for_task(task.name) == {"queue": "process"}
+        assert task.acks_late

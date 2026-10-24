@@ -119,6 +119,7 @@ class TestUploadCancel:
 
         processor = mock.MagicMock()
         processor.process_csv_in_chunks.side_effect = process_and_cancel
+        processor.plan_csv_parts.return_value = ("id,x\n", [(5, 1000)])  # one part: one stream
         with app.app_context(), mock.patch.object(tasks, "GCSCsvProcessor", return_value=processor), \
                 mock.patch.object(tasks, "SchemaProcessor"):
             with pytest.raises(tasks.UploadCancelled):
