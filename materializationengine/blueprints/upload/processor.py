@@ -19,6 +19,44 @@ def create_wkt_element(geom):
     return WKBElement(geom.wkb)
 
 
+# EWKB for a POINT Z: little-endian byte order (01) and type 0x80000001 (Point with the Z flag).
+_POINTZ_WKB_HEADER = np.frombuffer(bytes.fromhex("0101000080"), dtype=np.uint8)
+# Two hex characters per byte value, as one uint16 each so a lookup builds the hex string in place.
+_HEX_PAIRS = np.array([f"{i:02x}" for i in range(256)], dtype="S2").view(np.uint16)
+
+
+def encode_points_wkb_hex(xyz: np.ndarray) -> np.ndarray:
+    """Encode an (n, 3) array of coordinates as hex EWKB POINT Z strings.
+
+    Gives the same text as str(create_wkt_element(Point(x, y, z))) for each row,
+    without a Python call per point. Rows with any NaN coordinate become None.
+    """
+    xyz = np.ascontiguousarray(xyz, dtype="<f8").reshape(-1, 3)
+    n = len(xyz)
+    raw = np.empty((n, 29), dtype=np.uint8)
+    raw[:, :5] = _POINTZ_WKB_HEADER
+    raw[:, 5:] = xyz.view(np.uint8).reshape(n, 24)
+    encoded = _HEX_PAIRS[raw].view("S58").ravel().astype(str).astype(object)
+    encoded[np.isnan(xyz).any(axis=1)] = None
+    return encoded
+
+
+def _parse_combined_xyz(value) -> Tuple[float, float, float]:
+    """Parse one combined "[x,y,z]" value; anything unusable gives NaNs."""
+    try:
+        if isinstance(value, str):
+            coords = [float(x.strip()) for x in value.strip("[]()").split(",")]
+        elif isinstance(value, (list, tuple, np.ndarray)):
+            coords = [float(x) for x in value]
+        else:
+            return (np.nan, np.nan, np.nan)
+    except (ValueError, TypeError):
+        return (np.nan, np.nan, np.nan)
+    if len(coords) != 3:
+        return (np.nan, np.nan, np.nan)
+    return tuple(coords)
+
+
 class SchemaProcessor:
     """Processes CSV data according to schema types, handling spatial points and references"""
 
@@ -149,8 +187,30 @@ class SchemaProcessor:
         if missing_columns:
             raise ValueError(f"Missing required columns: {missing_columns}")
 
+    def _spatial_column(
+        self, chunk: pd.DataFrame, coordinate_cols: List[str]
+    ) -> np.ndarray:
+        """Hex EWKB POINT Z for every row of a chunk, None where a point is invalid.
+
+        Same result as process_spatial_point on each row, vectorized: a per-row
+        loop cost about 1 billion Python calls on a 337M-row synapse upload.
+        """
+        if len(coordinate_cols) == 1:
+            xyz = np.array(
+                [_parse_combined_xyz(v) for v in chunk[coordinate_cols[0]]],
+                dtype=float,
+            ).reshape(-1, 3)
+        else:
+            xyz = np.column_stack(
+                [
+                    pd.to_numeric(chunk[col], errors="coerce").to_numpy(dtype=float)
+                    for col in coordinate_cols
+                ]
+            )
+        return encode_points_wkb_hex(xyz)
+
     def process_spatial_point(
-        self, 
+        self,
         row: pd.Series, 
         coordinate_cols: List[str]
     ) -> Optional[str]:
@@ -229,10 +289,9 @@ class SchemaProcessor:
 
         for field_name, coordinate_cols in self.spatial_points:
             if all(col in chunk.columns for col in coordinate_cols):
-                processed_data[f"{field_name}_position"] = [
-                    self.process_spatial_point(row, coordinate_cols)
-                    for _, row in chunk.iterrows()
-                ]
+                processed_data[f"{field_name}_position"] = self._spatial_column(
+                    chunk, coordinate_cols
+                )
             else:
                 if field_name in self.required_spatial_points:
                     raise ValueError(
