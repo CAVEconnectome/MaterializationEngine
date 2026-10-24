@@ -90,9 +90,9 @@ spatial_svid_parser.add_argument(
 )
 spatial_svid_parser.add_argument(
     "supervoxel_batch_size",
-    default=50,
+    default=500,
     type=int,
-    help="Number of supervoxels to lookup at a time per cloud volume call",
+    help="Target points per lookup task; a task takes whole storage chunks",
 )
 spatial_svid_parser.add_argument("get_root_ids", default=True, type=inputs.boolean)
 spatial_svid_parser.add_argument(

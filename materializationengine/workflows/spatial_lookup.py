@@ -8,7 +8,9 @@ import pandas as pd
 from celery import Task, chain, chord
 from celery.exceptions import MaxRetriesExceededError, Retry
 from celery.utils.log import get_task_logger
-from cloudvolume.lib import Vec
+from cloudfiles import CloudFiles, compression
+from cloudvolume import chunks as cv_chunks
+from cloudvolume.lib import Bbox, Vec
 from geoalchemy2 import Geometry
 from sqlalchemy import (
     case,
@@ -63,6 +65,11 @@ from materializationengine.workflows.ingest_new_annotations import (
 Base = declarative_base()
 
 celery_logger = get_task_logger(__name__)
+
+# Target points per spatial lookup sub-batch. A sub-batch takes whole storage chunks, so
+# this is ~70 chunk downloads at minnie's ~7 points per 256x256x32 chunk: about a second
+# of work, far inside the spatial queue's 300 s visibility timeout.
+DEFAULT_SUPERVOXEL_BATCH_SIZE = 500
 
 
 MAX_CHUNK_WORKFLOW_ATTEMPTS = 10
@@ -215,7 +222,7 @@ def run_spatial_lookup_workflow(
     datastack_info: dict,
     table_name: str,
     chunk_scale_factor: int = 1,
-    supervoxel_batch_size: int = 50,
+    supervoxel_batch_size: int = DEFAULT_SUPERVOXEL_BATCH_SIZE,
     use_staging_database: bool = False,
     resume_from_checkpoint: bool = False,
 ):
@@ -696,6 +703,7 @@ def process_table_in_chunks(
     name="spatial:process_chunk",
     bind=True,
     acks_late=True,
+    keep_db_connections=True,
     max_retries=10,
     retry_backoff=True,
 )
@@ -706,7 +714,7 @@ def process_chunk(
     mat_metadata: dict,
     chunk_info: dict,
     database_name: str,
-    supervoxel_sub_batch_size: int = 50,
+    supervoxel_sub_batch_size: int = DEFAULT_SUPERVOXEL_BATCH_SIZE,
     workflow_name: str = None,
 ):
     start_time = time.time()
@@ -807,6 +815,14 @@ def process_chunk(
         sub_task_signatures = []
         num_total_points = len(all_point_data_for_sub_batches)
         num_sub_batches = 0
+        # Each storage chunk's points, pre and post together, go to one sub-batch, so the
+        # sub-batch downloads that chunk once for all of them.
+        point_sub_batches = split_points_by_storage_chunk(
+            all_point_data_for_sub_batches,
+            cloudvolume_cache.get_cv(mat_metadata["segmentation_source"]),
+            mat_metadata["coord_resolution"],
+            supervoxel_sub_batch_size,
+        )
 
         mat_metadata_for_subtask = mat_metadata.copy()
         if isinstance(
@@ -820,10 +836,7 @@ def process_chunk(
         if "workflow_name" not in mat_metadata_for_subtask:
             mat_metadata_for_subtask["workflow_name"] = workflow_name
 
-        for i in range(0, num_total_points, supervoxel_sub_batch_size):
-            sub_batch_point_data_slice = all_point_data_for_sub_batches[
-                i : i + supervoxel_sub_batch_size
-            ]
+        for sub_batch_point_data_slice in point_sub_batches:
             if sub_batch_point_data_slice:
                 num_sub_batches += 1
                 sub_task_signatures.append(
@@ -1120,6 +1133,124 @@ def get_pts_from_bbox(database, min_corner, max_corner, mat_info):
         celery_logger.error(f"min_corner: {min_corner}, max_corner: {max_corner}")
         celery_logger.error(f"aligned_volume: {mat_info.get('aligned_volume')}")
         raise e
+
+
+def points_to_voxels(cv, points, coord_resolution) -> np.ndarray:
+    """Voxel coordinates at cv's mip for points given at coord_resolution.
+
+    The same flooring as normalize_positions, which matched scattered_points results.
+    """
+    scale = np.asarray(cv.resolution, dtype=float) / np.asarray(coord_resolution, dtype=float)
+    return np.floor(np.asarray(points, dtype=float).reshape(-1, 3) / scale).astype(np.int64)
+
+
+def storage_chunk_keys(cv, voxels: np.ndarray) -> np.ndarray:
+    """The grid index of the storage chunk holding each voxel."""
+    mip = cv.mip
+    offset = np.asarray(cv.meta.voxel_offset(mip), dtype=np.int64)
+    chunk_size = np.asarray(cv.meta.chunk_size(mip), dtype=np.int64)
+    return (voxels - offset) // chunk_size
+
+
+def split_points_by_storage_chunk(
+    point_data: List[Dict], cv, coord_resolution, target_points: int
+) -> List[List[Dict]]:
+    """Split points into sub-batches of about target_points that never split a chunk.
+
+    Points are ordered by the storage chunk that holds them, so every point of a chunk
+    (a synapse's pre and post points usually share one) lands in the same sub-batch,
+    which then downloads that chunk once.
+    """
+    if not point_data:
+        return []
+    voxels = points_to_voxels(cv, [p["pt_position"] for p in point_data], coord_resolution)
+    keys = storage_chunk_keys(cv, voxels)
+    order = np.lexsort((keys[:, 0], keys[:, 1], keys[:, 2]))
+    batches, current = [], []
+    previous_key = None
+    for index in order:
+        key = tuple(keys[index])
+        if key != previous_key and len(current) >= max(int(target_points), 1):
+            batches.append(current)
+            current = []
+        current.append(point_data[index])
+        previous_key = key
+    if current:
+        batches.append(current)
+    return batches
+
+
+def lookup_supervoxel_ids(cv, points, coord_resolution) -> np.ndarray:
+    """The segmentation label at each point, in order, downloading each chunk once.
+
+    Gives the same labels as cv.scattered_points, which fetches and decompresses the
+    whole chunk again for every point: on a 4.8M-row minnie upload, 9.6M downloads of
+    ~0.3 MB for 1.3M distinct chunks. Points outside the volume or in a missing chunk
+    get 0. Sharded volumes still go through scattered_points.
+    """
+    mip = cv.mip
+    voxels = points_to_voxels(cv, points, coord_resolution)
+    labels = np.zeros(len(voxels), dtype=np.uint64)
+    if len(voxels) == 0:
+        return labels
+    if cv.image.is_sharded(mip):
+        found = cv.scattered_points([tuple(v) for v in voxels], mip=mip)
+        for i, v in enumerate(voxels):
+            labels[i] = found.get(tuple(v), 0)
+        return labels
+
+    bounds = cv.meta.bounds(mip)
+    inside = np.all((voxels >= np.asarray(bounds.minpt)) & (voxels < np.asarray(bounds.maxpt)), axis=1)
+    inside_index = np.nonzero(inside)[0]
+    if len(inside_index) == 0:
+        return labels
+    keys = storage_chunk_keys(cv, voxels[inside_index])
+    unique_keys, point_chunk = np.unique(keys, axis=0, return_inverse=True)
+    point_chunk = point_chunk.reshape(-1)
+
+    offset = np.asarray(cv.meta.voxel_offset(mip), dtype=np.int64)
+    chunk_size = np.asarray(cv.meta.chunk_size(mip), dtype=np.int64)
+    chunk_bboxes = [
+        Bbox.clamp(Bbox(offset + key * chunk_size, offset + (key + 1) * chunk_size), bounds)
+        for key in unique_keys
+    ]
+    filenames = [bbox.to_filename() for bbox in chunk_bboxes]
+    cf = CloudFiles(
+        cv.meta.join(cv.meta.cloudpath, cv.meta.key(mip)), secrets=cv.config.secrets
+    )
+    files = {f["path"]: f for f in cf.get(filenames, raw=True)}
+
+    encoding = cv.meta.encoding(mip)
+    block_size = cv.meta.compressed_segmentation_block_size(mip) or (8, 8, 8)
+    background = int(cv.background_color or 0)
+    for chunk_index, (filename, bbox) in enumerate(zip(filenames, chunk_bboxes)):
+        file = files.get(filename) or {}
+        if file.get("error") is not None:
+            raise file["error"]
+        content = file.get("content")
+        members = inside_index[point_chunk == chunk_index]
+        if not content:
+            labels[members] = background  # missing chunk: fill_missing
+            continue
+        content = compression.decompress(content, file.get("compress"))
+        shape = list(bbox.size3()) + [cv.meta.num_channels]
+        if encoding in ("compressed_segmentation", "compresso", "crackle"):
+            # these read a voxel without decoding the chunk
+            for i in members:
+                labels[i] = cv_chunks.read_voxel(
+                    voxels[i] - bbox.minpt, content, encoding, shape=shape,
+                    dtype=cv.meta.dtype, block_size=block_size,
+                    background_color=background,
+                )[0, 0, 0, 0]
+        else:
+            image = cv_chunks.decode(
+                content, encoding, shape=shape, dtype=cv.meta.dtype,
+                block_size=block_size, background_color=background,
+            )
+            for i in members:
+                x, y, z = voxels[i] - bbox.minpt
+                labels[i] = image[x, y, z, 0]
+    return labels
 
 
 def match_point_and_get_value(point, points_map):
@@ -1501,6 +1632,7 @@ def insert_segmentation_data(
     name="spatial:process_and_insert_sub_batch",
     bind=True,
     acks_late=True,
+    keep_db_connections=True,
     autoretry_for=(OperationalError, DisconnectionError, ChunkDataValidationError),
     max_retries=3,
     retry_backoff=True,
@@ -1560,30 +1692,20 @@ def process_and_insert_sub_batch(
         coord_resolution_xyz = mat_info["coord_resolution"]
         cv = cloudvolume_cache.get_cv(segmentation_source)
 
-        sv_data_tuple_keys = cv.scattered_points(
-            points_for_sv_lookup, coord_resolution=coord_resolution_xyz
+        sv_lookup_start = time.time()
+        supervoxel_ids = lookup_supervoxel_ids(
+            cv, points_for_sv_lookup, coord_resolution_xyz
         )
-        sv_id_data_aggregated = {str(k): int(v) for k, v in sv_data_tuple_keys.items()}
         celery_logger.info(
-            f"{log_prefix} Supervoxel lookup found {len(sv_id_data_aggregated)} mappings for {len(points_for_sv_lookup)} points."
+            f"{log_prefix} Supervoxel lookup found {int(np.count_nonzero(supervoxel_ids))} "
+            f"non-zero ids for {len(points_for_sv_lookup)} points "
+            f"in {time.time() - sv_lookup_start:.2f}s."
         )
-
-        if not sv_id_data_aggregated:
-            celery_logger.info(f"{log_prefix} No supervoxels found for this sub-batch.")
-            return {
-                "status": "success_no_supervoxels_found",
-                "rows_processed": 0,
-                "sub_batch_idx": sub_batch_idx,
-            }
-
-        scale_factor = cv.resolution / np.array(coord_resolution_xyz)
 
         pivoted_data_map = {}
-        for item_dict in sub_batch_point_data:
+        for item_dict, svid in zip(sub_batch_point_data, supervoxel_ids):
             item_id = item_dict["id"]
-            original_pt_position = item_dict["pt_position"]
-            scaled_pos_tuple = normalize_positions(original_pt_position, scale_factor)
-            svid = match_point_and_get_value(scaled_pos_tuple, sv_id_data_aggregated)
+            svid = int(svid)
 
             type_str = item_dict.get("type", "unknown")
             col_name = (

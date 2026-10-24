@@ -2,7 +2,7 @@ from contextlib import contextmanager
 from urllib.parse import urlparse
 
 from dynamicannotationdb import DynamicAnnotationInterface
-from flask import current_app
+from flask import current_app, g
 from sqlalchemy import MetaData, create_engine
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.pool import QueuePool
@@ -33,6 +33,25 @@ def reflect_tables(sql_base, database_name):
     tables = [table for table in meta.tables]
     engine.dispose()
     return tables
+
+
+# Set on g by a celery task declared with keep_db_connections=True (see ContextTask).
+KEEP_DB_CONNECTIONS_FLAG = "keep_db_connections"
+
+
+def cleanup_after_app_context() -> None:
+    """Dispose the connection pools when an app context ends, unless asked to keep them.
+
+    Every celery task runs in its own app context, so disposing after each one makes the
+    next task open new connections. That is fine for long tasks, but the spatial lookup
+    runs ~1 s sub-batch tasks: on ltv7 (2026-10-24) they opened ~60 connections/s and
+    held a 2-vCPU Cloud SQL instance at 100% CPU. Tasks that keep their pools only use
+    the staging and aligned-volume databases, which are never dropped, so the idle
+    connections they leave cannot block a DROP DATABASE of an expired version.
+    """
+    if g.get(KEEP_DB_CONNECTIONS_FLAG):
+        return
+    db_manager.cleanup()
 
 
 def ping_connection(session):

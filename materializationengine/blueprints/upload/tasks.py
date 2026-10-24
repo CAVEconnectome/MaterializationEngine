@@ -169,7 +169,7 @@ def process_and_upload(
 
     chunk_scale_factor = current_app.config.get("CHUNK_SCALE_FACTOR", 2)
     sql_instance_name = current_app.config.get("SQL_INSTANCE_NAME")
-    supervoxel_batch_size = current_app.config.get("SUPERVOXEL_BATCH_SIZE", 50)
+    supervoxel_batch_size = current_app.config.get("SUPERVOXEL_BATCH_SIZE", 500)
     table_name = file_metadata["metadata"]["table_name"]
     schema_type = file_metadata["metadata"]["schema_type"]
     reference_table = file_metadata["metadata"].get("reference_table")
