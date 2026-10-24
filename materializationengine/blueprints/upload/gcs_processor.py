@@ -8,6 +8,12 @@ from typing import Iterator, List, Optional, Callable, Dict, Any, Tuple
 from dataclasses import dataclass
 import time
 
+from materializationengine.blueprints.upload.source import (
+    GCSSource,
+    S3Source,
+    parse_source_uri,
+)
+
 # GCS compose accepts at most this many source objects per call.
 MAX_COMPOSE_SOURCES = 32
 # How much to fetch at a time while looking for the end of a line.
@@ -17,16 +23,15 @@ BOUNDARY_LOOKUP_THREADS = 16
 
 
 class _RangeReader(io.RawIOBase):
-    """A read-only file over bytes [start, end) of a seekable stream.
+    """A read-only file over the next `length` bytes of a stream.
 
     Counts the lines it hands out, so a caller can check that a parser read one row
     per line.
     """
 
-    def __init__(self, stream, start: int, end: int):
-        stream.seek(start)
+    def __init__(self, stream, length: int):
         self._stream = stream
-        self._remaining = end - start
+        self._remaining = length
         self._newlines = 0
         self._any = False
         self._last = b""
@@ -82,22 +87,23 @@ class GCSCsvProcessor:
             chunk_size 
         )
 
-    def _get_csv_row_count(self, blob: storage.Blob) -> int:
-        """
-        Get the total number of rows in a CSV file stored in GCS.
+    def source(self, name: str):
+        """The CSV to read: a name in the upload bucket, or a gs:// or s3:// location."""
+        if "://" not in name:
+            return GCSSource(self.bucket, name, f"gs://{self.bucket.name}/{name}")
+        scheme, bucket_name, key = parse_source_uri(name)
+        if scheme == "s3":
+            return S3Source(bucket_name, key, name)
+        bucket = self.bucket if bucket_name == self.bucket.name else self.client.bucket(bucket_name)
+        return GCSSource(bucket, key, name)
 
-        Args:
-            blob: The GCS blob representing the CSV file.
-
-        Returns:
-            int: Total number of data rows in the file (excluding the header).
-        """
-        count = 0
-        with blob.open("rt", encoding="utf-8", errors="replace") as blob_stream:
-            next(blob_stream, None)
-            for _ in blob_stream:
-                count += 1
-        return count
+    def _get_csv_row_count(self, source) -> int:
+        """The number of data rows in a CSV (its lines, less the header)."""
+        with source.open_range(0, source.size) as stream:
+            reader = _RangeReader(stream, source.size)
+            while reader.read(COUNT_READ_BYTES):
+                pass
+        return max(reader.lines() - 1, 0)
 
     def process_csv_in_chunks(
         self,
@@ -118,14 +124,9 @@ class GCSCsvProcessor:
                                    {'progress': float, 'processed_rows': int,
                                     'total_rows': int, 'current_chunk_num': int, 'total_chunks': int}
         """
-        source_blob = self.bucket.blob(source_blob_name)
+        source = self.source(source_blob_name)
 
-        if not source_blob.exists():
-            raise FileNotFoundError(
-                f"Source blob '{source_blob_name}' not found in bucket '{self.bucket.name}'."
-            )
-
-        total_rows = self._get_csv_row_count(source_blob)
+        total_rows = self._get_csv_row_count(source)
         total_processed_rows = 0
 
         estimated_total_chunks = 0
@@ -146,7 +147,7 @@ class GCSCsvProcessor:
             with destination_blob.open(
                 "wb", content_type="text/csv", ignore_flush=True
             ) as gcs_writer_stream:
-                for chunk_df in self._download_in_chunks(source_blob):
+                for chunk_df in self._download_in_chunks(source):
                     current_chunk_num += 1
                     processed_chunk_df = transform_function(chunk_df)
 
@@ -211,14 +212,10 @@ class GCSCsvProcessor:
         That assumes no quoted field holds a newline; process_csv_range detects a file
         where one does.
         """
-        blob = self.bucket.get_blob(source_blob_name)
-        if blob is None:
-            raise FileNotFoundError(
-                f"Source blob '{source_blob_name}' not found in bucket '{self.bucket.name}'."
-            )
-        size = blob.size
-        header_end = self._next_line_start(blob, 0, size)
-        header = blob.download_as_bytes(start=0, end=header_end - 1).decode("utf-8-sig")
+        source = self.source(source_blob_name)
+        size = source.size
+        header_end = self._next_line_start(source, 0, size)
+        header = source.read(0, header_end).decode("utf-8-sig")
         if header_end >= size:
             return header, []
 
@@ -227,13 +224,13 @@ class GCSCsvProcessor:
         offsets = range(header_end + part_size_bytes, size, part_size_bytes)
         with ThreadPoolExecutor(max_workers=BOUNDARY_LOOKUP_THREADS) as pool:
             line_starts = pool.map(
-                lambda offset: self._next_line_start(blob, offset, size), offsets
+                lambda offset: self._next_line_start(source, offset, size), offsets
             )
             boundaries = sorted({b for b in line_starts if header_end < b < size})
         edges = [header_end] + boundaries + [size]
         return header, list(zip(edges[:-1], edges[1:]))
 
-    def _next_line_start(self, blob: storage.Blob, offset: int, size: int) -> int:
+    def _next_line_start(self, source, offset: int, size: int) -> int:
         """The first line start at or after offset (size when none is left)."""
         if offset >= size:
             return size
@@ -244,7 +241,7 @@ class GCSCsvProcessor:
             position = offset - 1
         while position < size:
             end = min(position + LINE_SEARCH_BYTES, size)
-            window = blob.download_as_bytes(start=position, end=end - 1)
+            window = source.read(position, end)
             newline = window.find(b"\n")
             if newline >= 0:
                 return position + newline + 1
@@ -268,12 +265,12 @@ class GCSCsvProcessor:
         has blank lines; the caller must not use the output then.
         """
         columns = list(pd.read_csv(io.StringIO(header), nrows=0).columns)
-        source_blob = self.bucket.blob(source_blob_name)
+        source = self.source(source_blob_name)
         destination_blob = self.bucket.blob(destination_blob_name)
         rows_read = 0
         rows_written = 0
-        with source_blob.open("rb") as blob_stream:
-            reader = _RangeReader(blob_stream, start, end)
+        with source.open_range(start, end) as blob_stream:
+            reader = _RangeReader(blob_stream, end - start)
             with destination_blob.open(
                 "wb", content_type="text/csv", ignore_flush=True
             ) as gcs_writer_stream:
@@ -300,8 +297,8 @@ class GCSCsvProcessor:
 
     def count_csv_range_lines(self, source_blob_name: str, start: int, end: int) -> int:
         """The number of lines in bytes [start, end) of an object."""
-        with self.bucket.blob(source_blob_name).open("rb") as blob_stream:
-            reader = _RangeReader(blob_stream, start, end)
+        with self.source(source_blob_name).open_range(start, end) as blob_stream:
+            reader = _RangeReader(blob_stream, end - start)
             while reader.read(COUNT_READ_BYTES):
                 pass
         return reader.lines()
@@ -339,16 +336,9 @@ class GCSCsvProcessor:
             except NotFound:
                 pass
 
-    def _download_in_chunks(self, blob: storage.Blob) -> Iterator[pd.DataFrame]:
-        """
-        Stream-download CSV from GCS in pandas DataFrame chunks.
-
-        Args:
-            blob: GCS blob object representing the source CSV.
-
-        Yields:
-            DataFrame chunks.
-        """
-        with blob.open("rb") as blob_stream:
-            for chunk in pd.read_csv(blob_stream, chunksize=self.pandas_chunk_size):
+    def _download_in_chunks(self, source) -> Iterator[pd.DataFrame]:
+        """Stream a whole CSV source as pandas DataFrame chunks."""
+        with source.open_range(0, source.size) as stream:
+            reader = _RangeReader(stream, source.size)
+            for chunk in pd.read_csv(reader, chunksize=self.pandas_chunk_size):
                 yield chunk

@@ -313,7 +313,8 @@ def process_csv(
         timestamp = datetime.now(timezone.utc)
         timestamp_str = timestamp.strftime("%Y%m%d_%H%M%S")
 
-        source_blob_name = file_path.split("/")[-1]
+        # the upload bucket, any GCS object the deployment can read, or public S3
+        source_blob_name = file_path
         destination_blob_name = f"processed_{schema_type}_{timestamp_str}.csv"
 
         def transform_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
