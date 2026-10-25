@@ -42,10 +42,10 @@
 
   <!-- Cloud location -->
   <div x-cloak x-show="$store.upload.sourceMode === 'uri'" class="mb-4">
-    <label for="sourceUriInput" class="form-label">CSV location *</label>
+    <label for="sourceUriInput" class="form-label">Data location *</label>
     <div class="input-group">
       <input id="sourceUriInput" type="text" class="form-control font-monospace"
-             placeholder="gs://bucket/path/file.csv or s3://bucket/path/file.csv"
+             placeholder="gs://bucket/path/file.csv, or a parquet file or folder (gs:// or s3://)"
              x-model="$store.upload.sourceUri"
              @keydown.enter.prevent="$store.upload.inspectSource()"
              :disabled="$store.upload.status === 'inspecting'">
@@ -58,15 +58,19 @@
       </button>
     </div>
     <div class="form-text">
-      The file is read in place, without uploading it. A gs:// file must be publicly
-      readable or readable by this deployment's service account; an s3:// file must be
-      publicly readable.
+      The data is read in place, without uploading it: a CSV file, or parquet as one
+      file, a folder of files (hive-partitioned folders like <code>key=value/</code>
+      become columns) or a Delta table (its current version is read). A gs:// location
+      must be publicly readable or readable by this deployment's service account; an
+      s3:// location must be publicly readable.
     </div>
     <div x-cloak x-show="$store.upload.sourceMode === 'uri' && $store.upload.status === 'completed'"
          class="alert alert-success mt-3 mb-0 py-2">
       <i class="fas fa-check me-1"></i>
       <span x-text="$store.upload.filename"></span>
-      (<span x-text="($store.upload.sourceSize / (1024 * 1024)).toFixed(2)"></span> MB)
+      (<span x-text="($store.upload.sourceSize / (1024 * 1024)).toFixed(2)"></span> MB<span
+        x-show="$store.upload.sourceInfo"
+        x-text="$store.upload.sourceInfo ? `, ${$store.upload.sourceInfo.kind === 'delta' ? 'Delta table' : 'parquet'}: ${$store.upload.sourceInfo.files.toLocaleString()} files, ${$store.upload.sourceInfo.rows.toLocaleString()} rows` : ''"></span>)
       is readable.
     </div>
     <div x-cloak x-show="$store.upload.sourceMode === 'uri' && $store.upload.error"

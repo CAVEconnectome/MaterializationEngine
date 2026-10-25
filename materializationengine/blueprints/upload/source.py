@@ -6,6 +6,8 @@ is read in place from a cloud location the user gives:
 - gs://bucket/path.csv: any GCS object this deployment's service account can read,
   which includes every publicly readable object.
 - s3://bucket/path.csv: a publicly readable S3 object, read with unsigned requests.
+- A parquet file, a folder of parquet files or a Delta table at such a location:
+  see parquet_source.py.
 
 Every source offers its size, a ranged read and a stream over a byte range, which is all
 the CSV processing needs. Only processed output is written, and always to the upload
@@ -35,9 +37,11 @@ def parse_source_uri(uri: str) -> Tuple[str, str, str]:
         raise ValueError(
             f"Unsupported location {uri!r}: use gs://bucket/path.csv or s3://bucket/path.csv"
         )
-    bucket, key = parsed.netloc, parsed.path.lstrip("/")
-    if not bucket or not key or key.endswith("/"):
-        raise ValueError(f"{uri!r} does not name a file: use {scheme}://bucket/path.csv")
+    bucket, key = parsed.netloc, parsed.path.strip("/")
+    if not bucket or not key:
+        raise ValueError(
+            f"{uri!r} does not name a file or folder: use {scheme}://bucket/path"
+        )
     return scheme, bucket, key
 
 

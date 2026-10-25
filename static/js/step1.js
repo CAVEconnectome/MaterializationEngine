@@ -21,6 +21,8 @@ document.addEventListener("alpine:init", () => {
     sourceMode: "file",
     sourceUri: "",
     sourceSize: 0,
+    // for parquet sources: "file", "folder" or "delta", and their files and rows
+    sourceInfo: null,
     speedStats: {
       startTime: null,
       lastUpdateTime: null,
@@ -39,6 +41,7 @@ document.addEventListener("alpine:init", () => {
         this.sourceMode = state.sourceMode || "file";
         this.sourceUri = state.sourceUri || "";
         this.sourceSize = state.sourceSize || 0;
+        this.sourceInfo = state.sourceInfo || null;
         if (this.selectedDatastack) {
           const datastackSelect = document.getElementById('datastackSelect');
           if (datastackSelect) {
@@ -71,6 +74,7 @@ document.addEventListener("alpine:init", () => {
       this.selectedDatastack = "";
       this.sourceUri = "";
       this.sourceSize = 0;
+      this.sourceInfo = null;
       this.speedStats = {
         startTime: null,
         lastUpdateTime: null,
@@ -96,6 +100,7 @@ document.addEventListener("alpine:init", () => {
         // only sent to the server when reading in place
         sourceUri: this.sourceMode === "uri" ? this.sourceUri : "",
         sourceSize: this.sourceSize,
+        sourceInfo: this.sourceInfo,
       };
       localStorage.setItem("uploadStore", JSON.stringify(stateToSave));
     },
@@ -135,6 +140,7 @@ document.addEventListener("alpine:init", () => {
       this.previewRows = [];
       this.filename = "";
       this.sourceSize = 0;
+      this.sourceInfo = null;
       if (!datastackName) {
         this.error = "Please select a datastack first.";
         this.status = "error";
@@ -165,6 +171,9 @@ document.addEventListener("alpine:init", () => {
         }
         this.filename = data.filename;
         this.sourceSize = data.size;
+        this.sourceInfo = data.kind
+          ? { kind: data.kind, files: data.files, rows: data.rows }
+          : null;
         this.previewRows = data.previewRows || [];
         this.status = "completed";
         this.saveState();

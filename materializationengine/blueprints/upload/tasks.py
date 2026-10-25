@@ -19,6 +19,11 @@ from dynamicannotationdb.key_utils import build_segmentation_table_name
 from dynamicannotationdb.models import SegmentationMetadata
 
 from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
+from materializationengine.blueprints.upload.parquet_source import (
+    DEFAULT_PARQUET_PART_ROWS,
+    is_parquet_source,
+    plan_parquet_parts,
+)
 from materializationengine.blueprints.upload.processor import SchemaProcessor
 from materializationengine.celery_init import celery
 from materializationengine.cloudsql_admin import (
@@ -409,34 +414,48 @@ def process_csv(
                 },
             )
 
-        part_size_bytes = int(
-            float(current_app.config.get("UPLOAD_CSV_PART_SIZE_MB", DEFAULT_CSV_PART_SIZE_MB))
-            * 1024
-            * 1024
-        )
-        header, ranges = gcs_processor.plan_csv_parts(source_blob_name, part_size_bytes)
-
+        part_kwargs = {
+            "schema_type": schema_type,
+            "column_mapping": column_mapping,
+            "reference_table": reference_table,
+            "ignored_columns": ignored_columns,
+            "chunk_size": chunk_size,
+            "timestamp": timestamp.isoformat(),
+        }
         parts_result = None
-        if len(ranges) > 1:
-            parts_result = _process_csv_in_parts(
+        if is_parquet_source(source_blob_name):
+            # a parquet file, a folder of them (hive partitions too), or a Delta table
+            parts_result = _process_parquet_in_parts(
                 gcs_processor,
                 bucket_name=bucket_name,
-                source_blob_name=source_blob_name,
-                header=header,
-                ranges=ranges,
+                source_uri=source_blob_name,
                 destination_blob_name=destination_blob_name,
                 job_id=job_id_for_status,
-                part_kwargs={
-                    "schema_type": schema_type,
-                    "column_mapping": column_mapping,
-                    "reference_table": reference_table,
-                    "ignored_columns": ignored_columns,
-                    "chunk_size": chunk_size,
-                    "timestamp": timestamp.isoformat(),
-                },
+                part_kwargs=part_kwargs,
                 generate_ids=schema_processor.generate_ids,
                 id_counter_start=id_counter_start,
             )
+        else:
+            part_size_bytes = int(
+                float(current_app.config.get("UPLOAD_CSV_PART_SIZE_MB", DEFAULT_CSV_PART_SIZE_MB))
+                * 1024
+                * 1024
+            )
+            header, ranges = gcs_processor.plan_csv_parts(source_blob_name, part_size_bytes)
+
+            if len(ranges) > 1:
+                parts_result = _process_csv_in_parts(
+                    gcs_processor,
+                    bucket_name=bucket_name,
+                    source_blob_name=source_blob_name,
+                    header=header,
+                    ranges=ranges,
+                    destination_blob_name=destination_blob_name,
+                    job_id=job_id_for_status,
+                    part_kwargs=part_kwargs,
+                    generate_ids=schema_processor.generate_ids,
+                    id_counter_start=id_counter_start,
+                )
 
         if parts_result is None:
             gcs_processor.process_csv_in_chunks(
@@ -572,6 +591,74 @@ def _process_csv_in_parts(
     }
 
 
+def _process_parquet_in_parts(
+    gcs_processor: GCSCsvProcessor,
+    bucket_name: str,
+    source_uri: str,
+    destination_blob_name: str,
+    job_id: str,
+    part_kwargs: Dict[str, Any],
+    generate_ids: bool,
+    id_counter_start: int,
+) -> Dict[str, Any]:
+    """Process a parquet source in part tasks of whole row groups, then join the outputs.
+
+    The footers give every part's row count up front, so generated ids get exact
+    offsets without a counting pass.
+    """
+    target_rows = int(
+        current_app.config.get("UPLOAD_PARQUET_PART_ROWS", DEFAULT_PARQUET_PART_ROWS)
+    )
+    plan = plan_parquet_parts(source_uri, target_rows)
+    parts = plan["parts"]
+    if not parts:
+        raise ValueError(f"{source_uri} has no rows to upload")
+    celery_logger.info(
+        f"Upload {job_id}: {plan['kind']} source with {plan['files']} files, "
+        f"{plan['total_rows']:,} rows, in {len(parts)} parts"
+    )
+    update_job_status(job_id, {"total_rows": plan["total_rows"]})
+    part_names = [f"processed_parts/{job_id}/part-{i:05d}.csv" for i in range(len(parts))]
+
+    starts = []
+    offset = id_counter_start
+    for part in parts:
+        starts.append(offset)
+        offset += part["rows"]
+
+    try:
+        results = _run_csv_part_tasks(
+            [
+                process_parquet_part.si(
+                    bucket_name=bucket_name,
+                    source_uri=source_uri,
+                    root=plan["root"],
+                    pieces=part["pieces"],
+                    expected_rows=part["rows"],
+                    destination_blob_name=part_names[i],
+                    id_counter_start=starts[i] if generate_ids else id_counter_start,
+                    job_id_for_status=job_id,
+                    **part_kwargs,
+                )
+                for i, part in enumerate(parts)
+            ],
+            job_id,
+            "Processing Parquet Data",
+        )
+    except BaseException:
+        gcs_processor.delete_blobs(part_names)
+        raise
+
+    gcs_processor.compose(part_names, destination_blob_name)
+    rows_read = sum(r["rows_read"] for r in results)
+    return {
+        "rows_read": rows_read,
+        "rows_written": sum(r["rows_written"] for r in results),
+        "dropped_rows": sum(r["dropped_rows"] for r in results),
+        "last_assigned_id": id_counter_start + rows_read if generate_ids else id_counter_start,
+    }
+
+
 def _run_csv_part_tasks(signatures: list, job_id: str, phase: str) -> List[Any]:
     """Send the part tasks and wait for all of them, reporting progress on the job.
 
@@ -670,6 +757,58 @@ def process_csv_part(
         result["split_error"] = (
             f"bytes {start}-{end}: {result['rows_read']} rows from {result['lines']} lines"
         )
+    return result
+
+
+@celery.task(
+    name="process:process_parquet_part",
+    bind=True,
+    acks_late=True,
+    autoretry_for=(Exception,),
+    dont_autoretry_for=(Ignore,),
+    max_retries=3,
+    retry_backoff=True,
+)
+def process_parquet_part(
+    self,
+    bucket_name: str,
+    source_uri: str,
+    root: str,
+    pieces: List[List[Any]],
+    expected_rows: int,
+    destination_blob_name: str,
+    schema_type: str,
+    column_mapping: Dict[str, str],
+    timestamp: str,
+    reference_table: str = None,
+    ignored_columns: List[str] = None,
+    chunk_size: int = 10000,
+    id_counter_start: int = 0,
+    job_id_for_status: str = None,
+) -> Dict[str, Any]:
+    """Transform some row groups of a parquet source into one processed CSV part."""
+    raise_if_upload_cancelled(job_id_for_status, "parquet part processing")
+    schema_processor = SchemaProcessor(
+        schema_type,
+        reference_table,
+        column_mapping=column_mapping,
+        ignored_columns=ignored_columns,
+        id_counter_start=id_counter_start,
+    )
+    created = datetime.fromisoformat(timestamp)
+    result = GCSCsvProcessor(bucket_name, chunk_size=chunk_size).process_parquet_part(
+        source_uri,
+        root,
+        pieces,
+        destination_blob_name,
+        lambda chunk: schema_processor.process_chunk(chunk, created),
+    )
+    if result["rows_read"] != expected_rows:
+        # the footers promised a different count: the files changed since planning
+        raise ValueError(
+            f"Read {result['rows_read']} rows from {source_uri}, expected {expected_rows}"
+        )
+    result["dropped_rows"] = schema_processor.dropped_rows
     return result
 
 
