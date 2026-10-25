@@ -12,6 +12,8 @@ document.addEventListener("alpine:init", () => {
       mappingSaved: false,
       useMergedPositions: false,
       hasPositionFields: false,
+      // fields whose column was filled in by suggestColumns, until the user changes it
+      suggestedFields: [],
     },
 
     init() {
@@ -106,6 +108,9 @@ document.addEventListener("alpine:init", () => {
             (field) => field.type.toLowerCase().includes("geometry")
           );
           this.updateDisplayFields();
+          if (!isRestoring) {
+            this.suggestColumns();
+          }
           this.updateIgnoredColumns();
           this.state.validationErrors = [];
           this.saveState();
@@ -164,12 +169,51 @@ document.addEventListener("alpine:init", () => {
         newMapping[field.name] = currentMapping[field.name] || "";
       });
       this.state.columnMapping = newMapping;
+      this.state.suggestedFields = this.state.suggestedFields.filter(
+        (name) => name in newMapping
+      );
+      this.suggestColumns();
       this.updateIgnoredColumns();
       this.saveState();
     },
 
+    // Fill fields that have no column yet with the best-matching column names
+    // (columnMatch.js). Columns already chosen are kept, and not suggested again.
+    suggestColumns() {
+      if (!window.columnMatch || !this.state.csvColumns.length) return 0;
+      const mapping = this.state.columnMapping;
+      const fieldNames = this.state.displayFields.map((field) => field.name);
+      const filled = fieldNames.filter((name) => mapping[name]);
+      const taken = new Set(filled.map((name) => mapping[name]));
+      const suggestions = window.columnMatch.suggestColumnMapping(
+        fieldNames,
+        this.state.csvColumns.filter((column) => !taken.has(column)),
+        filled
+      );
+      Object.entries(suggestions).forEach(([field, column]) => {
+        mapping[field] = column;
+        if (!this.state.suggestedFields.includes(field)) {
+          this.state.suggestedFields.push(field);
+        }
+      });
+      this.updateIgnoredColumns();
+      this.saveState();
+      return Object.keys(suggestions).length;
+    },
+
+    isSuggested(fieldName) {
+      return (
+        this.state.suggestedFields.includes(fieldName) &&
+        Boolean(this.state.columnMapping[fieldName])
+      );
+    },
+
     updateColumnMapping(fieldName, columnName) {
       this.state.columnMapping[fieldName] = columnName;
+      // the user's choice now, not a suggestion
+      this.state.suggestedFields = this.state.suggestedFields.filter(
+        (name) => name !== fieldName
+      );
       this.updateIgnoredColumns();
       this.saveState();
     },
@@ -249,6 +293,7 @@ document.addEventListener("alpine:init", () => {
       this.state.displayFields = [];
       this.state.columnMapping = {};
       this.state.ignoredColumns = [];
+      this.state.suggestedFields = [];
       this.state.validationErrors = [];
       this.state.mappingSaved = false;
       this.saveState();
@@ -276,6 +321,7 @@ document.addEventListener("alpine:init", () => {
         schemaModel: null,
         validationErrors: [],
         mappingSaved: false,
+        suggestedFields: [],
       };
       localStorage.removeItem("schemaStore");
       this.init();
