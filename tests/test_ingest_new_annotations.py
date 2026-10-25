@@ -7,24 +7,36 @@ from collections import namedtuple
 from contextlib import contextmanager
 from unittest import mock
 
-sys.modules["materializationengine.chunkedgraph_gateway"] = mock.MagicMock()
-sys.modules["cloudvolume"] = mock.MagicMock()
+# Mocked only while ingest_new_annotations is imported: left in sys.modules, the mock
+# cloudvolume replaced the real one for every test module collected after this one
+# (test_spatial_supervoxel_lookup builds real volumes).
+_MOCKED_MODULES = ("materializationengine.chunkedgraph_gateway", "cloudvolume")
+_real_modules = {name: sys.modules.get(name) for name in _MOCKED_MODULES}
+for _name in _MOCKED_MODULES:
+    sys.modules[_name] = mock.MagicMock()
+try:
+    from materializationengine.workflows.ingest_new_annotations import (
+        create_missing_segmentation_table,
+        get_annotations_with_missing_supervoxel_ids,
+        batch_missing_root_ids_query,
+        find_missing_root_ids_workflow,
+        process_dense_missing_roots_workflow,
+        process_sparse_missing_roots_workflow,
+        get_cloudvolume_supervoxel_ids,
+        get_ids_with_missing_roots,
+        get_new_root_ids,
+        get_sql_supervoxel_ids_chunks,
+        insert_segmentation_data,
+        table_modified_since_last_update,
+    )
+finally:
+    for _name, _module in _real_modules.items():
+        if _module is None:
+            sys.modules.pop(_name, None)
+        else:
+            sys.modules[_name] = _module
 
 import numpy as np
-from materializationengine.workflows.ingest_new_annotations import (
-    create_missing_segmentation_table,
-    get_annotations_with_missing_supervoxel_ids,
-    batch_missing_root_ids_query,
-    find_missing_root_ids_workflow,
-    process_dense_missing_roots_workflow,
-    process_sparse_missing_roots_workflow,
-    get_cloudvolume_supervoxel_ids,
-    get_ids_with_missing_roots,
-    get_new_root_ids,
-    get_sql_supervoxel_ids_chunks,
-    insert_segmentation_data,
-    table_modified_since_last_update,
-)
 from numpy import nan
 from sqlalchemy.orm import Query
 
