@@ -154,7 +154,7 @@ class TestCleanupIsWiredIn:
                 job_id=JOB,
             )
         steps = [sig.task for sig in chain.call_args.args]
-        assert steps[-2:] == ["workflow:transfer_to_production", "workflow:cleanup_staging_tables"]
+        assert steps[-2:] == ["orchestration:transfer_to_production", "workflow:cleanup_staging_tables"]
         errback = chain.return_value.apply_async.call_args.kwargs["link_error"]
         assert errback.task == "workflow:discard_upload_staging"
         assert errback.kwargs == {"table_name": ANNO, "job_id": JOB, "reason": "failed"}
