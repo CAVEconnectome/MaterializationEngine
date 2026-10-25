@@ -7,6 +7,7 @@ from marshmallow import (
     validates_schema,
 )
 from typing import Dict, Any
+from materializationengine.blueprints.upload.source import parse_source_uri
 
 
 class MetadataSchema(Schema):
@@ -32,9 +33,20 @@ class MetadataSchema(Schema):
 
 class UploadRequestSchema(Schema):
     filename = fields.Str(required=True)
+    # A gs:// or s3:// location to read the CSV from in place, instead of the file
+    # uploaded to the upload bucket as filename.
+    source_uri = fields.Str(data_key="sourceUri", missing=None, allow_none=True)
     column_mapping = fields.Dict(required=True, data_key="columnMapping")
     ignored_columns = fields.List(fields.Str(), data_key="ignoredColumns", missing=[])
     metadata = fields.Nested(MetadataSchema, required=True)
+
+    @validates("source_uri")
+    def validate_source_uri(self, value):
+        if value:
+            try:
+                parse_source_uri(value)
+            except ValueError as e:
+                raise ValidationError(str(e))
 
     @validates("filename")
     def validate_filename(self, value):

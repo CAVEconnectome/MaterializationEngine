@@ -5,6 +5,7 @@ import subprocess
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import shlex
+import time
 
 import pandas as pd
 from celery import chain
@@ -48,6 +49,8 @@ REDIS_CLIENT = SharedRedis(db=0)
 
 
 CANCEL_KEY_PREFIX = "csv_processing_cancelled:"
+# Bytes of the source CSV each part task processes; see process_csv_part.
+DEFAULT_CSV_PART_SIZE_MB = 128
 # Longer than any upload, and independent of the job record (1h, rewritten by every step).
 CANCEL_KEY_TTL_SECONDS = 7 * 24 * 3600
 
@@ -166,7 +169,7 @@ def process_and_upload(
 
     chunk_scale_factor = current_app.config.get("CHUNK_SCALE_FACTOR", 2)
     sql_instance_name = current_app.config.get("SQL_INSTANCE_NAME")
-    supervoxel_batch_size = current_app.config.get("SUPERVOXEL_BATCH_SIZE", 50)
+    supervoxel_batch_size = current_app.config.get("SUPERVOXEL_BATCH_SIZE", 500)
     table_name = file_metadata["metadata"]["table_name"]
     schema_type = file_metadata["metadata"]["schema_type"]
     reference_table = file_metadata["metadata"].get("reference_table")
@@ -310,7 +313,8 @@ def process_csv(
         timestamp = datetime.now(timezone.utc)
         timestamp_str = timestamp.strftime("%Y%m%d_%H%M%S")
 
-        source_blob_name = file_path.split("/")[-1]
+        # the upload bucket, any GCS object the deployment can read, or public S3
+        source_blob_name = file_path
         destination_blob_name = f"processed_{schema_type}_{timestamp_str}.csv"
 
         def transform_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
@@ -340,15 +344,47 @@ def process_csv(
                 },
             )
 
-        gcs_processor.process_csv_in_chunks(
-            source_blob_name,
-            destination_blob_name,
-            transform_chunk,
-            chunk_upload_callback=progress_callback,
+        part_size_bytes = int(
+            float(current_app.config.get("UPLOAD_CSV_PART_SIZE_MB", DEFAULT_CSV_PART_SIZE_MB))
+            * 1024
+            * 1024
         )
+        header, ranges = gcs_processor.plan_csv_parts(source_blob_name, part_size_bytes)
 
-        last_assigned_id = schema_processor._id_counter
-        dropped_rows = schema_processor.dropped_rows
+        parts_result = None
+        if len(ranges) > 1:
+            parts_result = _process_csv_in_parts(
+                gcs_processor,
+                bucket_name=bucket_name,
+                source_blob_name=source_blob_name,
+                header=header,
+                ranges=ranges,
+                destination_blob_name=destination_blob_name,
+                job_id=job_id_for_status,
+                part_kwargs={
+                    "schema_type": schema_type,
+                    "column_mapping": column_mapping,
+                    "reference_table": reference_table,
+                    "ignored_columns": ignored_columns,
+                    "chunk_size": chunk_size,
+                    "timestamp": timestamp.isoformat(),
+                },
+                generate_ids=schema_processor.generate_ids,
+                id_counter_start=id_counter_start,
+            )
+
+        if parts_result is None:
+            gcs_processor.process_csv_in_chunks(
+                source_blob_name,
+                destination_blob_name,
+                transform_chunk,
+                chunk_upload_callback=progress_callback,
+            )
+            last_assigned_id = schema_processor._id_counter
+            dropped_rows = schema_processor.dropped_rows
+        else:
+            last_assigned_id = parts_result["last_assigned_id"]
+            dropped_rows = parts_result["dropped_rows"]
 
         status_update: Dict[str, Any] = {"last_assigned_id": last_assigned_id}
         if dropped_rows:
@@ -389,6 +425,199 @@ def process_csv(
         except Exception as update_err:
             celery_logger.error(f"Failed to update job status with error: {update_err}")
         raise
+
+
+def _process_csv_in_parts(
+    gcs_processor: GCSCsvProcessor,
+    bucket_name: str,
+    source_blob_name: str,
+    header: str,
+    ranges: List[tuple],
+    destination_blob_name: str,
+    job_id: str,
+    part_kwargs: Dict[str, Any],
+    generate_ids: bool,
+    id_counter_start: int,
+) -> Optional[Dict[str, Any]]:
+    """Process each byte range of the CSV in its own task, then join the outputs in order.
+
+    Returns None when the file cannot be split by lines (a quoted field holds a newline,
+    or there are blank lines); the caller then processes it as one stream.
+    """
+    part_prefix = f"processed_parts/{job_id}/"
+    part_names = [f"{part_prefix}part-{i:05d}.csv" for i in range(len(ranges))]
+
+    starts = [id_counter_start] * len(ranges)
+    if generate_ids:
+        # each part numbers its rows from the count of data rows before it
+        counts = _run_csv_part_tasks(
+            [
+                count_csv_part.si(bucket_name, source_blob_name, start, end)
+                for start, end in ranges
+            ],
+            job_id,
+            "Processing CSV Data: counting rows",
+        )
+        offset = id_counter_start
+        for i, count in enumerate(counts):
+            starts[i] = offset
+            offset += count
+
+    try:
+        results = _run_csv_part_tasks(
+            [
+                process_csv_part.si(
+                    bucket_name=bucket_name,
+                    source_blob_name=source_blob_name,
+                    start=start,
+                    end=end,
+                    header=header,
+                    destination_blob_name=part_names[i],
+                    id_counter_start=starts[i],
+                    job_id_for_status=job_id,
+                    **part_kwargs,
+                )
+                for i, (start, end) in enumerate(ranges)
+            ],
+            job_id,
+            "Processing CSV Data",
+        )
+    except BaseException:
+        # a cancelled or failed upload leaves no parts behind (best effort: a part
+        # still running can write after this)
+        gcs_processor.delete_blobs(part_names)
+        raise
+
+    split_errors = [r["split_error"] for r in results if r.get("split_error")]
+    if split_errors:
+        celery_logger.warning(
+            f"Upload {job_id}: the CSV cannot be split by lines ({split_errors[0]}); "
+            f"processing it as one stream instead."
+        )
+        gcs_processor.delete_blobs(part_names)
+        return None
+
+    gcs_processor.compose(part_names, destination_blob_name)
+    rows_read = sum(r["rows_read"] for r in results)
+    return {
+        "rows_read": rows_read,
+        "rows_written": sum(r["rows_written"] for r in results),
+        "dropped_rows": sum(r["dropped_rows"] for r in results),
+        "last_assigned_id": id_counter_start + rows_read if generate_ids else id_counter_start,
+    }
+
+
+def _run_csv_part_tasks(signatures: list, job_id: str, phase: str) -> List[Any]:
+    """Send the part tasks and wait for all of them, reporting progress on the job.
+
+    Returns their results in order. A cancelled job revokes the parts still waiting;
+    a part that fails fails the upload.
+    """
+    async_results = [signature.apply_async() for signature in signatures]
+    poll_seconds = float(current_app.config.get("UPLOAD_CSV_PART_POLL_SECONDS", 5))
+    total = len(async_results)
+    try:
+        while True:
+            raise_if_upload_cancelled(job_id, phase)
+            failed = next((r for r in async_results if r.state == "FAILURE"), None)
+            if failed is not None:
+                raise RuntimeError(f"CSV part task {failed.id} failed: {failed.result!r}")
+            done = [r for r in async_results if r.state == "SUCCESS"]
+            rows = sum(
+                r.result.get("rows_read", 0) for r in done if isinstance(r.result, dict)
+            )
+            update_job_status(
+                job_id,
+                {
+                    "status": "processing",
+                    "phase": phase,
+                    "progress": round(100.0 * len(done) / total, 2),
+                    "processed_rows": rows,
+                    "current_chunk_num": len(done),
+                    "total_chunks": total,
+                },
+            )
+            if len(done) == total:
+                celery_logger.info(f"Upload {job_id}: {phase}: all {total} parts done")
+                return [r.result for r in async_results]
+            time.sleep(poll_seconds)
+    except BaseException:
+        for r in async_results:
+            if r.state not in ("SUCCESS", "FAILURE"):
+                r.revoke()
+        raise
+
+
+# Each part reads at most UPLOAD_CSV_PART_SIZE_MB of the source and runs for about a
+# minute, well inside the process queue's visibility timeout (300 s). It overwrites its
+# own output object, so a redelivered or retried part is safe to run again.
+@celery.task(
+    name="process:process_csv_part",
+    bind=True,
+    acks_late=True,
+    autoretry_for=(Exception,),
+    dont_autoretry_for=(Ignore,),
+    max_retries=3,
+    retry_backoff=True,
+)
+def process_csv_part(
+    self,
+    bucket_name: str,
+    source_blob_name: str,
+    start: int,
+    end: int,
+    header: str,
+    destination_blob_name: str,
+    schema_type: str,
+    column_mapping: Dict[str, str],
+    timestamp: str,
+    reference_table: str = None,
+    ignored_columns: List[str] = None,
+    chunk_size: int = 10000,
+    id_counter_start: int = 0,
+    job_id_for_status: str = None,
+) -> Dict[str, Any]:
+    """Transform bytes [start, end) of an uploaded CSV into one processed part."""
+    raise_if_upload_cancelled(job_id_for_status, "CSV part processing")
+    schema_processor = SchemaProcessor(
+        schema_type,
+        reference_table,
+        column_mapping=column_mapping,
+        ignored_columns=ignored_columns,
+        id_counter_start=id_counter_start,
+    )
+    created = datetime.fromisoformat(timestamp)
+    gcs_processor = GCSCsvProcessor(bucket_name, chunk_size=chunk_size)
+    try:
+        result = gcs_processor.process_csv_range(
+            source_blob_name,
+            start,
+            end,
+            header,
+            destination_blob_name,
+            lambda chunk: schema_processor.process_chunk(chunk, created),
+        )
+    except pd.errors.ParserError as e:
+        # a quoted field holding a newline makes a range start mid-row
+        return {"split_error": f"bytes {start}-{end}: {e}"}
+    result["dropped_rows"] = schema_processor.dropped_rows
+    if result["rows_read"] != result["lines"]:
+        result["split_error"] = (
+            f"bytes {start}-{end}: {result['rows_read']} rows from {result['lines']} lines"
+        )
+    return result
+
+
+@celery.task(
+    name="process:count_csv_part",
+    acks_late=True,
+    autoretry_for=(Exception,),
+    max_retries=3,
+    retry_backoff=True,
+)
+def count_csv_part(bucket_name: str, source_blob_name: str, start: int, end: int) -> int:
+    """The number of lines in bytes [start, end) of an uploaded CSV."""
+    return GCSCsvProcessor(bucket_name).count_csv_range_lines(source_blob_name, start, end)
 
 
 # Long-running (CSV import, then index builds over this worker's connection), so it

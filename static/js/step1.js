@@ -16,6 +16,11 @@ document.addEventListener("alpine:init", () => {
     savedState: null,
     previewRows: [],
     selectedDatastack: "", 
+    // "file": upload a local file to the upload bucket; "uri": read a gs:// or
+    // s3:// file in place
+    sourceMode: "file",
+    sourceUri: "",
+    sourceSize: 0,
     speedStats: {
       startTime: null,
       lastUpdateTime: null,
@@ -31,6 +36,9 @@ document.addEventListener("alpine:init", () => {
         this.status = state.status;
         this.previewRows = state.previewRows;
         this.selectedDatastack = state.selectedDatastack || "";
+        this.sourceMode = state.sourceMode || "file";
+        this.sourceUri = state.sourceUri || "";
+        this.sourceSize = state.sourceSize || 0;
         if (this.selectedDatastack) {
           const datastackSelect = document.getElementById('datastackSelect');
           if (datastackSelect) {
@@ -61,6 +69,8 @@ document.addEventListener("alpine:init", () => {
       this.savedState = null;
       this.previewRows = [];
       this.selectedDatastack = "";
+      this.sourceUri = "";
+      this.sourceSize = 0;
       this.speedStats = {
         startTime: null,
         lastUpdateTime: null,
@@ -82,6 +92,10 @@ document.addEventListener("alpine:init", () => {
         status: this.status,
         previewRows: this.previewRows,
         selectedDatastack: this.selectedDatastack,
+        sourceMode: this.sourceMode,
+        // only sent to the server when reading in place
+        sourceUri: this.sourceMode === "uri" ? this.sourceUri : "",
+        sourceSize: this.sourceSize,
       };
       localStorage.setItem("uploadStore", JSON.stringify(stateToSave));
     },
@@ -99,6 +113,70 @@ document.addEventListener("alpine:init", () => {
 
     clearAllStates() {
       localStorage.removeItem("uploadStore");
+    },
+
+    setSourceMode(mode) {
+      if (this.sourceMode === mode) return;
+      const datastack = document.getElementById("datastackSelect")?.value || "";
+      this.reset();
+      this.sourceMode = mode;
+      const datastackSelect = document.getElementById("datastackSelect");
+      if (datastackSelect) datastackSelect.value = datastack;
+      this.selectedDatastack = datastack;
+      this.saveState();
+    },
+
+    // Check that the server can read the gs:// or s3:// file, and preview it.
+    async inspectSource() {
+      const datastackSelect = document.getElementById("datastackSelect");
+      const datastackName = datastackSelect ? datastackSelect.value : "";
+      this.selectedDatastack = datastackName;
+      this.error = null;
+      this.previewRows = [];
+      this.filename = "";
+      this.sourceSize = 0;
+      if (!datastackName) {
+        this.error = "Please select a datastack first.";
+        this.status = "error";
+        return;
+      }
+      const uri = (this.sourceUri || "").trim();
+      this.sourceUri = uri;
+      this.status = "inspecting";
+      try {
+        const response = await fetch(
+          `/materialize/upload/api/source/inspect/${encodeURIComponent(datastackName)}`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Requested-With": "XMLHttpRequest",
+            },
+            body: JSON.stringify({ uri }),
+            credentials: "same-origin",
+          }
+        );
+        let data = {};
+        try {
+          data = await response.json();
+        } catch {}
+        if (!response.ok) {
+          throw new Error(data.message || `HTTP ${response.status}`);
+        }
+        this.filename = data.filename;
+        this.sourceSize = data.size;
+        this.previewRows = data.previewRows || [];
+        this.status = "completed";
+        this.saveState();
+        const schemaStore = Alpine.store("schema");
+        if (schemaStore) {
+          schemaStore.loadCsvColumns();
+        }
+      } catch (error) {
+        console.error("Source check failed:", error);
+        this.error = error.message;
+        this.status = "error";
+      }
     },
 
     handleFileSelect(event) {
@@ -458,8 +536,9 @@ document.addEventListener("alpine:init", () => {
     },
 
     isValid() {
-      const valid =
-        this.file !== null && this.status === "completed" && !this.error;
+      const hasSource =
+        this.sourceMode === "uri" ? Boolean(this.sourceUri && this.filename) : this.file !== null;
+      const valid = hasSource && this.status === "completed" && !this.error;
       if (valid) {
         this.saveState();
       }

@@ -1,3 +1,4 @@
+import csv
 import datetime
 import functools
 import os
@@ -40,6 +41,8 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
 )
 from materializationengine.blueprints.upload.schema_helper import get_schema_types
 from materializationengine.blueprints.upload.schemas import UploadRequestSchema
+from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
+from materializationengine.blueprints.upload.source import SourceAccessError
 from materializationengine.blueprints.upload.storage import (
     StorageConfig,
     StorageService,
@@ -87,9 +90,9 @@ spatial_svid_parser.add_argument(
 )
 spatial_svid_parser.add_argument(
     "supervoxel_batch_size",
-    default=50,
+    default=500,
     type=int,
-    help="Number of supervoxels to lookup at a time per cloud volume call",
+    help="Target points per lookup task; a task takes whole storage chunks",
 )
 spatial_svid_parser.add_argument("get_root_ids", default=True, type=inputs.boolean)
 spatial_svid_parser.add_argument(
@@ -338,6 +341,65 @@ def generate_presigned_url(datastack_name: str):
     except Exception as e:
         current_app.logger.error(f"Error generating presigned URL: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# Enough of the file for its header and a first row.
+SOURCE_PREVIEW_BYTES = 64 * 1024
+
+
+@upload_bp.route("/api/source/inspect/<string:datastack_name>", methods=["POST"])
+@auth_requires_permission("edit", table_arg="datastack_name")
+def inspect_source(datastack_name: str):
+    """Check that a gs:// or s3:// CSV can be read, and return its size and first rows.
+
+    The wizard calls this instead of uploading a file, when the CSV is read in place.
+    """
+    data = request.get_json(silent=True) or {}
+    uri = (data.get("uri") or "").strip()
+    bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
+    if not bucket_name:
+        return jsonify({"status": "error", "message": "Upload bucket is not configured"}), 500
+    try:
+        processor = GCSCsvProcessor(bucket_name)
+        if "://" not in uri:
+            raise ValueError("Enter a location such as gs://bucket/path.csv or s3://bucket/path.csv")
+        source = processor.source(uri)
+        filename = uri.rstrip("/").rsplit("/", 1)[-1]
+        if not filename.lower().endswith(".csv"):
+            raise ValueError("The file must be a CSV (.csv)")
+        head = source.read(0, min(source.size, SOURCE_PREVIEW_BYTES))
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except FileNotFoundError as e:
+        return jsonify({"status": "error", "message": str(e)}), 404
+    except SourceAccessError as e:
+        message = str(e)
+        account = getattr(getattr(processor, "client", None), "_credentials", None)
+        account = getattr(account, "service_account_email", None)
+        if uri.startswith("gs://") and account:
+            message += (
+                f". Make the object publicly readable, or grant {account} "
+                "Storage Object Viewer on the bucket."
+            )
+        return jsonify({"status": "error", "message": message}), 403
+    except Exception as e:
+        current_app.logger.error(f"Error inspecting upload source {uri}: {e}")
+        return jsonify({"status": "error", "message": f"Could not read {uri}: {e}"}), 502
+
+    text_head = head.decode("utf-8-sig", errors="replace")
+    lines = [line for line in text_head.splitlines() if line.strip()]
+    if len(head) < source.size:
+        lines = lines[:-1] if len(lines) > 1 else lines  # the last line may be cut off
+    preview_rows = [next(csv.reader([line])) for line in lines[:2]]
+    return jsonify(
+        {
+            "status": "ok",
+            "uri": uri,
+            "filename": filename,
+            "size": source.size,
+            "previewRows": [[cell.strip() for cell in row] for row in preview_rows],
+        }
+    )
 
 
 @upload_bp.route("/api/get-schema-types", methods=["GET"])
@@ -720,7 +782,10 @@ def start_csv_processing():
 
     bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
 
-    file_path = f"gs://{bucket_name}/{file_metadata.get('filename')}"
+    # read in place from a cloud location, or the file uploaded to the upload bucket
+    file_path = file_metadata.get("source_uri") or (
+        f"gs://{bucket_name}/{file_metadata.get('filename')}"
+    )
 
     sql_instance_name = current_app.config.get("SQLALCHEMY_DATABASE_URI")
     database_name = current_app.config.get("STAGING_DATABASE_NAME")

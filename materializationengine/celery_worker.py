@@ -112,6 +112,11 @@ def create_celery(app=None):
 
         def __call__(self, *args, **kwargs):
             with app.app_context():
+                if getattr(self, "keep_db_connections", False):
+                    # read by database.cleanup_after_app_context when this context ends
+                    from flask import g
+
+                    g.keep_db_connections = True
                 return TaskBase.__call__(self, *args, **kwargs)
 
     celery.Task = ContextTask
