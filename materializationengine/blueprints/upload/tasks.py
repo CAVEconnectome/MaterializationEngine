@@ -51,6 +51,10 @@ REDIS_CLIENT = SharedRedis(db=0)
 CANCEL_KEY_PREFIX = "csv_processing_cancelled:"
 # Bytes of the source CSV each part task processes; see process_csv_part.
 DEFAULT_CSV_PART_SIZE_MB = 128
+# How long upload_to_database waits for the Cloud SQL import. 1200 s gave up on a
+# 337M-row upload (2026-10-25) whose import finished fine 28.5 min after it began.
+# upload_to_database is acked on receipt, so a long wait cannot cause a redelivery.
+DEFAULT_SQL_IMPORT_TIMEOUT_SECONDS = 21600
 # Longer than any upload, and independent of the job record (1h, rewritten by every step).
 CANCEL_KEY_TTL_SECONDS = 7 * 24 * 3600
 
@@ -761,7 +765,9 @@ def upload_to_database(
                 database=staging_database,
                 table=table_name,
                 user="postgres",
-                timeout=current_app.config.get("SQL_IMPORT_TIMEOUT_SECONDS", 1200),
+                timeout=current_app.config.get(
+                    "SQL_IMPORT_TIMEOUT_SECONDS", DEFAULT_SQL_IMPORT_TIMEOUT_SECONDS
+                ),
             )
         except (CloudSQLAdminError, TimeoutError) as e:
             celery_logger.error(f"Cloud SQL CSV import failed: {e}")
