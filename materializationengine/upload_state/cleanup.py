@@ -54,7 +54,11 @@ def reconcile(engine, stale_minutes: float, dry_run: bool) -> list:
         ended.append(job["job_id"])
         logger.info(f"{job['job_id']}: {reason}")
         if not dry_run:
-            store.mark_terminal_if_active(engine, job["job_id"], "error", reason)
+            if job.get("cancel_requested_at"):
+                # cancelled while no driver was running to notice
+                store.mark_terminal_if_active(engine, job["job_id"], "cancelled")
+            else:
+                store.mark_terminal_if_active(engine, job["job_id"], "error", reason)
             store.set_job_fields(engine, job["job_id"], retryable=False)
     return ended
 
