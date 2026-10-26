@@ -793,11 +793,13 @@ def main(argv=None) -> int:
     app = create_app()
     with app.app_context():
         engine = upload_state_db.get_engine()
+        from materializationengine.config import as_bool
+        from materializationengine.utils import get_config_param
+
         fault = None
-        if app.config.get("UPLOAD_FAULT_INJECT_ENABLED"):
-            fault = os.environ.get("UPLOAD_FAULT_INJECT") or None
-        max_in_flight = int(app.config.get("UPLOAD_RAY_MAX_IN_FLIGHT") or os.environ.get(
-            "UPLOAD_RAY_MAX_IN_FLIGHT", DEFAULT_MAX_IN_FLIGHT))
+        if as_bool(get_config_param("UPLOAD_FAULT_INJECT_ENABLED", False)):
+            fault = get_config_param("UPLOAD_FAULT_INJECT") or None
+        max_in_flight = int(get_config_param("UPLOAD_RAY_MAX_IN_FLIGHT") or DEFAULT_MAX_IN_FLIGHT)
 
         def make_runner():
             from materializationengine.rayjobs import runner
