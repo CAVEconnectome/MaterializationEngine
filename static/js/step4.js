@@ -117,7 +117,7 @@ document.addEventListener("alpine:init", () => {
           );
         }
 
-        const { filename } = JSON.parse(uploadStoreData);
+        const { filename, sourceUri } = JSON.parse(uploadStoreData);
         this.state.inputFile = filename || this.state.inputFile;
 
         const { columnMapping, ignoredColumns, selectedSchema } =
@@ -160,6 +160,7 @@ document.addEventListener("alpine:init", () => {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             filename: this.state.inputFile,
+            ...(sourceUri ? { sourceUri } : {}),
             columnMapping,
             ignoredColumns,
             metadata: metadataPayload,

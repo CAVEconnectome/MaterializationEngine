@@ -8,6 +8,7 @@ rejects it with a bare HTML 400. So these requests send only the bearer token,
 instead of going through gcloud or google-auth's AuthorizedSession.
 """
 
+import logging
 import time
 from typing import Optional, Tuple
 
@@ -16,6 +17,8 @@ import google.auth.transport.requests
 import requests
 
 from materializationengine.utils import get_config_param
+
+logger = logging.getLogger(__name__)
 
 SQLADMIN_ROOT = "https://sqladmin.googleapis.com/v1"
 # The narrower sqlservice.admin scope is enough for GETs, but instances.import is
@@ -96,7 +99,11 @@ def wait_for_operation(
     deadline = time.monotonic() + timeout
     while operation.get("status") != "DONE":
         if time.monotonic() > deadline:
-            raise TimeoutError(f"Cloud SQL operation {name} did not finish within {timeout}s")
+            # only the waiting stops: Cloud SQL keeps running the operation
+            raise TimeoutError(
+                f"Cloud SQL operation {name} did not finish within {timeout}s; it may "
+                f"still be running (gcloud sql operations describe {name} --project {project})"
+            )
         time.sleep(poll_interval)
         response = session.get(url, timeout=60)
         if not response.ok:
@@ -118,10 +125,15 @@ def import_csv(
     database: str,
     table: str,
     user: str = "postgres",
-    timeout: float = 1200,
+    timeout: float = 21600,
+    on_started=None,
 ) -> dict:
     """Import a CSV from GCS into a table and wait for it to finish
-    (equivalent of `gcloud sql import csv`)."""
+    (equivalent of `gcloud sql import csv`).
+
+    An 80 GB processed CSV (337M synapses) took 28.5 min to import on minnie, so the
+    default wait is 6 h; Cloud SQL runs one import at a time per instance.
+    """
     session, default_project = _session_and_default_project()
     project, instance = resolve_instance(instance_name, default_project)
     body = {
@@ -137,7 +149,20 @@ def import_csv(
     operation = _post_operation(
         session, f"{SQLADMIN_ROOT}/projects/{project}/instances/{instance}/import", body
     )
+    logger.info(f"Cloud SQL import {operation.get('name')} started: {uri} -> {database}.{table}")
+    if on_started is not None:
+        # lets the caller record the operation, to wait on it again after a restart
+        on_started(operation.get("name"))
     return wait_for_operation(session, project, operation, timeout=timeout)
+
+
+def wait_for_operation_name(instance_name: str, operation_name: str, timeout: float) -> dict:
+    """Wait for an operation started earlier, e.g. by a worker that has since died."""
+    session, default_project = _session_and_default_project()
+    project, _ = resolve_instance(instance_name, default_project)
+    return wait_for_operation(
+        session, project, {"name": operation_name, "status": "PENDING"}, timeout=timeout
+    )
 
 
 def export_csv(

@@ -20,7 +20,7 @@ from materializationengine.blueprints.upload.api import spatial_lookup_bp, uploa
 from materializationengine.blueprints.upload.models import init_staging_database
 from materializationengine.blueprints.upload.storage import StorageService
 from materializationengine.config import config, configure_app
-from materializationengine.database import db_manager
+from materializationengine.database import cleanup_after_app_context, db_manager
 from materializationengine.health import health_bp
 from materializationengine.limiter import limiter
 from materializationengine.memory_audit import init_memory_audit
@@ -167,6 +167,6 @@ def create_app(config_name: str = None):
 
     @app.teardown_appcontext
     def shutdown_session(exception=None):
-        db_manager.cleanup()
+        cleanup_after_app_context()
 
     return app

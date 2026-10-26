@@ -5,6 +5,7 @@ import subprocess
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 import shlex
+import time
 
 import pandas as pd
 from celery import chain
@@ -20,7 +21,11 @@ from dynamicannotationdb.models import SegmentationMetadata
 from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
 from materializationengine.blueprints.upload.processor import SchemaProcessor
 from materializationengine.celery_init import celery
-from materializationengine.cloudsql_admin import CloudSQLAdminError, import_csv
+from materializationengine.cloudsql_admin import (
+    CloudSQLAdminError,
+    import_csv,
+    wait_for_operation_name,
+)
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.index_manager import index_cache
 from materializationengine.shared_tasks import add_index
@@ -29,7 +34,10 @@ from materializationengine.workflows.ingest_new_annotations import (
     create_missing_segmentation_table,
     create_segmentation_model,
 )
-from materializationengine.workflows.spatial_lookup import run_spatial_lookup_workflow
+from materializationengine.workflows.spatial_lookup import (
+    DEFAULT_SUPERVOXEL_BATCH_SIZE,
+    run_spatial_lookup_workflow,
+)
 from materializationengine.blueprints.upload import checkpoint_manager as checkpoint_manager_module
 from materializationengine.blueprints.upload.checkpoint_manager import (
     WORKFLOW_STATUS_CANCELLED,
@@ -48,6 +56,18 @@ REDIS_CLIENT = SharedRedis(db=0)
 
 
 CANCEL_KEY_PREFIX = "csv_processing_cancelled:"
+# Bytes of the source CSV each part task processes; see process_csv_part.
+DEFAULT_CSV_PART_SIZE_MB = 128
+# How long upload_to_database waits for the Cloud SQL import. 1200 s gave up on a
+# 337M-row upload (2026-10-25) whose import finished fine 28.5 min after it began.
+# upload_to_database is acked on receipt, so a long wait cannot cause a redelivery.
+DEFAULT_SQL_IMPORT_TIMEOUT_SECONDS = 21600
+# Per upload job: the Cloud SQL import's operation name and whether it finished, so a
+# redelivered upload_to_database resumes instead of importing the rows a second time.
+IMPORT_STATE_KEY_PREFIX = "upload_import:"
+IMPORT_STATE_TTL_SECONDS = 7 * 24 * 3600
+# How often a resumed upload_to_database checks for index builds a dead attempt left.
+INDEX_BUILD_POLL_SECONDS = 30
 # Longer than any upload, and independent of the job record (1h, rewritten by every step).
 CANCEL_KEY_TTL_SECONDS = 7 * 24 * 3600
 
@@ -138,6 +158,52 @@ def update_job_status(job_id: str, status: Dict[str, Any]) -> None:
     )
 
 
+def get_import_state(job_id: Optional[str]) -> Dict[str, Any]:
+    if not job_id:
+        return {}
+    raw = REDIS_CLIENT.get(f"{IMPORT_STATE_KEY_PREFIX}{job_id}")
+    return json.loads(raw) if raw else {}
+
+
+def set_import_state(job_id: Optional[str], **fields) -> None:
+    if not job_id:
+        return
+    state = {**get_import_state(job_id), **fields}
+    REDIS_CLIENT.set(
+        f"{IMPORT_STATE_KEY_PREFIX}{job_id}", json.dumps(state), ex=IMPORT_STATE_TTL_SECONDS
+    )
+
+
+def wait_for_index_builds(engine, table_name: str, poll_seconds: float = None) -> int:
+    """Wait until no other session is building an index on table_name.
+
+    A worker that dies mid CREATE INDEX leaves its Postgres backend building it to the
+    end. Starting the same CREATE INDEX IF NOT EXISTS beside it would build it twice
+    and fail on the name; once it has finished, IF NOT EXISTS skips it. Returns the
+    number of checks that found one running.
+    """
+    poll_seconds = INDEX_BUILD_POLL_SECONDS if poll_seconds is None else poll_seconds
+    waited = 0
+    while True:
+        with engine.connect() as conn:
+            running = conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND pid <> pg_backend_pid() "
+                    "AND state = 'active' AND query ILIKE '%CREATE INDEX%' "
+                    "AND query ILIKE :table"
+                ),
+                {"table": f"%{table_name}%"},
+            ).scalar()
+        if not running:
+            return waited
+        waited += 1
+        celery_logger.info(
+            f"Waiting for {running} index build(s) on {table_name} left by an earlier attempt"
+        )
+        time.sleep(poll_seconds)
+
+
 def make_upload_job_id(datastack_name: str, table_name: str, time_stamp: datetime) -> str:
     return f"{datastack_name}_{table_name}_{time_stamp.strftime('%Y%m%d_%H%M%S')}"
 
@@ -166,7 +232,9 @@ def process_and_upload(
 
     chunk_scale_factor = current_app.config.get("CHUNK_SCALE_FACTOR", 2)
     sql_instance_name = current_app.config.get("SQL_INSTANCE_NAME")
-    supervoxel_batch_size = current_app.config.get("SUPERVOXEL_BATCH_SIZE", 50)
+    supervoxel_batch_size = current_app.config.get(
+        "SUPERVOXEL_BATCH_SIZE", DEFAULT_SUPERVOXEL_BATCH_SIZE
+    )
     table_name = file_metadata["metadata"]["table_name"]
     schema_type = file_metadata["metadata"]["schema_type"]
     reference_table = file_metadata["metadata"].get("reference_table")
@@ -310,7 +378,8 @@ def process_csv(
         timestamp = datetime.now(timezone.utc)
         timestamp_str = timestamp.strftime("%Y%m%d_%H%M%S")
 
-        source_blob_name = file_path.split("/")[-1]
+        # the upload bucket, any GCS object the deployment can read, or public S3
+        source_blob_name = file_path
         destination_blob_name = f"processed_{schema_type}_{timestamp_str}.csv"
 
         def transform_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
@@ -340,15 +409,47 @@ def process_csv(
                 },
             )
 
-        gcs_processor.process_csv_in_chunks(
-            source_blob_name,
-            destination_blob_name,
-            transform_chunk,
-            chunk_upload_callback=progress_callback,
+        part_size_bytes = int(
+            float(current_app.config.get("UPLOAD_CSV_PART_SIZE_MB", DEFAULT_CSV_PART_SIZE_MB))
+            * 1024
+            * 1024
         )
+        header, ranges = gcs_processor.plan_csv_parts(source_blob_name, part_size_bytes)
 
-        last_assigned_id = schema_processor._id_counter
-        dropped_rows = schema_processor.dropped_rows
+        parts_result = None
+        if len(ranges) > 1:
+            parts_result = _process_csv_in_parts(
+                gcs_processor,
+                bucket_name=bucket_name,
+                source_blob_name=source_blob_name,
+                header=header,
+                ranges=ranges,
+                destination_blob_name=destination_blob_name,
+                job_id=job_id_for_status,
+                part_kwargs={
+                    "schema_type": schema_type,
+                    "column_mapping": column_mapping,
+                    "reference_table": reference_table,
+                    "ignored_columns": ignored_columns,
+                    "chunk_size": chunk_size,
+                    "timestamp": timestamp.isoformat(),
+                },
+                generate_ids=schema_processor.generate_ids,
+                id_counter_start=id_counter_start,
+            )
+
+        if parts_result is None:
+            gcs_processor.process_csv_in_chunks(
+                source_blob_name,
+                destination_blob_name,
+                transform_chunk,
+                chunk_upload_callback=progress_callback,
+            )
+            last_assigned_id = schema_processor._id_counter
+            dropped_rows = schema_processor.dropped_rows
+        else:
+            last_assigned_id = parts_result["last_assigned_id"]
+            dropped_rows = parts_result["dropped_rows"]
 
         status_update: Dict[str, Any] = {"last_assigned_id": last_assigned_id}
         if dropped_rows:
@@ -391,10 +492,206 @@ def process_csv(
         raise
 
 
-# Long-running (CSV import, then index builds over this worker's connection), so it
-# runs on the workflow queue: the producer is on non-preemptible nodes and drains
-# before scale-down. Acked on receipt: re-running would import the rows twice.
-@celery.task(name="workflow:upload_to_db", bind=True)
+def _process_csv_in_parts(
+    gcs_processor: GCSCsvProcessor,
+    bucket_name: str,
+    source_blob_name: str,
+    header: str,
+    ranges: List[tuple],
+    destination_blob_name: str,
+    job_id: str,
+    part_kwargs: Dict[str, Any],
+    generate_ids: bool,
+    id_counter_start: int,
+) -> Optional[Dict[str, Any]]:
+    """Process each byte range of the CSV in its own task, then join the outputs in order.
+
+    Returns None when the file cannot be split by lines (a quoted field holds a newline,
+    or there are blank lines); the caller then processes it as one stream.
+    """
+    part_prefix = f"processed_parts/{job_id}/"
+    part_names = [f"{part_prefix}part-{i:05d}.csv" for i in range(len(ranges))]
+
+    starts = [id_counter_start] * len(ranges)
+    if generate_ids:
+        # each part numbers its rows from the count of data rows before it
+        counts = _run_csv_part_tasks(
+            [
+                count_csv_part.si(bucket_name, source_blob_name, start, end)
+                for start, end in ranges
+            ],
+            job_id,
+            "Processing CSV Data: counting rows",
+        )
+        offset = id_counter_start
+        for i, count in enumerate(counts):
+            starts[i] = offset
+            offset += count
+
+    try:
+        results = _run_csv_part_tasks(
+            [
+                process_csv_part.si(
+                    bucket_name=bucket_name,
+                    source_blob_name=source_blob_name,
+                    start=start,
+                    end=end,
+                    header=header,
+                    destination_blob_name=part_names[i],
+                    id_counter_start=starts[i],
+                    job_id_for_status=job_id,
+                    **part_kwargs,
+                )
+                for i, (start, end) in enumerate(ranges)
+            ],
+            job_id,
+            "Processing CSV Data",
+        )
+    except BaseException:
+        # a cancelled or failed upload leaves no parts behind (best effort: a part
+        # still running can write after this)
+        gcs_processor.delete_blobs(part_names)
+        raise
+
+    split_errors = [r["split_error"] for r in results if r.get("split_error")]
+    if split_errors:
+        celery_logger.warning(
+            f"Upload {job_id}: the CSV cannot be split by lines ({split_errors[0]}); "
+            f"processing it as one stream instead."
+        )
+        gcs_processor.delete_blobs(part_names)
+        return None
+
+    gcs_processor.compose(part_names, destination_blob_name)
+    rows_read = sum(r["rows_read"] for r in results)
+    return {
+        "rows_read": rows_read,
+        "rows_written": sum(r["rows_written"] for r in results),
+        "dropped_rows": sum(r["dropped_rows"] for r in results),
+        "last_assigned_id": id_counter_start + rows_read if generate_ids else id_counter_start,
+    }
+
+
+def _run_csv_part_tasks(signatures: list, job_id: str, phase: str) -> List[Any]:
+    """Send the part tasks and wait for all of them, reporting progress on the job.
+
+    Returns their results in order. A cancelled job revokes the parts still waiting;
+    a part that fails fails the upload.
+    """
+    async_results = [signature.apply_async() for signature in signatures]
+    poll_seconds = float(current_app.config.get("UPLOAD_CSV_PART_POLL_SECONDS", 5))
+    total = len(async_results)
+    try:
+        while True:
+            raise_if_upload_cancelled(job_id, phase)
+            failed = next((r for r in async_results if r.state == "FAILURE"), None)
+            if failed is not None:
+                raise RuntimeError(f"CSV part task {failed.id} failed: {failed.result!r}")
+            done = [r for r in async_results if r.state == "SUCCESS"]
+            rows = sum(
+                r.result.get("rows_read", 0) for r in done if isinstance(r.result, dict)
+            )
+            update_job_status(
+                job_id,
+                {
+                    "status": "processing",
+                    "phase": phase,
+                    "progress": round(100.0 * len(done) / total, 2),
+                    "processed_rows": rows,
+                    "current_chunk_num": len(done),
+                    "total_chunks": total,
+                },
+            )
+            if len(done) == total:
+                celery_logger.info(f"Upload {job_id}: {phase}: all {total} parts done")
+                return [r.result for r in async_results]
+            time.sleep(poll_seconds)
+    except BaseException:
+        for r in async_results:
+            if r.state not in ("SUCCESS", "FAILURE"):
+                r.revoke()
+        raise
+
+
+# Each part reads at most UPLOAD_CSV_PART_SIZE_MB of the source and runs for about a
+# minute, well inside the process queue's visibility timeout (300 s). It overwrites its
+# own output object, so a redelivered or retried part is safe to run again.
+@celery.task(
+    name="process:process_csv_part",
+    bind=True,
+    acks_late=True,
+    autoretry_for=(Exception,),
+    dont_autoretry_for=(Ignore,),
+    max_retries=3,
+    retry_backoff=True,
+)
+def process_csv_part(
+    self,
+    bucket_name: str,
+    source_blob_name: str,
+    start: int,
+    end: int,
+    header: str,
+    destination_blob_name: str,
+    schema_type: str,
+    column_mapping: Dict[str, str],
+    timestamp: str,
+    reference_table: str = None,
+    ignored_columns: List[str] = None,
+    chunk_size: int = 10000,
+    id_counter_start: int = 0,
+    job_id_for_status: str = None,
+) -> Dict[str, Any]:
+    """Transform bytes [start, end) of an uploaded CSV into one processed part."""
+    raise_if_upload_cancelled(job_id_for_status, "CSV part processing")
+    schema_processor = SchemaProcessor(
+        schema_type,
+        reference_table,
+        column_mapping=column_mapping,
+        ignored_columns=ignored_columns,
+        id_counter_start=id_counter_start,
+    )
+    created = datetime.fromisoformat(timestamp)
+    gcs_processor = GCSCsvProcessor(bucket_name, chunk_size=chunk_size)
+    try:
+        result = gcs_processor.process_csv_range(
+            source_blob_name,
+            start,
+            end,
+            header,
+            destination_blob_name,
+            lambda chunk: schema_processor.process_chunk(chunk, created),
+        )
+    except pd.errors.ParserError as e:
+        # a quoted field holding a newline makes a range start mid-row
+        return {"split_error": f"bytes {start}-{end}: {e}"}
+    result["dropped_rows"] = schema_processor.dropped_rows
+    if result["rows_read"] != result["lines"]:
+        result["split_error"] = (
+            f"bytes {start}-{end}: {result['rows_read']} rows from {result['lines']} lines"
+        )
+    return result
+
+
+@celery.task(
+    name="process:count_csv_part",
+    acks_late=True,
+    autoretry_for=(Exception,),
+    max_retries=3,
+    retry_backoff=True,
+)
+def count_csv_part(bucket_name: str, source_blob_name: str, start: int, end: int) -> int:
+    """The number of lines in bytes [start, end) of an uploaded CSV."""
+    return GCSCsvProcessor(bucket_name).count_csv_range_lines(source_blob_name, start, end)
+
+
+# Long-running (the Cloud SQL import, then index builds that take hours on a 337M-row
+# table), so it runs on the orchestration queue: a KEDA job pod of its own, on a
+# non-preemptible node, that runs this one task and exits. On the workflow queue a
+# scale-down killed it mid index build (minnie, 2026-10-25). Acked late, so a pod lost
+# anyway (node failure, the job deadline) means a redelivery, which resumes from the
+# recorded import (see get_import_state) instead of importing the rows twice.
+@celery.task(name="orchestration:upload_to_db", bind=True, acks_late=True)
 def upload_to_database(
     self,
     process_result: Dict[str, Any],
@@ -471,47 +768,61 @@ def upload_to_database(
         )
         db_client = dynamic_annotation_cache.get_db(staging_database)
         force_overwrite = file_metadata["metadata"].get("force_overwrite", False)
-
-        try:
-            db_client.annotation.create_table(
-                table_name=table_name,
-                schema_type=schema,
-                description=description,
-                user_id=user_id,
-                voxel_resolution_x=voxel_resolution_nm_x,
-                voxel_resolution_y=voxel_resolution_nm_y,
-                voxel_resolution_z=voxel_resolution_nm_z,
-                table_metadata=table_metadata,
-                flat_segmentation_source=flat_segmentation_source,
-                write_permission=write_permission,
-                read_permission=read_permission,
-                notice_text=notice_text,
-            )
-        except Exception as e:
-            celery_logger.error(f"Error creating table: {str(e)}")
-
-        # If the user confirmed overwrite, clear any data left from a previous run
-        # before importing so we don't accumulate duplicate IDs.
-        if force_overwrite:
-            try:
-                with db_client.database.engine.begin() as conn:
-                    # CASCADE truncates any FK-dependent tables (e.g. the segmentation table)
-                    conn.execute(text(f"TRUNCATE TABLE {table_name} CASCADE"))
-                celery_logger.info(
-                    f"force_overwrite=True: truncated staging data for '{table_name}' (CASCADE)"
-                )
-            except Exception as trunc_err:
-                celery_logger.warning(
-                    f"Could not truncate staging table '{table_name}' for overwrite: {trunc_err}"
-                )
-
-        update_job_status(
-            job_id_for_status,
-            {"phase": "Uploading to Database: Dropping Indices", "progress": 10},
+        sql_timeout = current_app.config.get(
+            "SQL_IMPORT_TIMEOUT_SECONDS", DEFAULT_SQL_IMPORT_TIMEOUT_SECONDS
         )
+        # Set once the Cloud SQL import has started. Present on a redelivery: the worker
+        # that started the import died, and the import may still be running (it carries
+        # on without its client) or be done. Resume from it instead of creating,
+        # truncating and importing again.
+        import_state = get_import_state(job_id_for_status)
+        resuming = bool(import_state.get("operation"))
+        if resuming:
+            celery_logger.warning(
+                f"Resuming upload {job_id_for_status}: Cloud SQL import "
+                f"{import_state['operation']} was {import_state.get('status')}"
+            )
+        else:
+            try:
+                db_client.annotation.create_table(
+                    table_name=table_name,
+                    schema_type=schema,
+                    description=description,
+                    user_id=user_id,
+                    voxel_resolution_x=voxel_resolution_nm_x,
+                    voxel_resolution_y=voxel_resolution_nm_y,
+                    voxel_resolution_z=voxel_resolution_nm_z,
+                    table_metadata=table_metadata,
+                    flat_segmentation_source=flat_segmentation_source,
+                    write_permission=write_permission,
+                    read_permission=read_permission,
+                    notice_text=notice_text,
+                )
+            except Exception as e:
+                celery_logger.error(f"Error creating table: {str(e)}")
 
-        # create table in staging database and drop indices
-        index_cache.drop_table_indices(table_name, db_client.database.engine)
+            # If the user confirmed overwrite, clear any data left from a previous run
+            # before importing so we don't accumulate duplicate IDs.
+            if force_overwrite:
+                try:
+                    with db_client.database.engine.begin() as conn:
+                        # CASCADE truncates any FK-dependent tables (e.g. the segmentation table)
+                        conn.execute(text(f"TRUNCATE TABLE {table_name} CASCADE"))
+                    celery_logger.info(
+                        f"force_overwrite=True: truncated staging data for '{table_name}' (CASCADE)"
+                    )
+                except Exception as trunc_err:
+                    celery_logger.warning(
+                        f"Could not truncate staging table '{table_name}' for overwrite: {trunc_err}"
+                    )
+
+            update_job_status(
+                job_id_for_status,
+                {"phase": "Uploading to Database: Dropping Indices", "progress": 10},
+            )
+
+            # create table in staging database and drop indices
+            index_cache.drop_table_indices(table_name, db_client.database.engine)
 
         import_uri = f"gs://{output_path}"
         try:
@@ -519,21 +830,39 @@ def upload_to_database(
                 f"Importing {import_uri} into {staging_database}.{table_name} "
                 f"on Cloud SQL instance {sql_instance_name}"
             )
-            update_job_status(
-                job_id_for_status,
-                {
-                    "phase": "Uploading to Database: Importing CSV into Cloud SQL",
-                    "progress": 30,
-                },
-            )
-            import_csv(
-                sql_instance_name,
-                import_uri,
-                database=staging_database,
-                table=table_name,
-                user="postgres",
-                timeout=current_app.config.get("SQL_IMPORT_TIMEOUT_SECONDS", 1200),
-            )
+            if import_state.get("status") == "done":
+                celery_logger.info(f"Import into {table_name} already finished; skipping it")
+            elif resuming:
+                update_job_status(
+                    job_id_for_status,
+                    {
+                        "phase": "Uploading to Database: Waiting for the Cloud SQL import",
+                        "progress": 30,
+                    },
+                )
+                wait_for_operation_name(
+                    sql_instance_name, import_state["operation"], timeout=sql_timeout
+                )
+            else:
+                update_job_status(
+                    job_id_for_status,
+                    {
+                        "phase": "Uploading to Database: Importing CSV into Cloud SQL",
+                        "progress": 30,
+                    },
+                )
+                import_csv(
+                    sql_instance_name,
+                    import_uri,
+                    database=staging_database,
+                    table=table_name,
+                    user="postgres",
+                    timeout=sql_timeout,
+                    on_started=lambda name: set_import_state(
+                        job_id_for_status, operation=name, status="running"
+                    ),
+                )
+            set_import_state(job_id_for_status, status="done")
         except (CloudSQLAdminError, TimeoutError) as e:
             celery_logger.error(f"Cloud SQL CSV import failed: {e}")
             if job_id:
@@ -555,6 +884,9 @@ def upload_to_database(
                 },
             )
             raise RuntimeError(f"Cloud SQL CSV import failed: {e}") from e
+        if resuming:
+            # the dead attempt may have left a CREATE INDEX running on the table
+            wait_for_index_builds(db_client.database.engine, table_name)
         raise_if_upload_cancelled(job_id_for_status, "index rebuild after import")
         update_job_status(
             job_id_for_status,
@@ -835,8 +1167,9 @@ def mark_clustered_on_primary_key(table_name: str, engine) -> bool:
 
 
 # Long-running for large tables (the CLUSTER holds this worker's connection), so it
-# runs on the workflow queue. Re-running is harmless, so it is acked late.
-@celery.task(name="workflow:cluster_staging_tables", bind=True, acks_late=True)
+# runs in an orchestration job pod of its own, like upload_to_db. Re-running is
+# harmless, so it is acked late.
+@celery.task(name="orchestration:cluster_staging_tables", bind=True, acks_late=True)
 def cluster_staging_tables(self, monitor_result: dict) -> dict:
     """Physically order the staging annotation and segmentation tables by id.
 
@@ -883,10 +1216,10 @@ def cluster_staging_tables(self, monitor_result: dict) -> dict:
 
 # Long-running: the copy streams through this worker (pg_dump | psql) and the index
 # rebuilds run over its connection, so the worker must stay up for the whole task. It
-# runs on the workflow queue (non-preemptible producer that drains before scale-down)
-# rather than the process queue, which is for short, easily retried tasks. Acked late
-# so a lost worker means a rerun, which is safe: each table is truncated before its copy.
-@celery.task(name="workflow:transfer_to_production", bind=True, acks_late=True)
+# runs in an orchestration job pod of its own (non-preemptible, never scaled down mid
+# task) rather than on a scaled worker pool. Acked late so a lost pod means a rerun,
+# which is safe: each table is truncated before its copy.
+@celery.task(name="orchestration:transfer_to_production", bind=True, acks_late=True)
 def transfer_to_production(
     self,
     monitor_result: dict,
@@ -1685,3 +2018,20 @@ def cancel_processing_job(job_id: str) -> Dict[str, Any]:
             job_id, {"status": "error", "phase": "Cancellation Failed", "error": str(e)}
         )
         raise
+
+
+# The names these steps had on the workflow queue, kept for one release so messages
+# already queued under them during a deploy still run. Remove in the next release.
+@celery.task(name="workflow:upload_to_db", bind=True, acks_late=True)
+def _upload_to_database_workflow_alias(self, *args, **kwargs):
+    return upload_to_database.run(*args, **kwargs)
+
+
+@celery.task(name="workflow:cluster_staging_tables", bind=True, acks_late=True)
+def _cluster_staging_tables_workflow_alias(self, *args, **kwargs):
+    return cluster_staging_tables.run(*args, **kwargs)
+
+
+@celery.task(name="workflow:transfer_to_production", bind=True, acks_late=True)
+def _transfer_to_production_workflow_alias(self, *args, **kwargs):
+    return transfer_to_production.run(*args, **kwargs)

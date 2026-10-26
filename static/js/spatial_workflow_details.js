@@ -322,9 +322,10 @@ function renderWorkflowDetails() {
       : "N/A";
   document.getElementById("processingRate").textContent = workflowDetailsData
     .summary.processing_rate
-    ? `${parseFloat(workflowDetailsData.summary.processing_rate).toFixed(
+    ? // the backend stores e.g. "410506.00 rows/minute"
+      `${parseFloat(workflowDetailsData.summary.processing_rate).toFixed(
         1
-      )} rows/sec`
+      )} rows/min`
     : "N/A";
   document.getElementById("estimatedCompletion").textContent =
     workflowDetailsData.summary.estimated_completion

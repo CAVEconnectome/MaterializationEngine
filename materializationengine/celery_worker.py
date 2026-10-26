@@ -112,6 +112,11 @@ def create_celery(app=None):
 
         def __call__(self, *args, **kwargs):
             with app.app_context():
+                if getattr(self, "keep_db_connections", False):
+                    # read by database.cleanup_after_app_context when this context ends
+                    from flask import g
+
+                    g.keep_db_connections = True
                 return TaskBase.__call__(self, *args, **kwargs)
 
     celery.Task = ContextTask
@@ -165,6 +170,14 @@ def reset_database_connections_after_fork(**kwargs):
     database.reset_database_connections(close_connections=False)
 
 
+# worker_ready, task_prerun and task_postrun handlers; lets a test disconnect them.
+AUTOSHUTDOWN_DISPATCH_UIDS = (
+    "autoshutdown_worker_ready",
+    "autoshutdown_task_prerun",
+    "autoshutdown_task_postrun",
+)
+
+
 def configure_worker_autoshutdown(app):
     """Let a worker exit after a bounded amount of work so it behaves correctly
     as a KEDA ScaledJob pod (one pod -> a little work -> exit), instead of
@@ -194,7 +207,7 @@ def configure_worker_autoshutdown(app):
     shutdown_delay = int(app.config.get("CELERY_WORKER_AUTOSHUTDOWN_DELAY_SECONDS", 2))
     idle_timeout = int(app.config.get("CELERY_WORKER_IDLE_TIMEOUT_SECONDS", 0))
 
-    state = {"completed": 0, "idle_timer": None, "shutting_down": False}
+    state = {"completed": 0, "started": 0, "idle_timer": None, "shutting_down": False, "consumer": None}
     lock = threading.Lock()
 
     def _shutdown(reason, delay):
@@ -232,20 +245,44 @@ def configure_worker_autoshutdown(app):
             state["idle_timer"] = timer
             timer.start()
 
-    @worker_ready.connect(weak=False)
-    def _on_worker_ready(**_kwargs):
+    def _stop_consuming():
+        """Take no more messages: this pod has started the last task it will run.
+
+        Otherwise the worker can claim the next message while it runs this one (an
+        early-acked task frees its prefetch slot) or in the moments before it exits,
+        and a message claimed by a pod that then exits sits unacked until the
+        visibility timeout restores it, hours later.
+        """
+        consumer = state["consumer"]
+        if consumer is None:
+            return
+        try:
+            for queue in list(consumer.task_consumer.queues):
+                consumer.cancel_task_queue(queue.name)
+            celery_logger.info("[autoshutdown] last task started; no longer consuming")
+        except Exception as e:
+            celery_logger.warning(f"[autoshutdown] could not stop consuming: {e}")
+
+    @worker_ready.connect(weak=False, dispatch_uid=AUTOSHUTDOWN_DISPATCH_UIDS[0])
+    def _on_worker_ready(sender=None, **_kwargs):
+        # sender is the worker's consumer, used to stop consuming later.
+        state["consumer"] = sender
         # If the queue was empty at startup (or nothing arrives), exit rather
         # than linger. A task arriving cancels this via task_prerun.
         _arm_idle_timer()
 
-    @task_prerun.connect(weak=False)
+    @task_prerun.connect(weak=False, dispatch_uid=AUTOSHUTDOWN_DISPATCH_UIDS[1])
     def _on_task_prerun(**_kwargs):
         with lock:
             if state["idle_timer"] is not None:
                 state["idle_timer"].cancel()
                 state["idle_timer"] = None
+            state["started"] += 1
+            last = state["started"] >= max_tasks
+        if last:
+            _stop_consuming()
 
-    @task_postrun.connect(weak=False)
+    @task_postrun.connect(weak=False, dispatch_uid=AUTOSHUTDOWN_DISPATCH_UIDS[2])
     def _on_task_postrun(**_kwargs):
         with lock:
             state["completed"] += 1
