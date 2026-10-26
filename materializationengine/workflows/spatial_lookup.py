@@ -1631,6 +1631,153 @@ def insert_segmentation_data(
         return rows_affected
 
 
+def process_sub_batch_points(
+    sub_batch_point_data: List[Dict], mat_info: Dict, log_prefix: str = ""
+) -> int:
+    """Look up supervoxels and root ids for points and upsert their segmentation rows.
+
+    sub_batch_point_data is a list of {"id", "type", "pt_position"}; returns the rows
+    affected. The body of the spatial:process_and_insert_sub_batch task, callable
+    outside celery (the Ray upload's chunk tasks).
+    """
+    points_for_sv_lookup = [item["pt_position"] for item in sub_batch_point_data]
+    if not points_for_sv_lookup:
+        celery_logger.info(
+            f"{log_prefix} No 'pt_position' found in sub_batch_point_data. Nothing to look up."
+        )
+        return 0
+
+    segmentation_source = mat_info["segmentation_source"]
+    coord_resolution_xyz = mat_info["coord_resolution"]
+    cv = cloudvolume_cache.get_cv(segmentation_source)
+
+    sv_lookup_start = time.time()
+    supervoxel_ids = lookup_supervoxel_ids(
+        cv, points_for_sv_lookup, coord_resolution_xyz
+    )
+    celery_logger.info(
+        f"{log_prefix} Supervoxel lookup found {int(np.count_nonzero(supervoxel_ids))} "
+        f"non-zero ids for {len(points_for_sv_lookup)} points "
+        f"in {time.time() - sv_lookup_start:.2f}s."
+    )
+
+    pivoted_data_map = {}
+    for item_dict, svid in zip(sub_batch_point_data, supervoxel_ids):
+        item_id = item_dict["id"]
+        svid = int(svid)
+
+        type_str = item_dict.get("type", "unknown")
+        col_name = (
+            f"{type_str}_supervoxel_id"
+            if "pt" in type_str
+            else f"{type_str}_pt_supervoxel_id"
+        )
+
+        if item_id not in pivoted_data_map:
+            pivoted_data_map[item_id] = {"id": item_id}
+        pivoted_data_map[item_id][col_name] = svid
+
+    pivoted_data_for_root_lookup = list(pivoted_data_map.values())
+
+    if not pivoted_data_for_root_lookup:
+        celery_logger.info(
+            f"{log_prefix} No data after pivoting for root ID lookup."
+        )
+        return 0
+
+    mat_info_for_root_lookup = mat_info.copy()
+    if isinstance(
+        mat_info_for_root_lookup.get("materialization_time_stamp"),
+        datetime.datetime,
+    ):
+        mat_info_for_root_lookup["materialization_time_stamp"] = (
+            mat_info_for_root_lookup["materialization_time_stamp"].isoformat()
+        )
+
+    root_id_data = get_root_ids_from_supervoxels(
+        pivoted_data_for_root_lookup, mat_info_for_root_lookup
+    )
+
+    affected_rows = 0
+    if root_id_data and len(root_id_data) > 0:
+        celery_logger.info(
+            f"{log_prefix} Inserting/updating {len(root_id_data)} root ID records."
+        )
+        affected_rows = insert_segmentation_data(
+            root_id_data, mat_info_for_root_lookup
+        )
+        celery_logger.info(
+            f"{log_prefix} DB insert/update affected {affected_rows} rows."
+        )
+    else:
+        celery_logger.info(
+            f"{log_prefix} No root ID data produced to insert for this sub-batch."
+        )
+    return affected_rows
+
+
+def chunk_point_data(database: str, min_corner, max_corner, mat_info: Dict) -> List[Dict]:
+    """The points in a chunk's bounding box, as process_chunk passes them on."""
+    pts_df = get_pts_from_bbox(database, np.array(min_corner), np.array(max_corner), mat_info)
+    if pts_df is None or pts_df.empty:
+        return []
+    return [
+        {"id": row["id"], "type": row["type"], "pt_position": row["pt_position"]}
+        for _, row in pts_df.iterrows()
+    ]
+
+
+def process_chunk_points(
+    database: str,
+    mat_info: Dict,
+    min_corner,
+    max_corner,
+    sub_batch_size: int = DEFAULT_SUPERVOXEL_BATCH_SIZE,
+    should_stop=None,
+) -> Dict[str, int]:
+    """Do all of one spatial chunk in-process: its points, split by storage chunk into
+    sub-batches of about sub_batch_size, each looked up and upserted in turn.
+
+    What process_chunk and its sub-batch tasks do across celery, as one call (the Ray
+    upload runs it as one task per chunk). should_stop, if given, is checked between
+    sub-batches. Returns {"points", "rows", "sub_batches"}.
+    """
+    points = chunk_point_data(database, min_corner, max_corner, mat_info)
+    if not points:
+        return {"points": 0, "rows": 0, "sub_batches": 0}
+    sub_batches = split_points_by_storage_chunk(
+        points,
+        cloudvolume_cache.get_cv(mat_info["segmentation_source"]),
+        mat_info["coord_resolution"],
+        sub_batch_size,
+    )
+    rows = 0
+    for i, sub_batch in enumerate(sub_batches):
+        if should_stop is not None and should_stop():
+            raise InterruptedError("stopped between sub-batches")
+        rows += process_sub_batch_points(sub_batch, mat_info, f"[sub-batch {i + 1}/{len(sub_batches)}]")
+    return {"points": len(points), "rows": rows, "sub_batches": len(sub_batches)}
+
+
+def rebuild_segmentation_indices(mat_metadata: dict, database: str) -> List[str]:
+    """Drop and rebuild the segmentation table's indices, then update its metadata.
+
+    rebuild_indices_for_spatial_lookup builds the same steps as a celery chain but
+    returns it without running it; this runs them, in-process. Returns the commands.
+    """
+    engine = db_manager.get_engine(database)
+    segmentation_table_name = mat_metadata["segmentation_table_name"]
+    seg_model = create_segmentation_model(mat_metadata)
+    index_cache.drop_table_indices(segmentation_table_name, engine, drop_primary_key=True)
+    commands = index_cache.add_indices_sql_commands(
+        table_name=segmentation_table_name, model=seg_model, engine=engine
+    ) or []
+    for command in commands:
+        add_index.run(database, command)
+    update_metadata.run(mat_metadata)
+    return commands
+
+
 @celery.task(
     name="spatial:process_and_insert_sub_batch",
     bind=True,
@@ -1680,87 +1827,7 @@ def process_and_insert_sub_batch(
         }
 
     try:
-        points_for_sv_lookup = [item["pt_position"] for item in sub_batch_point_data]
-        if not points_for_sv_lookup:
-            celery_logger.info(
-                f"{log_prefix} No 'pt_position' found in sub_batch_point_data. Nothing to look up."
-            )
-            return {
-                "status": "success_no_points_for_lookup",
-                "rows_processed": 0,
-                "sub_batch_idx": sub_batch_idx,
-            }
-
-        segmentation_source = mat_info["segmentation_source"]
-        coord_resolution_xyz = mat_info["coord_resolution"]
-        cv = cloudvolume_cache.get_cv(segmentation_source)
-
-        sv_lookup_start = time.time()
-        supervoxel_ids = lookup_supervoxel_ids(
-            cv, points_for_sv_lookup, coord_resolution_xyz
-        )
-        celery_logger.info(
-            f"{log_prefix} Supervoxel lookup found {int(np.count_nonzero(supervoxel_ids))} "
-            f"non-zero ids for {len(points_for_sv_lookup)} points "
-            f"in {time.time() - sv_lookup_start:.2f}s."
-        )
-
-        pivoted_data_map = {}
-        for item_dict, svid in zip(sub_batch_point_data, supervoxel_ids):
-            item_id = item_dict["id"]
-            svid = int(svid)
-
-            type_str = item_dict.get("type", "unknown")
-            col_name = (
-                f"{type_str}_supervoxel_id"
-                if "pt" in type_str
-                else f"{type_str}_pt_supervoxel_id"
-            )
-
-            if item_id not in pivoted_data_map:
-                pivoted_data_map[item_id] = {"id": item_id}
-            pivoted_data_map[item_id][col_name] = svid
-
-        pivoted_data_for_root_lookup = list(pivoted_data_map.values())
-
-        if not pivoted_data_for_root_lookup:
-            celery_logger.info(
-                f"{log_prefix} No data after pivoting for root ID lookup."
-            )
-            return {
-                "status": "success_empty_pivot",
-                "rows_processed": 0,
-                "sub_batch_idx": sub_batch_idx,
-            }
-
-        mat_info_for_root_lookup = mat_info.copy()
-        if isinstance(
-            mat_info_for_root_lookup.get("materialization_time_stamp"),
-            datetime.datetime,
-        ):
-            mat_info_for_root_lookup["materialization_time_stamp"] = (
-                mat_info_for_root_lookup["materialization_time_stamp"].isoformat()
-            )
-
-        root_id_data = get_root_ids_from_supervoxels(
-            pivoted_data_for_root_lookup, mat_info_for_root_lookup
-        )
-
-        affected_rows = 0
-        if root_id_data and len(root_id_data) > 0:
-            celery_logger.info(
-                f"{log_prefix} Inserting/updating {len(root_id_data)} root ID records."
-            )
-            affected_rows = insert_segmentation_data(
-                root_id_data, mat_info_for_root_lookup
-            )
-            celery_logger.info(
-                f"{log_prefix} DB insert/update affected {affected_rows} rows."
-            )
-        else:
-            celery_logger.info(
-                f"{log_prefix} No root ID data produced to insert for this sub-batch."
-            )
+        affected_rows = process_sub_batch_points(sub_batch_point_data, mat_info, log_prefix)
 
         return {
             "status": "success",
