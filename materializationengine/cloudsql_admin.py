@@ -126,6 +126,7 @@ def import_csv(
     table: str,
     user: str = "postgres",
     timeout: float = 21600,
+    on_started=None,
 ) -> dict:
     """Import a CSV from GCS into a table and wait for it to finish
     (equivalent of `gcloud sql import csv`).
@@ -149,7 +150,19 @@ def import_csv(
         session, f"{SQLADMIN_ROOT}/projects/{project}/instances/{instance}/import", body
     )
     logger.info(f"Cloud SQL import {operation.get('name')} started: {uri} -> {database}.{table}")
+    if on_started is not None:
+        # lets the caller record the operation, to wait on it again after a restart
+        on_started(operation.get("name"))
     return wait_for_operation(session, project, operation, timeout=timeout)
+
+
+def wait_for_operation_name(instance_name: str, operation_name: str, timeout: float) -> dict:
+    """Wait for an operation started earlier, e.g. by a worker that has since died."""
+    session, default_project = _session_and_default_project()
+    project, _ = resolve_instance(instance_name, default_project)
+    return wait_for_operation(
+        session, project, {"name": operation_name, "status": "PENDING"}, timeout=timeout
+    )
 
 
 def export_csv(
