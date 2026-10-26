@@ -28,12 +28,14 @@ from materializationengine.blueprints.upload.processor import SchemaProcessor
 from materializationengine.celery_init import celery
 from materializationengine.cloudsql_admin import (
     CloudSQLAdminError,
+    find_import_operation,
     import_csv,
     wait_for_operation_name,
 )
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.index_manager import index_cache
 from materializationengine.shared_tasks import add_index
+from materializationengine.upload_state import status_sink
 from materializationengine.utils import get_config_param
 from materializationengine.workflows.ingest_new_annotations import (
     create_missing_segmentation_table,
@@ -85,6 +87,9 @@ class UploadCancelled(Ignore):
 
 
 def is_upload_cancelled(job_id: Optional[str]) -> bool:
+    sink = status_sink.current(job_id)
+    if sink is not None:
+        return sink.is_cancelled()
     return bool(job_id) and bool(REDIS_CLIENT.exists(f"{CANCEL_KEY_PREFIX}{job_id}"))
 
 
@@ -141,7 +146,12 @@ def request_upload_cancel(job_id: str) -> Dict[str, Any]:
 
 
 def update_job_status(job_id: str, status: Dict[str, Any]) -> None:
-    """Update job status in Redis"""
+    """Update job status in Redis (or the upload state database, for a Ray upload)"""
+    sink = status_sink.current(job_id)
+    if sink is not None:
+        # merged into the stored record, which a cancel request protects
+        sink.update_job(dict(status))
+        return
     # Steps still winding down after a cancel must not overwrite it.
     if status.get("status") != "cancelled" and is_upload_cancelled(job_id):
         return
@@ -166,6 +176,9 @@ def update_job_status(job_id: str, status: Dict[str, Any]) -> None:
 def get_import_state(job_id: Optional[str]) -> Dict[str, Any]:
     if not job_id:
         return {}
+    sink = status_sink.current(job_id)
+    if sink is not None:
+        return sink.get_import_state()
     raw = REDIS_CLIENT.get(f"{IMPORT_STATE_KEY_PREFIX}{job_id}")
     return json.loads(raw) if raw else {}
 
@@ -173,21 +186,31 @@ def get_import_state(job_id: Optional[str]) -> Dict[str, Any]:
 def set_import_state(job_id: Optional[str], **fields) -> None:
     if not job_id:
         return
+    sink = status_sink.current(job_id)
+    if sink is not None:
+        sink.set_import_state(**fields)
+        return
     state = {**get_import_state(job_id), **fields}
     REDIS_CLIENT.set(
         f"{IMPORT_STATE_KEY_PREFIX}{job_id}", json.dumps(state), ex=IMPORT_STATE_TTL_SECONDS
     )
 
 
-def wait_for_index_builds(engine, table_name: str, poll_seconds: float = None) -> int:
-    """Wait until no other session is building an index on table_name.
+def wait_for_backend_work(
+    engine, table_name: str, statements=("CREATE INDEX",), poll_seconds: float = None
+) -> int:
+    """Wait until no other session runs one of statements (e.g. CREATE INDEX, CLUSTER)
+    on table_name.
 
-    A worker that dies mid CREATE INDEX leaves its Postgres backend building it to the
+    A worker that dies mid statement leaves its Postgres backend running it to the
     end. Starting the same CREATE INDEX IF NOT EXISTS beside it would build it twice
     and fail on the name; once it has finished, IF NOT EXISTS skips it. Returns the
     number of checks that found one running.
     """
     poll_seconds = INDEX_BUILD_POLL_SECONDS if poll_seconds is None else poll_seconds
+    statement_match = " OR ".join(f"query ILIKE :s{i}" for i in range(len(statements)))
+    params = {"table": f"%{table_name}%"}
+    params.update({f"s{i}": f"%{s}%" for i, s in enumerate(statements)})
     waited = 0
     while True:
         with engine.connect() as conn:
@@ -195,18 +218,23 @@ def wait_for_index_builds(engine, table_name: str, poll_seconds: float = None) -
                 text(
                     "SELECT count(*) FROM pg_stat_activity "
                     "WHERE datname = current_database() AND pid <> pg_backend_pid() "
-                    "AND state = 'active' AND query ILIKE '%CREATE INDEX%' "
+                    f"AND state = 'active' AND ({statement_match}) "
                     "AND query ILIKE :table"
                 ),
-                {"table": f"%{table_name}%"},
+                params,
             ).scalar()
         if not running:
             return waited
         waited += 1
         celery_logger.info(
-            f"Waiting for {running} index build(s) on {table_name} left by an earlier attempt"
+            f"Waiting for {running} {'/'.join(statements)} on {table_name} left by an earlier attempt"
         )
         time.sleep(poll_seconds)
+
+
+def wait_for_index_builds(engine, table_name: str, poll_seconds: float = None) -> int:
+    """Wait until no other session is building an index on table_name."""
+    return wait_for_backend_work(engine, table_name, ("CREATE INDEX",), poll_seconds)
 
 
 def make_upload_job_id(datastack_name: str, table_name: str, time_stamp: datetime) -> str:
@@ -214,7 +242,10 @@ def make_upload_job_id(datastack_name: str, table_name: str, time_stamp: datetim
 
 
 def get_job_status(job_id: str) -> Dict[str, Any]:
-    """Get job status from Redis"""
+    """Get job status from Redis (or the upload state database, for a Ray upload)"""
+    sink = status_sink.current(job_id)
+    if sink is not None:
+        return sink.get_job()
     status = REDIS_CLIENT.get(f"csv_processing:{job_id}")
     return json.loads(status) if status else None
 
@@ -352,8 +383,13 @@ def process_csv(
     ignored_columns: List[str] = None,
     chunk_size: int = 10000,
     id_counter_start: int = 0,
+    timestamp: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Process CSV file in chunks using GCSCsvProcessor"""
+    """Process CSV file in chunks using GCSCsvProcessor
+
+    timestamp (ISO) fixes the rows' created time and the output object's name, so a
+    resumed run writes the same object; by default it is now.
+    """
     raise_if_upload_cancelled(job_id_for_status, "CSV processing")
     try:
         update_job_status(
@@ -380,7 +416,9 @@ def process_csv(
 
         gcs_processor = GCSCsvProcessor(bucket_name, chunk_size=chunk_size)
 
-        timestamp = datetime.now(timezone.utc)
+        timestamp = (
+            datetime.fromisoformat(timestamp) if timestamp else datetime.now(timezone.utc)
+        )
         timestamp_str = timestamp.strftime("%Y%m%d_%H%M%S")
 
         # the upload bucket, any GCS object the deployment can read, or public S3
@@ -663,8 +701,11 @@ def _run_csv_part_tasks(signatures: list, job_id: str, phase: str) -> List[Any]:
     """Send the part tasks and wait for all of them, reporting progress on the job.
 
     Returns their results in order. A cancelled job revokes the parts still waiting;
-    a part that fails fails the upload.
+    a part that fails fails the upload. A Ray upload sets its own runner instead.
     """
+    runner = status_sink.part_runner()
+    if runner is not None:
+        return runner(signatures, job_id, phase)
     async_results = [signature.apply_async() for signature in signatures]
     poll_seconds = float(current_app.config.get("UPLOAD_CSV_PART_POLL_SECONDS", 5))
     total = len(async_results)
@@ -914,7 +955,18 @@ def upload_to_database(
         # that started the import died, and the import may still be running (it carries
         # on without its client) or be done. Resume from it instead of creating,
         # truncating and importing again.
+        import_uri = f"gs://{output_path}"
         import_state = get_import_state(job_id_for_status)
+        if import_state.get("status") == "requested" and not import_state.get("operation"):
+            # the attempt that requested the import died before recording its
+            # operation; if Cloud SQL started it, wait on it rather than import twice
+            adopted = find_import_operation(sql_instance_name, import_uri)
+            if adopted:
+                celery_logger.warning(
+                    f"Upload {job_id_for_status}: adopting Cloud SQL import {adopted['name']}"
+                )
+                set_import_state(job_id_for_status, operation=adopted["name"], status="running")
+                import_state = get_import_state(job_id_for_status)
         resuming = bool(import_state.get("operation"))
         if resuming:
             celery_logger.warning(
@@ -963,7 +1015,6 @@ def upload_to_database(
             # create table in staging database and drop indices
             index_cache.drop_table_indices(table_name, db_client.database.engine)
 
-        import_uri = f"gs://{output_path}"
         try:
             celery_logger.info(
                 f"Importing {import_uri} into {staging_database}.{table_name} "
@@ -989,6 +1040,13 @@ def upload_to_database(
                         "phase": "Uploading to Database: Importing CSV into Cloud SQL",
                         "progress": 30,
                     },
+                )
+                set_import_state(
+                    job_id_for_status,
+                    status="requested",
+                    uri=import_uri,
+                    database=staging_database,
+                    table=table_name,
                 )
                 import_csv(
                     sql_instance_name,
@@ -1672,10 +1730,12 @@ def drop_upload_tables(table_name: str, engine, dry_run: bool = False) -> List[s
             text("DELETE FROM segmentation_table_metadata WHERE annotation_table = :t"),
             {"t": table_name},
         )
-        conn.execute(
-            text("DELETE FROM combined_table_metadata WHERE annotation_table = :t"),
-            {"t": table_name},
-        )
+        # older staging databases have no combined_table_metadata
+        if conn.execute(text("SELECT to_regclass('combined_table_metadata')")).scalar():
+            conn.execute(
+                text("DELETE FROM combined_table_metadata WHERE annotation_table = :t"),
+                {"t": table_name},
+            )
         conn.execute(
             text("DELETE FROM annotation_table_metadata WHERE table_name = :t"),
             {"t": table_name},
