@@ -9,6 +9,7 @@ the job's state, so cancellation is checked there, not here.
 """
 
 import logging
+import pickle
 import threading
 from typing import Any, Dict
 
@@ -78,7 +79,31 @@ CELERY_PART_TASKS = {
 }
 
 
+class TaskFailed(Exception):
+    """A task's exception that could not travel back to the driver as itself."""
+
+    def __init__(self, error_type: str, message: str):
+        super().__init__(error_type, message)
+        self.error_type = error_type
+        self.message = message
+
+    def __str__(self):
+        return f"{self.error_type}: {self.message}"
+
+
 def run_task(name: str, *args):
-    """Entry point of every Ray task: run TASKS[name] in the worker's app context."""
+    """Entry point of every Ray task: run TASKS[name] in the worker's app context.
+
+    Ray sends a task's exception back pickled. Many client libraries' exceptions do
+    not pickle (google.api_core's hold a lock), and the driver then saw only "isn't
+    serializable"; those are re-raised as TaskFailed with their type and message.
+    """
     with worker_app().app_context():
-        return TASKS[name](*args)
+        try:
+            return TASKS[name](*args)
+        except Exception as e:
+            try:
+                pickle.dumps(e)
+            except Exception:
+                raise TaskFailed(type(e).__name__, str(e)) from None
+            raise

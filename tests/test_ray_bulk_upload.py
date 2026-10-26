@@ -10,6 +10,7 @@ from flask import Flask
 
 from materializationengine.blueprints.upload import tasks
 from materializationengine.rayjobs import runner as runner_module
+from materializationengine.rayjobs import upload_tasks
 from materializationengine.rayjobs.entrypoints import bulk_upload
 from materializationengine.upload_state import store
 from materializationengine.upload_state.status_sink import StoreSink, use_sink
@@ -347,6 +348,78 @@ class TestSpatialChunks:
         assert rows[1]["attempt_count"] == bulk_upload.MAX_CHUNK_ATTEMPTS
         assert rows[1]["error_type"] == "ValueError"
         assert store.get_spatial(job, JOB)["status"] == "failed"
+
+
+    def test_a_broken_setup_stops_the_stage_early(self, job, app, bounds):
+        init_spatial(job, 100)
+        epoch = store.acquire_lease(job, JOB, "head")
+        tried = []
+
+        def chunk(database, info, min_corner, max_corner, sub_batch):
+            tried.append(min_corner[0])
+            raise upload_tasks.TaskFailed("InvalidArgument", "instances//tables/minnie3_v1")
+
+        ctx = context(job, runner_module.InlineRunner({"spatial_chunk": chunk}), epoch, max_in_flight=4)
+        with use_sink(StoreSink(job, JOB, epoch=epoch)), \
+                pytest.raises(bulk_upload.SystemicChunkFailure, match="instances//tables"):
+            bulk_upload.stage_spatial_chunks(ctx)
+        assert len(set(tried)) <= bulk_upload.SYSTEMIC_FAILURE_CHUNKS + 4
+        rows = store.chunk_rows(job, JOB)
+        assert rows and {r["error_type"] for r in rows} == {"InvalidArgument"}
+        assert rows[0]["error_message"] == "instances//tables/minnie3_v1"
+
+    def test_some_failing_chunks_are_not_a_broken_setup(self, job, app, bounds):
+        init_spatial(job, 40)
+        epoch = store.acquire_lease(job, JOB, "head")
+
+        def chunk(database, info, min_corner, max_corner, sub_batch):
+            if min_corner[0] < 25 and min_corner[0] != 0:
+                raise ConnectionError("blip")
+            return {"points": 2, "rows": 1}
+
+        calls = {}
+
+        def flaky_once(database, info, min_corner, max_corner, sub_batch):
+            i = min_corner[0]
+            calls[i] = calls.get(i, 0) + 1
+            if calls[i] == 1:
+                return chunk(database, info, min_corner, max_corner, sub_batch)
+            return {"points": 2, "rows": 1}
+
+        ctx = context(job, runner_module.InlineRunner({"spatial_chunk": flaky_once}), epoch, max_in_flight=1)
+        with use_sink(StoreSink(job, JOB, epoch=epoch)):
+            result = bulk_upload.stage_spatial_chunks(ctx)
+        assert result["completed_chunks"] == 40
+
+
+class TestTaskFailed:
+    def test_unpicklable_errors_come_back_with_their_type_and_message(self):
+        import pickle
+        import threading
+
+        class Unpicklable(Exception):
+            def __init__(self, message):
+                super().__init__(message)
+                self.lock = threading.RLock()
+
+        def boom():
+            raise Unpicklable("instances//tables/minnie3_v1")
+
+        with mock.patch.dict(upload_tasks.TASKS, {"boom": boom}), \
+                mock.patch.object(upload_tasks, "worker_app", return_value=Flask(__name__)):
+            with pytest.raises(upload_tasks.TaskFailed) as raised:
+                upload_tasks.run_task("boom")
+        error = pickle.loads(pickle.dumps(raised.value))
+        assert (error.error_type, error.message) == ("Unpicklable", "instances//tables/minnie3_v1")
+
+    def test_picklable_errors_are_raised_as_they_are(self):
+        def boom():
+            raise ValueError("bad points")
+
+        with mock.patch.dict(upload_tasks.TASKS, {"boom": boom}), \
+                mock.patch.object(upload_tasks, "worker_app", return_value=Flask(__name__)):
+            with pytest.raises(ValueError):
+                upload_tasks.run_task("boom")
 
 
 class TestRunBounded:
