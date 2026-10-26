@@ -34,7 +34,10 @@ from materializationengine.workflows.ingest_new_annotations import (
     create_missing_segmentation_table,
     create_segmentation_model,
 )
-from materializationengine.workflows.spatial_lookup import run_spatial_lookup_workflow
+from materializationengine.workflows.spatial_lookup import (
+    DEFAULT_SUPERVOXEL_BATCH_SIZE,
+    run_spatial_lookup_workflow,
+)
 from materializationengine.blueprints.upload import checkpoint_manager as checkpoint_manager_module
 from materializationengine.blueprints.upload.checkpoint_manager import (
     WORKFLOW_STATUS_CANCELLED,
@@ -229,7 +232,9 @@ def process_and_upload(
 
     chunk_scale_factor = current_app.config.get("CHUNK_SCALE_FACTOR", 2)
     sql_instance_name = current_app.config.get("SQL_INSTANCE_NAME")
-    supervoxel_batch_size = current_app.config.get("SUPERVOXEL_BATCH_SIZE", 500)
+    supervoxel_batch_size = current_app.config.get(
+        "SUPERVOXEL_BATCH_SIZE", DEFAULT_SUPERVOXEL_BATCH_SIZE
+    )
     table_name = file_metadata["metadata"]["table_name"]
     schema_type = file_metadata["metadata"]["schema_type"]
     reference_table = file_metadata["metadata"].get("reference_table")

@@ -56,6 +56,7 @@ from materializationengine.blueprints.upload.tasks import (
     purge_upload,
     request_upload_cancel,
     update_job_status,
+    DEFAULT_SUPERVOXEL_BATCH_SIZE,
 )
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.info_client import get_datastack_info, get_datastacks
@@ -90,7 +91,7 @@ spatial_svid_parser.add_argument(
 )
 spatial_svid_parser.add_argument(
     "supervoxel_batch_size",
-    default=500,
+    default=DEFAULT_SUPERVOXEL_BATCH_SIZE,
     type=int,
     help="Target points per lookup task; a task takes whole storage chunks",
 )

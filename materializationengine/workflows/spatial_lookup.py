@@ -66,10 +66,13 @@ Base = declarative_base()
 
 celery_logger = get_task_logger(__name__)
 
-# Target points per spatial lookup sub-batch. A sub-batch takes whole storage chunks, so
-# this is ~70 chunk downloads at minnie's ~7 points per 256x256x32 chunk: about a second
-# of work, far inside the spatial queue's 300 s visibility timeout.
-DEFAULT_SUPERVOXEL_BATCH_SIZE = 500
+# Target points per spatial lookup sub-batch. A sub-batch takes whole storage chunks
+# (~7 points each on minnie), so this is ~290 chunk downloads, ~8 s of work, far inside
+# the spatial queue's 300 s visibility timeout. Each sub-batch is a celery task whose
+# result stays in redis for result_expires (a day): at 500 points a 337M-row upload made
+# ~1.35M tasks, ~850 MB of results on a 1 GB instance, ~1,200 connections and 14 MB/s
+# (minnie, 2026-10-26). 2000 makes 4x fewer.
+DEFAULT_SUPERVOXEL_BATCH_SIZE = 2000
 
 
 MAX_CHUNK_WORKFLOW_ATTEMPTS = 10
