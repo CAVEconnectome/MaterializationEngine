@@ -166,12 +166,16 @@ def list_jobs(engine, window_hours: float = 24) -> List[dict]:
 UNCANCELLABLE_STAGES = ("transfer", "cleanup")
 
 
-def request_cancel(engine, job_id: str, by: Optional[str] = None) -> Optional[dict]:
+def request_cancel(
+    engine, job_id: str, by: Optional[str] = None, record_patch: Optional[Dict[str, Any]] = None
+) -> Optional[dict]:
     """Record a cancel request (once); returns the job row, or None if there is none.
 
-    Refused (cancel_requested_at stays NULL in the returned row) once the driver has
-    entered the transfer; see enter_stage.
+    record_patch is merged into the record with it (update_job refuses updates once a
+    cancel is requested). Refused (cancel_requested_at stays NULL in the returned row)
+    for a finished job, or once the driver has entered the transfer; see enter_stage.
     """
+    patch = {**(record_patch or {}), "last_updated": _utcnow().isoformat()}
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -179,12 +183,16 @@ def request_cancel(engine, job_id: str, by: Optional[str] = None) -> Optional[di
                 UPDATE upload_jobs
                    SET cancel_requested_at = COALESCE(cancel_requested_at, now()),
                        cancel_requested_by = COALESCE(cancel_requested_by, :by),
+                       record = CASE WHEN cancel_requested_at IS NULL
+                                     THEN record || CAST(:patch AS jsonb) ELSE record END,
                        updated_at = now()
                  WHERE job_id = :job_id
+                   AND status IN :active
                    AND (current_stage IS NULL OR current_stage NOT IN :late)
                 """
             ),
-            {"job_id": job_id, "by": by, "late": UNCANCELLABLE_STAGES},
+            {"job_id": job_id, "by": by, "late": UNCANCELLABLE_STAGES,
+             "patch": _dumps(patch), "active": tuple(ACTIVE_STATUSES)},
         )
     return get_job(engine, job_id)
 

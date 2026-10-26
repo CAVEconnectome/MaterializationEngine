@@ -269,6 +269,13 @@ def upload_jobs(datastack: str = None) -> list:
             continue
         job["job_id"] = (key.decode() if isinstance(key, bytes) else key).split(":", 1)[1]
         jobs.append(job)
+    from materializationengine.blueprints.upload import ray_status
+
+    ray_jobs = [
+        j for j in ray_status.list_records()
+        if not datastack or j.get("datastack_name") == datastack
+    ]
+    jobs = ray_status.merge_job_lists(jobs, ray_jobs)
     jobs.sort(key=lambda j: str(j.get("last_updated") or j.get("start_time") or ""), reverse=True)
     return jobs
 
