@@ -6,8 +6,10 @@ rendered template mounted at ``RAY_JOB_TEMPLATE_PATH``. This module patches in
 only what varies per submission: the entrypoint, the worker ceiling, and env.
 """
 
+import hashlib
 import logging
 import os
+import re
 import threading
 
 import yaml
@@ -23,6 +25,11 @@ PLURAL = "rayjobs"
 # without ever reaching RUNNING (e.g. the image never pulled), so callers must
 # treat both as authoritative rather than waiting for jobStatus alone.
 TERMINAL_JOB_STATUSES = frozenset({"SUCCEEDED", "FAILED", "STOPPED"})
+
+# Labels on every bulk upload RayJob, for the cleanup CronJob to find them by.
+UPLOAD_WORKLOAD_LABEL = "materialize-workload"
+UPLOAD_WORKLOAD_VALUE = "bulk-upload"
+UPLOAD_JOB_LABEL = "upload-job"
 
 _client_lock = threading.Lock()
 _custom_objects_api = None
@@ -67,6 +74,30 @@ def ray_deltalake_export_enabled() -> bool:
     that invariant even if the env vars are set by hand.
     """
     return ray_enabled() and _env_flag("RAY_DELTALAKE_EXPORT", default=True)
+
+
+def ray_upload_enabled() -> bool:
+    """Whether bulk uploads run as RayJobs (chart: ``ray.upload``, off by default).
+
+    Like the export switch, gated on the platform being there at all.
+    """
+    return ray_enabled() and _env_flag("RAY_UPLOAD", default=False)
+
+
+def dns_label(value: str, max_length: int = 40, fallback: str = "rayjob") -> str:
+    """value as a DNS label prefix: lower case letters, digits and dashes."""
+    label = re.sub(r"[^a-z0-9-]+", "-", value.lower())
+    label = re.sub(r"-{2,}", "-", label)[:max_length].strip("-")
+    return label or fallback
+
+
+def label_value(value) -> str:
+    """value as a Kubernetes label value (<= 63 chars of [A-Za-z0-9_.-], alphanumeric at
+    both ends); a value that does not fit becomes a sha1 of itself, still unique."""
+    text = str(value)
+    if re.fullmatch(r"([A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?)?", text):
+        return text
+    return hashlib.sha1(text.encode()).hexdigest()[:40]
 
 
 def _namespace() -> str:
@@ -147,6 +178,7 @@ def submit_rayjob(
     num_workers: int | None = None,
     env: dict | None = None,
     metadata: dict | None = None,
+    active_deadline_seconds: int | None = None,
 ) -> str:
     """Create a RayJob and return its generated name.
 
@@ -162,23 +194,28 @@ def submit_rayjob(
         num_workers: ceiling on worker pods. Clamped to the chart's configured
             maximum so a caller cannot ask for an unbounded fan-out.
         env: extra environment variables for head and worker containers.
-        metadata: extra labels recorded on the CR for later lookup.
+        metadata: extra labels recorded on the CR for later lookup; values that are not
+            valid label values are recorded as a hash of themselves.
+        active_deadline_seconds: overrides the template's activeDeadlineSeconds (a
+            337M-row upload needs longer than the 24 h default).
     """
     job = _load_template()
 
     # generateName, not name: concurrent submissions for the same table must not
     # collide, and the RayJob CR outlives the pods (ttlSecondsAfterFinished) so a
     # fixed name would clash with its own predecessor.
-    prefix = name_prefix.strip("-")[:40]
+    prefix = dns_label(name_prefix)
     job.setdefault("metadata", {})
     job["metadata"]["generateName"] = f"{prefix}-"
     job["metadata"].pop("name", None)
     if metadata:
         labels = job["metadata"].setdefault("labels", {})
-        labels.update({k: str(v) for k, v in metadata.items()})
+        labels.update({k: label_value(v) for k, v in metadata.items()})
 
     spec = job.setdefault("spec", {})
     spec["entrypoint"] = entrypoint
+    if active_deadline_seconds:
+        spec["activeDeadlineSeconds"] = int(active_deadline_seconds)
 
     worker_groups = spec.get("rayClusterSpec", {}).get("workerGroupSpecs") or []
     if not worker_groups:
@@ -258,9 +295,19 @@ def get_rayjob_status(name: str) -> dict:
             f"failed to read RayJob {name} in {namespace}: {exc}"
         ) from exc
 
+    return normalise_status(name, namespace, obj)
+
+
+def normalise_status(name: str, namespace: str, obj: dict) -> dict:
+    """The status fields of a RayJob CR, with ``finished`` and ``retrying``.
+
+    With backoffLimit, a failed attempt reports jobStatus FAILED while KubeRay sets
+    jobDeploymentStatus Retrying and starts the next attempt; that job is not finished.
+    """
     status = obj.get("status") or {}
     job_status = status.get("jobStatus") or ""
     deployment_status = status.get("jobDeploymentStatus") or ""
+    retrying = deployment_status == "Retrying"
     return {
         "name": name,
         "namespace": namespace,
@@ -270,9 +317,13 @@ def get_rayjob_status(name: str) -> dict:
         "startTime": status.get("startTime"),
         "endTime": status.get("endTime"),
         "message": status.get("message", ""),
-        "finished": job_status in TERMINAL_JOB_STATUSES
-        or deployment_status in ("Complete", "Failed"),
+        "finished": deployment_status in ("Complete", "Failed")
+        or (job_status in TERMINAL_JOB_STATUSES and not retrying),
+        "retrying": retrying,
+        "failed": deployment_status == "Failed" or (job_status == "FAILED" and not retrying),
         "succeeded": job_status == "SUCCEEDED",
+        "succeeded_attempts": status.get("succeeded"),
+        "failed_attempts": status.get("failed"),
     }
 
 
@@ -288,7 +339,43 @@ def delete_rayjob(name: str) -> None:
             name=name,
         )
     except Exception as exc:
+        if getattr(exc, "status", None) == 404:
+            logger.info("RayJob %s in %s was already gone", name, namespace)
+            return
         raise RayJobSubmissionError(
             f"failed to delete RayJob {name} in {namespace}: {exc}"
         ) from exc
     logger.info("deleted RayJob %s in %s", name, namespace)
+
+
+def list_rayjobs(label_selector: str) -> list:
+    """Normalised statuses of the RayJobs in the namespace that match label_selector."""
+    namespace = _namespace()
+    try:
+        listing = _api().list_namespaced_custom_object(
+            group=GROUP,
+            version=VERSION,
+            namespace=namespace,
+            plural=PLURAL,
+            label_selector=label_selector,
+        )
+    except Exception as exc:
+        raise RayJobSubmissionError(
+            f"failed to list RayJobs in {namespace}: {exc}"
+        ) from exc
+    return [
+        {**normalise_status(obj["metadata"]["name"], namespace, obj), "labels": obj["metadata"].get("labels", {})}
+        for obj in listing.get("items", [])
+    ]
+
+
+def rayjob_exists(name: str) -> bool:
+    """False only if the RayJob is certainly gone (404); other errors are raised."""
+    try:
+        get_rayjob_status(name)
+        return True
+    except RayJobSubmissionError as exc:
+        if getattr(exc.__cause__, "status", None) == 404:
+            return False
+        raise
+

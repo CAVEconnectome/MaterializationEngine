@@ -162,8 +162,16 @@ def list_jobs(engine, window_hours: float = 24) -> List[dict]:
     return [{**dict(r["record"]), "job_id": r["job_id"]} for r in rows]
 
 
+# Stages a cancel can no longer stop: the transfer replaces the production table.
+UNCANCELLABLE_STAGES = ("transfer", "cleanup")
+
+
 def request_cancel(engine, job_id: str, by: Optional[str] = None) -> Optional[dict]:
-    """Record a cancel request (once); returns the job row, or None if there is none."""
+    """Record a cancel request (once); returns the job row, or None if there is none.
+
+    Refused (cancel_requested_at stays NULL in the returned row) once the driver has
+    entered the transfer; see enter_stage.
+    """
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -173,11 +181,27 @@ def request_cancel(engine, job_id: str, by: Optional[str] = None) -> Optional[di
                        cancel_requested_by = COALESCE(cancel_requested_by, :by),
                        updated_at = now()
                  WHERE job_id = :job_id
+                   AND (current_stage IS NULL OR current_stage NOT IN :late)
                 """
             ),
-            {"job_id": job_id, "by": by},
+            {"job_id": job_id, "by": by, "late": UNCANCELLABLE_STAGES},
         )
     return get_job(engine, job_id)
+
+
+def enter_stage(engine, job_id: str, stage: str, epoch: int, refuse_if_cancelled: bool = False) -> bool:
+    """Set the job's current stage, if this driver holds the lease (and, with
+    refuse_if_cancelled, if no cancel has been requested). False if not set."""
+    sql = (
+        "UPDATE upload_jobs SET current_stage = :stage, updated_at = now() "
+        "WHERE job_id = :job_id AND driver_epoch = :epoch"
+    )
+    if refuse_if_cancelled:
+        sql += " AND cancel_requested_at IS NULL"
+    with engine.begin() as conn:
+        return conn.execute(
+            text(sql), {"stage": stage, "job_id": job_id, "epoch": epoch}
+        ).rowcount > 0
 
 
 def is_cancel_requested(engine, job_id: str) -> bool:
@@ -466,6 +490,9 @@ def record_chunk_results(engine, job_id: str, rows: List[dict]) -> None:
     error_message, error_type) in one statement. A COMPLETED chunk stays COMPLETED."""
     if not rows:
         return
+    # one row per chunk: an upsert may not touch the same row twice, and a chunk
+    # retried before a flush appears more than once (the last is the latest)
+    rows = list({r["chunk_index"]: r for r in rows}.values())
     values = [
         {
             "job_id": job_id,
@@ -618,6 +645,25 @@ def jobs_with_dead_driver(engine, stale_minutes: float = 10) -> List[dict]:
                 """
             ),
             {"active": tuple(ACTIVE_STATUSES), "m": int(stale_minutes)},
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def jobs_needing_staging_cleanup(engine, grace_hours: float = 48) -> List[dict]:
+    """Failed or cancelled jobs, finished more than grace_hours ago, whose staging tables
+    were not dropped (the driver died, or dropping them failed)."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT * FROM upload_jobs
+                 WHERE status IN ('error', 'cancelled')
+                   AND coalesce(finished_at, updated_at) < now() - make_interval(hours => :h)
+                   AND coalesce(record->>'staging_cleanup', '') <> 'done'
+                 ORDER BY job_id
+                """
+            ),
+            {"h": int(grace_hours)},
         ).fetchall()
     return [dict(r) for r in rows]
 
