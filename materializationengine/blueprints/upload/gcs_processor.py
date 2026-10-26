@@ -340,7 +340,16 @@ class GCSCsvProcessor:
 
         GCS composes at most 32 objects per call, so more parts are combined in rounds
         through intermediate objects named after the destination.
+
+        Safe to repeat: the parts are deleted only once the destination is complete, so
+        a destination that exists while a part is missing was composed by an earlier
+        run that stopped while deleting; this finishes the deleting.
         """
+        if self.bucket.blob(destination_blob_name).exists() and not all(
+            self.bucket.blob(name).exists() for name in part_blob_names
+        ):
+            self.delete_blobs(list(part_blob_names))
+            return
         names = list(part_blob_names)
         intermediates = []
         level = 0

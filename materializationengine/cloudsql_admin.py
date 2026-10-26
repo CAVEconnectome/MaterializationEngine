@@ -81,8 +81,20 @@ def resolve_instance(instance_name: str, default_project: Optional[str]) -> Tupl
     return project, instance_name
 
 
-def _post_operation(session, url: str, body: dict) -> dict:
-    response = session.post(url, json=body, timeout=60)
+# Cloud SQL runs one import/export per instance at a time and answers a second with
+# HTTP 409; wait for the other one this long before giving up.
+BUSY_RETRY_SECONDS = 3600
+BUSY_POLL_SECONDS = 30
+
+
+def _post_operation(session, url: str, body: dict, busy_timeout: float = 0) -> dict:
+    deadline = time.monotonic() + busy_timeout
+    while True:
+        response = session.post(url, json=body, timeout=60)
+        if response.status_code != 409 or time.monotonic() > deadline:
+            break
+        logger.info(f"Cloud SQL instance busy with another operation; retrying {url}")
+        time.sleep(BUSY_POLL_SECONDS)
     if not response.ok:
         raise CloudSQLAdminError(
             f"POST {url} failed with HTTP {response.status_code}: {response.text[:2000]}"
@@ -147,7 +159,10 @@ def import_csv(
         }
     }
     operation = _post_operation(
-        session, f"{SQLADMIN_ROOT}/projects/{project}/instances/{instance}/import", body
+        session,
+        f"{SQLADMIN_ROOT}/projects/{project}/instances/{instance}/import",
+        body,
+        busy_timeout=BUSY_RETRY_SECONDS,
     )
     logger.info(f"Cloud SQL import {operation.get('name')} started: {uri} -> {database}.{table}")
     if on_started is not None:
@@ -163,6 +178,36 @@ def wait_for_operation_name(instance_name: str, operation_name: str, timeout: fl
     return wait_for_operation(
         session, project, {"name": operation_name, "status": "PENDING"}, timeout=timeout
     )
+
+
+def find_import_operation(instance_name: str, uri: str, max_pages: int = 5) -> Optional[dict]:
+    """The instance's recent import of uri that is running or succeeded, if any.
+
+    For a caller that requested an import and died before recording its operation.
+    """
+    session, default_project = _session_and_default_project()
+    project, instance = resolve_instance(instance_name, default_project)
+    url = f"{SQLADMIN_ROOT}/projects/{project}/operations"
+    params = {"instance": instance, "maxResults": 100}
+    for _ in range(max_pages):
+        response = session.get(url, params=params, timeout=60)
+        if not response.ok:
+            raise CloudSQLAdminError(
+                f"GET {url} failed with HTTP {response.status_code}: {response.text[:2000]}"
+            )
+        page = response.json()
+        for operation in page.get("items", []):
+            if operation.get("operationType") != "IMPORT":
+                continue
+            if (operation.get("importContext") or {}).get("uri") != uri:
+                continue
+            failed = operation.get("status") == "DONE" and (operation.get("error") or {}).get("errors")
+            if not failed:
+                return operation
+        if not page.get("nextPageToken"):
+            return None
+        params["pageToken"] = page["nextPageToken"]
+    return None
 
 
 def export_csv(

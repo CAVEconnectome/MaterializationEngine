@@ -188,6 +188,17 @@ class TestCompose:
         assert bucket.objects["out.csv"] == b"".join(b"%d\n" % i for i in range(n_parts))
         assert set(bucket.objects) == {"out.csv"}
 
+    def test_compose_again_after_a_partial_delete_finishes_deleting(self):
+        names = [f"p/part-{i:05d}.csv" for i in range(40)]
+        bucket = FakeBucket({name: b"%d\n" % i for i, name in enumerate(names)})
+        make_processor(bucket).compose(names, "out.csv")
+        composed = bucket.objects["out.csv"]
+        # a run that died while deleting the parts left some of them
+        bucket.objects.update({name: b"x\n" for name in names[30:]})
+        make_processor(bucket).compose(names, "out.csv")
+        assert bucket.objects["out.csv"] == composed
+        assert set(bucket.objects) == {"out.csv"}
+
 
 def run_parts_inline(signatures, job_id, phase):
     return [signature.apply().get() for signature in signatures]

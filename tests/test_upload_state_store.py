@@ -253,3 +253,79 @@ class TestRetention:
         with engine.begin() as conn:
             conn.execute(text("UPDATE upload_jobs SET created_at = now() - interval '1 hour'"))
         assert [j["job_id"] for j in store.jobs_with_dead_driver(engine, stale_minutes=10)] == [JOB]
+
+
+class TestStatusSink:
+    """tasks.py's status helpers report to the store inside a StoreSink, redis outside."""
+
+    @pytest.fixture
+    def tasks(self):
+        from unittest import mock
+
+        from materializationengine.blueprints.upload import tasks
+
+        redis = mock.MagicMock()
+        redis.get.return_value = None
+        redis.exists.return_value = 0
+        with mock.patch.object(tasks, "REDIS_CLIENT", redis):
+            yield tasks, redis
+
+    def test_job_status_goes_to_the_store(self, engine, tasks):
+        from materializationengine.upload_state.status_sink import StoreSink, use_sink
+
+        tasks, redis = tasks
+        new_job(engine)
+        with use_sink(StoreSink(engine, JOB, stage="import")):
+            tasks.update_job_status(JOB, {"status": "processing", "phase": "Importing", "progress": 30})
+            assert tasks.get_job_status(JOB)["phase"] == "Importing"
+            assert tasks.get_job_status(JOB)["user_id"] == "1174"  # merged, not replaced
+            assert not tasks.is_upload_cancelled(JOB)
+            # another job id in the same context still uses redis
+            tasks.update_job_status("other-job", {"phase": "x"})
+        redis.set.assert_called_once()
+        assert redis.set.call_args.args[0] == "csv_processing:other-job"
+        job = store.get_job(engine, JOB)
+        assert (job["status"], job["current_stage"]) == ("processing", "import")
+        # outside the sink: redis
+        assert tasks.get_job_status(JOB) is None
+
+    def test_a_cancel_stops_later_updates(self, engine, tasks):
+        from materializationengine.upload_state.status_sink import StoreSink, use_sink
+
+        tasks, _ = tasks
+        new_job(engine)
+        store.request_cancel(engine, JOB, by="1174")
+        with use_sink(StoreSink(engine, JOB)):
+            assert tasks.is_upload_cancelled(JOB)
+            tasks.update_job_status(JOB, {"status": "processing", "phase": "still going"})
+            assert tasks.get_job_status(JOB)["phase"] != "still going"
+
+    def test_a_stale_driver_cannot_write(self, engine, tasks):
+        from materializationengine.upload_state.status_sink import StoreSink, use_sink
+
+        tasks, _ = tasks
+        new_job(engine)
+        old = store.acquire_lease(engine, JOB, "head-1")
+        store.set_job_fields(engine, JOB, driver_heartbeat_at=None)  # head-1 died
+        assert store.acquire_lease(engine, JOB, "head-2") == old + 1
+        with use_sink(StoreSink(engine, JOB, epoch=old)):
+            tasks.update_job_status(JOB, {"phase": "from the dead driver"})
+            assert tasks.get_job_status(JOB)["phase"] == "Queued"
+
+    def test_import_state_round_trip(self, engine, tasks):
+        from materializationengine.upload_state.status_sink import StoreSink, use_sink
+
+        tasks, _ = tasks
+        new_job(engine)
+        with use_sink(StoreSink(engine, JOB)):
+            assert tasks.get_import_state(JOB) == {}
+            intent = dict(status="requested", uri="gs://b/p.csv", database="staging", table="t")
+            tasks.set_import_state(JOB, **intent)
+            assert tasks.get_import_state(JOB) == {"status": "requested", "uri": "gs://b/p.csv"}
+            tasks.set_import_state(JOB, operation="op-1", status="running")
+            tasks.set_import_state(JOB, **intent)  # a second request keeps the operation
+            assert tasks.get_import_state(JOB) == {
+                "status": "running", "uri": "gs://b/p.csv", "operation": "op-1",
+            }
+            tasks.set_import_state(JOB, status="done")
+            assert tasks.get_import_state(JOB)["status"] == "done"

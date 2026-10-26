@@ -85,7 +85,9 @@ class TestUploadToDatabaseResume:
     def test_a_fresh_run_records_its_import(self, env):
         def import_csv(*args, on_started=None, **kwargs):
             on_started("op-1")
-            assert tasks.get_import_state(JOB) == {"operation": "op-1", "status": "running"}
+            assert tasks.get_import_state(JOB) == {
+                "operation": "op-1", "status": "running", "uri": "gs://bucket/processed.csv", "database": "staging", "table": TABLE,
+            }
 
         env["import_csv"].side_effect = import_csv
         result = run_upload()
@@ -95,7 +97,7 @@ class TestUploadToDatabaseResume:
         env["wait_for_operation"].assert_not_called()
         env["wait_for_index_builds"].assert_not_called()
         assert env["add_index"].call_count == 2
-        assert tasks.get_import_state(JOB) == {"operation": "op-1", "status": "done"}
+        assert tasks.get_import_state(JOB) == {"operation": "op-1", "status": "done", "uri": "gs://bucket/processed.csv", "database": "staging", "table": TABLE}
 
     def test_a_redelivery_waits_for_the_running_import(self, env):
         tasks.set_import_state(JOB, operation="op-1", status="running")
@@ -117,6 +119,24 @@ class TestUploadToDatabaseResume:
         env["wait_for_index_builds"].assert_called_once()
         assert env["add_index"].call_count == 2
 
+    def test_an_import_requested_but_not_recorded_is_adopted(self, env):
+        # the attempt died between requesting the import and recording its operation
+        tasks.set_import_state(JOB, status="requested", uri="gs://bucket/processed.csv")
+        with mock.patch.object(tasks, "find_import_operation", return_value={"name": "op-7"}) as find:
+            run_upload()
+        assert find.call_args.args == ("instance", "gs://bucket/processed.csv")
+        env["import_csv"].assert_not_called()
+        env["db_client"].annotation.create_table.assert_not_called()
+        assert env["wait_for_operation"].call_args.args[:2] == ("instance", "op-7")
+        assert tasks.get_import_state(JOB)["status"] == "done"
+
+    def test_an_import_requested_that_never_started_is_requested_again(self, env):
+        tasks.set_import_state(JOB, status="requested", uri="gs://bucket/processed.csv")
+        with mock.patch.object(tasks, "find_import_operation", return_value=None):
+            run_upload()
+        env["import_csv"].assert_called_once()
+        env["wait_for_operation"].assert_not_called()
+
     def test_a_failed_import_fails_the_job(self, env):
         tasks.set_import_state(JOB, operation="op-1", status="running")
         env["wait_for_operation"].side_effect = tasks.CloudSQLAdminError("op-1 failed: disk full")
@@ -135,7 +155,18 @@ class TestWaitForIndexBuilds:
         engine.connect.return_value.__enter__.return_value = conn
         assert tasks.wait_for_index_builds(engine, TABLE, poll_seconds=0) == 2
         sql, params = conn.execute.call_args.args
-        assert "CREATE INDEX" in str(sql) and params == {"table": f"%{TABLE}%"}
+        assert "query ILIKE :s0" in str(sql)
+        assert params == {"table": f"%{TABLE}%", "s0": "%CREATE INDEX%"}
+
+    def test_waits_for_other_statements_too(self):
+        conn = mock.MagicMock()
+        conn.execute.return_value.scalar.return_value = 0
+        engine = mock.MagicMock()
+        engine.connect.return_value.__enter__.return_value = conn
+        assert tasks.wait_for_backend_work(engine, TABLE, ("CREATE INDEX", "CLUSTER"), poll_seconds=0) == 0
+        sql, params = conn.execute.call_args.args
+        assert "query ILIKE :s0 OR query ILIKE :s1" in str(sql)
+        assert params["s1"] == "%CLUSTER%"
 
 
 class TestAutoshutdownStopsConsuming:
