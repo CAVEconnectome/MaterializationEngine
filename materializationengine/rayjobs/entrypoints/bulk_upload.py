@@ -63,6 +63,10 @@ LEASE_WAIT_SECONDS = 150
 MAX_STAGE_ATTEMPTS = 3
 # Attempts at one spatial chunk before it is FAILED_PERMANENT (as the celery path).
 MAX_CHUNK_ATTEMPTS = 10
+# This many different chunks failing, with the same error and none succeeding, is not
+# bad luck with chunks but a broken setup (a missing token, a wrong Bigtable instance):
+# the stage stops instead of trying every chunk MAX_CHUNK_ATTEMPTS times.
+SYSTEMIC_FAILURE_CHUNKS = 20
 FLUSH_SECONDS = 2.0
 DEFAULT_MAX_IN_FLIGHT = 32
 
@@ -82,6 +86,10 @@ UNCANCELLABLE_FROM = "transfer"
 
 class PermanentUploadError(RuntimeError):
     """A failure that a retry would only repeat."""
+
+
+class SystemicChunkFailure(RuntimeError):
+    """Every spatial chunk tried so far failed the same way."""
 
 
 class LeaseLost(RuntimeError):
@@ -464,19 +472,38 @@ def stage_spatial_chunks(ctx: Context) -> dict:
         })
         ctx.maybe_fault(f"spatial_chunk:{counts['completed_chunks']}")
 
+    succeeded_this_run = [0]
+    failed_this_run: Dict[int, str] = {}
+
+    def on_done_counted(i, result):
+        succeeded_this_run[0] += 1
+        on_done(i, result)
+
     def on_error(i, exc) -> bool:
         attempts[i] = attempts.get(i, 0) + 1
         final = attempts[i] >= MAX_CHUNK_ATTEMPTS
-        logger.warning(f"chunk {i} failed (attempt {attempts[i]}): {exc!r}")
+        error_type = getattr(exc, "error_type", None) or type(exc).__name__
+        message = getattr(exc, "message", None) or str(exc)
+        logger.warning(f"chunk {i} failed (attempt {attempts[i]}): {error_type}: {message}")
         if final:
             counts["failed_chunks"] += 1
         buffer.append({
             "chunk_index": i,
             "status": CHUNK_STATUS_FAILED_PERMANENT if final else CHUNK_STATUS_FAILED_RETRYABLE,
             "attempt_count": attempts[i],
-            "error_message": str(exc),
-            "error_type": type(exc).__name__,
+            "error_message": message,
+            "error_type": error_type,
         })
+        failed_this_run[i] = error_type
+        if (
+            not succeeded_this_run[0]
+            and len(failed_this_run) >= SYSTEMIC_FAILURE_CHUNKS
+            and len(set(failed_this_run.values())) == 1
+        ):
+            raise SystemicChunkFailure(
+                f"the first {len(failed_this_run)} spatial chunks all failed and none "
+                f"succeeded: {error_type}: {message}"
+            )
         return not final
 
     def flush(force=False):
@@ -520,7 +547,7 @@ def stage_spatial_chunks(ctx: Context) -> dict:
             "spatial_chunk",
             items(),
             ctx.max_in_flight,
-            on_done,
+            on_done_counted,
             on_error=on_error,
             should_stop=ctx.should_stop,
             on_tick=flush,
