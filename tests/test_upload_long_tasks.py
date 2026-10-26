@@ -203,3 +203,33 @@ class TestAutoshutdownStopsConsuming:
         task_prerun.send(sender=None)  # task 2 of 2: the last one
         assert [c.args[0] for c in consumer.cancel_task_queue.call_args_list] == ["orchestration", "other"]
         kill.assert_not_called()
+
+
+class TestIndexMaintenanceWorkMem:
+    """UPLOAD_INDEX_MAINTENANCE_WORK_MEM gives an upload's index builds their own memory."""
+
+    def test_upload_builds_use_the_upload_setting(self, env):
+        from flask import current_app
+
+        current_app.config["UPLOAD_INDEX_MAINTENANCE_WORK_MEM"] = "6GB"
+        tasks.set_import_state(JOB, operation="op-1", status="done")
+        run_upload()
+        assert [c.args[2] for c in env["add_index"].call_args_list] == ["6GB", "6GB"]
+
+    def test_unset_keeps_add_indexs_default(self, env):
+        tasks.set_import_state(JOB, operation="op-1", status="done")
+        run_upload()
+        assert [c.args[2] for c in env["add_index"].call_args_list] == [None, None]
+
+    @pytest.mark.parametrize("value", ["6GB", "512MB", "65536kB"])
+    def test_valid_values(self, value):
+        from materializationengine.shared_tasks import maintenance_work_mem_setting
+
+        assert maintenance_work_mem_setting(value) == value
+
+    @pytest.mark.parametrize("value", ["6", "6 GiB", "6GB'; DROP TABLE x; --"])
+    def test_values_are_checked_before_they_reach_sql(self, value):
+        from materializationengine.shared_tasks import maintenance_work_mem_setting
+
+        with pytest.raises(ValueError):
+            maintenance_work_mem_setting(value)

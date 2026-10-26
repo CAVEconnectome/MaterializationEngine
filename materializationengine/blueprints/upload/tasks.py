@@ -34,7 +34,7 @@ from materializationengine.cloudsql_admin import (
 )
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.index_manager import index_cache
-from materializationengine.shared_tasks import add_index
+from materializationengine.shared_tasks import add_index, maintenance_work_mem_setting
 from materializationengine.upload_state import status_sink
 from materializationengine.utils import get_config_param
 from materializationengine.workflows.ingest_new_annotations import (
@@ -235,6 +235,18 @@ def wait_for_backend_work(
 def wait_for_index_builds(engine, table_name: str, poll_seconds: float = None) -> int:
     """Wait until no other session is building an index on table_name."""
     return wait_for_backend_work(engine, table_name, ("CREATE INDEX",), poll_seconds)
+
+
+def upload_index_maintenance_work_mem() -> Optional[str]:
+    """maintenance_work_mem for an upload's index builds (UPLOAD_INDEX_MAINTENANCE_WORK_MEM).
+
+    Each upload builds its indexes one at a time, so a large value (6GB on minnie) is
+    held by one session at a time per upload, and only for its build: SET LOCAL ends
+    with the transaction. Unset, staging builds use add_index's 1GB and production
+    rebuilds the instance's setting, as before.
+    """
+    value = get_config_param("UPLOAD_INDEX_MAINTENANCE_WORK_MEM")
+    return maintenance_work_mem_setting(value) if value else None
 
 
 def make_upload_job_id(datastack_name: str, table_name: str, time_stamp: datetime) -> str:
@@ -1107,7 +1119,7 @@ def upload_to_database(
                     "progress": current_progress,
                 },
             )
-            add_index(staging_database, index_sql)
+            add_index(staging_database, index_sql, upload_index_maintenance_work_mem())
             celery_logger.info(f"Index {i+1} added/command submitted.")
 
         update_job_status(
@@ -2197,6 +2209,9 @@ def transfer_table_using_pg_dump(
         for index in indices:
             celery_logger.info(f"Adding index: {index}")
             with engine.begin() as conn:
+                mem = upload_index_maintenance_work_mem()
+                if mem:
+                    conn.execute(text(f"SET LOCAL maintenance_work_mem TO '{mem}'"))
                 conn.execute(text(index))
         try:
             mark_clustered_on_primary_key(table_name, engine)
