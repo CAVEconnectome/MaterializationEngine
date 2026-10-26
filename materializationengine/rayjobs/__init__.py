@@ -27,6 +27,7 @@ from materializationengine.rayjobs.submitter import (
     get_rayjob_status,
     ray_deltalake_export_enabled,
     ray_enabled,
+    ray_upload_enabled,
     submit_rayjob,
 )
 
@@ -36,5 +37,6 @@ __all__ = [
     "get_rayjob_status",
     "ray_deltalake_export_enabled",
     "ray_enabled",
+    "ray_upload_enabled",
     "submit_rayjob",
 ]
