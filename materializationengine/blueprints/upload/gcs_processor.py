@@ -295,6 +295,38 @@ class GCSCsvProcessor:
             "lines": reader.lines(),
         }
 
+    def process_parquet_part(
+        self,
+        source_uri: str,
+        root: str,
+        pieces: List[List[Any]],
+        destination_blob_name: str,
+        transform_function: Callable[[pd.DataFrame], pd.DataFrame],
+    ) -> Dict[str, Any]:
+        """Transform a parquet part's row groups and write them to one CSV object."""
+        from materializationengine.blueprints.upload.parquet_source import (
+            iter_parquet_part,
+        )
+
+        destination_blob = self.bucket.blob(destination_blob_name)
+        rows_read = 0
+        rows_written = 0
+        with destination_blob.open(
+            "wb", content_type="text/csv", ignore_flush=True
+        ) as gcs_writer_stream:
+            for chunk_df in iter_parquet_part(
+                source_uri, root, pieces, self.pandas_chunk_size
+            ):
+                rows_read += len(chunk_df)
+                processed_chunk_df = transform_function(chunk_df)
+                chunk_bytes = processed_chunk_df.to_csv(index=False, header=False).encode(
+                    "utf-8"
+                )
+                if chunk_bytes:
+                    gcs_writer_stream.write(chunk_bytes)
+                rows_written += len(processed_chunk_df)
+        return {"rows_read": rows_read, "rows_written": rows_written}
+
     def count_csv_range_lines(self, source_blob_name: str, start: int, end: int) -> int:
         """The number of lines in bytes [start, end) of an object."""
         with self.source(source_blob_name).open_range(start, end) as blob_stream:

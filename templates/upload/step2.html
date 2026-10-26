@@ -121,7 +121,18 @@
 
 <!-- Column Mapping -->
 <div x-show="$store.schema.state.selectedSchema" class="mb-4" x-cloak>
-  <h4>Map CSV Columns to Schema Fields</h4>
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <h4 class="mb-0">Map Columns to Schema Fields</h4>
+    <button type="button" class="btn btn-outline-secondary btn-sm"
+            @click="$store.schema.suggestColumns()"
+            title="Fill the fields that have no column with the columns whose names match best">
+      <i class="fas fa-magic me-1"></i> Suggest matches
+    </button>
+  </div>
+  <p class="text-muted small mb-2">
+    Columns whose names match a field are filled in as suggestions; check them and
+    change any before going on.
+  </p>
   <div
     class="table-responsive"
     style="border: 1px solid #dee2e6; border-radius: 0.25rem"
@@ -132,7 +143,7 @@
           <th>Schema Field</th>
           <th>Type</th>
           <th>Required</th>
-          <th>CSV Column</th>
+          <th>Column</th>
         </tr>
       </thead>
       <tbody>
@@ -152,6 +163,9 @@
               <span x-show="field.isGeometry" class="badge bg-info ms-1"
                 >Position</span
               >
+              <span x-show="$store.schema.isSuggested(field.name)"
+                    class="badge bg-warning text-dark ms-1"
+                    title="Filled in from the column names; check it">suggested</span>
             </td>
             <td x-text="field.type"></td>
             <td>

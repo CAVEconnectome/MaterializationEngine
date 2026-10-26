@@ -72,11 +72,14 @@ class TestParseSourceUri:
         assert parse_source_uri(uri) == expected
 
     @pytest.mark.parametrize(
-        "uri", ["", "k.csv", "https://b/k.csv", "gs://b", "gs://b/", "s3:///k.csv", "gs://b/dir/"]
+        "uri", ["", "k.csv", "https://b/k.csv", "gs://b", "gs://b/", "s3:///k.csv"]
     )
     def test_invalid(self, uri):
         with pytest.raises(ValueError):
             parse_source_uri(uri)
+
+    def test_a_folder_is_valid(self):
+        assert parse_source_uri("gs://b/dir/") == ("gs", "b", "dir")
 
 
 class TestS3Source:
@@ -175,7 +178,7 @@ class TestInspectEndpoint:
 
     @pytest.mark.parametrize(
         "uri, code",
-        [("in.csv", 400), ("ftp://b/in.csv", 400), ("gs://uploads/in.txt", 404),
+        [("in.csv", 400), ("ftp://b/in.csv", 400), ("gs://uploads/in.txt", 400),
          ("gs://uploads/missing.csv", 404)],
     )
     def test_errors(self, uri, code):
@@ -183,10 +186,10 @@ class TestInspectEndpoint:
         status, body = self.call(uri, processor)
         assert status == code and body["status"] == "error"
 
-    def test_not_a_csv(self):
+    def test_neither_csv_nor_parquet(self):
         processor = make_processor(FakeBucket({"in.txt": b"a\n1\n"}))
         status, body = self.call("gs://uploads/in.txt", processor)
-        assert status == 400 and "CSV" in body["message"]
+        assert status == 400 and ".csv or .parquet" in body["message"]
 
     def test_private_gcs_names_the_service_account(self):
         processor = make_processor(FakeBucket())

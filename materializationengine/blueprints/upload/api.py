@@ -42,7 +42,14 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
 from materializationengine.blueprints.upload.schema_helper import get_schema_types
 from materializationengine.blueprints.upload.schemas import UploadRequestSchema
 from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
-from materializationengine.blueprints.upload.source import SourceAccessError
+from materializationengine.blueprints.upload.parquet_source import (
+    is_parquet_source,
+    preview_parquet,
+)
+from materializationengine.blueprints.upload.source import (
+    SourceAccessError,
+    parse_source_uri,
+)
 from materializationengine.blueprints.upload.storage import (
     StorageConfig,
     StorageService,
@@ -351,9 +358,11 @@ SOURCE_PREVIEW_BYTES = 64 * 1024
 @upload_bp.route("/api/source/inspect/<string:datastack_name>", methods=["POST"])
 @auth_requires_permission("edit", table_arg="datastack_name")
 def inspect_source(datastack_name: str):
-    """Check that a gs:// or s3:// CSV can be read, and return its size and first rows.
+    """Check that a gs:// or s3:// source can be read; return its size and first rows.
 
-    The wizard calls this instead of uploading a file, when the CSV is read in place.
+    The source is a CSV file, or parquet: a file, a folder of files (hive-partitioned
+    or not) or a Delta table. The wizard calls this instead of uploading a file, when
+    the data is read in place.
     """
     data = request.get_json(silent=True) or {}
     uri = (data.get("uri") or "").strip()
@@ -363,7 +372,24 @@ def inspect_source(datastack_name: str):
     try:
         processor = GCSCsvProcessor(bucket_name)
         if "://" not in uri:
-            raise ValueError("Enter a location such as gs://bucket/path.csv or s3://bucket/path.csv")
+            raise ValueError(
+                "Enter a location such as gs://bucket/path.csv, or a parquet file or folder"
+            )
+        if is_parquet_source(uri):
+            parse_source_uri(uri)
+            info = preview_parquet(uri)
+            return jsonify(
+                {
+                    "status": "ok",
+                    "uri": uri,
+                    "filename": info["name"],
+                    "size": info["total_bytes"],
+                    "previewRows": info["preview_rows"],
+                    "kind": info["kind"],
+                    "files": info["files"],
+                    "rows": info["total_rows"],
+                }
+            )
         source = processor.source(uri)
         filename = uri.rstrip("/").rsplit("/", 1)[-1]
         if not filename.lower().endswith(".csv"):

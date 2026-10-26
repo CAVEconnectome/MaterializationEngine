@@ -7,6 +7,7 @@ from marshmallow import (
     validates_schema,
 )
 from typing import Dict, Any
+from materializationengine.blueprints.upload.parquet_source import is_parquet_source
 from materializationengine.blueprints.upload.source import parse_source_uri
 
 
@@ -45,13 +46,16 @@ class UploadRequestSchema(Schema):
         if value:
             try:
                 parse_source_uri(value)
+                is_parquet_source(value)  # refuses a file that is neither CSV nor parquet
             except ValueError as e:
                 raise ValidationError(str(e))
 
-    @validates("filename")
-    def validate_filename(self, value):
-        if not value.endswith(".csv"):
-            raise ValidationError("File must be a CSV")
+    @validates_schema
+    def validate_filename(self, data, **kwargs):
+        # a file uploaded through the browser is a CSV; a cloud location may also be
+        # parquet (a file, a folder of files or a Delta table)
+        if not data.get("source_uri") and not data.get("filename", "").endswith(".csv"):
+            raise ValidationError("File must be a CSV", "filename")
 
     @validates_schema
     def validate_ignored_columns(self, data, **kwargs):
