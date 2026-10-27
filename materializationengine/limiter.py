@@ -53,7 +53,7 @@ def is_service_account():
 
     middle_auth_client populates flask.g.auth_user from the auth service's /user/cache response,
     which carries `service_account`. Auth runs before the limiter -- flask_restx applies
-    method_decorators first-to-innermost, so the order is reset_auth -> auth -> limiter -- which
+    method_decorators first-to-innermost, so the order is auth -> limiter -- which
     is why this can be read here at all.
 
     Keyed on the flag rather than on specific user ids so that swapping in a differently-scoped

@@ -327,5 +327,4 @@ def configure_app(app: Flask) -> Flask:
         f"BEAT_SCHEDULES type: {type(beat_schedules_after)}, length: {len(beat_schedules_after) if isinstance(beat_schedules_after, (list, dict)) else 'N/A'}"
     )
     app.logger.debug(app.config)
-    app.app_context().push()
     return app

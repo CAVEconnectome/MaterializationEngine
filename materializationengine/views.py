@@ -36,7 +36,6 @@ from sqlalchemy.sql import text
 from materializationengine.blueprints.client.datastack import validate_datastack
 from materializationengine.blueprints.client.query_manager import QueryManager
 from materializationengine.blueprints.client.schemas import AnalysisViewSchema
-from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.celery_init import celery
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.blueprints.client.query_manager import QueryManager
@@ -78,7 +77,6 @@ def make_flat_model(db, table: AnalysisTable):
 
 
 @views_bp.before_request
-@reset_auth
 def before_request():
     pass
 

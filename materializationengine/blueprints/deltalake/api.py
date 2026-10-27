@@ -15,7 +15,6 @@ from flask import (
 from middle_auth_client import auth_required, auth_requires_dataset_admin
 
 from materializationengine.config import as_bool
-from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.info_client import get_datastack_info, get_datastacks
 from materializationengine.utils import get_config_param
 
@@ -62,7 +61,6 @@ def _dataset_for_datastack(datastack_name):
 
 
 @deltalake_bp.route("/")
-@reset_auth
 @auth_required
 def index():
     """Redirect to step 1 of the wizard."""
@@ -70,7 +68,6 @@ def index():
 
 
 @deltalake_bp.route("/step<int:step_number>")
-@reset_auth
 @auth_required
 def wizard_step(step_number):
     total_steps = 3
@@ -141,7 +138,6 @@ def wizard_step(step_number):
 
 
 @deltalake_bp.route("/running-exports")
-@reset_auth
 @auth_required
 def running_exports_page():
     """Render the running exports monitoring page."""
@@ -161,7 +157,6 @@ def _optional_int(value):
 
 
 @deltalake_bp.route("/api/defaults", methods=["GET"])
-@reset_auth
 @auth_required
 def get_defaults():
     """Return environment defaults for the wizard UI."""
@@ -183,7 +178,6 @@ def get_defaults():
 
 
 @deltalake_bp.route("/api/<string:datastack_name>/discover-specs", methods=["POST"])
-@reset_auth
 @auth_requires_dataset_admin(table_arg="datastack_name")
 def discover_specs(datastack_name):
     """Run spec discovery for a table without enqueuing an export.
@@ -416,7 +410,6 @@ def discover_specs(datastack_name):
 
 
 @deltalake_bp.route("/api/<string:datastack_name>/check-exists", methods=["POST"])
-@reset_auth
 @auth_requires_dataset_admin(table_arg="datastack_name")
 def check_exists(datastack_name):
     """Check whether Delta Lake exports already exist for a table/version.

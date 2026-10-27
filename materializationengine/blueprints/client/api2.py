@@ -61,7 +61,6 @@ from materializationengine.blueprints.client.utils import (
     get_latest_version,
     update_notice_text_warnings,
 )
-from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.chunkedgraph_gateway import chunkedgraph_cache
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.info_client import get_aligned_volumes, get_datastack_info
@@ -718,7 +717,6 @@ class DatastackVersions(Resource):
     method_decorators = [
         limit_by_category("fast_query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("datastack_versions", security="apikey")
@@ -754,7 +752,6 @@ class DatastackVersion(Resource):
     method_decorators = [
         limit_by_category("fast_query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("version metadata", security="apikey")
@@ -793,7 +790,6 @@ class FrozenTableCount(Resource):
         validate_datastack,
         limit_by_category("fast_query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("table count", security="apikey")
@@ -849,7 +845,6 @@ class DatastackMetadata(Resource):
     method_decorators = [
         limit_by_category("fast_query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("all valid version metadata", security="apikey")
@@ -887,7 +882,6 @@ class FrozenTableVersions(Resource):
     method_decorators = [
         limit_by_category("fast_query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("get_frozen_tables", security="apikey")
@@ -936,7 +930,6 @@ class FrozenTablesMetadata(Resource):
         validate_datastack,
         limit_by_category("fast_query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("get_frozen_tables_metadata", security="apikey")
@@ -997,7 +990,6 @@ class FrozenTableMetadata(Resource):
         validate_datastack,
         limit_by_category("fast_query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("get_frozen_table_metadata", security="apikey")
@@ -1060,7 +1052,6 @@ class FrozenTableQuery(Resource):
         validate_datastack,
         limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("simple_query", security="apikey")
@@ -1346,7 +1337,6 @@ class MatTableSegmentInfo(Resource):
         validate_datastack,
         limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     def get(
@@ -1455,7 +1445,6 @@ class MatTableSegmentInfoLive(Resource):
         validate_datastack,
         limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     def get(
@@ -1533,7 +1522,6 @@ class FrozenQuery(Resource):
         validate_datastack,
         limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("complex_query", security="apikey")
@@ -1632,7 +1620,6 @@ class TableUniqueStringValues(Resource):
     method_decorators = [
         limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("get_unique_string_values", security="apikey")
@@ -1815,7 +1802,6 @@ class LiveTableQuery(Resource):
         # (e.g. SkeletonService's _get_root_soma) saturate.
         limit_by_category("query", endpoint="LiveTableQuery"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("v2_query", security="apikey")
@@ -2282,7 +2268,6 @@ class LiveTablePrecomputedInfo(Resource):
         validate_datastack,
         limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("get_precomputed_info", security="apikey")
@@ -2638,7 +2623,6 @@ class LiveTablesAvailable(Resource):
     method_decorators = [
         validate_datastack,
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("get_live_tables", security="apikey")
@@ -2703,7 +2687,6 @@ class LiveTablesAvailable(Resource):
 class LiveTablesAvailable(Resource):
     method_decorators = [
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("get_info_listing", security="apikey")
@@ -2770,7 +2753,6 @@ class LiveTableSpatialLevel(Resource):
     method_decorators = [
         validate_datastack,
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("get_precomputed spatial level cutout", security="apikey")
@@ -2921,7 +2903,6 @@ class LiveTableSpatialLevel(Resource):
 #     method_decorators = [
 #         validate_datastack,
 #         auth_requires_permission("view", table_arg="datastack_name"),
-#         reset_auth,
 #     ]
 
 #     @client_bp.doc("get_precomputed_overview", security="apikey")
@@ -2983,7 +2964,6 @@ class LiveTablePrecomputedById(Resource):
     method_decorators = [
         validate_datastack,
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("get_precomputed_by_id", security="apikey")
@@ -3040,7 +3020,6 @@ class LiveTablePrecomputedRelationship(Resource):
     method_decorators = [
         validate_datastack,
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("get_precomputed_relationships", security="apikey")
@@ -3103,7 +3082,6 @@ class AvailableViews(Resource):
         validate_datastack,
         limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("available_views", security="apikey")
@@ -3148,7 +3126,6 @@ class ViewMetadata(Resource):
         validate_datastack,
         limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("view_metadata", security="apikey")
@@ -3325,7 +3302,6 @@ class MatViewSegmentInfo(Resource):
         validate_datastack,
         limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     def get(
@@ -3396,7 +3372,6 @@ class ViewQuery(Resource):
         validate_datastack,
         limit_by_category("query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("view_query", security="apikey")
@@ -3541,7 +3516,6 @@ class ViewSchema(Resource):
         validate_datastack,
         limit_by_category("fast_query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("view_schema", security="apikey")
@@ -3586,7 +3560,6 @@ class ViewSchemas(Resource):
         validate_datastack,
         limit_by_category("fast_query"),
         auth_requires_permission("view", table_arg="datastack_name"),
-        reset_auth,
     ]
 
     @client_bp.doc("view_schemas", security="apikey")
