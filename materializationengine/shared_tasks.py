@@ -1,3 +1,4 @@
+import re
 import datetime
 import time
 from typing import Generator, List
@@ -397,6 +398,17 @@ def update_metadata(self, mat_metadata: dict):
     }
 
 
+DEFAULT_INDEX_MAINTENANCE_WORK_MEM = "1GB"
+
+
+def maintenance_work_mem_setting(value: str = None) -> str:
+    """A maintenance_work_mem value such as "6GB", checked (it is put into SQL)."""
+    value = (value or DEFAULT_INDEX_MAINTENANCE_WORK_MEM).strip()
+    if not re.fullmatch(r"\d+\s*(kB|MB|GB)", value):
+        raise ValueError(f"maintenance_work_mem must look like 512MB or 6GB, not {value!r}")
+    return value
+
+
 @celery.task(
     name="workflow:add_index",
     bind=True,
@@ -405,12 +417,13 @@ def update_metadata(self, mat_metadata: dict):
     autoretry_for=(Exception,),
     max_retries=3,
 )
-def add_index(self, database: str, command: str):
+def add_index(self, database: str, command: str, maintenance_work_mem: str = None):
     """Add an index or a constraints to a table.
 
     Args:
         database (str): database name
         command (str): sql command to create an index or constraint
+        maintenance_work_mem (str): memory for the build, e.g. "6GB" (default 1GB)
 
     Raises:
         self.retry: retries task when an error creating an index occurs
@@ -420,12 +433,12 @@ def add_index(self, database: str, command: str):
     """
     engine = db_manager.get_engine(database)
 
-    # increase maintenance memory to improve index creation speeds,
-    # reset to default after index is created
+    # More maintenance memory speeds up the build. SET LOCAL ends with the
+    # transaction, so the pooled connection returns to the instance's setting (a plain
+    # SET, reset to 64MB afterwards, left it below the instance's 2GB).
     ADD_INDEX_SQL = f"""
-        SET maintenance_work_mem to '1GB';
+        SET LOCAL maintenance_work_mem TO '{maintenance_work_mem_setting(maintenance_work_mem)}';
         {command}
-        SET maintenance_work_mem to '64MB';
     """
 
     try:

@@ -139,3 +139,37 @@ class TestCloudSQLAdmin:
         with mock.patch.object(cloudsql_admin, "get_config_param", return_value=None):
             with pytest.raises(CloudSQLAdminError, match="SQL_INSTANCE_PROJECT"):
                 cloudsql_admin.resolve_instance("inst", None)
+
+
+class TestImportResume:
+    def test_import_waits_while_the_instance_is_busy(self, session):
+        session.post.side_effect = [
+            _response(status=409, text="another operation is in progress"),
+            _response(payload={"name": "op1", "status": "PENDING"}),
+        ]
+        session.get.return_value = _response(payload={"name": "op1", "status": "DONE"})
+        assert cloudsql_admin.import_csv("inst", "gs://b/f.csv", "staging", "t")["status"] == "DONE"
+        assert session.post.call_count == 2
+
+    def test_find_import_operation_matches_the_uri(self, session):
+        session.get.side_effect = [
+            _response(payload={"items": [
+                {"name": "e1", "operationType": "EXPORT", "status": "RUNNING"},
+                {"name": "i0", "operationType": "IMPORT", "status": "DONE",
+                 "importContext": {"uri": "gs://b/f.csv"}, "error": {"errors": [{"code": "x"}]}},
+            ], "nextPageToken": "p2"}),
+            _response(payload={"items": [
+                {"name": "i1", "operationType": "IMPORT", "status": "RUNNING",
+                 "importContext": {"uri": "gs://b/other.csv"}},
+                {"name": "i2", "operationType": "IMPORT", "status": "RUNNING",
+                 "importContext": {"uri": "gs://b/f.csv"}},
+            ]}),
+        ]
+        assert cloudsql_admin.find_import_operation("inst", "gs://b/f.csv")["name"] == "i2"
+        assert session.get.call_args.kwargs["params"] == {
+            "instance": "inst", "maxResults": 100, "pageToken": "p2",
+        }
+
+    def test_find_import_operation_finds_nothing(self, session):
+        session.get.return_value = _response(payload={})
+        assert cloudsql_admin.find_import_operation("inst", "gs://b/f.csv") is None

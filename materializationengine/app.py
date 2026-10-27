@@ -149,6 +149,14 @@ def create_app(config_name: str = None):
         if app.config.get("STAGING_DATABASE_NAME"):
             init_staging_database(app)
 
+        from materializationengine.rayjobs import ray_upload_enabled
+
+        if ray_upload_enabled():
+            # created here if missing; a failure is retried on first use
+            from materializationengine.upload_state.db import init_upload_state
+
+            init_upload_state(app)
+
         # setup cors on upload bucket
         try:
             bucket_name = app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")

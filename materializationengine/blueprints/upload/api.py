@@ -39,6 +39,7 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
     CHUNK_STATUS_FAILED_RETRYABLE,
     CHUNK_STATUS_FAILED_PERMANENT,
 )
+from materializationengine.blueprints.upload import ray_status
 from materializationengine.blueprints.upload.schema_helper import get_schema_types
 from materializationengine.blueprints.upload.schemas import UploadRequestSchema
 from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
@@ -67,6 +68,7 @@ from materializationengine.blueprints.upload.tasks import (
 )
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.info_client import get_datastack_info, get_datastacks
+from materializationengine.rayjobs import ray_upload_enabled
 from materializationengine.utils import get_config_param
 from materializationengine import __version__
 
@@ -124,6 +126,11 @@ spatial_lookup_status.add_argument(
 
 
 REDIS_CLIENT = SharedRedis(db=0)
+
+
+def _job_record(job_id: str):
+    """A job's record: a Ray-run upload's from the upload state database, else redis's."""
+    return ray_status.get_record(job_id) or get_job_status(job_id)
 
 
 def is_auth_disabled():
@@ -836,6 +843,13 @@ def start_csv_processing():
         file_metadata["metadata"]["table_name"],
         datetime.datetime.utcnow(),
     )
+    if ray_upload_enabled():
+        # one RayJob runs the whole upload; its state is kept in the upload state database
+        body, code = ray_status.start_ray_upload(
+            job_id, file_path, file_metadata, datastack_info, user_id
+        )
+        return jsonify(body), code
+
     update_job_status(
         job_id,
         {
@@ -859,7 +873,7 @@ def start_csv_processing():
 def check_processing_status(job_id):
     """Get processing job status"""
     try:
-        status = get_job_status(job_id)
+        status = _job_record(job_id)
         if not status:
             return jsonify({"status": "error", "message": "Job not found"}), 404
 
@@ -939,7 +953,7 @@ def _handle_spatial_lookup(status, job_id):
 
 def _get_spatial_data(db_name, table_name):
     """Retrieve spatial data from checkpoint manager"""
-    checkpoint_manager = RedisCheckpointManager(db_name)
+    checkpoint_manager = ray_status.checkpoint_reader(db_name, table_name)
     return checkpoint_manager.get_workflow_data(table_name)
 
 
@@ -979,7 +993,7 @@ def cancel_job(job_id):
     """Cancel processing job"""
     try:
         if not is_auth_disabled() and g.get("auth_user"):
-            status = get_job_status(job_id)
+            status = _job_record(job_id)
             if not status:
                 return jsonify({"status": "error", "message": "Job not found"}), 404
             user_id = str(g.auth_user["id"])
@@ -1001,6 +1015,13 @@ def cancel_job(job_id):
                     ),
                     403,
                 )
+
+        # A Ray-run upload: a request its driver acts on
+        user = g.get("auth_user") or {}
+        ray_result = ray_status.request_cancel(job_id, str(user["id"]) if user.get("id") else None)
+        if ray_result is not None:
+            body, code = ray_result
+            return jsonify(body), code
 
         # Just Redis writes, so done here rather than through a task: waiting on a
         # process-queue worker made cancel time out whenever consumers were scaled down.
@@ -1092,35 +1113,36 @@ def get_user_jobs():
         user_id = str(g.auth_user["id"]) if g.get("auth_user") else None
         job_keys = REDIS_CLIENT.scan_iter("csv_processing:*")
 
+        redis_jobs = []
         for job_key in job_keys:
             job_data_raw = REDIS_CLIENT.get(job_key)
             if job_data_raw:
                 try:
                     job_data = json.loads(job_data_raw.decode("utf-8"))
                     job_data["job_id"] = job_key.decode("utf-8").split(":", 1)[1]
-
-                    if is_auth_disabled():
-                        user_jobs.append(job_data)
-                        continue
-
-                    job_user_id = job_data.get("user_id")
-                    datastack_name = job_data.get("datastack_name")
-
-                    if job_user_id == user_id:
-                        user_jobs.append(job_data)
-                    elif datastack_name and _has_datastack_permission(
-                        g.auth_user, "view", datastack_name
-                    ):
-                        user_jobs.append(job_data)
-
+                    redis_jobs.append(job_data)
                 except json.JSONDecodeError as e:
                     current_app.logger.error(
                         f"Error decoding JSON for job key {job_key}: {e}"
                     )
-                except Exception as e:
-                    current_app.logger.error(f"Error processing job key {job_key}: {e}")
 
-        user_jobs.sort(key=lambda x: x.get("last_updated", ""), reverse=True)
+        for job_data in ray_status.merge_job_lists(redis_jobs, ray_status.list_records()):
+            try:
+                if is_auth_disabled():
+                    user_jobs.append(job_data)
+                    continue
+
+                job_user_id = job_data.get("user_id")
+                datastack_name = job_data.get("datastack_name")
+
+                if job_user_id == user_id:
+                    user_jobs.append(job_data)
+                elif datastack_name and _has_datastack_permission(
+                    g.auth_user, "view", datastack_name
+                ):
+                    user_jobs.append(job_data)
+            except Exception as e:
+                current_app.logger.error(f"Error processing job {job_data.get('job_id')}: {e}")
 
         return jsonify({"status": "success", "jobs": user_jobs})
     except Exception as e:
@@ -1209,7 +1231,7 @@ class SpatialLookupStatus(Resource):
             else:
                 database = aligned_volume_name
 
-            checkpoint_manager = RedisCheckpointManager(database)
+            checkpoint_manager = ray_status.checkpoint_reader(database, table_name)
             checkpoint = checkpoint_manager.get_workflow_data(table_name)
 
             if checkpoint:
@@ -1303,8 +1325,7 @@ class ActiveSpatialLookups(Resource):
                     "message": "Could not determine database for datastack.",
                 }, 500
 
-            checkpoint_manager = RedisCheckpointManager(target_db_for_datastack)
-            workflows = checkpoint_manager.get_active_workflows()
+            workflows = ray_status.active_workflows(target_db_for_datastack)
 
             for wf in workflows:
                 wf["datastack_name"] = datastack_name
@@ -1363,12 +1384,7 @@ class AllActiveDirectSpatialLookups(Resource):
                 staging_db_name = get_config_param("STAGING_DATABASE_NAME")
                 if staging_db_name:
                     try:
-                        checkpoint_manager_staging = RedisCheckpointManager(
-                            staging_db_name
-                        )
-                        staging_workflows = (
-                            checkpoint_manager_staging.get_active_workflows()
-                        )
+                        staging_workflows = ray_status.active_workflows(staging_db_name)
                         for wf in staging_workflows:
 
                             wf["database_name"] = staging_db_name
@@ -1387,8 +1403,7 @@ class AllActiveDirectSpatialLookups(Resource):
                     ds_info = get_datastack_info(datastack_name_iter)
                     prod_db_name = ds_info["aligned_volume"]["name"]
                     if prod_db_name and prod_db_name != staging_db_name:
-                        checkpoint_manager_prod = RedisCheckpointManager(prod_db_name)
-                        prod_workflows = checkpoint_manager_prod.get_active_workflows()
+                        prod_workflows = ray_status.active_workflows(prod_db_name)
                         for wf in prod_workflows:
                             wf["datastack_name"] = datastack_name_iter
                             wf["database_name"] = prod_db_name
@@ -1480,7 +1495,7 @@ class SpatialLookupWorkflowDetails(Resource):
             if not target_database:
                 abort(400, "Could not determine the target database for the workflow.")
 
-            checkpoint_manager = RedisCheckpointManager(target_database)
+            checkpoint_manager = ray_status.checkpoint_reader(target_database, workflow_name)
 
             workflow_data = checkpoint_manager.get_workflow_data(workflow_name)
             if not workflow_data:
