@@ -17,7 +17,6 @@ from middle_auth_client import auth_required, auth_requires_admin
 from middle_auth_client.decorators import dataset_from_table_id_from_request
 
 from materializationengine import __version__
-from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.redis_client import get_redis_client
 
 admin_bp = Blueprint("mat_admin", __name__, url_prefix="/materialize/admin")
@@ -75,7 +74,6 @@ def can_see_admin_page() -> bool:
 
 
 @admin_bp.route("/")
-@reset_auth
 @auth_required
 def admin_page():
     if not can_see_admin_page():
@@ -84,14 +82,12 @@ def admin_page():
 
 
 @admin_bp.route("/api/capabilities")
-@reset_auth
 @auth_required
 def user_capabilities():
     return jsonify(capabilities())
 
 
 @admin_bp.route("/api/databases")
-@reset_auth
 @auth_requires_admin
 def databases():
     from materializationengine.workflows.table_maintenance import list_databases
@@ -115,7 +111,6 @@ def _require_datastack_admin(datastack: str):
 
 
 @admin_bp.route("/api/datastack/<string:datastack>/versions")
-@reset_auth
 @auth_required
 def frozen_versions(datastack: str):
     """Frozen versions of the datastack whose databases exist (for choosing one to export)."""
@@ -126,7 +121,6 @@ def frozen_versions(datastack: str):
 
 
 @admin_bp.route("/api/datastack/<string:datastack>/version/<int:version>/tables")
-@reset_auth
 @auth_required
 def version_tables(datastack: str, version: int):
     """Tables and views of one frozen version's database."""
@@ -143,7 +137,6 @@ def version_tables(datastack: str, version: int):
 
 
 @admin_bp.route("/api/datastack/<string:datastack>/version/<int:version>/annotation_tables")
-@reset_auth
 @auth_required
 def version_annotation_tables(datastack: str, version: int):
     """The annotation tables recorded for a frozen version (what a virtual version may include)."""
@@ -214,7 +207,6 @@ def virtual_target_status(source: str, name: str) -> dict:
 
 
 @admin_bp.route("/api/datastack/<string:datastack>/virtual_targets")
-@reset_auth
 @auth_required
 def virtual_targets(datastack: str):
     """Other datastacks on this datastack's aligned volume, which can hold its virtual versions."""
@@ -237,7 +229,6 @@ def virtual_targets(datastack: str):
 
 
 @admin_bp.route("/api/datastack/<string:datastack>/virtual_target/<string:name>")
-@reset_auth
 @auth_required
 def virtual_target(datastack: str, name: str):
     """Readiness of one (possibly new) datastack name to hold virtual versions."""
@@ -281,14 +272,12 @@ def upload_jobs(datastack: str = None) -> list:
 
 
 @admin_bp.route("/api/uploads")
-@reset_auth
 @auth_requires_admin
 def uploads():
     return jsonify({"jobs": upload_jobs(request.args.get("datastack") or None)})
 
 
 @admin_bp.route("/api/repack/jobs")
-@reset_auth
 @auth_requires_admin
 def repack_jobs():
     from materializationengine.workflows.table_maintenance import list_repack_jobs
@@ -321,14 +310,12 @@ def queue_status() -> dict:
 
 
 @admin_bp.route("/api/queues")
-@reset_auth
 @auth_requires_admin
 def queues():
     return jsonify(queue_status())
 
 
 @admin_bp.route("/api/datastacks")
-@reset_auth
 @auth_requires_admin
 def datastacks():
     """Datastacks this deployment materializes (the workflows on the Materialization tab take one)."""

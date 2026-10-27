@@ -30,7 +30,6 @@ from middle_auth_client import (
 from materializationengine.redis_client import SharedRedis
 
 from materializationengine.config import as_bool
-from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.blueprints.upload.checkpoint_manager import (
     RedisCheckpointManager,
     CHUNK_STATUS_PENDING,
@@ -183,7 +182,6 @@ def require_upload_permissions(f):
 
 
 @upload_bp.route("/")
-@reset_auth
 @auth_requires_admin
 def index():
     """Redirect to step 1 of the wizard"""
@@ -191,7 +189,6 @@ def index():
 
 
 @upload_bp.route("/step<int:step_number>")
-@reset_auth
 @auth_required
 def wizard_step(step_number):
 
@@ -262,7 +259,6 @@ def _has_datastack_permission(
 
 
 @upload_bp.route("/running-uploads")
-@reset_auth
 @auth_required
 def running_uploads_page():
     """Render the running uploads page"""
@@ -291,7 +287,6 @@ def running_uploads_page():
 @upload_bp.route(
     "/spatial-lookup/details/<string:datastack_name>/<string:workflow_name>"
 )
-@reset_auth
 @auth_requires_permission("view", table_arg="datastack_name")
 def spatial_lookup_workflow_details_page(datastack_name: str, workflow_name: str):
     """Render the spatial lookup workflow details page."""
@@ -1160,7 +1155,6 @@ def get_user_jobs():
     "/run/spatial_lookup/datastack/<string:datastack_name>/<string:table_name>"
 )
 class SpatialSVIDLookupTableResource(Resource):
-    @reset_auth
     @auth_requires_permission("edit", table_arg="datastack_name")
     @spatial_lookup_bp.doc("Lookup spatially chunked svid workflow", security="apikey")
     def post(self, datastack_name: str, table_name: str):
@@ -1206,7 +1200,6 @@ class SpatialSVIDLookupTableResource(Resource):
     "/status/datastack/<string:datastack_name>/<string:table_name>"
 )
 class SpatialLookupStatus(Resource):
-    @reset_auth
     @auth_requires_permission("edit", table_arg="datastack_name")
     @spatial_lookup_bp.doc("get_spatial_lookup_status", security="apikey")
     def get(self, datastack_name: str, table_name: str):
@@ -1295,7 +1288,6 @@ class SpatialLookupStatus(Resource):
 @spatial_lookup_bp.expect(spatial_lookup_status)
 @spatial_lookup_bp.route("/active/datastack/<string:datastack_name>")
 class ActiveSpatialLookups(Resource):
-    @reset_auth
     @auth_requires_permission("edit", table_arg="datastack_name")
     @spatial_lookup_bp.doc("get_active_spatial_lookups", security="apikey")
     def get(self, datastack_name: str):
@@ -1370,7 +1362,6 @@ class ActiveSpatialLookups(Resource):
 
 @spatial_lookup_bp.route("/all-active-direct")
 class AllActiveDirectSpatialLookups(Resource):
-    @reset_auth
     @auth_required
     @spatial_lookup_bp.doc("get_all_active_direct_spatial_lookups", security="apikey")
     def get(self):
@@ -1465,7 +1456,6 @@ class AllActiveDirectSpatialLookups(Resource):
 )
 @spatial_lookup_bp.doc("get_spatial_lookup_workflow_details", security="apikey")
 class SpatialLookupWorkflowDetails(Resource):
-    @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
     def get(self, datastack_name: str, workflow_name: str):
         """Get detailed status and chunk information for a spatial lookup workflow."""

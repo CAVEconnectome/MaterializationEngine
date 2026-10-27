@@ -25,7 +25,6 @@ from materializationengine.blueprints.materialize.schemas import (
     BadRootsSchema,
     VirtualVersionSchema,
 )
-from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.cloudsql_admin import CloudSQLAdminError, export_csv
 from materializationengine.database import (
     db_manager,
@@ -87,7 +86,6 @@ def check_aligned_volume(aligned_volume):
 
 @mat_bp.route("/celery/test/<int:iterator_length>")
 class TestWorkflowResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("Test workflow pattern", security="apikey")
     def post(self, iterator_length: int = 50):
@@ -104,7 +102,6 @@ class TestWorkflowResource(Resource):
 
 @mat_bp.route("/workflow/status/active")
 class ActiveTasksResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("Get current actively running tasks", security="apikey")
     def get(self):
@@ -116,7 +113,6 @@ class ActiveTasksResource(Resource):
 
 @mat_bp.route("/workflow/status/locks")
 class LockedTasksResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("Get locked tasks", security="apikey")
     def get(self):
@@ -126,7 +122,6 @@ class LockedTasksResource(Resource):
         ltdict = inspect_locked_tasks(release_locks=False)
         return {str(k): v for k, v in ltdict.items()}
 
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("Unlock locked tasks", security="apikey")
     def put(self):
@@ -158,7 +153,6 @@ repack_parser.add_argument("wait_timeout", type=int, default=60, location="args"
 
 @mat_bp.route("/maintenance/table_order/<string:database>")
 class TableOrderResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.expect(maintenance_parser)
     @mat_bp.doc("Report how well tables are ordered by id", security="apikey")
@@ -180,7 +174,6 @@ class TableOrderResource(Resource):
 
 @mat_bp.route("/maintenance/repack/<string:database>/<string:table_name>")
 class RepackTableResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.expect(repack_parser)
     @mat_bp.doc("Reorder a table by id with pg_repack", security="apikey")
@@ -202,7 +195,6 @@ class RepackTableResource(Resource):
 
 @mat_bp.route("/maintenance/repack/status/<string:job_id>")
 class RepackStatusResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("Status of a pg_repack job", security="apikey")
     def get(self, job_id: str):
@@ -216,7 +208,6 @@ class RepackStatusResource(Resource):
 
 @mat_bp.route("/celery/status/queue")
 class QueueResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("Get task queue size", security="apikey")
     def get(self):
@@ -229,7 +220,6 @@ class QueueResource(Resource):
 
 @mat_bp.route("/celery/status/info")
 class CeleryResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("Get celery worker status", security="apikey")
     def get(self):
@@ -242,7 +232,6 @@ class CeleryResource(Resource):
 
 @mat_bp.route("/materialize/run/ingest_annotations/datastack/<string:datastack_name>")
 class ProcessNewAnnotationsResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("process new annotations workflow", security="apikey")
     def post(self, datastack_name: str):
@@ -264,7 +253,6 @@ class ProcessNewAnnotationsResource(Resource):
     "/materialize/run/lookup_svid/datastack/<string:datastack_name>/<string:table_name>"
 )
 class ProcessNewSVIDResource(Resource):
-    @reset_auth
     @auth_requires_permission("edit", table_arg="datastack_name")
     @mat_bp.doc("process new svids workflow", security="apikey")
     @accepts("AnnotationIDList", schema=AnnotationIDListSchema, api=mat_bp)
@@ -294,7 +282,6 @@ class ProcessNewSVIDResource(Resource):
     "/materialize/run/ingest_annotations/datastack/<string:datastack_name>/<string:table_name>"
 )
 class ProcessNewAnnotationsTableResource(Resource):
-    @reset_auth
     @auth_requires_permission("edit", table_arg="datastack_name")
     @mat_bp.doc("process new annotations workflow", security="apikey")
     def post(self, datastack_name: str, table_name: str):
@@ -320,7 +307,6 @@ class ProcessNewAnnotationsTableResource(Resource):
 
 @mat_bp.route("/materialize/run/lookup_root_ids/datastack/<string:datastack_name>")
 class LookupMissingRootIdsResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("Find all null root ids and lookup new roots", security="apikey")
     def post(self, datastack_name: str):
@@ -343,7 +329,6 @@ class LookupMissingRootIdsResource(Resource):
     "/materialize/run/sparse_lookup_root_ids/datastack/<string:datastack_name>/table/<string:table_name>"
 )
 class LookupSparseMissingRootIdsResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc(
         "Find null root ids in table and lookup new root ids", security="apikey"
@@ -371,7 +356,6 @@ class LookupSparseMissingRootIdsResource(Resource):
     "/materialize/run/lookup_all_root_ids/datastack/<string:datastack_name>/table/<string:table_name>"
 )
 class LookupAllRootIdsResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc(
         "Look up every root id of a table from its supervoxel ids", security="apikey"
@@ -398,7 +382,6 @@ class LookupAllRootIdsResource(Resource):
     "/materialize/run/remove_bad_root_ids/datastack/<string:datastack_name>/table/<string:table_name>"
 )
 class SetBadRootsToNullResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @accepts("BadRootsSchema", schema=BadRootsSchema, api=mat_bp)
     @mat_bp.doc("set bad roots to None", security="apikey")
@@ -422,7 +405,6 @@ class SetBadRootsToNullResource(Resource):
 
 @mat_bp.route("/materialize/run/complete_workflow/datastack/<string:datastack_name>")
 class CompleteWorkflowResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.expect(materialize_parser)
     @mat_bp.doc(
@@ -455,7 +437,6 @@ class CompleteWorkflowResource(Resource):
 
 @mat_bp.route("/materialize/run/create_frozen/datastack/<string:datastack_name>")
 class CreateFrozenMaterializationResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.expect(materialize_parser)
     @mat_bp.doc("create frozen materialization", security="apikey")
@@ -482,7 +463,6 @@ class CreateFrozenMaterializationResource(Resource):
 
 @mat_bp.route("/materialize/run/update_roots/datastack/<string:datastack_name>")
 class UpdateExpiredRootIdsResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.expect(get_roots_parser)
     @mat_bp.doc("Update expired root ids", security="apikey")
@@ -519,7 +499,6 @@ response_model = mat_bp.model(
     "/materialize/run/dump_csv_table/datastack/<string:datastack_name>/version/<int(signed=True):version>/table_name/<string:table_name>/"
 )
 class DumpTableToBucketAsCSV(Resource):
-    @reset_auth
     @auth_requires_dataset_admin(table_arg="datastack_name")
     @mat_bp.doc("Take table or view and dump it to a bucket as csv", security="apikey")
     @mat_bp.response(200, "Success", response_model)
@@ -595,7 +574,6 @@ class DumpTableToBucketAsCSV(Resource):
 
 @mat_bp.route("/materialize/run/update_database/datastack/<string:datastack_name>")
 class UpdateLiveDatabaseResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.expect(get_roots_parser)
     @mat_bp.doc("Ingest new annotations and update expired root ids", security="apikey")
@@ -623,7 +601,6 @@ class UpdateLiveDatabaseResource(Resource):
     "/bulk_upload/upload/<string:datastack_name>/<string:table_name>/<string:segmentation_source>/<string:description>"
 )
 class BulkUploadResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("bulk upload", security="apikey")
     def post(
@@ -673,7 +650,6 @@ class BulkUploadResource(Resource):
     "/bulk_upload/missing_chunks/<string:datastack_name>/<string:table_name>/<string:segmentation_source>/<string:description>"
 )
 class InsertMissingChunks(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("insert missing chunks", security="apikey")
     def post(
@@ -717,7 +693,6 @@ class InsertMissingChunks(Resource):
 
 @mat_bp.route("/aligned_volume/<aligned_volume_name>")
 class DatasetResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("get_aligned_volume_versions", security="apikey")
     def get(self, aligned_volume_name: str):
@@ -731,7 +706,6 @@ class DatasetResource(Resource):
 
 @mat_bp.route("/aligned_volumes/<aligned_volume_name>")
 class VersionResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("get_analysis_versions", security="apikey")
     def get(self, aligned_volume_name):
@@ -751,7 +725,6 @@ class VersionResource(Resource):
             logging.error(error)
             return abort(404)
 
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("setup new aligned volume database", security="apikey")
     def post(self, aligned_volume_name: str):
@@ -770,7 +743,6 @@ class VersionResource(Resource):
 
 @mat_bp.route("/aligned_volumes/<aligned_volume_name>/version/<version>")
 class TableResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("get_all_tables", security="apikey")
     def get(self, aligned_volume_name, version):
@@ -797,7 +769,6 @@ class TableResource(Resource):
     "/aligned_volumes/<string:aligned_volume_name>/version/<int:version>/tablename/<string:tablename>"
 )
 class AnnotationResource(Resource):
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("get_top_materialized_annotations", security="apikey")
     def get(self, aligned_volume_name: str, version: int, tablename: str):
@@ -828,7 +799,6 @@ class AnnotationResource(Resource):
 
 @mat_bp.route("/materialize/run/create_virtual/datastack/<string:datastack_name>")
 class CreateVirtualPublicVersionResource(Resource):
-    @reset_auth
     @auth_requires_dataset_admin(table_arg="datastack_name")
     @mat_bp.doc("create virtual materialization", security="apikey")
     @accepts("VirtualVersionSchema", schema=VirtualVersionSchema, api=mat_bp)
@@ -917,7 +887,6 @@ class CreateVirtualPublicVersionResource(Resource):
     "/materialize/run/write_deltalake/datastack/<string:datastack_name>/version/<int(signed=True):version>/table_name/<string:table_name>/"
 )
 class WriteDeltalakeResource(Resource):
-    @reset_auth
     @auth_requires_dataset_admin(table_arg="datastack_name")
     @mat_bp.doc("Export a table to Delta Lake", security="apikey")
     def post(self, datastack_name: str, version: int, table_name: str):
@@ -1044,7 +1013,6 @@ class WriteDeltalakeResource(Resource):
             "backend": "celery",
         }, 200
 
-    @reset_auth
     @auth_requires_dataset_admin(table_arg="datastack_name")
     @mat_bp.doc("Get Delta Lake export progress", security="apikey")
     def get(self, datastack_name: str, version: int, table_name: str):
@@ -1091,7 +1059,6 @@ class RayJobResource(Resource):
     tell "not configured" apart from "job not found".
     """
 
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("Get RayJob status", security="apikey")
     def get(self, job_name: str):
@@ -1111,7 +1078,6 @@ class RayJobResource(Resource):
             # message carries which.
             return {"message": str(exc)}, 404
 
-    @reset_auth
     @auth_requires_admin
     @mat_bp.doc("Cancel a RayJob", security="apikey")
     def delete(self, job_name: str):

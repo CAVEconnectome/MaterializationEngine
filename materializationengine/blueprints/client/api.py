@@ -23,7 +23,6 @@ from materializationengine.blueprints.client.utils import (
     add_warnings_to_headers,
     update_notice_text_warnings,
 )
-from materializationengine.blueprints.reset_auth import reset_auth
 from materializationengine.database import db_manager, dynamic_annotation_cache
 from materializationengine.info_client import (
     get_aligned_volumes,
@@ -111,7 +110,6 @@ def check_aligned_volume(aligned_volume):
 
 @client_bp.route("/datastack/<string:datastack_name>/versions")
 class DatastackVersions(Resource):
-    @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("datastack_versions", security="apikey")
     def get(self, datastack_name: str):
@@ -142,7 +140,6 @@ class DatastackVersions(Resource):
 
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>")
 class DatastackVersion(Resource):
-    @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("version metadata", security="apikey")
     def get(self, datastack_name: str, version: int):
@@ -174,7 +171,6 @@ class DatastackVersion(Resource):
 
 @client_bp.route("/datastack/<string:datastack_name>/metadata")
 class DatastackMetadata(Resource):
-    @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("all valid version metadata", security="apikey")
     def get(self, datastack_name: str):
@@ -204,7 +200,6 @@ class DatastackMetadata(Resource):
 
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/tables")
 class FrozenTableVersions(Resource):
-    @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("get_frozen_tables", security="apikey")
     def get(self, datastack_name: str, version: int):
@@ -246,7 +241,6 @@ class FrozenTableVersions(Resource):
     "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/metadata"
 )
 class FrozenTableMetadata(Resource):
-    @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
     @client_bp.doc("get_frozen_table_metadata", security="apikey")
     def get(self, datastack_name: str, version: int, table_name: str):
@@ -293,7 +287,6 @@ class FrozenTableMetadata(Resource):
     "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/count"
 )
 class FrozenTableCount(Resource):
-    @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
     @validate_datastack
     @client_bp.doc("simple_query", security="apikey")
@@ -336,7 +329,6 @@ class FrozenTableCount(Resource):
     "/datastack/<string:datastack_name>/version/<int:version>/table/<string:table_name>/query"
 )
 class FrozenTableQuery(Resource):
-    @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
     @validate_datastack
     @client_bp.doc("simple_query", security="apikey")
@@ -425,7 +417,6 @@ class FrozenTableQuery(Resource):
 @client_bp.expect(query_parser)
 @client_bp.route("/datastack/<string:datastack_name>/version/<int:version>/query")
 class FrozenQuery(Resource):
-    @reset_auth
     @auth_requires_permission("view", table_arg="datastack_name")
     @validate_datastack
     @client_bp.doc("complex_query", security="apikey")

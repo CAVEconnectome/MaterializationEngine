@@ -16,6 +16,7 @@ from materializationengine.blueprints.client.api2 import client_bp as client_bp2
 from materializationengine.blueprints.deltalake.api import deltalake_bp
 from materializationengine.blueprints.admin.api import admin_bp, can_see_admin_page
 from materializationengine.blueprints.materialize.api import mat_bp
+from materializationengine.blueprints.reset_auth import init_reset_auth
 from materializationengine.blueprints.upload.api import spatial_lookup_bp, upload_bp
 from materializationengine.blueprints.upload.models import init_staging_database
 from materializationengine.blueprints.upload.storage import StorageService
@@ -75,6 +76,9 @@ def create_app(config_name: str = None):
     logging.getLogger("materializationengine").setLevel(app.config["LOGGING_LEVEL"])
     logging.getLogger("root").setLevel(app.config["LOGGING_LEVEL"])
     logging.getLogger("python_jsonschema_objects").setLevel(app.config["LOGGING_LEVEL"])
+
+    # No request inherits the previous request's user (see reset_auth.py)
+    init_reset_auth(app)
 
     # Initialize request-scoped database session cleanup
     init_request_db_cleanup(app)
