@@ -8,6 +8,7 @@ from unittest import mock
 
 import pytest
 import sqlalchemy as sa
+from flask import Flask
 from sqlalchemy.engine.url import make_url
 
 from materializationengine.blueprints.upload import tasks
@@ -165,11 +166,13 @@ class TestClusterStagingTables:
             "table_name": "synapse_cluster_test",
             "job_id_for_status": "job1",
         }
-        with mock.patch.object(tasks, "get_config_param", return_value="staging"), mock.patch.object(
+        with Flask(__name__).app_context(), mock.patch.object(
+            tasks, "get_config_param", return_value="staging"
+        ), mock.patch.object(
             tasks.db_manager, "get_engine"
         ), mock.patch.object(tasks, "update_job_status"), mock.patch.object(
             tasks, "is_upload_cancelled", return_value=False
-        ), mock.patch.object(
+        ), mock.patch.object(tasks, "id_order_correlation", return_value=None), mock.patch.object(
             tasks, "cluster_table_by_id", side_effect=[True, RuntimeError("disk full")]
         ) as mock_cluster:
             result = tasks.cluster_staging_tables.run(monitor_result)

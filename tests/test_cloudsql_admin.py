@@ -173,3 +173,41 @@ class TestImportResume:
     def test_find_import_operation_finds_nothing(self, session):
         session.get.return_value = _response(payload={})
         assert cloudsql_admin.find_import_operation("inst", "gs://b/f.csv") is None
+
+
+class TestTransferOperations:
+    """What the transfer to production needs: imports into named columns, exports it
+    can record and resume, and finding either again by URI and database."""
+
+    def test_import_csv_names_the_columns(self, session):
+        session.post.return_value = _response(payload={"name": "op1", "status": "DONE"})
+        cloudsql_admin.import_csv("inst", "gs://b/f.csv", "prod", "t", columns=["id", "v"])
+        assert session.post.call_args.kwargs["json"]["importContext"]["csvImportOptions"] == {
+            "table": "t", "columns": ["id", "v"],
+        }
+
+    def test_export_csv_reports_its_operation_and_waits_out_a_busy_instance(self, session):
+        session.post.side_effect = [
+            _response(status=409, text="busy"),
+            _response(payload={"name": "e1", "status": "PENDING"}),
+        ]
+        session.get.return_value = _response(payload={"name": "e1", "status": "DONE"})
+        started = []
+        cloudsql_admin.export_csv(
+            "inst", "gs://b/seg.csv", "staging", "SELECT 1", on_started=started.append, busy_timeout=60
+        )
+        assert started == ["e1"] and session.post.call_count == 2
+
+    def test_find_operation_matches_type_uri_and_database(self, session):
+        session.get.return_value = _response(payload={"items": [
+            {"name": "i-staging", "operationType": "IMPORT", "status": "DONE",
+             "importContext": {"uri": "gs://b/f.csv", "database": "staging"}},
+            {"name": "e1", "operationType": "EXPORT", "status": "RUNNING",
+             "exportContext": {"uri": "gs://b/seg.csv", "databases": ["staging"]}},
+            {"name": "i-prod", "operationType": "IMPORT", "status": "RUNNING",
+             "importContext": {"uri": "gs://b/f.csv", "database": "prod"}},
+        ]})
+        assert cloudsql_admin.find_import_operation("inst", "gs://b/f.csv", database="prod")["name"] == "i-prod"
+        assert cloudsql_admin.find_import_operation("inst", "gs://b/f.csv")["name"] == "i-staging"
+        assert cloudsql_admin.find_operation("inst", "EXPORT", "gs://b/seg.csv", database="staging")["name"] == "e1"
+        assert cloudsql_admin.find_operation("inst", "EXPORT", "gs://b/seg.csv", database="prod") is None
