@@ -1397,6 +1397,10 @@ def cluster_table_by_id(table_name: str, engine) -> bool:
 
     quote = engine.dialect.identifier_preparer.quote
     with engine.begin() as conn:
+        # CLUSTER sorts the rows and rebuilds the indexes in maintenance_work_mem
+        mem = upload_index_maintenance_work_mem()
+        if mem:
+            conn.execute(text(f"SET LOCAL maintenance_work_mem TO '{mem}'"))
         if pk_index:
             conn.execute(text(f"CLUSTER {quote(table_name)} USING {quote(pk_index)}"))
         else:
@@ -1434,9 +1438,10 @@ def cluster_staging_tables(self, monitor_result: dict) -> dict:
     rows in spatial chunk order, so that table in particular is not in id order before this.
 
     A table already in id order is left alone: the annotation table is imported from
-    the processed CSV, which is written in id order, and nothing reorders it, so its
-    CLUSTER (6h13m for 337M rows on minnie, 2026-10-28, mostly rebuilding its GIST
-    indexes) changed nothing. "In id order" is the planner's correlation statistic for
+    the processed CSV, which is in id order when the upload numbers the rows, and then
+    its CLUSTER (6h13m for 337M rows on minnie, 2026-10-28, mostly rebuilding its GIST
+    indexes) changes nothing. A source file with its own ids keeps the file's order, so
+    that table does need it. "In id order" is the planner's correlation statistic for
     id, from a fresh ANALYZE, at or above UPLOAD_CLUSTER_SKIP_CORRELATION.
 
     Clustering only changes row order, never the data, so a failure here is logged and the

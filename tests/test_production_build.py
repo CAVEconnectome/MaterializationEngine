@@ -368,7 +368,10 @@ class TestProductionStages:
     """The stage bodies, against a scratch aligned volume database: the Cloud SQL import
     and the spatial chunks are stood in for by inserts."""
 
-    def test_load_lookup_finish_and_publish(self, production, engine, app):
+    @pytest.mark.parametrize("source_order", ["x", "random()"])
+    def test_load_lookup_finish_and_publish(self, production, engine, app, source_order):
+        """source_order: the order of the imported rows (a source file with its own ids
+        keeps the file's order, which for the minnie synapse files is not id order)."""
         from materializationengine.upload_state.status_sink import StoreSink, use_sink
 
         prod, interface, table = production
@@ -395,6 +398,7 @@ class TestProductionStages:
                     f'INSERT INTO "{table}" (id, created, valid, size, pre_pt_position, post_pt_position, ctr_pt_position)'
                     " SELECT x, now(), true, x, ST_MakePoint(x * 10, x * 10, x), ST_MakePoint(x * 10, x * 10, x + 1),"
                     " ST_MakePoint(x * 10, x * 10, x + 2) FROM generate_series(1, 500) x"
+                    f" ORDER BY {source_order}"
                 ))
 
         with use_sink(StoreSink(engine, JOB, epoch=1)), \
@@ -404,6 +408,7 @@ class TestProductionStages:
                 mock.patch.object(tasks, "get_config_param", return_value=None):
             loaded = bulk_upload.stage_load_annotations(ctx)
             assert loaded["indexes"] >= 5  # pkey, created, deleted and the three GIST indexes
+            assert loaded["clustered"] is (source_order != "x")
             assert TABLE not in interface.database.get_valid_table_names()
 
             ctx.results["load_annotations"] = loaded
@@ -437,6 +442,7 @@ class TestProductionStages:
             prod, names["final_segmentation"], pb.segmentation_model(table, META, PCG)
         ) == []
         with prod.connect() as conn:
-            ids = [r[0] for r in conn.execute(f'SELECT id FROM "{names["final_segmentation"]}" ORDER BY ctid')]
-        assert ids == list(range(1, 501))
+            for final in (table, names["final_segmentation"]):
+                ids = [r[0] for r in conn.execute(f'SELECT id FROM "{final}" ORDER BY ctid')]
+                assert ids == list(range(1, 501)), final
         assert store.get_import(engine, JOB)["database"] == "prod"
