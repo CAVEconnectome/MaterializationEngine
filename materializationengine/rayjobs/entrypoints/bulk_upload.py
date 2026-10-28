@@ -53,7 +53,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -824,8 +824,44 @@ def _run_index_commands(ctx: Context, engine, table: str, commands: List[str], l
             conn.execute(text(command))
 
 
+def _cluster_unless_in_id_order(ctx: Context, engine, table: str, label: str) -> Tuple[bool, Optional[float]]:
+    """CLUSTER table on its primary key unless it is already in id order (the planner's
+    id correlation, after ANALYZE, at or above UPLOAD_CLUSTER_SKIP_CORRELATION).
+    Returns (clustered, correlation)."""
+    from materializationengine.blueprints.upload.tasks import (
+        DEFAULT_CLUSTER_SKIP_CORRELATION,
+        cluster_table_by_id,
+        id_order_correlation,
+        update_job_status,
+        wait_for_backend_work,
+    )
+    from materializationengine.utils import get_config_param
+
+    skip_above = float(
+        get_config_param("UPLOAD_CLUSTER_SKIP_CORRELATION") or DEFAULT_CLUSTER_SKIP_CORRELATION
+    )
+    ctx.wait_turn()
+    # a dead attempt's CLUSTER runs on in its backend; once it is done the table is in order
+    wait_for_backend_work(engine, table, ("CLUSTER", "CREATE INDEX"))
+    correlation = id_order_correlation(table, engine)
+    if correlation is not None and correlation >= skip_above:
+        logger.info(f"{table}: already in id order (correlation {correlation:.4f})")
+        return False, correlation
+    update_job_status(ctx.job_id, {"status": "processing", "phase": f"Clustering {label} by id"})
+    ctx.wait_turn()
+    logger.info(f"{table}: CLUSTER by id (correlation {correlation})")
+    return cluster_table_by_id(table, engine), correlation
+
+
 def stage_load_annotations(ctx: Context) -> dict:
-    """The temporary annotation table, the processed CSV imported into it, its indexes."""
+    """The temporary annotation table, the processed CSV imported into it, its indexes.
+
+    The CSV is in id order when the upload numbers the rows, but in the source file's
+    order when the file has its own ids (the minnie synapse files' are unsorted: the
+    1M ltv7 test table came out with id correlation 0.0001). Such a table is clustered
+    on its primary key before the other indexes are built, so the CLUSTER rewrites one
+    index instead of six (the staging CLUSTER of all six took 6h13m on 337M rows).
+    """
     from sqlalchemy import text
 
     from materializationengine.blueprints.upload import production_build as pb
@@ -883,6 +919,9 @@ def stage_load_annotations(ctx: Context) -> dict:
         ),
         prepare=truncate,
     )
+    primary_key = [c for c in pb.index_commands(engine, temp, model) if "primary key" in c.lower()]
+    _run_index_commands(ctx, engine, temp, primary_key, "Uploading to Database")
+    clustered, correlation = _cluster_unless_in_id_order(ctx, engine, temp, "Annotation Table")
     commands = pb.index_commands(engine, temp, model)
     _run_index_commands(ctx, engine, temp, commands, "Uploading to Database")
     ctx.wait_turn()
@@ -892,7 +931,12 @@ def stage_load_annotations(ctx: Context) -> dict:
         ctx.job_id,
         {"status": "processing", "phase": "Database Upload Complete, awaiting next step", "progress": 100},
     )
-    return {"table": temp, "indexes": len(commands)}
+    return {
+        "table": temp,
+        "indexes": len(primary_key) + len(commands),
+        "clustered": clustered,
+        "correlation": correlation,
+    }
 
 
 def stage_finish_tables(ctx: Context) -> dict:
@@ -901,35 +945,15 @@ def stage_finish_tables(ctx: Context) -> dict:
     from sqlalchemy import text
 
     from materializationengine.blueprints.upload import production_build as pb
-    from materializationengine.blueprints.upload.tasks import (
-        DEFAULT_CLUSTER_SKIP_CORRELATION,
-        cluster_table_by_id,
-        id_order_correlation,
-        mark_clustered_on_primary_key,
-        update_job_status,
-        wait_for_backend_work,
-    )
-    from materializationengine.utils import get_config_param
+    from materializationengine.blueprints.upload.tasks import mark_clustered_on_primary_key
 
     names = ctx.params["build_tables"]
     meta = ctx.params["table_meta"]
     database, engine = _production(ctx)
     quote = engine.dialect.identifier_preparer.quote
     seg = names["segmentation"]
-    skip_above = float(
-        get_config_param("UPLOAD_CLUSTER_SKIP_CORRELATION") or DEFAULT_CLUSTER_SKIP_CORRELATION
-    )
 
-    ctx.wait_turn()
-    wait_for_backend_work(engine, seg, ("CLUSTER", "CREATE INDEX"))
-    correlation = id_order_correlation(seg, engine)
-    clustered = False
-    if correlation is None or correlation < skip_above:
-        update_job_status(
-            ctx.job_id, {"status": "processing", "phase": "Clustering Segmentation Table by id"}
-        )
-        ctx.wait_turn()
-        clustered = cluster_table_by_id(seg, engine)
+    clustered, correlation = _cluster_unless_in_id_order(ctx, engine, seg, "Segmentation Table")
     seg_model = pb.segmentation_model(names["annotation"], meta, _pcg_table_name(ctx))
     commands = pb.index_commands(engine, seg, seg_model)
     _run_index_commands(ctx, engine, seg, commands, "Segmentation Table")
