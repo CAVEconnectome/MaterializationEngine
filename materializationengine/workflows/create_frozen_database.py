@@ -21,6 +21,7 @@ from emannotationschemas.models import (
     make_flat_model,
     make_reference_annotation_model,
 )
+from materializationengine.upload_state.clone_gate import clone_gate
 from materializationengine.blueprints.materialize.api import get_datastack_info
 from materializationengine.celery_init import celery
 from materializationengine.database import (
@@ -346,12 +347,15 @@ def create_analysis_database(self, datastack_info: dict, analysis_version: int) 
             AND pid <> pg_backend_pid()
             """
 
-            connection.execute(drop_connections)
+            # an upload building its tables in the live database stops working there
+            # (and closes its connections) for the copy; see upload_state/clone_gate.py
+            with clone_gate(aligned_volume):
+                connection.execute(drop_connections)
 
-            connection.execute(
-                f"""CREATE DATABASE {analysis_sql_uri.database} 
-                    WITH TEMPLATE {aligned_volume}"""
-            )
+                connection.execute(
+                    f"""CREATE DATABASE {analysis_sql_uri.database} 
+                        WITH TEMPLATE {aligned_volume}"""
+                )
             # lets reconnect
             try:
                 connection = engine.connect()

@@ -63,12 +63,32 @@ def start_ray_upload(
     Returns the start endpoint's (JSON, status code). Everything the driver needs, and
     every value that must stay the same across its attempts, goes in params now.
     """
+    from materializationengine.blueprints.upload import production_build as pb
+    from materializationengine.database import db_manager
+
     config = current_app.config
     engine = db.get_engine()
     now = _utcnow()
     table_name = file_metadata["metadata"]["table_name"]
     datastack_name = datastack_info.get("datastack", "unknown")
-    staging_database = config.get("STAGING_DATABASE_NAME")
+    # The tables are built in the production database under temporary names and
+    # published by renaming them (production_build.py); there is no staging copy.
+    aligned_volume = datastack_info["aligned_volume"]["name"]
+    pcg_table_name = datastack_info["segmentation_source"].split("/")[-1]
+    build_tables = pb.build_names(job_id, table_name, pcg_table_name)
+    table_meta = pb.table_metadata_from_file(file_metadata)
+    too_long = pb.names_too_long(build_tables, table_meta, pcg_table_name)
+    if too_long:
+        return {
+            "status": "error",
+            "message": f"Table name {table_name!r} is too long: Postgres would truncate {too_long}",
+        }, 400
+    taken = pb.names_in_use(db_manager.get_engine(aligned_volume), build_tables)
+    if taken:
+        return {
+            "status": "error",
+            "message": f"{taken} already exist in {aligned_volume}; choose another table name",
+        }, 409
     params = {
         "file_path": file_path,
         "file_metadata": file_metadata,
@@ -80,6 +100,9 @@ def start_ray_upload(
         "created_ts": now.isoformat(),
         # root ids are looked up as of this moment, on every attempt
         "materialization_time_stamp": now.replace(tzinfo=None).isoformat(),
+        "build_in_production": True,
+        "build_tables": build_tables,
+        "table_meta": table_meta,
     }
     try:
         store.create_job(
@@ -88,14 +111,14 @@ def start_ray_upload(
             user_id=user_id,
             datastack_name=datastack_name,
             table_name=table_name,
-            staging_database=staging_database,
+            staging_database=aligned_volume,
             record={
                 "status": "pending",
                 "phase": QUEUED_PHASE,
                 "progress": 0,
                 "user_id": user_id,
                 "datastack_name": datastack_name,
-                "staging_table_name": table_name,
+                "staging_table_name": build_tables["annotation"],
             },
             params=params,
         )
