@@ -1465,8 +1465,11 @@ def spatial_lookup_point_columns(mat_info: dict):
     A column is looked up when the segmentation table has a matching
     <name>_supervoxel_id column (pre_pt_position -> pre_pt_supervoxel_id).
     """
-    db = dynamic_annotation_cache.get_db(mat_info["database"])
-    mat_info["schema"] = db.database.get_table_schema(mat_info["annotation_table_name"])
+    if not mat_info.get("schema"):
+        # a Ray upload's table being built in production has no metadata row, and
+        # get_materialization_info already put its schema here
+        db = dynamic_annotation_cache.get_db(mat_info["database"])
+        mat_info["schema"] = db.database.get_table_schema(mat_info["annotation_table_name"])
     AnnotationModel = create_annotation_model(mat_info)
     SegmentationModel = create_segmentation_model(mat_info)
 

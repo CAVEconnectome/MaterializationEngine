@@ -31,6 +31,7 @@ class ChunkingStrategy:
         database,
         base_chunk_size=1024,
         target_rows_per_chunk=DEFAULT_TARGET_ROWS_PER_CHUNK,
+        schema=None,
     ):
         """
         Initialize a chunking strategy.
@@ -41,12 +42,15 @@ class ChunkingStrategy:
             database: Database name
             base_chunk_size: Smallest chunk size in spatial units
             target_rows_per_chunk: Rows per chunk the grid strategy sizes its chunks for
+            schema: The table's schema type; looked up from its metadata row when None
+                (a Ray upload's table being built in production has no row yet)
         """
         self.engine = engine
         self.table_name = table_name
         self.database = database
         self.base_chunk_size = base_chunk_size
         self.target_rows_per_chunk = target_rows_per_chunk
+        self.schema = schema
         self.min_coords = None
         self.max_coords = None
         self.estimated_rows = None
@@ -56,6 +60,12 @@ class ChunkingStrategy:
         self.data_chunk_bounds_list = None
         self._chunk_info = None
         self._chunk_generator = None
+
+    def _schema_type(self, table_name: str, database: str) -> str:
+        if self.schema is not None:
+            return self.schema
+        db = dynamic_annotation_cache.get_db(database)
+        return db.database.get_table_schema(table_name)
 
     def determine_bounds(self):
         """
@@ -88,8 +98,7 @@ class ChunkingStrategy:
         celery_logger.info(f"Getting bounding box for table {table_name}")
 
         try:
-            db = dynamic_annotation_cache.get_db(aligned_volume)
-            schema = db.database.get_table_schema(table_name)
+            schema = self._schema_type(table_name, aligned_volume)
             mat_metadata = {
                 "annotation_table_name": table_name,
                 "schema": schema,
@@ -368,8 +377,7 @@ class ChunkingStrategy:
             tuple: (chunk_generator_function, chunk_count) or None if failed
         """
         try:
-            db = dynamic_annotation_cache.get_db(self.database)
-            schema = db.database.get_table_schema(self.table_name)
+            schema = self._schema_type(self.table_name, self.database)
             mat_metadata = {
                 "annotation_table_name": self.table_name,
                 "schema": schema,

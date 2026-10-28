@@ -12,6 +12,7 @@ import uuid
 from unittest import mock
 
 import pytest
+import numpy as np
 import sqlalchemy as sa
 from dynamicannotationdb import DynamicAnnotationInterface
 from flask import Flask
@@ -411,6 +412,14 @@ class TestProductionStages:
             info = spatial["mat_metadata"]
             assert (spatial["database_name"], info["annotation_table_name"]) == ("prod", names["annotation"])
             assert info["segmentation_table_name"] == names["segmentation"]
+            # the bounds and a chunk's points come from the table, not a metadata row
+            assert spatial["total_chunks"] > 0
+            lo, hi = spatial["min_enclosing_bbox"]
+            assert lo != hi
+            from materializationengine.workflows.spatial_lookup import get_pts_from_bbox
+
+            pts = get_pts_from_bbox("prod", np.array(lo), np.array(hi) + 1, dict(info))
+            assert pts is not None and len(pts) >= 500
             # the chunks, written out of id order
             with prod.begin() as conn:
                 conn.execute(sa.text(
