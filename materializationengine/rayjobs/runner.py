@@ -115,6 +115,8 @@ def run_bounded(
     should_stop: Optional[Callable[[], bool]] = None,
     on_tick: Optional[Callable[[], None]] = None,
     poll_seconds: float = 2.0,
+    should_pause: Optional[Callable[[], bool]] = None,
+    on_paused: Optional[Callable[[], None]] = None,
 ) -> None:
     """Run task over items, (key, args) pairs, with at most max_in_flight at a time.
 
@@ -123,6 +125,9 @@ def run_bounded(
     should_stop is checked between waits; when it says so the calls in flight are
     cancelled and Stopped is raised. on_tick runs after every wait (for flushing
     progress). Items are consumed lazily, so a long range costs nothing up front.
+
+    While should_pause says so, nothing new is submitted; once the calls in flight have
+    finished, on_paused runs (it returns when the work may go on).
     """
     items = iter(items)
     retry = collections.deque()
@@ -132,7 +137,8 @@ def run_bounded(
         while True:
             if should_stop is not None and should_stop():
                 raise Stopped()
-            while len(pending) < max_in_flight:
+            pausing = should_pause is not None and should_pause()
+            while not pausing and len(pending) < max_in_flight:
                 if retry:
                     key, args = retry.popleft()
                 elif not exhausted:
@@ -145,6 +151,10 @@ def run_bounded(
                     break
                 pending[runner.submit(task, *args)] = (key, args)
             if not pending:
+                if pausing:
+                    if on_paused is not None:
+                        on_paused()
+                    continue
                 break
             for handle in runner.wait(list(pending), timeout=poll_seconds):
                 key, args = pending.pop(handle)

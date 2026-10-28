@@ -61,10 +61,19 @@ def call(app, view, *args, json_body=None, user=1174):
         return json.loads(response.get_data()), code
 
 
-def start(app, **submit):
+DATASTACK_INFO = {
+    "datastack": DATASTACK,
+    "aligned_volume": {"name": "minnie65_phase3"},
+    "segmentation_source": "graphene://https://example/segmentation/table/minnie3_v1",
+}
+
+
+def start(app, taken=(), **submit):
     with mock.patch.object(api, "UploadRequestSchema") as schema, \
-            mock.patch.object(api, "get_datastack_info", return_value={"datastack": DATASTACK}), \
+            mock.patch.object(api, "get_datastack_info", return_value=DATASTACK_INFO), \
             mock.patch.object(submitter, "submit_rayjob", return_value="upload-synapses-test-x1", **submit) as submit_mock, \
+            mock.patch("materializationengine.blueprints.upload.production_build.names_in_use", return_value=list(taken)), \
+            mock.patch("materializationengine.database.db_manager.get_engine"), \
             mock.patch.object(api, "process_and_upload") as celery:
         schema.return_value.load.return_value = json.loads(json.dumps(FILE_METADATA))
         body, code = call(app, api.start_csv_processing, json_body=FILE_METADATA)
@@ -90,6 +99,22 @@ class TestStart:
         assert submit_mock.call_args.kwargs["metadata"] == {
             "materialize-workload": "bulk-upload", "upload-job": body["job_id"],
         }
+
+    def test_the_tables_are_built_in_production_under_temporary_names(self, ray_on, app):
+        body, code, _ = start(app)
+        job = store.get_job(ray_on, body["job_id"])
+        names = job["params"]["build_tables"]
+        assert job["params"]["build_in_production"] is True
+        assert names["final_annotation"] == "synapses_test"
+        assert names["annotation"].startswith("upl") and names["annotation"].endswith("_synapses_test")
+        assert names["segmentation"] == names["annotation"] + "__minnie3_v1"
+        assert job["staging_database"] == "minnie65_phase3"
+        assert job["params"]["table_meta"]["schema_type"] == FILE_METADATA["metadata"]["schema_type"]
+
+    def test_a_table_name_taken_in_production_is_refused(self, ray_on, app):
+        body, code, submit_mock = start(app, taken=["synapses_test"])
+        assert code == 409 and "synapses_test" in body["message"]
+        submit_mock.assert_not_called()
 
     def test_a_second_upload_into_the_same_table_is_refused(self, ray_on, app):
         start(app)

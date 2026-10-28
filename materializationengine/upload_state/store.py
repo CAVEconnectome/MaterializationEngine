@@ -163,7 +163,8 @@ def list_jobs(engine, window_hours: float = 24) -> List[dict]:
 
 
 # Stages a cancel can no longer stop: the transfer replaces the production table.
-UNCANCELLABLE_STAGES = ("transfer", "cleanup")
+# once one of these has been entered production is being changed; see bulk_upload.UNCANCELLABLE_FROM
+UNCANCELLABLE_STAGES = ("transfer", "publish", "cleanup")
 
 
 def request_cancel(
@@ -679,3 +680,74 @@ def jobs_needing_staging_cleanup(engine, grace_hours: float = 48) -> List[dict]:
 
 
 __all__ = [n for n in dir() if not n.startswith("_")] + ["models"]
+
+
+# --- frozen materialization and uploads in the production database ----------------
+
+
+def request_clone(engine, aligned_volume: str, requested_by: Optional[str] = None) -> int:
+    with engine.begin() as conn:
+        return conn.execute(
+            models.clone_requests.insert()
+            .values(aligned_volume=aligned_volume, requested_by=requested_by)
+            .returning(models.clone_requests.c.request_id)
+        ).scalar()
+
+
+def release_clone(engine, request_id: int) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            models.clone_requests.update()
+            .where(models.clone_requests.c.request_id == request_id)
+            .values(released_at=_utcnow())
+        )
+
+
+def clone_requested(engine, aligned_volume: str, max_age_seconds: float = 6 * 3600) -> bool:
+    """Whether a frozen materialization of aligned_volume is waiting or running. A
+    request older than max_age_seconds is from a worker that died before releasing it."""
+    with engine.connect() as conn:
+        return bool(
+            conn.execute(
+                text(
+                    "SELECT 1 FROM clone_requests WHERE aligned_volume = :v"
+                    " AND released_at IS NULL"
+                    " AND requested_at > now() - make_interval(secs => :age) LIMIT 1"
+                ),
+                {"v": aligned_volume, "age": max_age_seconds},
+            ).first()
+        )
+
+
+def set_holding(engine, job_id: str, aligned_volume: str, holding: bool) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            insert(models.production_holds)
+            .values(job_id=job_id, aligned_volume=aligned_volume, holding=holding)
+            .on_conflict_do_update(
+                index_elements=["job_id"],
+                set_={"holding": holding, "aligned_volume": aligned_volume, "updated_at": _utcnow()},
+            )
+        )
+
+
+def jobs_holding_production(engine, aligned_volume: str) -> List[str]:
+    """Running uploads whose live driver may have work running in aligned_volume. A
+    driver that stopped heartbeating holds nothing: its connections are gone or will
+    be terminated with the rest."""
+    with engine.connect() as conn:
+        return [
+            row[0]
+            for row in conn.execute(
+                text(
+                    """
+                    SELECT h.job_id FROM production_holds h
+                      JOIN upload_jobs j USING (job_id)
+                     WHERE h.aligned_volume = :v AND h.holding
+                       AND j.status IN :active
+                       AND j.driver_heartbeat_at > now() - make_interval(secs => :stale)
+                    """
+                ),
+                {"v": aligned_volume, "active": tuple(ACTIVE_STATUSES), "stale": LEASE_STALE_SECONDS},
+            )
+        ]

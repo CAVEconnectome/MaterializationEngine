@@ -3,8 +3,9 @@
 Each task is the body of the matching celery task, run in a Flask app that has only
 the configuration (create_worker_app): no blueprints, and none of create_app's startup
 work (CORS on the upload bucket, staging database setup, the admin views), which every
-one of dozens of workers would otherwise repeat. Workers reach only the staging
-database, through their own cloud-sql-proxy, and never touch redis: the driver owns
+one of dozens of workers would otherwise repeat. Workers reach the database the upload
+builds in (production, or staging for jobs from before), through their own
+cloud-sql-proxy, and never touch redis: the driver owns
 the job's state, so cancellation is checked there, not here.
 """
 
@@ -59,9 +60,17 @@ def parquet_part(kwargs: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def spatial_chunk(database: str, mat_metadata: dict, min_corner, max_corner, sub_batch_size: int) -> Dict[str, int]:
+    from materializationengine.database import db_manager
     from materializationengine.workflows.spatial_lookup import process_chunk_points
 
-    return process_chunk_points(database, mat_metadata, min_corner, max_corner, sub_batch_size)
+    try:
+        return process_chunk_points(database, mat_metadata, min_corner, max_corner, sub_batch_size)
+    finally:
+        # An upload building in the production database must be able to leave it with no
+        # connection open while a frozen version is copied (see upload_state/clone_gate),
+        # and an idle worker's pool would keep some. A chunk takes seconds (~10 s each on
+        # the 337M-row minnie upload), so connecting per chunk costs little.
+        db_manager.cleanup()
 
 
 TASKS = {

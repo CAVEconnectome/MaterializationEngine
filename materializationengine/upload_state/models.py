@@ -216,3 +216,39 @@ Index(
     upload_spatial_chunks.c.status,
     postgresql_where=upload_spatial_chunks.c.status != "COMPLETED",
 )
+
+# Frozen materialization and uploads built in the production database. A frozen
+# version is a CREATE DATABASE ... WITH TEMPLATE copy of the live (aligned volume)
+# database, which first terminates every connection to it and needs none to remain.
+# create_analysis_database records its request here and waits until no upload
+# building in that database holds it; such an upload stops starting work there while
+# a request is open, lets what is running finish, closes its connections and clears
+# its hold. Both tables are new tables only (create_all adds them), so the schema
+# version stays 1 and pods running older code are unaffected.
+clone_requests = Table(
+    "clone_requests",
+    metadata,
+    Column("request_id", BigInteger, primary_key=True, autoincrement=True),
+    Column("aligned_volume", Text, nullable=False),
+    Column("requested_by", Text),
+    _now_column("requested_at"),
+    Column("released_at", DateTime(timezone=True)),
+)
+Index(
+    "ix_clone_requests_open",
+    clone_requests.c.aligned_volume,
+    postgresql_where=clone_requests.c.released_at.is_(None),
+)
+
+# One row per upload building in a production database: whether its driver may have
+# work running there right now.
+production_holds = Table(
+    "production_holds",
+    metadata,
+    Column(
+        "job_id", Text, ForeignKey("upload_jobs.job_id", ondelete="CASCADE"), primary_key=True
+    ),
+    Column("aligned_volume", Text, nullable=False),
+    Column("holding", Boolean, nullable=False),
+    _now_column("updated_at"),
+)

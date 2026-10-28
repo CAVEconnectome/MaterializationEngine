@@ -125,6 +125,7 @@ def get_materialization_info(
     table_name: str = None,
     skip_row_count: bool = False,
     database: str = None,
+    annotation_metadata: dict = None,
 ) -> List[dict]:
     """Initialize materialization by an aligned volume name. Iterates through all
     tables in a aligned volume database and gathers metadata for each table. The list
@@ -139,6 +140,11 @@ def get_materialization_info(
         table_name (str, optional): Table name to materialize. Defaults to None.
         skip_row_count (bool, optional): Skip row count. Defaults to False.
         database (str, optional): Database name. Defaults to None.
+        annotation_metadata (dict, optional): The metadata of table_name (schema_type,
+            reference_table, voxel_resolution_x/y/z), for a table that has no metadata
+            row: an upload building its tables in the production database registers
+            them only when it publishes them. Its segmentation table is taken not to
+            exist yet.
 
     Returns:
         List[dict]: List of materialization metadata for each table
@@ -156,16 +162,28 @@ def get_materialization_info(
     else:
         db = dynamic_annotation_cache.get_db(database)
 
-    annotation_tables = db.database.get_valid_table_names()
-    if table_name is not None:
-        annotation_tables = [next(a for a in annotation_tables if a == table_name)]
+    if annotation_metadata is not None:
+        if table_name is None:
+            raise ValueError("annotation_metadata needs table_name")
+        annotation_tables = [table_name]
+    else:
+        annotation_tables = db.database.get_valid_table_names()
+        if table_name is not None:
+            annotation_tables = [next(a for a in annotation_tables if a == table_name)]
     
     schema = MaterializationInfoSchema()
     metadata = []
     
     celery_logger.debug(f"Annotation tables: {annotation_tables}")
     for annotation_table in annotation_tables:
-        max_id = db.database.get_max_id_value(annotation_table)
+        if annotation_metadata is not None:
+            # not in the metadata, so not a model dynamicannotationdb can load
+            with db.database.engine.connect() as conn:
+                max_id = conn.execute(
+                    text(f'SELECT max(id) FROM "{annotation_table}"')
+                ).scalar()
+        else:
+            max_id = db.database.get_max_id_value(annotation_table)
         try:
             max_id = int(max_id)
         except TypeError:
@@ -205,7 +223,10 @@ def get_materialization_info(
                 continue
         
         # Get table metadata
-        md = db.database.get_table_metadata(annotation_table)
+        if annotation_metadata is not None:
+            md = annotation_metadata
+        else:
+            md = db.database.get_table_metadata(annotation_table)
         vx = md.get("voxel_resolution_x", None)
         vy = md.get("voxel_resolution_y", None)
         vz = md.get("voxel_resolution_z", None)
@@ -215,7 +236,10 @@ def get_materialization_info(
         voxel_resolution = [vx, vy, vz]
 
         reference_table = md.get("reference_table")
-        schema_name = db.database.get_table_schema(annotation_table)
+        if annotation_metadata is not None:
+            schema_name = annotation_metadata["schema_type"]
+        else:
+            schema_name = db.database.get_table_schema(annotation_table)
         
         if max_id:
             table_metadata.update({
@@ -232,8 +256,12 @@ def get_materialization_info(
                     annotation_table, pcg_table_name
                 )
 
-                segmentation_metadata = db.segmentation.get_segmentation_table_metadata(
-                    annotation_table, pcg_table_name
+                segmentation_metadata = (
+                    None
+                    if annotation_metadata is not None
+                    else db.segmentation.get_segmentation_table_metadata(
+                        annotation_table, pcg_table_name
+                    )
                 )
                 
                 if segmentation_metadata:
