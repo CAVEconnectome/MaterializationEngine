@@ -394,57 +394,59 @@ def update_parts(engine, job_id: str, updates: Iterable[dict]) -> None:
             )
 
 
-# --- the Cloud SQL import -----------------------------------------------------------
+# --- Cloud SQL imports and exports -----------------------------------------------------------
 
 
-def get_import(engine, job_id: str) -> Optional[dict]:
+def _op(job_id: str, kind: str):
+    return (upload_cloudsql_ops.c.job_id == job_id) & (upload_cloudsql_ops.c.kind == kind)
+
+
+def get_import(engine, job_id: str, kind: str = "import") -> Optional[dict]:
+    """The job's Cloud SQL operation of this kind: "import" (into staging) or one of
+    the transfer's exports and imports."""
     with engine.connect() as conn:
-        row = conn.execute(
-            upload_cloudsql_ops.select().where(
-                (upload_cloudsql_ops.c.job_id == job_id) & (upload_cloudsql_ops.c.kind == "import")
-            )
-        ).first()
+        row = conn.execute(upload_cloudsql_ops.select().where(_op(job_id, kind))).first()
     return dict(row) if row else None
 
 
-def record_import_intent(engine, job_id: str, uri: str, database: str, table: str) -> dict:
-    """Note the import before it is requested; returns the (possibly existing) row."""
+def record_import_intent(
+    engine, job_id: str, uri: str, database: str, table: str, kind: str = "import"
+) -> dict:
+    """Note the operation before it is requested; returns the (possibly existing) row."""
     with engine.begin() as conn:
         conn.execute(
             insert(upload_cloudsql_ops)
-            .values(job_id=job_id, kind="import", uri=uri, database=database,
+            .values(job_id=job_id, kind=kind, uri=uri, database=database,
                     target_table=table, status="requested")
             .on_conflict_do_nothing()
         )
-    return get_import(engine, job_id)
+    return get_import(engine, job_id, kind)
 
 
-def set_import_operation(engine, job_id: str, operation_name: str) -> None:
+def set_import_operation(engine, job_id: str, operation_name: str, kind: str = "import") -> None:
     with engine.begin() as conn:
         conn.execute(
             upload_cloudsql_ops.update()
-            .where((upload_cloudsql_ops.c.job_id == job_id) & (upload_cloudsql_ops.c.kind == "import"))
+            .where(_op(job_id, kind))
             .values(operation_name=operation_name, status="running")
         )
 
 
-def finish_import(engine, job_id: str, status: str, error: Optional[str] = None) -> None:
+def finish_import(
+    engine, job_id: str, status: str, error: Optional[str] = None, kind: str = "import"
+) -> None:
     with engine.begin() as conn:
         conn.execute(
             upload_cloudsql_ops.update()
-            .where((upload_cloudsql_ops.c.job_id == job_id) & (upload_cloudsql_ops.c.kind == "import"))
+            .where(_op(job_id, kind))
             .values(status=status, error=error, finished_at=_utcnow())
         )
 
 
-def reset_import(engine, job_id: str) -> None:
-    """Forget a requested import that never started, before requesting it again."""
+def reset_import(engine, job_id: str, kind: str = "import") -> None:
+    """Forget a requested operation that never started, before requesting it again."""
     with engine.begin() as conn:
-        conn.execute(
-            upload_cloudsql_ops.delete().where(
-                (upload_cloudsql_ops.c.job_id == job_id) & (upload_cloudsql_ops.c.kind == "import")
-            )
-        )
+        conn.execute(upload_cloudsql_ops.delete().where(_op(job_id, kind)))
 
 
 # --- spatial lookup -----------------------------------------------------------------

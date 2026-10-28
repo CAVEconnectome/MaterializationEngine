@@ -10,7 +10,7 @@ instead of going through gcloud or google-auth's AuthorizedSession.
 
 import logging
 import time
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import google.auth
 import google.auth.transport.requests
@@ -139,15 +139,21 @@ def import_csv(
     user: str = "postgres",
     timeout: float = 21600,
     on_started=None,
+    columns: Optional[List[str]] = None,
 ) -> dict:
     """Import a CSV from GCS into a table and wait for it to finish
     (equivalent of `gcloud sql import csv`).
 
     An 80 GB processed CSV (337M synapses) took 28.5 min to import on minnie, so the
-    default wait is 6 h; Cloud SQL runs one import at a time per instance.
+    default wait is 6 h; Cloud SQL runs one import at a time per instance. columns
+    names the table columns the CSV's fields go into, in order (default: all of them,
+    in the table's order).
     """
     session, default_project = _session_and_default_project()
     project, instance = resolve_instance(instance_name, default_project)
+    csv_options = {"table": table}
+    if columns:
+        csv_options["columns"] = list(columns)
     body = {
         "importContext": {
             "kind": "sql#importContext",
@@ -155,7 +161,7 @@ def import_csv(
             "uri": uri,
             "database": database,
             "importUser": user,
-            "csvImportOptions": {"table": table},
+            "csvImportOptions": csv_options,
         }
     }
     operation = _post_operation(
@@ -180,11 +186,27 @@ def wait_for_operation_name(instance_name: str, operation_name: str, timeout: fl
     )
 
 
-def find_import_operation(instance_name: str, uri: str, max_pages: int = 5) -> Optional[dict]:
+def find_import_operation(
+    instance_name: str, uri: str, max_pages: int = 5, database: Optional[str] = None
+) -> Optional[dict]:
     """The instance's recent import of uri that is running or succeeded, if any.
 
     For a caller that requested an import and died before recording its operation.
+    With database, only an import into that database counts (one CSV can be imported
+    into staging and then into production).
     """
+    return find_operation(instance_name, "IMPORT", uri, max_pages=max_pages, database=database)
+
+
+def find_operation(
+    instance_name: str,
+    operation_type: str,
+    uri: str,
+    max_pages: int = 5,
+    database: Optional[str] = None,
+) -> Optional[dict]:
+    """The instance's recent IMPORT or EXPORT of uri that is running or succeeded."""
+    context_key = "importContext" if operation_type == "IMPORT" else "exportContext"
     session, default_project = _session_and_default_project()
     project, instance = resolve_instance(instance_name, default_project)
     url = f"{SQLADMIN_ROOT}/projects/{project}/operations"
@@ -197,10 +219,15 @@ def find_import_operation(instance_name: str, uri: str, max_pages: int = 5) -> O
             )
         page = response.json()
         for operation in page.get("items", []):
-            if operation.get("operationType") != "IMPORT":
+            if operation.get("operationType") != operation_type:
                 continue
-            if (operation.get("importContext") or {}).get("uri") != uri:
+            context = operation.get(context_key) or {}
+            if context.get("uri") != uri:
                 continue
+            if database is not None:
+                databases = context.get("databases") or [context.get("database")]
+                if database not in databases:
+                    continue
             failed = operation.get("status") == "DONE" and (operation.get("error") or {}).get("errors")
             if not failed:
                 return operation
@@ -217,11 +244,13 @@ def export_csv(
     select_query: str,
     wait: bool = True,
     timeout: float = 1200,
+    on_started=None,
+    busy_timeout: float = 0,
 ) -> dict:
     """Export a query's results as CSV to GCS (equivalent of `gcloud sql export csv`).
 
     A uri ending in .gz is gzip-compressed by Cloud SQL. With wait=False the operation
-    is only started, like `--async`.
+    is only started, like `--async`. busy_timeout and on_started are as for import_csv.
     """
     session, default_project = _session_and_default_project()
     project, instance = resolve_instance(instance_name, default_project)
@@ -235,8 +264,14 @@ def export_csv(
         }
     }
     operation = _post_operation(
-        session, f"{SQLADMIN_ROOT}/projects/{project}/instances/{instance}/export", body
+        session,
+        f"{SQLADMIN_ROOT}/projects/{project}/instances/{instance}/export",
+        body,
+        busy_timeout=busy_timeout,
     )
+    logger.info(f"Cloud SQL export {operation.get('name')} started: {database} -> {uri}")
+    if on_started is not None:
+        on_started(operation.get("name"))
     if not wait:
         return operation
     return wait_for_operation(session, project, operation, timeout=timeout)

@@ -112,14 +112,15 @@ upload_stages = Table(
     PrimaryKeyConstraint("job_id", "stage"),
 )
 
-# The Cloud SQL import. The row is written before the import is requested, so a driver
-# that dies between the request and recording its operation name can find the
-# operation again instead of starting a second import.
+# The Cloud SQL import into staging ("import"), and the transfer's exports and imports
+# ("transfer_export:<table>", "transfer_import:<table>"). The row is written before the
+# operation is requested, so a driver that dies between the request and recording its
+# operation name can find the operation again instead of starting a second one.
 upload_cloudsql_ops = Table(
     "upload_cloudsql_ops",
     metadata,
     _job_fk(),
-    Column("kind", Text, nullable=False),  # import
+    Column("kind", Text, nullable=False),
     Column("uri", Text, nullable=False),
     Column("database", Text, nullable=False),
     Column("target_table", Text, nullable=False),

@@ -21,10 +21,13 @@ spatial_init       materialization info at the frozen time      the stored param
 spatial_chunks     one worker task per spatial chunk            completed chunks are
                                                                 never run again
 spatial_finalize   mark the lookup complete                     idempotent
-cluster            CLUSTER both staging tables by id            waits for an orphaned
-                                                                CLUSTER first
-transfer           pg_dump | psql into production               truncates first, as now
-cleanup            drop staging, delete the processed CSV,      idempotent
+cluster            CLUSTER both staging tables by id, unless    waits for an orphaned
+                   one is in id order already                   CLUSTER first
+transfer           Cloud SQL import into production (from the   waits on, or skips, the
+                   processed CSV; the segmentation table        recorded exports and
+                   exported from staging first)                 imports
+cleanup            drop staging, delete the processed and       idempotent
+                   exported CSVs,
                    mark the job done
 =================  ===========================================  =========================
 
@@ -623,9 +626,17 @@ def stage_cluster(ctx: Context) -> dict:
 
 
 def stage_transfer(ctx: Context) -> dict:
+    """Through GCS, with Cloud SQL exports and imports: the annotation table from the
+    processed CSV it was imported from, the segmentation table exported from staging."""
     from materializationengine.blueprints.upload.tasks import transfer_to_production
 
-    return transfer_to_production.run(_monitor_result(ctx), transfer_segmentation=True)
+    monitor_result = _monitor_result(ctx)
+    output_path = (ctx.results.get("process_source") or {}).get("output_path")
+    if output_path:
+        monitor_result["annotation_csv_uri"] = f"gs://{output_path}"
+    return transfer_to_production.run(
+        monitor_result, transfer_segmentation=True, method="cloudsql"
+    )
 
 
 def stage_cleanup(ctx: Context) -> dict:
@@ -634,12 +645,19 @@ def stage_cleanup(ctx: Context) -> dict:
 
     dropped = _discard_staging(ctx.table_name, ctx.job_id, "completed")
     output_path = (ctx.results.get("process_source") or {}).get("output_path") or ""
-    bucket, _, blob = output_path.partition("/")
-    if bucket and blob:
+    exported = [
+        uri[len("gs://"):]
+        for uri in (ctx.results.get("transfer") or {}).get("exported_csvs") or []
+    ]
+    # the processed CSV, and the CSVs the transfer exported staging tables to
+    for path in ([output_path] if output_path else []) + exported:
+        bucket, _, blob = path.partition("/")
+        if not (bucket and blob):
+            continue
         try:
             GCSCsvProcessor(bucket).delete_blobs([blob])
         except Exception as e:
-            logger.warning(f"could not delete the processed CSV gs://{output_path}: {e}")
+            logger.warning(f"could not delete gs://{path}: {e}")
     update_job_status(ctx.job_id, {"status": "done", "phase": "Transfer Complete", "progress": 100})
     return {"staging": dropped.get("status")}
 
