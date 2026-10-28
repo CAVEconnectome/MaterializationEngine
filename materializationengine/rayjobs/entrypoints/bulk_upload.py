@@ -501,7 +501,11 @@ def stage_spatial_init(ctx: Context) -> dict:
         target_rows_per_chunk=int(
             get_config_param("SPATIAL_LOOKUP_TARGET_ROWS_PER_CHUNK", DEFAULT_TARGET_ROWS_PER_CHUNK)
         ),
+        schema=info["schema"],
     )
+    if not chunking.determine_bounds():
+        # select_strategy would go on with one zero-volume chunk that finds nothing
+        raise PermanentUploadError(f"Could not find the spatial bounds of {table} in {database}")
     chunking.select_strategy()
     row = store.init_spatial(
         ctx.engine,
