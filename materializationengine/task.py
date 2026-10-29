@@ -24,6 +24,24 @@ def argument_signature(
     return key_prefix + task_hash
 
 
+def datastack_lock_id(task_name: str, datastack: str, key_prefix="LOCKED_WORKFLOW_TASK"):
+    """The lock of a DatastackLockedTask: one per task and datastack, whatever else
+    it was queued with. Keeps the LOCKED_WORKFLOW_TASK prefix that
+    inspect_locked_tasks lists and releases."""
+    return f"{key_prefix}:{task_name}:{datastack}"
+
+
+def datastack_of(args, kwargs):
+    """The datastack a workflow task was queued for: its Datastack kwarg, or the
+    datastack_info dict it takes first."""
+    kwargs = kwargs or {}
+    if kwargs.get("Datastack"):
+        return kwargs["Datastack"]
+    if args and isinstance(args[0], dict):
+        return args[0].get("datastack")
+    return None
+
+
 class LockedTask(Task):
     """A custom celery task that prevents tasks of the
     same type from running simultaneously. If an attempt to run a
@@ -91,7 +109,7 @@ class LockedTask(Task):
         args = args or []
         kwargs = kwargs or {}
         task_id = task_id or uuid()
-        lock_id = argument_signature(self.name, args, kwargs)
+        lock_id = self.lock_id(args, kwargs)
 
         run_args = dict(
             lock_id=lock_id,
@@ -130,9 +148,12 @@ class LockedTask(Task):
                 self.unlock(lock_id)
                 raise
 
+    def lock_id(self, args, kwargs) -> str:
+        """The Redis key this queue attempt locks: one per name and arguments."""
+        return argument_signature(self.name, args, kwargs)
+
     def release_lock(self, task_args: str = None, task_kwargs: dict = None):
-        lock_id = argument_signature(self.name, task_args, task_kwargs)
-        self.unlock(lock_id)
+        self.unlock(self.lock_id(task_args or [], task_kwargs or {}))
 
     def on_duplicate(self, task: str, lock_id: str, task_id: str):
         if self.raise_on_duplicate:
@@ -148,6 +169,24 @@ class LockedTask(Task):
 
     def on_success(self, retval, task_id, args, kwargs):
         self.release_lock(task_args=args, task_kwargs=kwargs)
+
+
+class DatastackLockedTask(LockedTask):
+    """A LockedTask with one lock per datastack instead of per argument set.
+
+    LockedTask hashes every argument, so the same workflow queued with a different
+    datastack_info (the admin endpoint adds lookup_all_root_ids) or other kwargs got a
+    lock of its own, and two updates of one live database ran at once. The task takes
+    datastack_info first, or a Datastack kwarg.
+    """
+
+    abstract = True
+
+    def lock_id(self, args, kwargs) -> str:
+        datastack = datastack_of(args, kwargs)
+        if not datastack:
+            return super().lock_id(args, kwargs)
+        return datastack_lock_id(self.name, datastack)
 
 
 # Lua: refresh TTL only if we still own the lease (avoids extending a lease that

@@ -12,7 +12,7 @@ from materializationengine.shared_tasks import (
     workflow_complete,
     fin,
 )
-from materializationengine.task import LockedTask
+from materializationengine.task import DatastackLockedTask
 from materializationengine.utils import get_config_param
 from materializationengine.workflows.ingest_new_annotations import (
     ingest_new_annotations_workflow,
@@ -54,7 +54,7 @@ def run_periodic_database_update(datastack: str = None) -> None:
 
 @celery.task(
     bind=True,
-    base=LockedTask,
+    base=DatastackLockedTask,
     timeout=int(60 * 60 * 24),  # Task locked for 1 day
     name="orchestration:update_database_workflow",
 )
