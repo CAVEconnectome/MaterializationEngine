@@ -70,7 +70,7 @@ from materializationengine.request_db import request_db_session
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from materializationengine.utils import check_read_permission
 
-__version__ = "5.34.0"
+__version__ = "5.34.1"
 
 
 authorizations = {
