@@ -6,7 +6,7 @@ import marshmallow as mm
 import pandas as pd
 import numpy as np
 from emannotationschemas import get_schema
-from emannotationschemas.models import make_model_from_schema
+from emannotationschemas.models import make_model_from_schema, split_annotation_schema
 from emannotationschemas.schemas.base import ReferenceAnnotation, SpatialPoint
 from geoalchemy2 import WKBElement
 from shapely.geometry import Point
@@ -57,6 +57,55 @@ def _parse_combined_xyz(value) -> Tuple[float, float, float]:
     return tuple(coords)
 
 
+SUPERVOXEL_SUFFIX = "_supervoxel_id"
+ROOT_SUFFIX = "_root_id"
+# Above this a float has lost integer precision: supervoxel and root ids (~8.6e16 to
+# ~8.6e17 on minnie) do not survive a trip through float64.
+_EXACT_FLOAT_LIMIT = 2**53
+
+
+def segmentation_columns(schema_type: str) -> Dict[str, Tuple[str, str]]:
+    """{point field: (supervoxel id column, root id column)} of the segmentation table,
+    for each bound spatial point of the schema (synapse: pre_pt and post_pt)."""
+    _, flat_segmentation = split_annotation_schema(get_schema(schema_type))
+    names = list(flat_segmentation._declared_fields)
+    return {
+        name[: -len(SUPERVOXEL_SUFFIX)]: (name, f"{name[: -len(SUPERVOXEL_SUFFIX)]}{ROOT_SUFFIX}")
+        for name in names
+        if name.endswith(SUPERVOXEL_SUFFIX)
+        and f"{name[: -len(SUPERVOXEL_SUFFIX)]}{ROOT_SUFFIX}" in names
+    }
+
+
+def exact_ids(series: pd.Series, column: str) -> np.ndarray:
+    """A column of supplied supervoxel or root ids as int64, with blanks as 0.
+
+    Strings are parsed exactly (the CSV reader keeps these columns as text, see
+    GCSCsvProcessor.text_columns); floats are refused once they are too large to hold
+    an id exactly, which is where a nullable integer column read as float64 ends up.
+    """
+    if pd.api.types.is_integer_dtype(series.dtype):
+        values = series.fillna(0).to_numpy(dtype=np.int64)
+    elif pd.api.types.is_float_dtype(series.dtype):
+        floats = series.fillna(0).to_numpy(dtype=float)
+        if np.any(np.abs(floats) >= _EXACT_FLOAT_LIMIT) or np.any(floats != np.floor(floats)):
+            raise ValueError(
+                f"Column {column} holds ids as floating point numbers, which cannot store "
+                f"them exactly; write it as integers"
+            )
+        values = floats.astype(np.int64)
+    else:
+        text = series.astype("string").str.strip().fillna("")
+        text = text.str.replace(r"\.0+$", "", regex=True).replace("", "0")
+        try:
+            values = np.array([int(v) for v in text], dtype=np.int64)
+        except (ValueError, OverflowError) as e:
+            raise ValueError(f"Column {column} has a value that is not an id: {e}") from None
+    if np.any(values < 0):
+        raise ValueError(f"Column {column} has negative ids")
+    return values
+
+
 class SchemaProcessor:
     """Processes CSV data according to schema types, handling spatial points and references"""
 
@@ -97,6 +146,25 @@ class SchemaProcessor:
             )
 
         self.spatial_points = self._get_spatial_point_fields()
+        # supervoxel and root ids the source already has, for the segmentation table
+        self.segmentation_columns = segmentation_columns(schema_type)
+        self.supplied_segmentation_columns = [
+            column
+            for sv_col, root_col in self.segmentation_columns.values()
+            for column in (sv_col, root_col)
+            if column in self.column_mapping
+        ]
+        # the point fields whose supervoxels the spatial lookup still has to find
+        self.lookup_fields = [
+            field
+            for field, (sv_col, _) in self.segmentation_columns.items()
+            if sv_col not in self.column_mapping
+        ]
+        self.segmentation_column_order = ["id"] + [
+            column
+            for sv_col, root_col in self.segmentation_columns.values()
+            for column in (sv_col, root_col)
+        ]
         self.required_spatial_points = self._get_required_fields()
         self.dropped_rows = 0  # cumulative count of rows dropped due to invalid/missing required fields
 
@@ -266,8 +334,32 @@ class SchemaProcessor:
             logger.debug(f"Error processing spatial point: {str(e)}")
             return None
 
-    def process_chunk(self, chunk: pd.DataFrame, timestamp: datetime) -> str:
+    @property
+    def writes_segmentation(self) -> bool:
+        """Whether the source supplies segmentation columns, written to their own CSV."""
+        return bool(self.supplied_segmentation_columns)
+
+    def source_text_columns(self) -> List[str]:
+        """The source columns to read as text, so that ids are not parsed as floats."""
+        return [self.column_mapping[c] for c in self.supplied_segmentation_columns]
+
+    def transform(self, timestamp: datetime):
+        """The chunk transform the CSV writers take: the processed annotation rows, and
+        the segmentation rows too when the source supplies segmentation columns."""
+        if self.writes_segmentation:
+            return lambda chunk: self.process_chunk_with_segmentation(chunk, timestamp)
+        return lambda chunk: self.process_chunk(chunk, timestamp)
+
+    def process_chunk(self, chunk: pd.DataFrame, timestamp: datetime) -> pd.DataFrame:
         """Process a chunk of data using vectorized operations"""
+        return self.process_chunk_with_segmentation(chunk, timestamp)[0]
+
+    def process_chunk_with_segmentation(
+        self, chunk: pd.DataFrame, timestamp: datetime
+    ) -> Tuple[pd.DataFrame, Optional[pd.DataFrame]]:
+        """The annotation rows of a chunk, and its segmentation rows (id and every
+        segmentation column, 0 where the source supplies none) when the source supplies
+        any segmentation column, else None. Both keep the same rows, in order."""
         self.validate_columns(chunk)
         chunk_size = len(chunk)
 
@@ -317,6 +409,19 @@ class SchemaProcessor:
                         processed_data[field_name] = chunk[csv_col]
 
         df = pd.DataFrame(processed_data)
+        segmentation = None
+        if self.writes_segmentation:
+            segmentation = pd.DataFrame(
+                {"id": df["id"].to_numpy(dtype=np.int64)}, index=df.index
+            )
+            for column in self.segmentation_column_order[1:]:
+                if column in self.supplied_segmentation_columns:
+                    csv_col = self.column_mapping[column]
+                    if csv_col not in chunk.columns:
+                        raise ValueError(f"Missing column {csv_col} for {column}")
+                    segmentation[column] = exact_ids(chunk[csv_col], csv_col)
+                else:
+                    segmentation[column] = np.zeros(chunk_size, dtype=np.int64)
 
         for col in self.column_order:
             if col not in df.columns:
@@ -339,5 +444,7 @@ class SchemaProcessor:
                 )
                 self.dropped_rows += n_dropped
                 df = df[~invalid_mask]
+                if segmentation is not None:
+                    segmentation = segmentation[~invalid_mask.to_numpy()]
 
-        return df[self.column_order]
+        return df[self.column_order], segmentation

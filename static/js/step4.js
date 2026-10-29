@@ -147,6 +147,10 @@ document.addEventListener("alpine:init", () => {
         read_permission: metadataFromStore.read_permission,
         ...(metadataFromStore.force_overwrite ? { force_overwrite: true } : {}),
       };
+      const rootIdsLookup = Alpine.store("metadata")?.rootIdsLookup();
+      if (rootIdsLookup) {
+        metadataPayload.root_ids_lookup = rootIdsLookup;
+      }
 
       if (!this.state.inputFile) {
         throw new Error(
@@ -185,6 +189,43 @@ document.addEventListener("alpine:init", () => {
         console.error("Error making preview link:", error);
         this.preview = { loading: false, url: null, error: error.message, summary: null };
       }
+    },
+
+    // The preview's check of the file's own supervoxel and root ids, as lines to show.
+    idCheckLines() {
+      const check = this.preview.summary?.id_check;
+      if (!check) return [];
+      if (check.error) return [{ text: `Could not check the ids: ${check.error}`, ok: false }];
+      const when = check.time_stamp
+        ? `at ${new Date(check.time_stamp).toLocaleString()}`
+        : "now";
+      const lines = [];
+      (check.fields || []).forEach((f) => {
+        if (f.error) {
+          lines.push({ text: `${f.field}: ${f.error}`, ok: false });
+          return;
+        }
+        if (f.supervoxels !== undefined) {
+          lines.push({
+            text: `${f.field}: ${f.supervoxels_with_root} of ${f.supervoxels} supervoxels have a root ${when}`,
+            ok: f.supervoxels_with_root === f.supervoxels,
+          });
+        }
+        if (f.roots_compared !== undefined) {
+          lines.push({
+            text: `${f.field}: ${f.roots_matching} of ${f.roots_compared} root ids are their supervoxel's root ${when}`,
+            ok: f.roots_matching === f.roots_compared,
+          });
+        }
+        if (f.roots !== undefined) {
+          // stale roots are expected; the upload looks them up again
+          lines.push({
+            text: `${f.field}: ${f.roots_current_now} of ${f.roots} root ids are still current (stale ones are looked up again)`,
+            ok: true,
+          });
+        }
+      });
+      return lines;
     },
 
     async startProcessing() {

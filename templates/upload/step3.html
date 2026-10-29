@@ -110,6 +110,45 @@
                         </div>
                     </div>
 
+                    <!-- When the file's root ids were looked up -->
+                    <div class="form-group mb-3" x-show="$store.metadata.state.hasSuppliedRootIds" x-cloak>
+                        <label class="form-label">When were the root ids in the file looked up?</label>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" id="rootIdsAt" value="at"
+                                x-model="$store.metadata.state.root_ids_lookup_mode">
+                            <label class="form-check-label" for="rootIdsAt">All at one time</label>
+                        </div>
+                        <input type="datetime-local" class="form-control mb-2 ms-4 w-auto"
+                            x-show="$store.metadata.state.root_ids_lookup_mode === 'at'"
+                            x-model="$store.metadata.state.root_ids_lookup_at">
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" id="rootIdsBetween" value="between"
+                                x-model="$store.metadata.state.root_ids_lookup_mode">
+                            <label class="form-check-label" for="rootIdsBetween">Sometime between two times</label>
+                        </div>
+                        <div class="d-flex gap-2 mb-2 ms-4"
+                            x-show="$store.metadata.state.root_ids_lookup_mode === 'between'">
+                            <input type="datetime-local" class="form-control w-auto"
+                                x-model="$store.metadata.state.root_ids_lookup_start">
+                            <span class="align-self-center">and</span>
+                            <input type="datetime-local" class="form-control w-auto"
+                                x-model="$store.metadata.state.root_ids_lookup_end">
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" id="rootIdsUnknown" value="unknown"
+                                x-model="$store.metadata.state.root_ids_lookup_mode">
+                            <label class="form-check-label" for="rootIdsUnknown">Not known</label>
+                        </div>
+                        <div class="text-danger small" x-show="$store.metadata.state.validationErrors.root_ids_lookup"
+                            x-text="$store.metadata.state.validationErrors.root_ids_lookup"></div>
+                        <small class="form-text text-muted d-block mt-1">
+                            Times are in your local time zone. Every root id is checked against the
+                            chunkedgraph as of the upload either way, and stale ones are looked up
+                            again; the time is kept with the upload and used to sample-check the file
+                            before it starts.
+                        </small>
+                    </div>
+
                     <!-- Permissions -->
                     <div class="row mb-3">
                         <div class="col">

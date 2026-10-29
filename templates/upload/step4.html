@@ -127,6 +127,13 @@
             shown in the datastack's
             <span x-text="$store.processor.preview.summary.viewer_resolution.join(', ')"></span> nm.
           </div>
+          <template x-if="$store.processor.preview.summary.id_check">
+            <ul class="small mt-2 mb-0 ps-3">
+              <template x-for="line in $store.processor.idCheckLines()" :key="line.text">
+                <li :class="line.ok ? 'text-success' : 'text-danger'" x-text="line.text"></li>
+              </template>
+            </ul>
+          </template>
         </div>
       </template>
       <div

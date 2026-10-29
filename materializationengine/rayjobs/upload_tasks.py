@@ -73,11 +73,23 @@ def spatial_chunk(database: str, mat_metadata: dict, min_corner, max_corner, sub
         db_manager.cleanup()
 
 
+def resolve_roots_chunk(database: str, info: dict, first_id: int, last_id: int, batch_size: int) -> Dict[str, int]:
+    from materializationengine.database import db_manager
+    from materializationengine.workflows.resolve_roots import resolve_id_range
+
+    try:
+        return resolve_id_range(database, info, first_id, last_id, batch_size)
+    finally:
+        # as spatial_chunk: no idle connections left in the production database
+        db_manager.cleanup()
+
+
 TASKS = {
     "count_csv_part": count_csv_part,
     "csv_part": csv_part,
     "parquet_part": parquet_part,
     "spatial_chunk": spatial_chunk,
+    "resolve_roots_chunk": resolve_roots_chunk,
 }
 
 # The celery task each part signature names, and the task here that runs its body.

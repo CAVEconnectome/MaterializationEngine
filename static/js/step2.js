@@ -49,6 +49,11 @@ document.addEventListener("alpine:init", () => {
           )
             ? this.state.validationErrors
             : [];
+          // rebuilt from the model, so a list saved by an older page gets the
+          // fields' current flags (optional, isSegmentation)
+          if (this.state.schemaModel) {
+            this.updateDisplayFields();
+          }
         } catch (e) {
           console.error("Error loading schemaStore from localStorage:", e);
           this.state.validationErrors = [];
@@ -147,12 +152,33 @@ document.addEventListener("alpine:init", () => {
               });
             });
           }
+          // ids the file may already have for this point: optional, and each one
+          // given saves a lookup (supervoxels: the spatial lookup; roots: all but the
+          // stale ones, which are checked and looked up again)
+          const point = fieldName.replace(/_position$/, "");
+          const segmentation = this.state.schemaModel?.segmentation_fields?.[point];
+          if (segmentation) {
+            [
+              [segmentation.supervoxel_id, "SUPERVOXEL ID"],
+              [segmentation.root_id, "ROOT ID"],
+            ].forEach(([name, type]) => {
+              fields.push({
+                name,
+                type,
+                isGeometry: false,
+                isSegmentation: true,
+                optional: true,
+                required: false,
+              });
+            });
+          }
         } else {
           fields.push({
             name: fieldName,
             type: field.type,
             isGeometry: false,
             required: field.required,
+            optional: fieldName === "id",
           });
         }
       });
@@ -239,7 +265,7 @@ document.addEventListener("alpine:init", () => {
 
       const unmappedRequiredFields = this.state.displayFields.filter(
         (field) => {
-          return field.name !== "id" && !this.state.columnMapping[field.name];
+          return !field.optional && !this.state.columnMapping[field.name];
         }
       );
 
@@ -278,6 +304,16 @@ document.addEventListener("alpine:init", () => {
         console.error("Error saving mapping:", error);
         return false;
       }
+    },
+
+    // root id columns are mapped: step 3 asks when they were looked up
+    hasSuppliedRootIds() {
+      return this.state.displayFields.some(
+        (field) =>
+          field.isSegmentation &&
+          field.type === "ROOT ID" &&
+          Boolean(this.state.columnMapping[field.name])
+      );
     },
 
     getUnmappedColumns() {

@@ -96,6 +96,9 @@ STAGE_ORDER = [
     "transfer",
     "cleanup",
 ]
+# The ids resolve_roots plans per chunk by default (UPLOAD_ROOT_CHUNK_ROWS): rows of
+# the id-ordered segmentation table, read with one primary key range scan each.
+DEFAULT_ROOT_CHUNK_ROWS = 100000
 # Cancelling is no longer possible from here on: the stage changes production.
 UNCANCELLABLE_FROM = {"production": "publish", "staging": "transfer"}
 
@@ -105,7 +108,20 @@ def builds_in_production(params: dict) -> bool:
 
 
 def stage_order(params: dict) -> List[str]:
-    return PRODUCTION_STAGE_ORDER if builds_in_production(params) else STAGE_ORDER
+    if not builds_in_production(params):
+        return STAGE_ORDER
+    supplied = params.get("supplied_segmentation")
+    if not supplied:
+        return PRODUCTION_STAGE_ORDER
+    # the source's own ids (blueprints/upload/supplied_ids.py) are imported into the
+    # segmentation table; the spatial lookup runs only for the fields without supplied
+    # supervoxels, and resolve_roots finishes the fields with supplied ids
+    order = ["process_source", "load_annotations", "load_segmentation"]
+    if supplied.get("lookup_fields"):
+        order += ["spatial_init", "spatial_chunks"]
+    if supplied.get("resolve_fields"):
+        order.append("resolve_roots")
+    return order + ["finish_tables", "publish", "cleanup"]
 
 
 class PermanentUploadError(RuntimeError):
@@ -483,6 +499,10 @@ def stage_spatial_init(ctx: Context) -> dict:
     if not mat_metadata:
         raise PermanentUploadError(f"No materialization metadata for {table} in {database}")
     info = mat_metadata[0]
+    supplied = p.get("supplied_segmentation")
+    if supplied:
+        # the other fields' supervoxels came with the source
+        info["lookup_fields"] = supplied["lookup_fields"]
     if builds_in_production(p):
         seg_model = pb.segmentation_model(table, meta, _pcg_table_name(ctx))
         with engine.connect() as conn:
@@ -939,6 +959,260 @@ def stage_load_annotations(ctx: Context) -> dict:
     }
 
 
+def stage_load_segmentation(ctx: Context) -> dict:
+    """The temporary segmentation table with the ids the source supplies imported into
+    it, from process_source's segmentation CSV (in id order, like the annotation CSV
+    when the upload numbers the rows), then its primary key."""
+    from sqlalchemy import text
+
+    from materializationengine.blueprints.upload import production_build as pb
+    from materializationengine.blueprints.upload.tasks import (
+        DEFAULT_SQL_IMPORT_TIMEOUT_SECONDS,
+        _run_cloudsql_operation,
+        import_csv,
+        update_job_status,
+    )
+    from materializationengine.utils import get_config_param
+
+    names = ctx.params["build_tables"]
+    meta = ctx.params["table_meta"]
+    seg = names["segmentation"]
+    database, engine = _production(ctx)
+    quote = engine.dialect.identifier_preparer.quote
+    seg_model = pb.segmentation_model(names["annotation"], meta, _pcg_table_name(ctx))
+
+    output_path = ctx.results["process_source"].get("segmentation_output_path")
+    if not output_path:
+        raise PermanentUploadError("process_source wrote no segmentation CSV for the supplied ids")
+    ctx.wait_turn()
+    with engine.connect() as conn:
+        exists = pb._table_exists(conn, seg)
+    if not exists:
+        pb.create_table(engine, seg_model, ctx.job_id, keep_primary_key=False)
+
+    uri = f"gs://{output_path}"
+    sql_instance_name = ctx.params["sql_instance_name"]
+    timeout = float(get_config_param("SQL_IMPORT_TIMEOUT_SECONDS") or DEFAULT_SQL_IMPORT_TIMEOUT_SECONDS)
+    columns = ctx.params["supplied_segmentation"]["columns"]
+
+    def truncate():
+        with engine.begin() as conn:
+            conn.execute(text(f"TRUNCATE TABLE {quote(seg)}"))
+
+    update_job_status(
+        ctx.job_id,
+        {"status": "processing", "phase": "Uploading to Database: Importing supplied ids", "progress": 0},
+    )
+    ctx.wait_turn()
+    _run_cloudsql_operation(
+        ctx.job_id,
+        "segmentation_import",
+        "IMPORT",
+        uri,
+        database,
+        seg,
+        start=lambda on_started: import_csv(
+            sql_instance_name, uri, database=database, table=seg, user="postgres",
+            timeout=timeout, on_started=on_started, columns=columns,
+        ),
+        prepare=truncate,
+    )
+    # the spatial lookup's upserts and resolve_roots' range scans need it
+    primary_key = [c for c in pb.index_commands(engine, seg, seg_model) if "primary key" in c.lower()]
+    _run_index_commands(ctx, engine, seg, primary_key, "Segmentation Table")
+    ctx.wait_turn()
+    with engine.begin() as conn:
+        conn.execute(text(f"ANALYZE {quote(seg)}"))
+    return {"table": seg, "supplied": ctx.params["supplied_segmentation"]["supplied"]}
+
+
+def _resolve_info(ctx: Context) -> dict:
+    """What each resolve_roots chunk task needs (workflows/resolve_roots.py)."""
+    supplied = ctx.params["supplied_segmentation"]
+    names = ctx.params["build_tables"]
+    meta = ctx.params["table_meta"]
+    fields = {}
+    for field in supplied["resolve_fields"]:
+        cols = supplied["fields"][field]
+        fields[field] = {
+            "supervoxel_id": cols["supervoxel_id"],
+            "root_id": cols["root_id"],
+            "position": f"{field}_position",
+            "supervoxels_supplied": cols["supervoxel_id"] in supplied["supplied"],
+            "roots_supplied": cols["root_id"] in supplied["supplied"],
+        }
+    return {
+        "segmentation_table": names["segmentation"],
+        "annotation_table": names["annotation"],
+        "pcg_table_name": _pcg_table_name(ctx),
+        "segmentation_source": ctx.params["datastack_info"]["segmentation_source"],
+        "coord_resolution": [
+            meta.get(f"voxel_resolution_{a}") or 1.0 for a in "xyz"
+        ],
+        "materialization_time_stamp": ctx.params["materialization_time_stamp"],
+        "fields": fields,
+    }
+
+
+def _plan_root_chunks(engine, table: str, rows_per_chunk: int) -> List[Tuple[int, int]]:
+    """Id ranges of about rows_per_chunk rows each, covering every id of table. Ranges
+    follow the ids present, so sparse ids (a source's own) give no empty chunks."""
+    from sqlalchemy import text
+
+    quote = engine.dialect.identifier_preparer.quote
+    with engine.connect() as conn:
+        last = conn.execute(text(f"SELECT max(id) FROM {quote(table)}")).scalar()
+        if last is None:
+            return []
+        starts = [
+            r[0]
+            for r in conn.execute(
+                text(
+                    f"SELECT id FROM (SELECT id, row_number() OVER (ORDER BY id) AS n "
+                    f"FROM {quote(table)}) AS s WHERE (n - 1) % :step = 0 ORDER BY id"
+                ),
+                {"step": int(rows_per_chunk)},
+            )
+        ]
+    ends = [s - 1 for s in starts[1:]] + [last]
+    return list(zip(starts, ends))
+
+
+def stage_resolve_roots(ctx: Context) -> dict:
+    """Finish the fields with supplied ids, one id range per task: fill blank
+    supervoxels, check supplied roots at the job's timestamp, and look up the missing
+    and stale ones. Chunks are planned once and checkpointed in upload_root_chunks."""
+    from materializationengine.blueprints.upload.tasks import update_job_status
+    from materializationengine.rayjobs.runner import run_bounded
+    from materializationengine.upload_state import store
+    from materializationengine.utils import get_config_param
+    from materializationengine.workflows.resolve_roots import DEFAULT_ROOT_BATCH_SIZE
+
+    database, engine = _production(ctx)
+    seg = ctx.params["build_tables"]["segmentation"]
+    chunks = store.root_chunks(ctx.engine, ctx.job_id)
+    if not chunks:
+        ctx.wait_turn()
+        rows_per_chunk = int(get_config_param("UPLOAD_ROOT_CHUNK_ROWS") or DEFAULT_ROOT_CHUNK_ROWS)
+        store.plan_root_chunks(ctx.engine, ctx.job_id, _plan_root_chunks(engine, seg, rows_per_chunk))
+        chunks = store.root_chunks(ctx.engine, ctx.job_id)
+    info = _resolve_info(ctx)
+    batch_size = int(get_config_param("UPLOAD_ROOT_BATCH_SIZE") or DEFAULT_ROOT_BATCH_SIZE)
+    total = len(chunks)
+    attempts = {c["chunk_index"]: c["attempt_count"] for c in chunks}
+    totals: Dict[str, int] = {}
+    completed = [0]
+    failed = [0]
+
+    def add(counts):
+        for key, value in (counts or {}).items():
+            totals[key] = totals.get(key, 0) + int(value)
+
+    for c in chunks:
+        if c["status"] == "COMPLETED":
+            completed[0] += 1
+            add(c["counts"])
+        elif c["status"] == "FAILED_PERMANENT":
+            failed[0] += 1
+    if completed[0]:
+        logger.info(f"resolve_roots: {completed[0]} of {total} chunks already done")
+
+    buffer: List[dict] = []
+    last_flush = [0.0]
+    succeeded_this_run = [0]
+    failed_this_run: Dict[int, str] = {}
+
+    def items():
+        for c in chunks:
+            if c["status"] in ("COMPLETED", "FAILED_PERMANENT"):
+                continue
+            yield c["chunk_index"], (database, info, c["first_id"], c["last_id"], batch_size)
+
+    def on_done(i, result):
+        attempts[i] = attempts.get(i, 0) + 1
+        succeeded_this_run[0] += 1
+        completed[0] += 1
+        add(result)
+        buffer.append({
+            "chunk_index": i, "status": "COMPLETED", "attempt_count": attempts[i],
+            "counts": {k: int(v) for k, v in (result or {}).items()},
+        })
+        ctx.maybe_fault(f"resolve_roots_chunk:{completed[0]}")
+
+    def on_error(i, exc) -> bool:
+        attempts[i] = attempts.get(i, 0) + 1
+        final = attempts[i] >= MAX_CHUNK_ATTEMPTS
+        error_type = getattr(exc, "error_type", None) or type(exc).__name__
+        message = getattr(exc, "message", None) or str(exc)
+        logger.warning(f"root chunk {i} failed (attempt {attempts[i]}): {error_type}: {message}")
+        if final:
+            failed[0] += 1
+        buffer.append({
+            "chunk_index": i,
+            "status": "FAILED_PERMANENT" if final else "FAILED_RETRYABLE",
+            "attempt_count": attempts[i], "error_message": message, "error_type": error_type,
+        })
+        failed_this_run[i] = error_type
+        if (
+            not succeeded_this_run[0]
+            and len(failed_this_run) >= SYSTEMIC_FAILURE_CHUNKS
+            and len(set(failed_this_run.values())) == 1
+        ):
+            raise SystemicChunkFailure(
+                f"the first {len(failed_this_run)} root chunks all failed and none "
+                f"succeeded: {error_type}: {message}"
+            )
+        return not final
+
+    def flush(force=False):
+        if not force and time.monotonic() - last_flush[0] < FLUSH_SECONDS:
+            return
+        last_flush[0] = time.monotonic()
+        if ctx.lost.is_set():
+            return
+        if buffer:
+            store.record_root_chunks(ctx.engine, ctx.job_id, list(buffer))
+            buffer.clear()
+        update_job_status(
+            ctx.job_id,
+            {
+                "status": "processing",
+                "phase": f"Resolving supplied ids ({completed[0]}/{total} chunks)",
+                "progress": round(100.0 * completed[0] / total, 2) if total else 100.0,
+                "active_workflow_part": "resolve_roots",
+                "total_rows": total,
+                "processed_rows": completed[0],
+            },
+        )
+
+    try:
+        run_bounded(
+            ctx.runner,
+            "resolve_roots_chunk",
+            items(),
+            ctx.max_in_flight,
+            on_done,
+            on_error=on_error,
+            should_stop=ctx.should_stop,
+            on_tick=flush,
+            should_pause=ctx.gate.requested if ctx.gate else None,
+            on_paused=ctx.wait_turn,
+        )
+    finally:
+        try:
+            flush(force=True)
+        except Exception as e:
+            logger.warning(f"could not record the last root chunk results: {e}")
+
+    if failed[0]:
+        raise PermanentUploadError(
+            f"{failed[0]} root chunk(s) failed {MAX_CHUNK_ATTEMPTS} times; "
+            f"see upload_root_chunks for {ctx.job_id}"
+        )
+    logger.info(f"resolve_roots: {totals}")
+    return {"chunks": total, **totals}
+
+
 def stage_finish_tables(ctx: Context) -> dict:
     """The segmentation table into id order (the spatial lookup wrote it in chunk
     order) and its indexes; statistics for both tables."""
@@ -1002,15 +1276,20 @@ def stage_cleanup_production(ctx: Context) -> dict:
     from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
     from materializationengine.blueprints.upload.tasks import update_job_status
 
-    output_path = (ctx.results.get("process_source") or {}).get("output_path") or ""
-    bucket, _, blob = output_path.partition("/")
-    if bucket and blob:
+    processed = ctx.results.get("process_source") or {}
+    output_path = processed.get("output_path") or ""
+    segmentation_path = processed.get("segmentation_output_path") or ""
+    # the processed CSV, and the supplied ids' CSV
+    for path in (output_path, segmentation_path):
+        bucket, _, blob = path.partition("/")
+        if not (bucket and blob):
+            continue
         try:
             GCSCsvProcessor(bucket).delete_blobs([blob])
         except Exception as e:
-            logger.warning(f"could not delete gs://{output_path}: {e}")
+            logger.warning(f"could not delete gs://{path}: {e}")
     update_job_status(ctx.job_id, {"status": "done", "phase": "Transfer Complete", "progress": 100})
-    return {"deleted": output_path}
+    return {"deleted": output_path, **({"deleted_segmentation": segmentation_path} if segmentation_path else {})}
 
 
 STAGES: Dict[str, Callable[[Context], dict]] = {
@@ -1027,13 +1306,15 @@ assert list(STAGES) == STAGE_ORDER
 PRODUCTION_STAGES: Dict[str, Callable[[Context], dict]] = {
     "process_source": stage_process_source,
     "load_annotations": stage_load_annotations,
+    "load_segmentation": stage_load_segmentation,
     "spatial_init": stage_spatial_init,
     "spatial_chunks": stage_spatial_chunks,
+    "resolve_roots": stage_resolve_roots,
     "finish_tables": stage_finish_tables,
     "publish": stage_publish,
     "cleanup": stage_cleanup_production,
 }
-assert list(PRODUCTION_STAGES) == PRODUCTION_STAGE_ORDER
+assert [s for s in PRODUCTION_STAGES if s in PRODUCTION_STAGE_ORDER] == PRODUCTION_STAGE_ORDER
 
 
 # --- the driver ---------------------------------------------------------------------

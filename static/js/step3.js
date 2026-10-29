@@ -17,6 +17,12 @@ document.addEventListener("alpine:init", () => {
       isReferenceSchema: false,
       metadataSaved: false,
       stagingConflict: null,  // { message, row_count } when staging table exists
+      // when the file's root id columns were looked up (asked only when some are mapped)
+      root_ids_lookup_mode: "unknown",
+      root_ids_lookup_at: "",
+      root_ids_lookup_start: "",
+      root_ids_lookup_end: "",
+      hasSuppliedRootIds: false,
     },
 
     init() {
@@ -56,6 +62,7 @@ document.addEventListener("alpine:init", () => {
       delete stateToSave.stagingConflict;
       delete stateToSave.isReferenceSchema;
       delete stateToSave.metadataSaved;
+      delete stateToSave.hasSuppliedRootIds;
       localStorage.setItem("metadataStore", JSON.stringify(stateToSave));
     },
 
@@ -71,6 +78,9 @@ document.addEventListener("alpine:init", () => {
         if (schemaModel && schemaModel.fields) {
           this.state.isReferenceSchema = "target_id" in schemaModel.fields;
         }
+        this.state.hasSuppliedRootIds = Alpine.store("schema")
+          ? Alpine.store("schema").hasSuppliedRootIds()
+          : false;
       }
     },
 
@@ -101,8 +111,45 @@ document.addEventListener("alpine:init", () => {
         }
       });
 
+      if (this.state.hasSuppliedRootIds) {
+        const now = Date.now();
+        const mode = this.state.root_ids_lookup_mode;
+        if (mode === "at") {
+          const at = Date.parse(this.state.root_ids_lookup_at);
+          if (isNaN(at)) {
+            errors.root_ids_lookup = "Give the time the root ids were looked up at";
+          } else if (at > now) {
+            errors.root_ids_lookup = "The time is in the future";
+          }
+        } else if (mode === "between") {
+          const start = Date.parse(this.state.root_ids_lookup_start);
+          const end = Date.parse(this.state.root_ids_lookup_end);
+          if (isNaN(start) || isNaN(end)) {
+            errors.root_ids_lookup = "Give both ends of the time range";
+          } else if (start >= end) {
+            errors.root_ids_lookup = "The range must start before it ends";
+          } else if (end > now) {
+            errors.root_ids_lookup = "The range ends in the future";
+          }
+        }
+      }
+
       this.state.validationErrors = errors;
       return Object.keys(errors).length === 0;
+    },
+
+    // The request's root_ids_lookup: times as UTC ISO strings (the inputs are local
+    // time), or null when no root id column is mapped.
+    rootIdsLookup() {
+      if (!this.state.hasSuppliedRootIds) return null;
+      const iso = (value) => (value ? new Date(value).toISOString() : null);
+      const mode = this.state.root_ids_lookup_mode || "unknown";
+      return {
+        mode,
+        at: mode === "at" ? iso(this.state.root_ids_lookup_at) : null,
+        start: mode === "between" ? iso(this.state.root_ids_lookup_start) : null,
+        end: mode === "between" ? iso(this.state.root_ids_lookup_end) : null,
+      };
     },
 
     _buildPayload(forceOverwrite = false) {

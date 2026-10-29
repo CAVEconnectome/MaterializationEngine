@@ -217,6 +217,29 @@ Index(
     postgresql_where=upload_spatial_chunks.c.status != "COMPLETED",
 )
 
+# The id-range chunks of resolve_roots (an upload whose source supplies supervoxel or
+# root ids, blueprints/upload/supplied_ids.py), all planned up front. A new table only,
+# so the schema version stays 1.
+upload_root_chunks = Table(
+    "upload_root_chunks",
+    metadata,
+    Column(
+        "job_id", Text, ForeignKey("upload_jobs.job_id", ondelete="CASCADE"), nullable=False
+    ),
+    Column("chunk_index", Integer, nullable=False),
+    Column("first_id", BigInteger, nullable=False),
+    Column("last_id", BigInteger, nullable=False),
+    # PENDING | COMPLETED | FAILED_RETRYABLE | FAILED_PERMANENT
+    Column("status", Text, nullable=False),
+    Column("attempt_count", Integer, nullable=False, server_default=text("0")),
+    # what the chunk found: rows, roots checked / stale, ids looked up, ...
+    Column("counts", JSONB),
+    Column("error_message", Text),
+    Column("error_type", Text),
+    _now_column("updated_at"),
+    PrimaryKeyConstraint("job_id", "chunk_index"),
+)
+
 # Frozen materialization and uploads built in the production database. A frozen
 # version is a CREATE DATABASE ... WITH TEMPLATE copy of the live (aligned volume)
 # database, which first terminates every connection to it and needs none to remain.

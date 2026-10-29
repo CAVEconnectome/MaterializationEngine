@@ -44,6 +44,11 @@ from materializationengine.blueprints.upload.checkpoint_manager import (
 from materializationengine.blueprints.upload import ray_status
 from materializationengine.blueprints.upload.schema_helper import get_schema_types
 from materializationengine.blueprints.upload.schemas import UploadRequestSchema
+from materializationengine.blueprints.upload.supplied_ids import (
+    maps_segmentation_columns,
+    sample_check,
+)
+from materializationengine.blueprints.upload.processor import segmentation_columns
 from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
 from materializationengine.blueprints.upload.parquet_source import (
     is_parquet_source,
@@ -530,8 +535,20 @@ def preview_link():
     except Exception as e:
         current_app.logger.error(f"Could not make a preview link for {uri}: {e}")
         return jsonify({"status": "error", "message": f"Could not make the link: {e}"}), 502
+    # the first rows' supplied supervoxel and root ids, against the chunkedgraph
+    try:
+        id_check = sample_check(rows, file_metadata, client.chunkedgraph)
+    except Exception as e:
+        current_app.logger.warning(f"Could not check the supplied ids of {uri}: {e}")
+        id_check = {"error": str(e)}
     return jsonify(
-        {"status": "ok", "url": url, "rows": len(rows), **pl.preview_summary(state, layers, data_resolution)}
+        {
+            "status": "ok",
+            "url": url,
+            "rows": len(rows),
+            **pl.preview_summary(state, layers, data_resolution),
+            **({"id_check": id_check} if id_check else {}),
+        }
     )
 
 
@@ -592,11 +609,24 @@ def get_schema_model():
                     "primary_key": column.primary_key,
                 }
 
+        # the optional supervoxel and root id columns a source may already have, per
+        # bound spatial point; only a Ray upload ingests them (supplied_ids.py)
+        segmentation_fields = {}
+        if ray_upload_enabled():
+            segmentation_fields = {
+                field: {"supervoxel_id": sv_col, "root_id": root_col}
+                for field, (sv_col, root_col) in segmentation_columns(schema_name).items()
+            }
+
         return (
             jsonify(
                 {
                     "status": "success",
-                    "model": {"name": schema_name, "fields": schema_fields},
+                    "model": {
+                        "name": schema_name,
+                        "fields": schema_fields,
+                        "segmentation_fields": segmentation_fields,
+                    },
                 }
             ),
             200,
@@ -949,6 +979,12 @@ def start_csv_processing():
         file_metadata["metadata"]["table_name"],
         datetime.datetime.utcnow(),
     )
+    if not ray_upload_enabled() and maps_segmentation_columns(file_metadata.get("column_mapping")):
+        return jsonify({
+            "status": "error",
+            "message": "Supervoxel and root id columns can only be ingested by a Ray upload, "
+            "which this deployment does not run; unmap them to look the ids up instead.",
+        }), 400
     if ray_upload_enabled():
         # one RayJob runs the whole upload; its state is kept in the upload state database
         body, code = ray_status.start_ray_upload(
