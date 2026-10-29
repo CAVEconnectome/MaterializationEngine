@@ -92,6 +92,52 @@
   </div>
 
   <div
+    class="card mb-4"
+    x-show="$store.processor.state.status === 'idle' || $store.processor.state.status === 'error' || $store.processor.state.status === 'cancelled'"
+    x-cloak
+  >
+    <div class="card-body">
+      <h5 class="card-title"><i class="fas fa-eye me-2"></i>Check the data in Neuroglancer</h5>
+      <p class="card-text text-muted small">
+        Shows the first rows of the file as points over the datastack's imagery, in the
+        voxel resolution above. If the points do not sit on your data, check the
+        coordinate columns and the voxel resolution before starting.
+      </p>
+      <button
+        class="btn btn-outline-primary"
+        @click="$store.processor.makePreviewLink()"
+        :disabled="$store.processor.preview.loading"
+      >
+        <span x-show="$store.processor.preview.loading" class="spinner-border spinner-border-sm me-2" role="status"></span>
+        <i x-show="!$store.processor.preview.loading" class="fas fa-link me-2"></i>Make preview link
+      </button>
+      <template x-if="$store.processor.preview.url">
+        <div class="mt-3">
+          <a
+            class="btn btn-success"
+            :href="$store.processor.preview.url"
+            target="_blank"
+            rel="noopener"
+          ><i class="fas fa-external-link-alt me-2"></i>Open in Neuroglancer</a>
+          <div class="small text-muted mt-2">
+            <span x-text="$store.processor.preview.summary.layers.map(l => `${l.name}: ${l.points} points`).join(', ')"></span>
+            <br />
+            Table coordinates in
+            <span x-text="$store.processor.preview.summary.data_resolution.join(', ')"></span> nm voxels,
+            shown in the datastack's
+            <span x-text="$store.processor.preview.summary.viewer_resolution.join(', ')"></span> nm.
+          </div>
+        </div>
+      </template>
+      <div
+        x-show="$store.processor.preview.error"
+        class="alert alert-danger mt-3 mb-0"
+        x-text="$store.processor.preview.error"
+      ></div>
+    </div>
+  </div>
+
+  <div
     class="mb-4 text-center"
     x-show="$store.processor.state.status === 'idle' || $store.processor.state.status === 'error' || $store.processor.state.status === 'cancelled'"
     x-cloak

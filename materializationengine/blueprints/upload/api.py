@@ -21,6 +21,7 @@ from flask import (
     url_for,
 )
 from flask_restx import Namespace, Resource, inputs, reqparse
+from marshmallow import ValidationError
 from google.cloud import storage
 from google.api_core import exceptions as google_exceptions
 from middle_auth_client import (
@@ -462,6 +463,75 @@ def inspect_source(datastack_name: str):
             "size": source.size,
             "previewRows": [[cell.strip() for cell in row] for row in preview_rows],
         }
+    )
+
+
+@upload_bp.route("/api/preview-link", methods=["POST"])
+@auth_required
+def preview_link():
+    """A Neuroglancer link showing the first rows of the proposed upload.
+
+    Takes the body /api/process/start does. Each spatial point column becomes a point
+    layer whose coordinates are as uploaded, in the declared voxel resolution, over the
+    datastack's imagery and segmentation in its own resolution; points away from the
+    data mean the coordinates or the declared resolution are wrong.
+    """
+    import caveclient
+
+    from materializationengine.blueprints.upload import preview_link as pl
+
+    try:
+        file_metadata = UploadRequestSchema().load(request.get_json() or {})
+    except ValidationError as e:
+        return jsonify({"status": "error", "message": e.messages}), 400
+    metadata = file_metadata["metadata"]
+    datastack_name = metadata["datastack_name"]
+    denied = _missing_edit_permission(datastack_name)
+    if denied:
+        return denied
+
+    bucket_name = current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
+    uri = file_metadata.get("source_uri") or f"gs://{bucket_name}/{file_metadata['filename']}"
+    data_resolution = [
+        metadata["voxel_resolution_nm_x"],
+        metadata["voxel_resolution_nm_y"],
+        metadata["voxel_resolution_nm_z"],
+    ]
+    try:
+        source = None if is_parquet_source(uri) else GCSCsvProcessor(bucket_name).source(uri)
+        rows = pl.read_first_rows(uri, source=source)
+        points = pl.spatial_points(
+            metadata["schema_type"],
+            file_metadata["column_mapping"],
+            file_metadata.get("ignored_columns") or [],
+            metadata.get("reference_table"),
+        )
+        layers = pl.point_layers(rows, points, file_metadata["column_mapping"].get("id"))
+    except (ValueError, FileNotFoundError) as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    except SourceAccessError as e:
+        return jsonify({"status": "error", "message": str(e)}), 403
+    if not layers:
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": "None of the first rows has a point in the mapped columns",
+                }
+            ),
+            400,
+        )
+    try:
+        client = caveclient.CAVEclient(
+            datastack_name, server_address=current_app.config["GLOBAL_SERVER_URL"]
+        )
+        state = pl.build_preview_state(client, layers, data_resolution)
+        url = state.to_link_shortener(client)
+    except Exception as e:
+        current_app.logger.error(f"Could not make a preview link for {uri}: {e}")
+        return jsonify({"status": "error", "message": f"Could not make the link: {e}"}), 502
+    return jsonify(
+        {"status": "ok", "url": url, "rows": len(rows), **pl.preview_summary(state, layers, data_resolution)}
     )
 
 

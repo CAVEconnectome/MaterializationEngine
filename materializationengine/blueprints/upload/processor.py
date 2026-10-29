@@ -187,6 +187,22 @@ class SchemaProcessor:
         if missing_columns:
             raise ValueError(f"Missing required columns: {missing_columns}")
 
+    @staticmethod
+    def point_xyz(chunk: pd.DataFrame, coordinate_cols: List[str]) -> np.ndarray:
+        """The (n, 3) coordinates of one spatial point field, NaN where a row's point
+        is missing or unparseable. coordinate_cols is [x, y, z] or [combined]."""
+        if len(coordinate_cols) == 1:
+            return np.array(
+                [_parse_combined_xyz(v) for v in chunk[coordinate_cols[0]]],
+                dtype=float,
+            ).reshape(-1, 3)
+        return np.column_stack(
+            [
+                pd.to_numeric(chunk[col], errors="coerce").to_numpy(dtype=float)
+                for col in coordinate_cols
+            ]
+        )
+
     def _spatial_column(
         self, chunk: pd.DataFrame, coordinate_cols: List[str]
     ) -> np.ndarray:
@@ -195,19 +211,7 @@ class SchemaProcessor:
         Same result as process_spatial_point on each row, vectorized: a per-row
         loop cost about 1 billion Python calls on a 337M-row synapse upload.
         """
-        if len(coordinate_cols) == 1:
-            xyz = np.array(
-                [_parse_combined_xyz(v) for v in chunk[coordinate_cols[0]]],
-                dtype=float,
-            ).reshape(-1, 3)
-        else:
-            xyz = np.column_stack(
-                [
-                    pd.to_numeric(chunk[col], errors="coerce").to_numpy(dtype=float)
-                    for col in coordinate_cols
-                ]
-            )
-        return encode_points_wkb_hex(xyz)
+        return encode_points_wkb_hex(self.point_xyz(chunk, coordinate_cols))
 
     def process_spatial_point(
         self,
