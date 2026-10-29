@@ -10,7 +10,7 @@ from materializationengine.blueprints.materialize.api import get_datastack_info
 from materializationengine.celery_init import celery
 from materializationengine.database import db_manager
 from dynamicannotationdb.models import AnalysisVersion
-from materializationengine.task import REDIS_CLIENT, argument_signature
+from materializationengine.task import REDIS_CLIENT, datastack_lock_id
 from materializationengine.utils import get_config_param
 from materializationengine.workflows.complete_workflow import run_complete_workflow
 
@@ -27,19 +27,14 @@ def update_database_workflow_locked(datastack: str, datastack_info: dict) -> boo
     so we detect it even while the worker pod is still cold-starting and before
     any task shows up in ``celery.control.inspect().active()``.
 
-    Note: this reconstructs the lock id for the *periodic* enqueue path
-    (``run_periodic_database_update``, which passes ``kwargs={"Datastack": ...}``).
-    An update triggered manually via the admin API mutates ``datastack_info``
-    before enqueuing and therefore locks under a different id; that path is not
-    detected here.
+    The lock is per datastack (DatastackLockedTask), so an update queued from the
+    admin endpoint or any other path is detected too.
     """
     from materializationengine.workflows.update_database_workflow import (
         update_database_workflow,
     )
 
-    lock_id = argument_signature(
-        update_database_workflow.name, [datastack_info], {"Datastack": datastack}
-    )
+    lock_id = datastack_lock_id(update_database_workflow.name, datastack)
     return REDIS_CLIENT.get(lock_id) is not None
 
 
