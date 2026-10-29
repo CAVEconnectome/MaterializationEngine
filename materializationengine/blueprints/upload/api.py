@@ -6,6 +6,7 @@ from typing import Any, Dict
 import json
 from dataclasses import asdict
 
+from cachetools import TTLCache, cached
 from dynamicannotationdb.models import AnalysisVersion
 from dynamicannotationdb.schema import DynamicSchemaClient
 from flask import (
@@ -27,6 +28,7 @@ from middle_auth_client import (
     auth_requires_permission,
     auth_required,
 )
+from middle_auth_client.decorators import dataset_from_table_id_from_request
 from materializationengine.redis_client import SharedRedis
 
 from materializationengine.config import as_bool
@@ -238,24 +240,56 @@ def permission_warning():
     )
 
 
+@cached(cache=TTLCache(maxsize=256, ttl=3600))
+def _dataset_for(datastack: str) -> str:
+    """The auth dataset a datastack belongs to (minnie65_phase3_v1 -> minnie65), as the
+    auth decorators look it up."""
+    return dataset_from_table_id_from_request(datastack)
+
+
 def _has_datastack_permission(
     auth_user_info: dict, permission_level: str, datastack_name: str
 ) -> bool:
-    """
-    Checks if the user has a specific permission level for a given datastack.
-    Relies on g.auth_user['permissions'] containing strings like '{datastack_name}_{permission_level}'.
+    """Whether the user has permission_level ("view", "edit" or "admin") on the auth
+    dataset datastack_name belongs to: what auth_requires_permission and
+    auth_requires_dataset_admin check, for a datastack named in a request body or a job
+    record rather than the URL. Superadmins and the dataset's admins have every level.
     """
     if not auth_user_info or not datastack_name or not permission_level:
         return False
-
-    permissions = auth_user_info.get("permissions", [])
-
-    required_permission = f"{datastack_name.lower()}_{permission_level.lower()}"
-
-    if required_permission in permissions:
+    if auth_user_info.get("admin"):
         return True
+    try:
+        dataset = _dataset_for(datastack_name)
+    except Exception as e:
+        current_app.logger.warning(
+            f"could not look up the auth dataset of {datastack_name}, denying "
+            f"{permission_level}: {e}"
+        )
+        return False
+    if dataset in (auth_user_info.get("datasets_admin") or []):
+        return True
+    if permission_level == "admin":
+        return False
+    permissions = auth_user_info.get("permissions_v2") or {}
+    return permission_level in (permissions.get(dataset) or [])
 
-    return False
+
+def _missing_edit_permission(datastack_name: str):
+    """A 403 response unless the user may create tables in datastack_name, else None."""
+    if is_auth_disabled() or _has_datastack_permission(
+        g.get("auth_user"), "edit", datastack_name
+    ):
+        return None
+    return (
+        jsonify(
+            {
+                "status": "error",
+                "message": f"Missing permission: edit for datastack {datastack_name}",
+            }
+        ),
+        403,
+    )
 
 
 @upload_bp.route("/running-uploads")
@@ -625,6 +659,10 @@ def save_metadata():
                     400,
                 )
 
+        denied = _missing_edit_permission(data["datastack_name"])
+        if denied:
+            return denied
+
         if data.get("reference_table"):
             table_metadata = {"reference_table": data["reference_table"]}
         else:
@@ -819,6 +857,9 @@ def start_csv_processing():
     sql_instance_name = current_app.config.get("SQLALCHEMY_DATABASE_URI")
     database_name = current_app.config.get("STAGING_DATABASE_NAME")
     datastack_name = file_metadata["metadata"]["datastack_name"]
+    denied = _missing_edit_permission(datastack_name)
+    if denied:
+        return denied
     datastack_info = get_datastack_info(datastack_name)
     user_id = str(g.auth_user["id"])
 
