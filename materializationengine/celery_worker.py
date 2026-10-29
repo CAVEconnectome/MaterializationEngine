@@ -24,7 +24,47 @@ from materializationengine.utils import get_config_param
 celery_logger = get_task_logger(__name__)
 
 
+# The Flask app create_celery was given; tasks run in its app context.
+_task_app = None
+
+
+def call_in_app_context(task, call, *args, **kwargs):
+    """Run call(task, *args, **kwargs), a task's __call__, in the worker's app context.
+
+    ContextTask uses it, and so must any task base that does not derive from it
+    (LockedTask): no app context is pushed for the process, so a task outside one
+    fails on its first current_app access.
+    """
+    if _task_app is None:
+        return call(task, *args, **kwargs)
+    with _task_app.app_context():
+        if getattr(task, "keep_db_connections", False):
+            # read by database.cleanup_after_app_context when this context ends
+            from flask import g
+
+            g.keep_db_connections = True
+        return call(task, *args, **kwargs)
+
+
 def create_celery(app=None):
+    # First, before anything reads celery.conf: the first read configures the app,
+    # and setup_periodic_tasks (on_after_configure) then builds the scheduled tasks,
+    # each with whatever celery.Task is at that moment. Set later, those tasks ran
+    # without an app context (run_periodic_materialization, remove_expired_databases).
+    global _task_app
+    _task_app = app
+    TaskBase = celery.Task
+
+    class ContextTask(TaskBase):
+        abstract = True
+
+        def __call__(self, *args, **kwargs):
+            return call_in_app_context(self, TaskBase.__call__, *args, **kwargs)
+
+    celery.Task = ContextTask
+    if os.environ.get("SLACK_WEBHOOK"):
+        celery.Task.on_failure = post_to_slack_on_task_failure
+
     celery.conf.broker_url = app.config["CELERY_BROKER_URL"]
     celery.conf.result_backend = app.config["CELERY_RESULT_BACKEND"]
     # Configure Celery and related loggers
@@ -105,23 +145,6 @@ def create_celery(app=None):
     # Debug: Verify beat_schedules is in celery.conf after update
     celery_logger.debug(f"beat_schedules in celery.conf after update: {celery.conf.get('beat_schedules', 'NOT FOUND')}")
     celery_logger.debug(f"BEAT_SCHEDULES in celery.conf after update: {celery.conf.get('BEAT_SCHEDULES', 'NOT FOUND')}")
-    TaskBase = celery.Task
-
-    class ContextTask(TaskBase):
-        abstract = True
-
-        def __call__(self, *args, **kwargs):
-            with app.app_context():
-                if getattr(self, "keep_db_connections", False):
-                    # read by database.cleanup_after_app_context when this context ends
-                    from flask import g
-
-                    g.keep_db_connections = True
-                return TaskBase.__call__(self, *args, **kwargs)
-
-    celery.Task = ContextTask
-    if os.environ.get("SLACK_WEBHOOK"):
-        celery.Task.on_failure = post_to_slack_on_task_failure
 
     configure_worker_autoshutdown(app)
     configure_fork_safe_database_connections(app)

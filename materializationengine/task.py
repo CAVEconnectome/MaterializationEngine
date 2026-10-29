@@ -62,6 +62,12 @@ class LockedTask(Task):
     use_slack = False
     raise_on_duplicate = True
 
+    def __call__(self, *args, **kwargs):
+        # a base of its own, so ContextTask's app context has to be entered here
+        from materializationengine.celery_worker import call_in_app_context
+
+        return call_in_app_context(self, Task.__call__, *args, **kwargs)
+
     def acquire_lock(self, lock_id: str, task_id: str) -> bool:
         return REDIS_CLIENT.set(lock_id, task_id, nx=True, ex=self.timeout)
 
