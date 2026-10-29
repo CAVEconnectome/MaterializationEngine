@@ -27,6 +27,9 @@ from materializationengine.blueprints.upload.parquet_source import (
 from materializationengine.blueprints.upload.processor import SchemaProcessor
 from materializationengine.celery_init import celery
 from materializationengine.cloudsql_admin import (
+    BUSY_RETRY_SECONDS,
+    export_csv,
+    find_operation,
     CloudSQLAdminError,
     find_import_operation,
     import_csv,
@@ -69,6 +72,9 @@ DEFAULT_CSV_PART_SIZE_MB = 128
 # 337M-row upload (2026-10-25) whose import finished fine 28.5 min after it began.
 # upload_to_database is acked on receipt, so a long wait cannot cause a redelivery.
 DEFAULT_SQL_IMPORT_TIMEOUT_SECONDS = 21600
+# Also the default for the transfer's psql (UPLOAD_TRANSFER_PSQL_TIMEOUT_SECONDS), which
+# a fixed 1200 s cut off twice on that upload's transfer (2026-10-28).
+
 # Per upload job: the Cloud SQL import's operation name and whether it finished, so a
 # redelivered upload_to_database resumes instead of importing the rows a second time.
 IMPORT_STATE_KEY_PREFIX = "upload_import:"
@@ -173,27 +179,43 @@ def update_job_status(job_id: str, status: Dict[str, Any]) -> None:
     )
 
 
-def get_import_state(job_id: Optional[str]) -> Dict[str, Any]:
+def _import_state_key(job_id: str, kind: str) -> str:
+    suffix = "" if kind == "import" else f":{kind}"
+    return f"{IMPORT_STATE_KEY_PREFIX}{job_id}{suffix}"
+
+
+def clear_import_state(job_id: Optional[str], kind: str = "import") -> None:
+    """Forget the job's operation of this kind, before requesting it again."""
+    if not job_id:
+        return
+    sink = status_sink.current(job_id)
+    if sink is not None:
+        sink.clear_import_state(kind)
+        return
+    REDIS_CLIENT.delete(_import_state_key(job_id, kind))
+
+
+def get_import_state(job_id: Optional[str], kind: str = "import") -> Dict[str, Any]:
+    """State of the job's Cloud SQL operation of this kind: "import" (into staging) or
+    one of the transfer's (see transfer_table_using_cloudsql)."""
     if not job_id:
         return {}
     sink = status_sink.current(job_id)
     if sink is not None:
-        return sink.get_import_state()
-    raw = REDIS_CLIENT.get(f"{IMPORT_STATE_KEY_PREFIX}{job_id}")
+        return sink.get_import_state(kind)
+    raw = REDIS_CLIENT.get(_import_state_key(job_id, kind))
     return json.loads(raw) if raw else {}
 
 
-def set_import_state(job_id: Optional[str], **fields) -> None:
+def set_import_state(job_id: Optional[str], kind: str = "import", **fields) -> None:
     if not job_id:
         return
     sink = status_sink.current(job_id)
     if sink is not None:
-        sink.set_import_state(**fields)
+        sink.set_import_state(kind, **fields)
         return
-    state = {**get_import_state(job_id), **fields}
-    REDIS_CLIENT.set(
-        f"{IMPORT_STATE_KEY_PREFIX}{job_id}", json.dumps(state), ex=IMPORT_STATE_TTL_SECONDS
-    )
+    state = {**get_import_state(job_id, kind), **fields}
+    REDIS_CLIENT.set(_import_state_key(job_id, kind), json.dumps(state), ex=IMPORT_STATE_TTL_SECONDS)
 
 
 def wait_for_backend_work(
@@ -1329,6 +1351,30 @@ def _primary_key_index_name(table_name: str, engine) -> Optional[str]:
     return inspect(engine).get_pk_constraint(table_name).get("name")
 
 
+# Correlation of physical row order with id at or above which CLUSTER is skipped.
+DEFAULT_CLUSTER_SKIP_CORRELATION = 0.99
+
+
+def id_order_correlation(table_name: str, engine) -> Optional[float]:
+    """How closely the table's physical row order follows id, from -1 to 1 (1: in id
+    order), as the planner's statistics see it after ANALYZE of id (a sample of rows, so
+    seconds even for a large table). None if the table or the statistic is missing."""
+    with engine.connect() as conn:
+        if not engine.dialect.has_table(conn, table_name):
+            return None
+    quote = engine.dialect.identifier_preparer.quote
+    with engine.begin() as conn:
+        conn.execute(text(f"ANALYZE {quote(table_name)} (id)"))
+        value = conn.execute(
+            text(
+                "SELECT correlation FROM pg_stats WHERE schemaname = current_schema()"
+                " AND tablename = :t AND attname = 'id'"
+            ),
+            {"t": table_name},
+        ).scalar()
+    return None if value is None else float(value)
+
+
 def cluster_table_by_id(table_name: str, engine) -> bool:
     """Rewrite the table in id order with CLUSTER, then ANALYZE it.
 
@@ -1351,6 +1397,10 @@ def cluster_table_by_id(table_name: str, engine) -> bool:
 
     quote = engine.dialect.identifier_preparer.quote
     with engine.begin() as conn:
+        # CLUSTER sorts the rows and rebuilds the indexes in maintenance_work_mem
+        mem = upload_index_maintenance_work_mem()
+        if mem:
+            conn.execute(text(f"SET LOCAL maintenance_work_mem TO '{mem}'"))
         if pk_index:
             conn.execute(text(f"CLUSTER {quote(table_name)} USING {quote(pk_index)}"))
         else:
@@ -1387,6 +1437,13 @@ def cluster_staging_tables(self, monitor_result: dict) -> dict:
     running CLUSTER on the production database. The spatial lookup writes segmentation
     rows in spatial chunk order, so that table in particular is not in id order before this.
 
+    A table already in id order is left alone: the annotation table is imported from
+    the processed CSV, which is in id order when the upload numbers the rows, and then
+    its CLUSTER (6h13m for 337M rows on minnie, 2026-10-28, mostly rebuilding its GIST
+    indexes) changes nothing. A source file with its own ids keeps the file's order, so
+    that table does need it. "In id order" is the planner's correlation statistic for
+    id, from a fresh ANALYZE, at or above UPLOAD_CLUSTER_SKIP_CORRELATION.
+
     Clustering only changes row order, never the data, so a failure here is logged and the
     upload carries on to the transfer. Returns monitor_result unchanged for the next task.
     """
@@ -1398,6 +1455,9 @@ def cluster_staging_tables(self, monitor_result: dict) -> dict:
     staging_database = get_config_param("STAGING_DATABASE_NAME")
     engine = db_manager.get_engine(staging_database)
     pcg_table_name = datastack_info["segmentation_source"].split("/")[-1]
+    skip_above = current_app.config.get(
+        "UPLOAD_CLUSTER_SKIP_CORRELATION", DEFAULT_CLUSTER_SKIP_CORRELATION
+    )
 
     for staging_table, label in (
         (table_name, "Annotation Table"),
@@ -1409,6 +1469,13 @@ def cluster_staging_tables(self, monitor_result: dict) -> dict:
                 {"status": "processing", "phase": f"Clustering Staging {label} by id"},
             )
         try:
+            correlation = id_order_correlation(staging_table, engine)
+            if correlation is not None and correlation >= skip_above:
+                celery_logger.info(
+                    f"Not clustering staging table '{staging_table}': already in id order "
+                    f"(correlation {correlation:.4f} >= {skip_above})"
+                )
+                continue
             start = datetime.now(timezone.utc)
             if cluster_table_by_id(staging_table, engine):
                 elapsed = (datetime.now(timezone.utc) - start).total_seconds()
@@ -1433,11 +1500,17 @@ def transfer_to_production(
     self,
     monitor_result: dict,
     transfer_segmentation: bool = True,
+    method: Optional[str] = None,
 ):
     """
     Transfer tables from staging schema to production database after spatial lookup.
-    Uses pg_dump and psql for efficient data transfer.
     Optimizes transfer by dropping indexes before transfer and rebuilding them afterward.
+
+    method "pg_dump" (the default, UPLOAD_TRANSFER_METHOD) streams each table through
+    this process with pg_dump | psql. "cloudsql" copies through CSVs in GCS with Cloud
+    SQL imports and exports instead (transfer_table_using_cloudsql): the annotation
+    table from the processed CSV (monitor_result["annotation_csv_uri"]) when it is
+    still there, the segmentation table by exporting it from staging first.
     """
     try:
         datastack_info = monitor_result["datastack_info"]
@@ -1559,21 +1632,52 @@ def transfer_to_production(
                 "progress": 10,
             })
 
-        celery_logger.info(f"Transferring data for annotation table '{table_name_to_transfer}'")
-        annotation_rows_transferred = transfer_table_using_pg_dump(
-            table_name=table_name_to_transfer,
-            source_db=staging_schema_name,
-            target_db=production_schema_name,
-            db_info=db_connection_info_for_cli,
-            drop_indices=True,
-            rebuild_indices=True,
-            engine=production_engine,
-            source_engine=staging_engine,
-            model_creator=lambda: production_db_client.schema.create_annotation_model(
+        method = method or current_app.config.get("UPLOAD_TRANSFER_METHOD", "pg_dump")
+        transfer_dir = _transfer_csv_dir(monitor_result, table_name_to_transfer)
+        exported_csvs = []
+
+        def transfer_table(table_name, model_creator, label, csv_uri=None):
+            if method == "cloudsql":
+                export = not (csv_uri and _gcs_blob_exists(csv_uri))
+                if export:
+                    csv_uri = f"{transfer_dir}/{table_name}.csv"
+                    exported_csvs.append(csv_uri)
+                return transfer_table_using_cloudsql(
+                    table_name=table_name,
+                    source_db=staging_schema_name,
+                    target_db=production_schema_name,
+                    engine=production_engine,
+                    source_engine=staging_engine,
+                    model_creator=model_creator,
+                    csv_uri=csv_uri,
+                    export=export,
+                    job_id=job_id_for_ui,
+                    table_label=label,
+                )
+            return transfer_table_using_pg_dump(
+                table_name=table_name,
+                source_db=staging_schema_name,
+                target_db=production_schema_name,
+                db_info=db_connection_info_for_cli,
+                drop_indices=True,
+                rebuild_indices=True,
+                engine=production_engine,
+                source_engine=staging_engine,
+                model_creator=model_creator,
+                job_id=job_id_for_ui,
+                table_label=label,
+            )
+
+        celery_logger.info(
+            f"Transferring data for annotation table '{table_name_to_transfer}' ({method})"
+        )
+        annotation_rows_transferred = transfer_table(
+            table_name_to_transfer,
+            lambda: production_db_client.schema.create_annotation_model(
                 table_name_to_transfer, schema_type
             ),
-            job_id=job_id_for_ui,
-            table_label="Annotation Table",
+            "Annotation Table",
+            csv_uri=monitor_result.get("annotation_csv_uri"),
         )
         if job_id_for_ui:
             update_job_status(job_id_for_ui, {
@@ -1629,18 +1733,10 @@ def transfer_to_production(
                     })
 
                 celery_logger.info(f"Transferring data for segmentation table '{segmentation_table_name}'")
-                segmentation_rows_transferred = transfer_table_using_pg_dump(
-                    table_name=segmentation_table_name,
-                    source_db=staging_schema_name,
-                    target_db=production_schema_name,
-                    db_info=db_connection_info_for_cli,
-                    drop_indices=True,
-                    rebuild_indices=True,
-                    engine=production_engine,
-                    source_engine=staging_engine,
-                    model_creator=lambda: create_segmentation_model(mat_metadata_for_segmentation_table),
-                    job_id=job_id_for_ui,
-                    table_label="Segmentation Table",
+                segmentation_rows_transferred = transfer_table(
+                    segmentation_table_name,
+                    lambda: create_segmentation_model(mat_metadata_for_segmentation_table),
+                    "Segmentation Table",
                 )
 
                 # Record the materialization timestamp used for spatial root ID lookup.
@@ -1683,6 +1779,9 @@ def transfer_to_production(
             "status": "success",
             "message": f"Transfer completed for table '{table_name_to_transfer}'.",
             "job_id_for_status": job_id_for_ui,
+            "method": method,
+            # for the cleanup to delete
+            "exported_csvs": exported_csvs,
             "tables_transferred": {
                 "annotation_table": {
                     "name": table_name_to_transfer,
@@ -1711,6 +1810,14 @@ def transfer_to_production(
             except Exception as update_err:
                 celery_logger.error(f"Failed to update job status after transfer error: {update_err}")
         raise
+
+def _transfer_csv_dir(monitor_result: dict, table_name: str) -> str:
+    """Where the cloudsql transfer exports staging tables: beside the processed CSV."""
+    bucket = (monitor_result.get("annotation_csv_uri") or "")[len("gs://"):].split("/")[0]
+    bucket = bucket or current_app.config.get("MATERIALIZATION_UPLOAD_BUCKET_PATH")
+    run = monitor_result.get("job_id_for_status") or table_name
+    return f"gs://{bucket}/transfer/{run}"
+
 
 def drop_upload_tables(table_name: str, engine, dry_run: bool = False) -> List[str]:
     """Drop an annotation table and its segmentation tables, with their metadata rows.
@@ -2130,7 +2237,10 @@ def transfer_table_using_pg_dump(
                     stdin=dump_proc.stdout,
                     capture_output=True,
                     text=True,
-                    timeout=1200,
+                    timeout=float(
+                        get_config_param("UPLOAD_TRANSFER_PSQL_TIMEOUT_SECONDS")
+                        or DEFAULT_SQL_IMPORT_TIMEOUT_SECONDS
+                    ),
                     env=pg_env,
                 )
                 # Drain pg_dump stderr and wait for it to exit cleanly
@@ -2201,23 +2311,211 @@ def transfer_table_using_pg_dump(
         )
 
     if rebuild_indices:
-        celery_logger.info(f"Rebuilding indexes on {table_name}")
-        if job_id:
-            update_job_status(job_id, {"status": "processing", "phase": f"Rebuilding Indices: {label}"})
-        model = model_creator()
-        indices = index_cache.add_indices_sql_commands(table_name, model, engine)
-        for index in indices:
-            celery_logger.info(f"Adding index: {index}")
-            with engine.begin() as conn:
-                mem = upload_index_maintenance_work_mem()
-                if mem:
-                    conn.execute(text(f"SET LOCAL maintenance_work_mem TO '{mem}'"))
-                conn.execute(text(index))
-        try:
-            mark_clustered_on_primary_key(table_name, engine)
-        except Exception as e:
-            celery_logger.warning(f"Could not mark '{table_name}' clustered on its primary key: {e}")
+        _rebuild_production_indices(table_name, model_creator, engine, job_id, label)
 
+    return row_count
+
+
+def _rebuild_production_indices(table_name: str, model_creator, engine, job_id, label) -> None:
+    """Build the model's indexes that the table lacks, then record the primary key as
+    its clustering index."""
+    celery_logger.info(f"Rebuilding indexes on {table_name}")
+    if job_id:
+        update_job_status(job_id, {"status": "processing", "phase": f"Rebuilding Indices: {label}"})
+    model = model_creator()
+    indices = index_cache.add_indices_sql_commands(table_name, model, engine)
+    for index in indices:
+        celery_logger.info(f"Adding index: {index}")
+        with engine.begin() as conn:
+            mem = upload_index_maintenance_work_mem()
+            if mem:
+                conn.execute(text(f"SET LOCAL maintenance_work_mem TO '{mem}'"))
+            conn.execute(text(index))
+    try:
+        mark_clustered_on_primary_key(table_name, engine)
+    except Exception as e:
+        celery_logger.warning(f"Could not mark '{table_name}' clustered on its primary key: {e}")
+
+
+def _table_columns(table_name: str, engine) -> List[str]:
+    """The table's columns in their physical order (the order a headerless CSV of it has)."""
+    with engine.connect() as conn:
+        return [
+            row[0]
+            for row in conn.execute(
+                text(
+                    "SELECT attname FROM pg_attribute"
+                    " WHERE attrelid = to_regclass(:t) AND attnum > 0 AND NOT attisdropped"
+                    " ORDER BY attnum"
+                ),
+                {"t": table_name},
+            )
+        ]
+
+
+def _run_cloudsql_operation(
+    job_id: Optional[str],
+    kind: str,
+    operation_type: str,
+    uri: str,
+    database: str,
+    table: str,
+    start,
+    prepare=None,
+) -> str:
+    """Run one of the transfer's Cloud SQL exports or imports, or resume it.
+
+    Recorded like upload_to_database's import (get_import_state, under kind): one that
+    finished is not run again; one that was started is waited on, or adopted when the
+    attempt that requested it died before recording it; one that failed is run again.
+    prepare runs only before the operation is requested afresh (an import truncates
+    its table there, which must not happen under a running import). start(on_started)
+    requests the operation and waits for it. Returns "done", "resumed" or "ran".
+    """
+    sql_instance_name = get_config_param("SQL_INSTANCE_NAME")
+    timeout = current_app.config.get("SQL_IMPORT_TIMEOUT_SECONDS", DEFAULT_SQL_IMPORT_TIMEOUT_SECONDS)
+    state = get_import_state(job_id, kind)
+    if state.get("status") == "done":
+        celery_logger.info(f"{kind}: already done ({uri})")
+        return "done"
+    if state.get("status") == "requested" and not state.get("operation"):
+        adopted = find_operation(sql_instance_name, operation_type, uri, database=database)
+        if adopted:
+            celery_logger.warning(f"{kind}: adopting Cloud SQL operation {adopted['name']}")
+            set_import_state(job_id, kind, operation=adopted["name"], status="running")
+            state = get_import_state(job_id, kind)
+    if state.get("operation"):
+        celery_logger.info(f"{kind}: waiting for Cloud SQL operation {state['operation']}")
+        try:
+            wait_for_operation_name(sql_instance_name, state["operation"], timeout=timeout)
+            set_import_state(job_id, kind, status="done")
+            return "resumed"
+        except CloudSQLAdminError as e:
+            celery_logger.warning(f"{kind}: Cloud SQL operation {state['operation']} failed ({e}); running it again")
+            clear_import_state(job_id, kind)
+
+    if prepare is not None:
+        prepare()
+    set_import_state(job_id, kind, status="requested", uri=uri, database=database, table=table)
+    start(lambda name: set_import_state(job_id, kind, operation=name, status="running"))
+    set_import_state(job_id, kind, status="done")
+    return "ran"
+
+
+def _gcs_blob_exists(uri: str) -> bool:
+    from google.cloud import storage
+
+    bucket, _, blob = uri[len("gs://"):].partition("/")
+    return storage.Client().bucket(bucket).blob(blob).exists()
+
+
+def transfer_table_using_cloudsql(
+    table_name: str,
+    source_db: str,
+    target_db: str,
+    engine,
+    source_engine,
+    model_creator,
+    csv_uri: str,
+    export: bool,
+    job_id: Optional[str] = None,
+    table_label: Optional[str] = None,
+) -> int:
+    """Copy a staging table into production through a CSV in GCS, with Cloud SQL
+    exports and imports run by the database server.
+
+    pg_dump | psql streamed every row through this process (137 GB for the 337M-row
+    minnie upload, which did not fit the 20 min psql timeout twice on 2026-10-28). With
+    export, the table is first exported to csv_uri, in id order; without, csv_uri is a
+    CSV already holding exactly the table's rows (the upload's processed CSV, which the
+    staging annotation table was imported from and which nothing changes afterwards).
+    The production table's indexes are dropped and it is truncated before the import,
+    then the row count is checked against staging and the indexes are built. Each
+    operation is recorded on the job, so a rerun waits on, or skips, what already ran.
+
+    Returns the number of rows in the production table.
+    """
+    label = table_label or table_name
+    sql_instance_name = get_config_param("SQL_INSTANCE_NAME")
+    timeout = current_app.config.get("SQL_IMPORT_TIMEOUT_SECONDS", DEFAULT_SQL_IMPORT_TIMEOUT_SECONDS)
+    columns = _table_columns(table_name, source_engine)
+    if not columns:
+        raise RuntimeError(f"staging table '{table_name}' not found in '{source_db}'")
+    quote = source_engine.dialect.identifier_preparer.quote
+
+    if export:
+        if job_id:
+            update_job_status(job_id, {"status": "processing", "phase": f"Exporting to GCS: {label}"})
+        select_query = (
+            f"SELECT {', '.join(quote(c) for c in columns)} FROM {quote(table_name)} ORDER BY id"
+        )
+        _run_cloudsql_operation(
+            job_id,
+            f"transfer_export:{table_name}",
+            "EXPORT",
+            csv_uri,
+            source_db,
+            table_name,
+            start=lambda on_started: export_csv(
+                sql_instance_name,
+                csv_uri,
+                source_db,
+                select_query,
+                timeout=timeout,
+                on_started=on_started,
+                busy_timeout=BUSY_RETRY_SECONDS,
+            ),
+        )
+
+    with source_engine.connect() as conn:
+        source_row_count = conn.execute(text(f"SELECT COUNT(*) FROM {quote(table_name)}")).scalar()
+    celery_logger.info(f"Source row count for {table_name}: {source_row_count}")
+
+    def prepare():
+        celery_logger.info(f"Dropping indexes on {table_name} and truncating it")
+        if job_id:
+            update_job_status(job_id, {"status": "processing", "phase": f"Dropping Indices: {label}"})
+        index_cache.drop_table_indices(table_name, engine)
+        with engine.begin() as conn:
+            conn.execute(text(f"TRUNCATE TABLE {quote(table_name)}"))
+
+    if job_id:
+        update_job_status(job_id, {"status": "processing", "phase": f"Importing into Production: {label}"})
+    outcome = _run_cloudsql_operation(
+        job_id,
+        f"transfer_import:{table_name}",
+        "IMPORT",
+        csv_uri,
+        target_db,
+        table_name,
+        start=lambda on_started: import_csv(
+            sql_instance_name,
+            csv_uri,
+            database=target_db,
+            table=table_name,
+            user="postgres",
+            timeout=timeout,
+            on_started=on_started,
+            columns=columns,
+        ),
+        prepare=prepare,
+    )
+
+    if job_id:
+        update_job_status(job_id, {"status": "processing", "phase": f"Verifying Row Count: {label}"})
+    with engine.connect() as conn:
+        row_count = conn.execute(text(f"SELECT COUNT(*) FROM {quote(table_name)}")).scalar()
+    celery_logger.info(f"Destination row count for {table_name}: {row_count}")
+    if row_count != source_row_count:
+        raise RuntimeError(
+            f"Row count mismatch after transfer of '{table_name}': "
+            f"source had {source_row_count} rows but destination has {row_count} rows"
+        )
+
+    if outcome != "ran":
+        # an earlier attempt may have left a CREATE INDEX running on the table
+        wait_for_backend_work(engine, table_name)
+    _rebuild_production_indices(table_name, model_creator, engine, job_id, label)
     return row_count
 
 

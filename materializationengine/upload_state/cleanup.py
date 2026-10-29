@@ -63,6 +63,27 @@ def reconcile(engine, stale_minutes: float, dry_run: bool) -> list:
     return ended
 
 
+def _drop_build_tables(job: dict) -> None:
+    """A job that built in the production database: drop its temporary tables (only
+    ones it marked, never a published table)."""
+    from materializationengine.blueprints.upload import production_build as pb
+    from materializationengine.blueprints.upload.tasks import _note_on_job
+    from materializationengine.database import db_manager
+
+    params = job["params"]
+    aligned_volume = params["datastack_info"]["aligned_volume"]["name"]
+    try:
+        dropped = pb.drop_build_tables(
+            db_manager.get_engine(aligned_volume), job["job_id"], params["build_tables"]
+        )
+    except Exception as e:
+        logger.warning(f"{job['job_id']}: could not drop its built tables: {e}")
+        _note_on_job(job["job_id"], staging_cleanup=f"failed: {e}")
+        return
+    logger.info(f"{job['job_id']}: dropped {dropped} from {aligned_volume}")
+    _note_on_job(job["job_id"], staging_cleanup="done")
+
+
 def drop_failed_staging(engine, grace_hours: float, dry_run: bool) -> list:
     from materializationengine.blueprints.upload.tasks import _discard_staging
     from materializationengine.upload_state import store
@@ -70,13 +91,19 @@ def drop_failed_staging(engine, grace_hours: float, dry_run: bool) -> list:
 
     dropped = []
     for job in store.jobs_needing_staging_cleanup(engine, grace_hours):
+        if str((job.get("record") or {}).get("staging_cleanup", "")).startswith("kept"):
+            continue  # finished tables left for a person to publish
         dropped.append(job["job_id"])
         logger.info(f"{job['job_id']}: dropping staging tables of {job['table_name']}")
         if dry_run:
             continue
         # a cancelled job's record must still take the staging_cleanup note
         with use_sink(StoreSink(engine, job["job_id"])):
-            _discard_staging(job["table_name"], job["job_id"], job["status"])
+            params = job.get("params") or {}
+            if params.get("build_in_production"):
+                _drop_build_tables(job)
+            else:
+                _discard_staging(job["table_name"], job["job_id"], job["status"])
     return dropped
 
 

@@ -163,7 +163,8 @@ def list_jobs(engine, window_hours: float = 24) -> List[dict]:
 
 
 # Stages a cancel can no longer stop: the transfer replaces the production table.
-UNCANCELLABLE_STAGES = ("transfer", "cleanup")
+# once one of these has been entered production is being changed; see bulk_upload.UNCANCELLABLE_FROM
+UNCANCELLABLE_STAGES = ("transfer", "publish", "cleanup")
 
 
 def request_cancel(
@@ -394,57 +395,59 @@ def update_parts(engine, job_id: str, updates: Iterable[dict]) -> None:
             )
 
 
-# --- the Cloud SQL import -----------------------------------------------------------
+# --- Cloud SQL imports and exports -----------------------------------------------------------
 
 
-def get_import(engine, job_id: str) -> Optional[dict]:
+def _op(job_id: str, kind: str):
+    return (upload_cloudsql_ops.c.job_id == job_id) & (upload_cloudsql_ops.c.kind == kind)
+
+
+def get_import(engine, job_id: str, kind: str = "import") -> Optional[dict]:
+    """The job's Cloud SQL operation of this kind: "import" (into staging) or one of
+    the transfer's exports and imports."""
     with engine.connect() as conn:
-        row = conn.execute(
-            upload_cloudsql_ops.select().where(
-                (upload_cloudsql_ops.c.job_id == job_id) & (upload_cloudsql_ops.c.kind == "import")
-            )
-        ).first()
+        row = conn.execute(upload_cloudsql_ops.select().where(_op(job_id, kind))).first()
     return dict(row) if row else None
 
 
-def record_import_intent(engine, job_id: str, uri: str, database: str, table: str) -> dict:
-    """Note the import before it is requested; returns the (possibly existing) row."""
+def record_import_intent(
+    engine, job_id: str, uri: str, database: str, table: str, kind: str = "import"
+) -> dict:
+    """Note the operation before it is requested; returns the (possibly existing) row."""
     with engine.begin() as conn:
         conn.execute(
             insert(upload_cloudsql_ops)
-            .values(job_id=job_id, kind="import", uri=uri, database=database,
+            .values(job_id=job_id, kind=kind, uri=uri, database=database,
                     target_table=table, status="requested")
             .on_conflict_do_nothing()
         )
-    return get_import(engine, job_id)
+    return get_import(engine, job_id, kind)
 
 
-def set_import_operation(engine, job_id: str, operation_name: str) -> None:
+def set_import_operation(engine, job_id: str, operation_name: str, kind: str = "import") -> None:
     with engine.begin() as conn:
         conn.execute(
             upload_cloudsql_ops.update()
-            .where((upload_cloudsql_ops.c.job_id == job_id) & (upload_cloudsql_ops.c.kind == "import"))
+            .where(_op(job_id, kind))
             .values(operation_name=operation_name, status="running")
         )
 
 
-def finish_import(engine, job_id: str, status: str, error: Optional[str] = None) -> None:
+def finish_import(
+    engine, job_id: str, status: str, error: Optional[str] = None, kind: str = "import"
+) -> None:
     with engine.begin() as conn:
         conn.execute(
             upload_cloudsql_ops.update()
-            .where((upload_cloudsql_ops.c.job_id == job_id) & (upload_cloudsql_ops.c.kind == "import"))
+            .where(_op(job_id, kind))
             .values(status=status, error=error, finished_at=_utcnow())
         )
 
 
-def reset_import(engine, job_id: str) -> None:
-    """Forget a requested import that never started, before requesting it again."""
+def reset_import(engine, job_id: str, kind: str = "import") -> None:
+    """Forget a requested operation that never started, before requesting it again."""
     with engine.begin() as conn:
-        conn.execute(
-            upload_cloudsql_ops.delete().where(
-                (upload_cloudsql_ops.c.job_id == job_id) & (upload_cloudsql_ops.c.kind == "import")
-            )
-        )
+        conn.execute(upload_cloudsql_ops.delete().where(_op(job_id, kind)))
 
 
 # --- spatial lookup -----------------------------------------------------------------
@@ -677,3 +680,74 @@ def jobs_needing_staging_cleanup(engine, grace_hours: float = 48) -> List[dict]:
 
 
 __all__ = [n for n in dir() if not n.startswith("_")] + ["models"]
+
+
+# --- frozen materialization and uploads in the production database ----------------
+
+
+def request_clone(engine, aligned_volume: str, requested_by: Optional[str] = None) -> int:
+    with engine.begin() as conn:
+        return conn.execute(
+            models.clone_requests.insert()
+            .values(aligned_volume=aligned_volume, requested_by=requested_by)
+            .returning(models.clone_requests.c.request_id)
+        ).scalar()
+
+
+def release_clone(engine, request_id: int) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            models.clone_requests.update()
+            .where(models.clone_requests.c.request_id == request_id)
+            .values(released_at=_utcnow())
+        )
+
+
+def clone_requested(engine, aligned_volume: str, max_age_seconds: float = 6 * 3600) -> bool:
+    """Whether a frozen materialization of aligned_volume is waiting or running. A
+    request older than max_age_seconds is from a worker that died before releasing it."""
+    with engine.connect() as conn:
+        return bool(
+            conn.execute(
+                text(
+                    "SELECT 1 FROM clone_requests WHERE aligned_volume = :v"
+                    " AND released_at IS NULL"
+                    " AND requested_at > now() - make_interval(secs => :age) LIMIT 1"
+                ),
+                {"v": aligned_volume, "age": max_age_seconds},
+            ).first()
+        )
+
+
+def set_holding(engine, job_id: str, aligned_volume: str, holding: bool) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            insert(models.production_holds)
+            .values(job_id=job_id, aligned_volume=aligned_volume, holding=holding)
+            .on_conflict_do_update(
+                index_elements=["job_id"],
+                set_={"holding": holding, "aligned_volume": aligned_volume, "updated_at": _utcnow()},
+            )
+        )
+
+
+def jobs_holding_production(engine, aligned_volume: str) -> List[str]:
+    """Running uploads whose live driver may have work running in aligned_volume. A
+    driver that stopped heartbeating holds nothing: its connections are gone or will
+    be terminated with the rest."""
+    with engine.connect() as conn:
+        return [
+            row[0]
+            for row in conn.execute(
+                text(
+                    """
+                    SELECT h.job_id FROM production_holds h
+                      JOIN upload_jobs j USING (job_id)
+                     WHERE h.aligned_volume = :v AND h.holding
+                       AND j.status IN :active
+                       AND j.driver_heartbeat_at > now() - make_interval(secs => :stale)
+                    """
+                ),
+                {"v": aligned_volume, "active": tuple(ACTIVE_STATUSES), "stale": LEASE_STALE_SECONDS},
+            )
+        ]

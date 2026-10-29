@@ -45,8 +45,8 @@ class StoreSink:
     def is_cancelled(self) -> bool:
         return store.is_cancel_requested(self.engine, self.job_id)
 
-    def get_import_state(self) -> Dict[str, Any]:
-        row = store.get_import(self.engine, self.job_id)
+    def get_import_state(self, kind: str = "import") -> Dict[str, Any]:
+        row = store.get_import(self.engine, self.job_id, kind)
         if not row:
             return {}
         state = {"status": row["status"], "uri": row["uri"]}
@@ -54,19 +54,22 @@ class StoreSink:
             state["operation"] = row["operation_name"]
         return state
 
-    def set_import_state(self, **fields) -> None:
+    def clear_import_state(self, kind: str = "import") -> None:
+        store.reset_import(self.engine, self.job_id, kind)
+
+    def set_import_state(self, kind: str = "import", **fields) -> None:
         """The import state fields tasks.py writes: uri+database+table (the intent),
         operation (started), status (running/done/failed)."""
         if fields.get("status") == "requested":
             store.record_import_intent(
-                self.engine, self.job_id, fields["uri"], fields["database"], fields["table"]
+                self.engine, self.job_id, fields["uri"], fields["database"], fields["table"], kind
             )
             return
         if fields.get("operation"):
-            store.set_import_operation(self.engine, self.job_id, fields["operation"])
+            store.set_import_operation(self.engine, self.job_id, fields["operation"], kind)
         status = fields.get("status")
         if status in ("done", "failed"):
-            store.finish_import(self.engine, self.job_id, status, fields.get("error"))
+            store.finish_import(self.engine, self.job_id, status, fields.get("error"), kind)
 
 
 def current(job_id: Optional[str]) -> Optional[StoreSink]:

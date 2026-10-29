@@ -52,6 +52,22 @@ def database_url(admin: str, name: str) -> str:
     return f"{admin.rpartition('/')[0]}/{name}"
 
 
+def database_exists(admin: Optional[str] = None, name: Optional[str] = None) -> bool:
+    """Whether the state database exists, without creating it (for code that runs on
+    every deployment, Ray uploads or not)."""
+    engine = create_engine(admin or admin_url(), poolclass=NullPool)
+    try:
+        with engine.connect() as conn:
+            return bool(
+                conn.execute(
+                    text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                    {"name": name or database_name()},
+                ).scalar()
+            )
+    finally:
+        engine.dispose()
+
+
 def ensure_database(admin: str, name: str) -> bool:
     """Create database name if it does not exist; True if it was created here."""
     engine = create_engine(admin, poolclass=NullPool, isolation_level="AUTOCOMMIT")
