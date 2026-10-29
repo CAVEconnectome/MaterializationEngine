@@ -18,6 +18,14 @@ document.addEventListener("alpine:init", () => {
       lastMessage: "",
     },
 
+    // the Neuroglancer preview of the first rows; not saved, so a reload asks again
+    preview: {
+      loading: false,
+      url: null,
+      error: null,
+      summary: null,
+    },
+
     init() {
       this.loadState();
       if (
@@ -102,69 +110,101 @@ document.addEventListener("alpine:init", () => {
       this.state.lastMessage = "";
     },
 
+    // The body /api/process/start takes (and /api/preview-link, so the preview shows
+    // exactly what would be uploaded).
+    buildRequestBody() {
+      const uploadStoreData = localStorage.getItem("uploadStore");
+      const schemaStoreData = localStorage.getItem("schemaStore");
+      const metadataStoreData = localStorage.getItem("metadataStore");
+
+      if (!uploadStoreData || !schemaStoreData || !metadataStoreData) {
+        throw new Error(
+          "Missing required data from previous steps. Please revisit earlier steps."
+        );
+      }
+
+      const { filename, sourceUri } = JSON.parse(uploadStoreData);
+      this.state.inputFile = filename || this.state.inputFile;
+
+      const { columnMapping, ignoredColumns, selectedSchema } =
+        JSON.parse(schemaStoreData);
+      const metadataFromStore = JSON.parse(metadataStoreData);
+
+      // Explicitly pick only the fields the backend schema expects,
+      // excluding UI-only state (validationErrors, metadataSaved, stagingConflict, etc.)
+      const metadataPayload = {
+        schema_type: metadataFromStore.schema_type || selectedSchema,
+        datastack_name: metadataFromStore.datastack_name,
+        table_name: metadataFromStore.table_name,
+        description: metadataFromStore.description,
+        notice_text: metadataFromStore.notice_text,
+        reference_table: metadataFromStore.reference_table,
+        flat_segmentation_source: metadataFromStore.flat_segmentation_source,
+        voxel_resolution_nm_x: metadataFromStore.voxel_resolution_nm_x,
+        voxel_resolution_nm_y: metadataFromStore.voxel_resolution_nm_y,
+        voxel_resolution_nm_z: metadataFromStore.voxel_resolution_nm_z,
+        write_permission: metadataFromStore.write_permission,
+        read_permission: metadataFromStore.read_permission,
+        ...(metadataFromStore.force_overwrite ? { force_overwrite: true } : {}),
+      };
+
+      if (!this.state.inputFile) {
+        throw new Error(
+          "Input file name is missing. Please re-upload the file in Step 1."
+        );
+      }
+
+      return {
+        filename: this.state.inputFile,
+        ...(sourceUri ? { sourceUri } : {}),
+        columnMapping,
+        ignoredColumns,
+        metadata: metadataPayload,
+      };
+    },
+
+    async makePreviewLink() {
+      this.updateInputFileFromUploadStore();
+      this.preview = { loading: true, url: null, error: null, summary: null };
+      try {
+        const response = await fetch("/materialize/upload/api/preview-link", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(this.buildRequestBody()),
+        });
+        let data = {};
+        try {
+          data = await response.json();
+        } catch (_) {}
+        if (!response.ok || data.status !== "ok") {
+          const message = typeof data.message === "string" ? data.message : JSON.stringify(data.message || data);
+          throw new Error(`Could not make the preview (${response.status}): ${message}`);
+        }
+        this.preview = { loading: false, url: data.url, error: null, summary: data };
+      } catch (error) {
+        console.error("Error making preview link:", error);
+        this.preview = { loading: false, url: null, error: error.message, summary: null };
+      }
+    },
+
     async startProcessing() {
       this.resetInternalState(false);
       this.updateInputFileFromUploadStore();
 
       try {
-        const uploadStoreData = localStorage.getItem("uploadStore");
-        const schemaStoreData = localStorage.getItem("schemaStore");
-        const metadataStoreData = localStorage.getItem("metadataStore"); 
-
-        if (!uploadStoreData || !schemaStoreData || !metadataStoreData) {
-          throw new Error(
-            "Missing required data from previous steps. Please revisit earlier steps."
-          );
-        }
-
-        const { filename, sourceUri } = JSON.parse(uploadStoreData);
-        this.state.inputFile = filename || this.state.inputFile;
-
-        const { columnMapping, ignoredColumns, selectedSchema } =
-          JSON.parse(schemaStoreData);
-        const metadataFromStore = JSON.parse(metadataStoreData); 
-
-        // Explicitly pick only the fields the backend schema expects,
-        // excluding UI-only state (validationErrors, metadataSaved, stagingConflict, etc.)
-        const metadataPayload = {
-          schema_type: metadataFromStore.schema_type || selectedSchema,
-          datastack_name: metadataFromStore.datastack_name,
-          table_name: metadataFromStore.table_name,
-          description: metadataFromStore.description,
-          notice_text: metadataFromStore.notice_text,
-          reference_table: metadataFromStore.reference_table,
-          flat_segmentation_source: metadataFromStore.flat_segmentation_source,
-          voxel_resolution_nm_x: metadataFromStore.voxel_resolution_nm_x,
-          voxel_resolution_nm_y: metadataFromStore.voxel_resolution_nm_y,
-          voxel_resolution_nm_z: metadataFromStore.voxel_resolution_nm_z,
-          write_permission: metadataFromStore.write_permission,
-          read_permission: metadataFromStore.read_permission,
-          ...(metadataFromStore.force_overwrite ? { force_overwrite: true } : {}),
-        };
-       
-        if (!this.state.inputFile) {
-          throw new Error(
-            "Input file name is missing. Please re-upload the file in Step 1."
-          );
-        }
+        const body = this.buildRequestBody();
 
         this.state.status = "preparing";
         this.state.phase = "Initializing processing workflow...";
         this.state.startTime = Date.now();
         this.saveState();
         console.log("Starting processing for file:", this.state.inputFile);
-        console.log("Metadata payload being sent:", metadataPayload);
+        console.log("Metadata payload being sent:", body.metadata);
 
         const response = await fetch("/materialize/upload/api/process/start", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            filename: this.state.inputFile,
-            ...(sourceUri ? { sourceUri } : {}),
-            columnMapping,
-            ignoredColumns,
-            metadata: metadataPayload,
-          }),
+          body: JSON.stringify(body),
         });
 
         if (!response.ok) {

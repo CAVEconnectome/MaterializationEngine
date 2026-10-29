@@ -4,7 +4,6 @@ import logging
 from typing import Any, Dict
 
 import caveclient
-import nglui
 import numpy as np
 import pandas as pd
 from celery.result import AsyncResult
@@ -28,7 +27,12 @@ from flask import (
 )
 from google.cloud import storage
 from middle_auth_client import auth_required, auth_requires_permission
-from nglui.statebuilder.helpers import make_point_statebuilder, package_state
+from nglui.statebuilder import (
+    AnnotationLayer,
+    ImageLayer,
+    SegmentationLayer,
+    ViewerState,
+)
 from redis import StrictRedis
 from sqlalchemy import and_, func, or_
 from sqlalchemy.sql import text
@@ -264,13 +268,33 @@ def version_error(datastack_name: str, id: int):
                 mat_version=version.version,
             )
 
+SPELUNKER_URL = "https://spelunker.cave-explorer.org"
+
+
+def _imagery_and_segmentation(client, extra_seg_sources=()) -> ViewerState:
+    """A spelunker state with the datastack's imagery ("img") and segmentation ("seg",
+    with its skeleton source and any extra_seg_sources), in its viewer resolution."""
+    seg_source = client.info.segmentation_source(format_for="neuroglancer")
+    seg_source = seg_source.replace("graphene://https://", "graphene://middleauth+https://")
+    seg_sources = [seg_source, *extra_seg_sources]
+    skeleton_source = client.info.get_datastack_info().get("skeleton_source", None)
+    if skeleton_source:
+        seg_sources.append(skeleton_source)
+    state = ViewerState(
+        target_url=SPELUNKER_URL,
+        dimensions=list(client.info.viewer_resolution()),
+        # as nglui 3 did: no request to the imagery to infer a position
+        infer_coordinates=False,
+    )
+    state.add_layer(ImageLayer(source=client.info.image_source(), name="img"))
+    state.add_layer(SegmentationLayer(source=seg_sources, name="seg"))
+    return state
+
+
 def make_precomputed_annotation_link(datastack_name, table_name, client):
     auth_disabled = get_config_param("AUTH_DISABLED", False)
     auth_prefix = "" if auth_disabled else "middleauth+"
     
-    seg_source = client.info.segmentation_source(format_for="neuroglancer")
-    seg_source = seg_source.replace("graphene://https://", "graphene://middleauth+https://")
-
     annotation_url = url_for(
         "api.Materialization Client2_live_table_precomputed_info",
         datastack_name=datastack_name,
@@ -279,44 +303,13 @@ def make_precomputed_annotation_link(datastack_name, table_name, client):
     annotation_source = f"precomputed://{auth_prefix}{annotation_url}"
     annotation_source = annotation_source[:-5]
 
-    seg_sources = [seg_source]
-    datastack_info = client.info.get_datastack_info()
-    skeleton_source = datastack_info.get("skeleton_source", None)
-    if skeleton_source:
-        seg_sources.append(skeleton_source)
-
-    seg_layer = nglui.statebuilder.SegmentationLayerConfig(
-        source=seg_sources, name="seg"
-    )
-    img_layer = nglui.statebuilder.ImageLayerConfig(
-        source=client.info.image_source(), name="img"
-    )
-
-    sb = nglui.statebuilder.StateBuilder([img_layer, seg_layer], client=client)
-    json = sb.render_state(
-        None,
-        return_as="dict",
-        url_prefix="https://spelunker.cave-explorer.org",
-        target_site="mainline",
-    )
-    json['layers'].append({
-        'type': 'annotation',
-        'source': annotation_source,
-        'annotationColor': '#ffffff',
-        'name': table_name
-        })
-
-    sb=nglui.statebuilder.StateBuilder(base_state=json)
-    
-    url = sb.render_state(url_prefix='https://spelunker.cave-explorer.org', return_as="url", target_site="mainline")
-    return url
+    state = _imagery_and_segmentation(client)
+    state.add_layer(AnnotationLayer(source=annotation_source, name=table_name, color="#ffffff"))
+    return state.to_url()
     
 def make_seg_prop_ng_link(datastack_name, table_name, version, client, is_view=False):
     auth_disabled = get_config_param("AUTH_DISABLED", False)
     auth_prefix = "" if auth_disabled else "middleauth+"
-    
-    seg_source = client.info.segmentation_source(format_for="neuroglancer")
-    seg_source = seg_source.replace("graphene://https://", "graphene://middleauth+https://")
     
     if is_view:
         seginfo_url = url_for(
@@ -339,26 +332,7 @@ def make_seg_prop_ng_link(datastack_name, table_name, version, client, is_view=F
     # strip off the /info
     seg_info_source = seg_info_source[:-5]
 
-    seg_sources = [seg_source, seg_info_source]
-    datastack_info = client.info.get_datastack_info()
-    skeleton_source = datastack_info.get("skeleton_source", None)
-    if skeleton_source:
-        seg_sources.append(skeleton_source)
-
-    seg_layer = nglui.statebuilder.SegmentationLayerConfig(
-        source=seg_sources, name="seg"
-    )
-    img_layer = nglui.statebuilder.ImageLayerConfig(
-        source=client.info.image_source(), name="img"
-    )
-    sb = nglui.statebuilder.StateBuilder([img_layer, seg_layer], client=client)
-    url_link = sb.render_state(
-        None,
-        return_as="url",
-        url_prefix="https://spelunker.cave-explorer.org",
-        target_site="mainline",
-    )
-    return url_link
+    return _imagery_and_segmentation(client, [seg_info_source]).to_url()
 
 
 
@@ -697,24 +671,23 @@ def generic_report(datastack_name, id):
             server_address=current_app.config["GLOBAL_SERVER_URL"]
         )
         
-        sb = make_point_statebuilder(
-            client,
+        # nglui 4 has no annotation groups; the group column is shown as each
+        # point's description instead
+        points = df.copy()
+        if grp_column:
+            points[grp_column] = points[grp_column].astype(str)
+        state = ViewerState(client=client, infer_coordinates=False).add_layers_from_client(
+            target_url=True
+        )
+        state.add_points(
+            points,
+            name=table_name,
             point_column=pos_column,
-            group_column=grp_column,
-            linked_seg_column=linked_cols,
+            segment_column=linked_cols or None,
+            description_column=grp_column or None,
             data_resolution=data_res,
         )
-        
-        url = package_state(
-            df,
-            sb,
-            client,
-            shorten="always",
-            return_as="url",
-            ngl_url=None,
-            link_text="link",
-        )
-        return redirect(url)
+        return redirect(state.to_link_shortener(client))
     
     classes = ["table table-borderless"]
     with pd.option_context("display.max_colwidth", None):

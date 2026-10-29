@@ -39,7 +39,7 @@ dependencies = [
     "numpy>=1.20",
     "emannotationschemas<=5.34.2",
     "dynamicannotationdb>=5.13.1",
-    "nglui>=3.2.1,<4",
+    "nglui>=4.9.0,<5",
     "Flask-Limiter[redis]",
     "cryptography>=44.0.2",
     "kvdbclient[extensions]",
