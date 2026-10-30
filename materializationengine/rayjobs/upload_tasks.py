@@ -75,10 +75,13 @@ def spatial_chunk(database: str, mat_metadata: dict, min_corner, max_corner, sub
 
 def resolve_roots_chunk(database: str, info: dict, first_id: int, last_id: int, batch_size: int) -> Dict[str, int]:
     from materializationengine.database import db_manager
-    from materializationengine.workflows.resolve_roots import resolve_id_range
+    from materializationengine.workflows.resolve_roots import DEFAULT_ROOT_THREADS, resolve_id_range
 
     try:
-        return resolve_id_range(database, info, first_id, last_id, batch_size)
+        return resolve_id_range(
+            database, info, first_id, last_id, batch_size,
+            threads=int(info.get("threads") or DEFAULT_ROOT_THREADS),
+        )
     finally:
         # as spatial_chunk: no idle connections left in the production database
         db_manager.cleanup()

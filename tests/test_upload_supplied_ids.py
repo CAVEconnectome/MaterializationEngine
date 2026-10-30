@@ -450,3 +450,27 @@ class TestSuppliedStages:
         assert pb.index_commands(
             prod, names["final_segmentation"], pb.segmentation_model(table, META, PCG)
         ) == []
+
+
+class TestThreadedBatches:
+    def test_pieces_keep_their_order_with_threads(self):
+        ids = np.arange(1, 2501, dtype=np.uint64)
+        seen = []
+
+        def fn(piece):
+            seen.append(len(piece))
+            return piece * 10
+
+        out = resolve_roots._map_batches(fn, ids, 1000, threads=4)
+        assert out.tolist() == (ids * 10).tolist()
+        assert sorted(seen) == [500, 1000, 1000]
+
+    def test_lookups_split_into_pieces(self):
+        root_ext = FakeRootExt({SV + i: ROOT + i for i in range(10)})
+        svs = np.array([SV + i for i in range(10)] * 2, dtype=np.uint64)
+        roots = resolve_roots.lookup_roots(mock.Mock(root_ext=root_ext), svs, None, "c", batch_size=3, threads=4)
+        assert roots.tolist() == [ROOT + i for i in range(10)] * 2
+        current = resolve_roots.current_roots(
+            mock.Mock(root_ext=FakeRootExt({}, stale={ROOT + 4})), roots, None, batch_size=3, threads=4
+        )
+        assert current.tolist() == [i != 4 for i in range(10)] * 2

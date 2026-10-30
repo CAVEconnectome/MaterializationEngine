@@ -16,7 +16,8 @@ Only rows that changed are written back.
 
 import datetime
 import logging
-from typing import Dict, List
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -24,8 +25,14 @@ from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
-# Supervoxels or roots per chunkedgraph call.
-DEFAULT_ROOT_BATCH_SIZE = 10000
+# Supervoxels or roots per chunkedgraph call, as PyChunkedGraph splits its Bigtable reads
+# (MAX_ROW_KEY_COUNT = 1000).
+DEFAULT_ROOT_BATCH_SIZE = 1000
+# Calls in flight at once per task (UPLOAD_ROOT_THREADS). kvdbclient reads one request at
+# a time, so a task alone mostly waits on Bigtable (~300 supervoxels/s at ~60m CPU on
+# ltv7); PyChunkedGraph runs its pieces on up to 2 x cores threads instead. Every task
+# of every worker reads the same Bigtable instance the chunkedgraph serves users from.
+DEFAULT_ROOT_THREADS = 8
 
 
 def _batches(n: int, size: int):
@@ -33,7 +40,20 @@ def _batches(n: int, size: int):
         yield slice(start, min(start + size, n))
 
 
-def current_roots(cg_client, roots: np.ndarray, time_stamp, batch_size: int) -> np.ndarray:
+def _map_batches(fn: Callable[[np.ndarray], np.ndarray], ids: np.ndarray, batch_size: int, threads: int) -> np.ndarray:
+    """fn over ids in pieces of batch_size, up to threads pieces at a time, in order."""
+    pieces = [ids[part] for part in _batches(len(ids), batch_size)]
+    if not pieces:
+        return np.zeros(0, dtype=np.uint64)
+    if threads <= 1 or len(pieces) == 1:
+        return np.concatenate([np.atleast_1d(np.asarray(fn(p))) for p in pieces])
+    with ThreadPoolExecutor(max_workers=min(threads, len(pieces))) as pool:
+        return np.concatenate([np.atleast_1d(np.asarray(r)) for r in pool.map(fn, pieces)])
+
+
+def current_roots(
+    cg_client, roots: np.ndarray, time_stamp, batch_size: int, threads: int = 1
+) -> np.ndarray:
     """Whether each root id (> 0) is a root that is still the latest at time_stamp.
 
     One read per distinct root. An id at a lower layer, a supervoxel or chunk id put in
@@ -47,20 +67,29 @@ def current_roots(cg_client, roots: np.ndarray, time_stamp, batch_size: int) -> 
     is_root = root_ext.get_chunk_layers(unique) == root_ext._layer_count
     latest = np.zeros(len(unique), dtype=bool)
     candidates = np.nonzero(is_root)[0]
-    for part in _batches(len(candidates), batch_size):
-        index = candidates[part]
-        latest[index] = root_ext.is_latest_roots(unique[index], time_stamp=time_stamp)
+    if len(candidates):
+        latest[candidates] = _map_batches(
+            lambda piece: root_ext.is_latest_roots(piece, time_stamp=time_stamp),
+            unique[candidates],
+            batch_size,
+            threads,
+        ).astype(bool)
     return np.isin(roots, unique[latest])
 
 
-def lookup_roots(cg_client, supervoxels: np.ndarray, time_stamp, column: str, batch_size: int) -> np.ndarray:
+def lookup_roots(
+    cg_client, supervoxels: np.ndarray, time_stamp, column: str, batch_size: int, threads: int = 1
+) -> np.ndarray:
     from materializationengine.workflows.spatial_lookup import _get_roots_zero_for_missing
 
     # each distinct supervoxel once (points in one cell often share a supervoxel)
     unique, inverse = np.unique(np.asarray(supervoxels, dtype=np.uint64), return_inverse=True)
-    roots = np.zeros(len(unique), dtype=np.uint64)
-    for part in _batches(len(unique), batch_size):
-        roots[part] = _get_roots_zero_for_missing(cg_client, unique[part], time_stamp, column)
+    roots = _map_batches(
+        lambda piece: _get_roots_zero_for_missing(cg_client, piece, time_stamp, column),
+        unique,
+        batch_size,
+        threads,
+    ).astype(np.uint64)
     return roots[inverse.reshape(-1)]
 
 
@@ -119,8 +148,10 @@ def resolve_id_range(
     first_id: int,
     last_id: int,
     batch_size: int = DEFAULT_ROOT_BATCH_SIZE,
+    threads: int = DEFAULT_ROOT_THREADS,
 ) -> Dict[str, int]:
-    """Do one id range [first_id, last_id]; returns what it counted.
+    """Do one id range [first_id, last_id]; returns what it counted. Chunkedgraph calls
+    take batch_size ids each, threads of them at a time.
 
     info: segmentation_table, annotation_table, pcg_table_name, segmentation_source,
     coord_resolution, materialization_time_stamp (ISO), and fields: {point field:
@@ -170,14 +201,14 @@ def resolve_id_range(
                 counts["supervoxels_looked_up"] += int(np.count_nonzero(supervoxels[missing]))
         if field.get("roots_supplied"):
             supplied = roots > 0
-            stale = supplied & ~current_roots(cg_client, roots, time_stamp, batch_size)
+            stale = supplied & ~current_roots(cg_client, roots, time_stamp, batch_size, threads)
             counts["roots_checked"] += int(supplied.sum())
             counts["roots_stale"] += int(stale.sum())
             roots[stale] = 0
         needed = (roots == 0) & (supervoxels > 0)
         if needed.any():
             roots[needed] = lookup_roots(
-                cg_client, supervoxels[needed], time_stamp, sv_col, batch_size
+                cg_client, supervoxels[needed], time_stamp, sv_col, batch_size, threads
             ).astype(np.int64)
             counts["roots_looked_up"] += int(needed.sum())
         field_changed = (supervoxels != data[sv_col].to_numpy()) | (roots != data[root_col].to_numpy())

@@ -1089,7 +1089,7 @@ def stage_resolve_roots(ctx: Context) -> dict:
     from materializationengine.rayjobs.runner import run_bounded
     from materializationengine.upload_state import store
     from materializationengine.utils import get_config_param
-    from materializationengine.workflows.resolve_roots import DEFAULT_ROOT_BATCH_SIZE
+    from materializationengine.workflows.resolve_roots import DEFAULT_ROOT_BATCH_SIZE, DEFAULT_ROOT_THREADS
 
     database, engine = _production(ctx)
     seg = ctx.params["build_tables"]["segmentation"]
@@ -1100,6 +1100,8 @@ def stage_resolve_roots(ctx: Context) -> dict:
         store.plan_root_chunks(ctx.engine, ctx.job_id, _plan_root_chunks(engine, seg, rows_per_chunk))
         chunks = store.root_chunks(ctx.engine, ctx.job_id)
     info = _resolve_info(ctx)
+    # chunkedgraph calls in flight per task, on the task's own threads
+    info["threads"] = int(get_config_param("UPLOAD_ROOT_THREADS") or DEFAULT_ROOT_THREADS)
     batch_size = int(get_config_param("UPLOAD_ROOT_BATCH_SIZE") or DEFAULT_ROOT_BATCH_SIZE)
     total = len(chunks)
     attempts = {c["chunk_index"]: c["attempt_count"] for c in chunks}
