@@ -242,21 +242,40 @@ class TestSampleCheck:
         assert supplied_ids.sample_check(pd.DataFrame(), file_metadata(), None) is None
 
 
+class FakeBigtable:
+    """read_nodes over Child and NewParent cells: every top-layer id exists, except
+    those in missing; those in stale have a new parent."""
+
+    def __init__(self, ext):
+        self.ext = ext
+
+    def read_nodes(self, node_ids, properties, end_time=None):
+        from kvdbclient import attributes
+
+        rows = {}
+        for n in node_ids:
+            self.ext.checked.append(int(n))
+            if int(n) in self.ext.missing:
+                continue
+            cells = {attributes.Hierarchy.Child: ["children"]}
+            if int(n) in self.ext.stale:
+                cells[attributes.Hierarchy.NewParent] = ["new parent"]
+            rows[n] = cells
+        return rows
+
+
 class FakeRootExt:
     """kvdbclient's root extension. Roots are ROOT + n (top layer); stale is a set."""
 
     _layer_count = 10
 
-    def __init__(self, roots, stale=()):
-        self.roots, self.stale = roots, set(stale)
+    def __init__(self, roots, stale=(), missing=()):
+        self.roots, self.stale, self.missing = roots, set(stale), set(missing)
         self.checked = []
+        self._client = FakeBigtable(self)
 
     def get_chunk_layers(self, ids):
         return np.array([10 if int(i) >= ROOT else 2 for i in ids])
-
-    def is_latest_roots(self, roots, time_stamp=None):
-        self.checked.extend(int(r) for r in roots)
-        return np.array([int(r) not in self.stale for r in roots])
 
     def get_roots(self, svs, time_stamp=None, fail_to_zero=False):
         return np.array([self.roots.get(int(s), 0) for s in svs], dtype=np.uint64)
@@ -319,8 +338,12 @@ class TestResolveIdRange:
             (3, SV + 3, 0, 0, 0),         # no root given
             (4, SV + 4, SV + 4, 0, 0),    # a supervoxel in the root column
             (5, 0, 0, 0, 0),              # nothing: point without a label
+            (6, SV + 6, ROOT + 6, 0, 0),  # root-shaped, but never existed
         ])
-        root_ext = FakeRootExt({SV + 2: ROOT + 20, SV + 3: ROOT + 30, SV + 4: ROOT + 40}, stale={ROOT + 2})
+        root_ext = FakeRootExt(
+            {SV + 2: ROOT + 20, SV + 3: ROOT + 30, SV + 4: ROOT + 40, SV + 6: ROOT + 60},
+            stale={ROOT + 2}, missing={ROOT + 6},
+        )
         counts = self.run(prod, self.info(names), root_ext)
         assert seg_rows(prod, names) == [
             (1, SV + 1, ROOT + 1, 0, 0),
@@ -328,13 +351,14 @@ class TestResolveIdRange:
             (3, SV + 3, ROOT + 30, 0, 0),
             (4, SV + 4, ROOT + 40, 0, 0),
             (5, 0, 0, 0, 0),
+            (6, SV + 6, ROOT + 60, 0, 0),
         ]
         assert counts == {
-            "rows": 5, "rows_updated": 3, "supervoxels_looked_up": 0,
-            "roots_checked": 3, "roots_stale": 2, "roots_looked_up": 3,
+            "rows": 6, "rows_updated": 4, "supervoxels_looked_up": 0,
+            "roots_checked": 4, "roots_stale": 3, "roots_looked_up": 4,
         }
         # each distinct root read once; the non-root is never asked about
-        assert sorted(root_ext.checked) == [ROOT + 1, ROOT + 2]
+        assert sorted(root_ext.checked) == [ROOT + 1, ROOT + 2, ROOT + 6]
 
     def test_blank_supervoxels_are_looked_up_and_other_fields_untouched(self, production):
         prod, _, table = production

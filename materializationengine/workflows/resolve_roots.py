@@ -51,13 +51,38 @@ def _map_batches(fn: Callable[[np.ndarray], np.ndarray], ids: np.ndarray, batch_
         return np.concatenate([np.atleast_1d(np.asarray(r)) for r in pool.map(fn, pieces)])
 
 
+def latest_roots(root_ext, roots: np.ndarray, time_stamp) -> np.ndarray:
+    """Whether each root existed and was not yet superseded before time_stamp.
+
+    kvdbclient 0.9's is_latest_roots (PyChunkedGraph's rule): a root has Child cells
+    before time_stamp and no NewParent. Before 0.8, kvdbclient only checked NewParent, so
+    an id that never existed counted as latest. 0.8 and later need Python 3.13; switch to
+    root_ext.is_latest_roots once the image moves to it.
+    """
+    from kvdbclient import attributes, basetypes
+    from kvdbclient.utils import get_valid_timestamp
+
+    roots = np.asarray(roots, dtype=basetypes.NODE_ID)
+    rows = root_ext._client.read_nodes(
+        node_ids=roots,
+        properties=[attributes.Hierarchy.Child, attributes.Hierarchy.NewParent],
+        end_time=get_valid_timestamp(time_stamp),
+    )
+    latest = [
+        node_id
+        for node_id, cells in rows.items()
+        if attributes.Hierarchy.Child in cells and attributes.Hierarchy.NewParent not in cells
+    ]
+    return np.isin(roots, np.array(latest, dtype=basetypes.NODE_ID))
+
+
 def current_roots(
     cg_client, roots: np.ndarray, time_stamp, batch_size: int, threads: int = 1
 ) -> np.ndarray:
     """Whether each root id (> 0) is a root that is still the latest at time_stamp.
 
-    One read per distinct root. An id at a lower layer, a supervoxel or chunk id put in
-    a root column by mistake, is not current.
+    One read per distinct root. An id at a lower layer (a supervoxel or chunk id put in
+    a root column by mistake), or one that never existed, is not current.
     """
     roots = np.asarray(roots, dtype=np.uint64)
     unique = np.unique(roots[roots > 0])
@@ -69,7 +94,7 @@ def current_roots(
     candidates = np.nonzero(is_root)[0]
     if len(candidates):
         latest[candidates] = _map_batches(
-            lambda piece: root_ext.is_latest_roots(piece, time_stamp=time_stamp),
+            lambda piece: latest_roots(root_ext, piece, time_stamp),
             unique[candidates],
             batch_size,
             threads,
