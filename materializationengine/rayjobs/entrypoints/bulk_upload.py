@@ -97,8 +97,11 @@ STAGE_ORDER = [
     "cleanup",
 ]
 # The ids resolve_roots plans per chunk by default (UPLOAD_ROOT_CHUNK_ROWS): rows of
-# the id-ordered segmentation table, read with one primary key range scan each.
-DEFAULT_ROOT_CHUNK_ROWS = 100000
+# the id-ordered segmentation table, read with one primary key range scan each. Root
+# lookups run at ~300 supervoxels/s per task (ltv7, minnie3_v1), so a chunk of 20k rows
+# (up to 40k synapse supervoxels) takes about 2 min, and a 1M-row upload gives 51
+# chunks to spread over the workers; 100k gave it 11, taking 15 min on 8 CPUs.
+DEFAULT_ROOT_CHUNK_ROWS = 20000
 # Cancelling is no longer possible from here on: the stage changes production.
 UNCANCELLABLE_FROM = {"production": "publish", "staging": "transfer"}
 
