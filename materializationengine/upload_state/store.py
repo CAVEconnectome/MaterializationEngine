@@ -19,6 +19,7 @@ from materializationengine.upload_state.models import (
     upload_cloudsql_ops,
     upload_jobs,
     upload_parts,
+    upload_root_chunks,
     upload_spatial,
     upload_spatial_chunks,
     upload_stages,
@@ -568,6 +569,63 @@ def chunk_totals(engine, job_id: str) -> Dict[str, int]:
             {"j": job_id},
         ).first()
     return {"completed_chunks": row[0], "failed_chunks": row[1], "rows_processed": int(row[2])}
+
+
+def plan_root_chunks(engine, job_id: str, ranges: List[Tuple[int, int]]) -> None:
+    """Record resolve_roots' id ranges once; a later attempt keeps the first plan."""
+    if not ranges:
+        return
+    values = [
+        {
+            "job_id": job_id,
+            "chunk_index": i,
+            "first_id": int(first),
+            "last_id": int(last),
+            "status": "PENDING",
+        }
+        for i, (first, last) in enumerate(ranges)
+    ]
+    with engine.begin() as conn:
+        for start in range(0, len(values), 10000):
+            conn.execute(
+                insert(upload_root_chunks)
+                .values(values[start : start + 10000])
+                .on_conflict_do_nothing(index_elements=["job_id", "chunk_index"])
+            )
+
+
+def root_chunks(engine, job_id: str) -> List[dict]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            upload_root_chunks.select()
+            .where(upload_root_chunks.c.job_id == job_id)
+            .order_by(upload_root_chunks.c.chunk_index)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def record_root_chunks(engine, job_id: str, rows: List[dict]) -> None:
+    """Update chunk rows (chunk_index, status, attempt_count, counts, error_message,
+    error_type). A COMPLETED chunk stays COMPLETED."""
+    rows = list({r["chunk_index"]: r for r in rows}.values())
+    if not rows:
+        return
+    with engine.begin() as conn:
+        for r in rows:
+            conn.execute(
+                upload_root_chunks.update()
+                .where(upload_root_chunks.c.job_id == job_id)
+                .where(upload_root_chunks.c.chunk_index == r["chunk_index"])
+                .where(upload_root_chunks.c.status != "COMPLETED")
+                .values(
+                    status=r["status"],
+                    attempt_count=r.get("attempt_count", 0),
+                    counts=r.get("counts"),
+                    error_message=(r.get("error_message") or None) and r["error_message"][:4000],
+                    error_type=r.get("error_type"),
+                    updated_at=_utcnow(),
+                )
+            )
 
 
 def chunk_rows(engine, job_id: str) -> List[dict]:

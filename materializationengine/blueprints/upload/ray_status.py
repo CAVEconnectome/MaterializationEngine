@@ -64,6 +64,10 @@ def start_ray_upload(
     every value that must stay the same across its attempts, goes in params now.
     """
     from materializationengine.blueprints.upload import production_build as pb
+    from materializationengine.blueprints.upload.supplied_ids import (
+        maps_segmentation_columns,
+        supplied_segmentation,
+    )
     from materializationengine.database import db_manager
 
     config = current_app.config
@@ -104,6 +108,14 @@ def start_ray_upload(
         "build_tables": build_tables,
         "table_meta": table_meta,
     }
+    supplied = (
+        supplied_segmentation(file_metadata)
+        if maps_segmentation_columns(file_metadata.get("column_mapping"))
+        else None
+    )
+    if supplied:
+        # the source's own supervoxel and/or root ids (supplied_ids.py)
+        params["supplied_segmentation"] = supplied
     try:
         store.create_job(
             engine,

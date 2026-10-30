@@ -153,7 +153,7 @@
         >
           <tr
             :class="{
-                'table-warning': (field.name !== 'id' && !$store.schema.state.columnMapping[field.name]),
+                'table-warning': (!field.optional && !$store.schema.state.columnMapping[field.name]),
                 'table-info': field.isGeometry,
                 'table-success': $store.schema.state.columnMapping[field.name]
               }"
@@ -169,10 +169,10 @@
             </td>
             <td x-text="field.type"></td>
             <td>
-              <template x-if="field.name === 'id'">
+              <template x-if="field.optional">
                 <span class="badge bg-secondary">Optional</span>
               </template>
-              <template x-if="field.name !== 'id'">
+              <template x-if="!field.optional">
                 <span class="badge bg-danger">Required</span>
               </template>
             </td>
@@ -181,14 +181,17 @@
                 class="form-select"
                 :value="$store.schema.state.columnMapping[field.name]"
                 @change="$store.schema.updateColumnMapping(field.name, $event.target.value)"
-                :class="{ 'is-invalid': field.name !== 'id' && !$store.schema.state.columnMapping[field.name] }"
+                :class="{ 'is-invalid': !field.optional && !$store.schema.state.columnMapping[field.name] }"
               >
                 <template x-if="field.name === 'id'">
                   <option value="">
                     Auto-generate (recommended unless pre-computed)
                   </option>
                 </template>
-                <template x-if="field.name !== 'id'">
+                <template x-if="field.isSegmentation">
+                  <option value="">Not in the file (look it up)</option>
+                </template>
+                <template x-if="!field.optional">
                   <option value="">Select column...</option>
                 </template>
                 <template
@@ -207,6 +210,13 @@
                   <i class="fas fa-info-circle"></i>
                   If no column is selected, unique IDs will be automatically
                   generated
+                </small>
+              </template>
+              <template x-if="field.isSegmentation && field.type === 'ROOT ID' && $store.schema.state.columnMapping[field.name]">
+                <small class="form-text text-muted mt-1 d-block">
+                  <i class="fas fa-info-circle"></i>
+                  Every root id is checked against the chunkedgraph; stale ones are
+                  looked up again from the supervoxel
                 </small>
               </template>
             </td>

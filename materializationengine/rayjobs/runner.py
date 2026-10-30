@@ -18,13 +18,14 @@ class Stopped(Exception):
 
 # Per task: Ray options. Parts are idempotent (each overwrites its own output object),
 # so application errors are retried there too. A spatial chunk's application errors
-# come back to the driver instead, which counts them as attempts (FAILED_RETRYABLE,
+# (and a resolve_roots chunk's) come back to the driver instead, which counts them as attempts (FAILED_RETRYABLE,
 # then FAILED_PERMANENT); Ray still retries a chunk whose worker died.
 TASK_OPTIONS: Dict[str, dict] = {
     "count_csv_part": {"max_retries": 3, "retry_exceptions": True},
     "csv_part": {"max_retries": 3, "retry_exceptions": True},
     "parquet_part": {"max_retries": 3, "retry_exceptions": True},
     "spatial_chunk": {"max_retries": 3, "retry_exceptions": False},
+    "resolve_roots_chunk": {"max_retries": 3, "retry_exceptions": False},
 }
 
 

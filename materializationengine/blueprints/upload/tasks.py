@@ -18,7 +18,10 @@ from sqlalchemy import inspect, text
 from dynamicannotationdb.key_utils import build_segmentation_table_name
 from dynamicannotationdb.models import SegmentationMetadata
 
-from materializationengine.blueprints.upload.gcs_processor import GCSCsvProcessor
+from materializationengine.blueprints.upload.gcs_processor import (
+    GCSCsvProcessor,
+    segmentation_blob_name,
+)
 from materializationengine.blueprints.upload.parquet_source import (
     DEFAULT_PARQUET_PART_ROWS,
     is_parquet_source,
@@ -459,8 +462,8 @@ def process_csv(
         source_blob_name = file_path
         destination_blob_name = f"processed_{schema_type}_{timestamp_str}.csv"
 
-        def transform_chunk(chunk: pd.DataFrame) -> pd.DataFrame:
-            return schema_processor.process_chunk(chunk, timestamp)
+        segmentation = schema_processor.writes_segmentation
+        segmentation_blob = segmentation_blob_name(destination_blob_name) if segmentation else None
 
         def print_progress(progress):
             celery_logger.info(f"Upload formatted progress: {progress:.2f}%")
@@ -506,6 +509,7 @@ def process_csv(
                 part_kwargs=part_kwargs,
                 generate_ids=schema_processor.generate_ids,
                 id_counter_start=id_counter_start,
+                segmentation=segmentation,
             )
         else:
             part_size_bytes = int(
@@ -527,14 +531,17 @@ def process_csv(
                     part_kwargs=part_kwargs,
                     generate_ids=schema_processor.generate_ids,
                     id_counter_start=id_counter_start,
+                    segmentation=segmentation,
                 )
 
         if parts_result is None:
             gcs_processor.process_csv_in_chunks(
                 source_blob_name,
                 destination_blob_name,
-                transform_chunk,
+                schema_processor.transform(timestamp),
                 chunk_upload_callback=progress_callback,
+                segmentation=segmentation,
+                text_columns=schema_processor.source_text_columns(),
             )
             last_assigned_id = schema_processor._id_counter
             dropped_rows = schema_processor.dropped_rows
@@ -558,6 +565,12 @@ def process_csv(
         return {
             "status": "completed_csv_processing",
             "output_path": f"{bucket_name}/{destination_blob_name}",
+            # the supplied supervoxel and root ids, in the segmentation table's columns
+            **(
+                {"segmentation_output_path": f"{bucket_name}/{segmentation_blob}"}
+                if segmentation_blob
+                else {}
+            ),
             "job_id_for_status": job_id_for_status,
             "last_assigned_id": last_assigned_id,
             "dropped_rows": dropped_rows,
@@ -594,6 +607,7 @@ def _process_csv_in_parts(
     part_kwargs: Dict[str, Any],
     generate_ids: bool,
     id_counter_start: int,
+    segmentation: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Process each byte range of the CSV in its own task, then join the outputs in order.
 
@@ -602,6 +616,9 @@ def _process_csv_in_parts(
     """
     part_prefix = f"processed_parts/{job_id}/"
     part_names = [f"{part_prefix}part-{i:05d}.csv" for i in range(len(ranges))]
+    segmentation_names = (
+        [segmentation_blob_name(name) for name in part_names] if segmentation else []
+    )
 
     starts = [id_counter_start] * len(ranges)
     if generate_ids:
@@ -641,7 +658,7 @@ def _process_csv_in_parts(
     except BaseException:
         # a cancelled or failed upload leaves no parts behind (best effort: a part
         # still running can write after this)
-        gcs_processor.delete_blobs(part_names)
+        gcs_processor.delete_blobs(part_names + segmentation_names)
         raise
 
     split_errors = [r["split_error"] for r in results if r.get("split_error")]
@@ -650,9 +667,11 @@ def _process_csv_in_parts(
             f"Upload {job_id}: the CSV cannot be split by lines ({split_errors[0]}); "
             f"processing it as one stream instead."
         )
-        gcs_processor.delete_blobs(part_names)
+        gcs_processor.delete_blobs(part_names + segmentation_names)
         return None
 
+    if segmentation:
+        gcs_processor.compose(segmentation_names, segmentation_blob_name(destination_blob_name))
     gcs_processor.compose(part_names, destination_blob_name)
     rows_read = sum(r["rows_read"] for r in results)
     return {
@@ -672,6 +691,7 @@ def _process_parquet_in_parts(
     part_kwargs: Dict[str, Any],
     generate_ids: bool,
     id_counter_start: int,
+    segmentation: bool = False,
 ) -> Dict[str, Any]:
     """Process a parquet source in part tasks of whole row groups, then join the outputs.
 
@@ -691,6 +711,9 @@ def _process_parquet_in_parts(
     )
     update_job_status(job_id, {"total_rows": plan["total_rows"]})
     part_names = [f"processed_parts/{job_id}/part-{i:05d}.csv" for i in range(len(parts))]
+    segmentation_names = (
+        [segmentation_blob_name(name) for name in part_names] if segmentation else []
+    )
 
     starts = []
     offset = id_counter_start
@@ -718,9 +741,11 @@ def _process_parquet_in_parts(
             "Processing Parquet Data",
         )
     except BaseException:
-        gcs_processor.delete_blobs(part_names)
+        gcs_processor.delete_blobs(part_names + segmentation_names)
         raise
 
+    if segmentation:
+        gcs_processor.compose(segmentation_names, segmentation_blob_name(destination_blob_name))
     gcs_processor.compose(part_names, destination_blob_name)
     rows_read = sum(r["rows_read"] for r in results)
     return {
@@ -822,7 +847,9 @@ def process_csv_part(
             end,
             header,
             destination_blob_name,
-            lambda chunk: schema_processor.process_chunk(chunk, created),
+            schema_processor.transform(created),
+            segmentation=schema_processor.writes_segmentation,
+            text_columns=schema_processor.source_text_columns(),
         )
     except pd.errors.ParserError as e:
         # a quoted field holding a newline makes a range start mid-row
@@ -876,7 +903,9 @@ def process_parquet_part(
         root,
         pieces,
         destination_blob_name,
-        lambda chunk: schema_processor.process_chunk(chunk, created),
+        schema_processor.transform(created),
+        segmentation=schema_processor.writes_segmentation,
+        text_columns=schema_processor.source_text_columns(),
     )
     if result["rows_read"] != expected_rows:
         # the footers promised a different count: the files changed since planning

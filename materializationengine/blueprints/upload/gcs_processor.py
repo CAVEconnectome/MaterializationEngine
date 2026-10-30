@@ -1,10 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 
 from google.api_core.exceptions import NotFound
 from google.cloud import storage
 import pandas as pd
 import io
-from typing import Iterator, List, Optional, Callable, Dict, Any, Tuple
+from typing import Iterator, List, Optional, Callable, Dict, Any, Sequence, Tuple
 from dataclasses import dataclass
 import time
 
@@ -63,6 +64,61 @@ class _RangeReader(io.RawIOBase):
         """Lines read so far, counting a last line that has no newline."""
         return self._newlines + (1 if self._any and self._last != b"\n" else 0)
 
+def segmentation_blob_name(name: str) -> str:
+    """Where the segmentation rows of a processed CSV go: beside it."""
+    base = name[: -len(".csv")] if name.endswith(".csv") else name
+    return f"{base}.segmentation.csv"
+
+
+class _ProcessedWriter:
+    """The processed CSV object, and with segmentation=True its segmentation object
+    (segmentation_blob_name) too: the transform then returns (rows, segmentation rows).
+
+    Both objects are opened up front, so a part with no rows still writes an empty
+    segmentation object for compose to find.
+    """
+
+    def __init__(self, bucket, name: str, segmentation: bool = False):
+        self._bucket = bucket
+        self._name = name
+        self._segmentation = segmentation
+        self._stack = ExitStack()
+
+    def _open(self, name: str):
+        return self._stack.enter_context(
+            self._bucket.blob(name).open("wb", content_type="text/csv", ignore_flush=True)
+        )
+
+    def __enter__(self):
+        self._rows = self._open(self._name)
+        self._segmentation_rows = (
+            self._open(segmentation_blob_name(self._name)) if self._segmentation else None
+        )
+        return self
+
+    def write(self, result) -> int:
+        """Write one transformed chunk; returns its number of rows."""
+        rows, segmentation = result if isinstance(result, tuple) else (result, None)
+        data = rows.to_csv(index=False, header=False).encode("utf-8")
+        if data:
+            self._rows.write(data)
+        if self._segmentation_rows is not None:
+            if segmentation is None or len(segmentation) != len(rows):
+                raise ValueError("the transform gave no segmentation rows for a chunk")
+            data = segmentation.to_csv(index=False, header=False).encode("utf-8")
+            if data:
+                self._segmentation_rows.write(data)
+        return len(rows)
+
+    def __exit__(self, *exc):
+        return self._stack.__exit__(*exc)
+
+
+def _text_dtypes(text_columns: Sequence[str]) -> Optional[Dict[str, Any]]:
+    """read_csv dtypes keeping text_columns as text, or None for none."""
+    return {c: str for c in text_columns} or None
+
+
 # @dataclass
 # class UploadConfig:
 #     """Configuration for GCS uploads"""
@@ -111,6 +167,8 @@ class GCSCsvProcessor:
         destination_blob_name: str,
         transform_function: Callable[[pd.DataFrame], pd.DataFrame],
         chunk_upload_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        segmentation: bool = False,
+        text_columns: Sequence[str] = (),
     ) -> None:
         """
         Process a CSV file from GCS in chunks and upload the transformed data.
@@ -123,6 +181,10 @@ class GCSCsvProcessor:
             chunk_upload_callback: Optional callback. Called with a dict:
                                    {'progress': float, 'processed_rows': int,
                                     'total_rows': int, 'current_chunk_num': int, 'total_chunks': int}
+            segmentation: The transform also gives segmentation rows, written beside
+                          the destination (segmentation_blob_name).
+            text_columns: Source columns read as text (supplied ids, which floats
+                          would round).
         """
         source = self.source(source_blob_name)
 
@@ -141,30 +203,13 @@ class GCSCsvProcessor:
 
         current_chunk_num = 0
 
-        destination_blob = self.bucket.blob(destination_blob_name)
-
         try:
-            with destination_blob.open(
-                "wb", content_type="text/csv", ignore_flush=True
-            ) as gcs_writer_stream:
-                for chunk_df in self._download_in_chunks(source):
+            with _ProcessedWriter(
+                self.bucket, destination_blob_name, segmentation
+            ) as writer:
+                for chunk_df in self._download_in_chunks(source, text_columns):
                     current_chunk_num += 1
-                    processed_chunk_df = transform_function(chunk_df)
-
-                    with io.StringIO() as csv_buffer:
-    
-                        processed_chunk_df.to_csv(
-                            csv_buffer, index=False, header=False
-                        )
-                       
-
-                        chunk_bytes = csv_buffer.getvalue().encode("utf-8")
-
-                    if chunk_bytes: 
-                        gcs_writer_stream.write(chunk_bytes)
-
-                    processed_rows_in_chunk = len(processed_chunk_df)
-                    total_processed_rows += processed_rows_in_chunk
+                    total_processed_rows += writer.write(transform_function(chunk_df))
 
                     progress_percentage = 0.0
                     if total_rows > 0:
@@ -256,6 +301,8 @@ class GCSCsvProcessor:
         header: str,
         destination_blob_name: str,
         transform_function: Callable[[pd.DataFrame], pd.DataFrame],
+        segmentation: bool = False,
+        text_columns: Sequence[str] = (),
     ) -> Dict[str, Any]:
         """Transform the lines in bytes [start, end) of a CSV and write them to one object.
 
@@ -266,29 +313,23 @@ class GCSCsvProcessor:
         """
         columns = list(pd.read_csv(io.StringIO(header), nrows=0).columns)
         source = self.source(source_blob_name)
-        destination_blob = self.bucket.blob(destination_blob_name)
         rows_read = 0
         rows_written = 0
         with source.open_range(start, end) as blob_stream:
             reader = _RangeReader(blob_stream, end - start)
-            with destination_blob.open(
-                "wb", content_type="text/csv", ignore_flush=True
-            ) as gcs_writer_stream:
+            with _ProcessedWriter(
+                self.bucket, destination_blob_name, segmentation
+            ) as writer:
                 if end > start:
                     for chunk_df in pd.read_csv(
                         reader,
                         header=None,
                         names=columns,
                         chunksize=self.pandas_chunk_size,
+                        dtype=_text_dtypes(text_columns),
                     ):
                         rows_read += len(chunk_df)
-                        processed_chunk_df = transform_function(chunk_df)
-                        chunk_bytes = processed_chunk_df.to_csv(
-                            index=False, header=False
-                        ).encode("utf-8")
-                        if chunk_bytes:
-                            gcs_writer_stream.write(chunk_bytes)
-                        rows_written += len(processed_chunk_df)
+                        rows_written += writer.write(transform_function(chunk_df))
         return {
             "rows_read": rows_read,
             "rows_written": rows_written,
@@ -302,29 +343,25 @@ class GCSCsvProcessor:
         pieces: List[List[Any]],
         destination_blob_name: str,
         transform_function: Callable[[pd.DataFrame], pd.DataFrame],
+        segmentation: bool = False,
+        text_columns: Sequence[str] = (),
     ) -> Dict[str, Any]:
-        """Transform a parquet part's row groups and write them to one CSV object."""
+        """Transform a parquet part's row groups and write them to one CSV object.
+
+        text_columns are integer columns kept exact where they have nulls (as Python
+        ints, not float64)."""
         from materializationengine.blueprints.upload.parquet_source import (
             iter_parquet_part,
         )
 
-        destination_blob = self.bucket.blob(destination_blob_name)
         rows_read = 0
         rows_written = 0
-        with destination_blob.open(
-            "wb", content_type="text/csv", ignore_flush=True
-        ) as gcs_writer_stream:
+        with _ProcessedWriter(self.bucket, destination_blob_name, segmentation) as writer:
             for chunk_df in iter_parquet_part(
-                source_uri, root, pieces, self.pandas_chunk_size
+                source_uri, root, pieces, self.pandas_chunk_size, exact_columns=text_columns
             ):
                 rows_read += len(chunk_df)
-                processed_chunk_df = transform_function(chunk_df)
-                chunk_bytes = processed_chunk_df.to_csv(index=False, header=False).encode(
-                    "utf-8"
-                )
-                if chunk_bytes:
-                    gcs_writer_stream.write(chunk_bytes)
-                rows_written += len(processed_chunk_df)
+                rows_written += writer.write(transform_function(chunk_df))
         return {"rows_read": rows_read, "rows_written": rows_written}
 
     def count_csv_range_lines(self, source_blob_name: str, start: int, end: int) -> int:
@@ -377,9 +414,13 @@ class GCSCsvProcessor:
             except NotFound:
                 pass
 
-    def _download_in_chunks(self, source) -> Iterator[pd.DataFrame]:
+    def _download_in_chunks(
+        self, source, text_columns: Sequence[str] = ()
+    ) -> Iterator[pd.DataFrame]:
         """Stream a whole CSV source as pandas DataFrame chunks."""
         with source.open_range(0, source.size) as stream:
             reader = _RangeReader(stream, source.size)
-            for chunk in pd.read_csv(reader, chunksize=self.pandas_chunk_size):
+            for chunk in pd.read_csv(
+                reader, chunksize=self.pandas_chunk_size, dtype=_text_dtypes(text_columns)
+            ):
                 yield chunk

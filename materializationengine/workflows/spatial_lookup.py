@@ -1306,14 +1306,11 @@ def get_root_ids_from_supervoxels(
     pcg_table_name: str = mat_metadata["pcg_table_name"]
     database = mat_metadata.get("database")
 
-    try:
-        materialization_time_stamp = datetime.datetime.strptime(
-            mat_metadata.get("materialization_time_stamp"), "%Y-%m-%d %H:%M:%S.%f"
-        )
-    except ValueError:
-        materialization_time_stamp = datetime.datetime.strptime(
-            mat_metadata.get("materialization_time_stamp"), "%Y-%m-%dT%H:%M:%S.%f"
-        )
+    # str() or isoformat() of a datetime; either leaves out the microseconds when
+    # they are 0, which the strptime formats used here before required
+    materialization_time_stamp = datetime.datetime.fromisoformat(
+        str(mat_metadata.get("materialization_time_stamp"))
+    )
 
     supervoxel_df = pd.DataFrame(materialization_data, dtype=object)
 
@@ -1463,7 +1460,9 @@ def spatial_lookup_point_columns(mat_info: dict):
     """The annotation model and its PointZ columns that get a supervoxel lookup.
 
     A column is looked up when the segmentation table has a matching
-    <name>_supervoxel_id column (pre_pt_position -> pre_pt_supervoxel_id).
+    <name>_supervoxel_id column (pre_pt_position -> pre_pt_supervoxel_id), and, when
+    mat_info has lookup_fields (an upload whose source supplies some fields'
+    supervoxels), its point field is one of them.
     """
     if not mat_info.get("schema"):
         # a Ray upload's table being built in production has no metadata row, and
@@ -1472,6 +1471,7 @@ def spatial_lookup_point_columns(mat_info: dict):
         mat_info["schema"] = db.database.get_table_schema(mat_info["annotation_table_name"])
     AnnotationModel = create_annotation_model(mat_info)
     SegmentationModel = create_segmentation_model(mat_info)
+    lookup_fields = mat_info.get("lookup_fields")
 
     spatial_columns = []
     for annotation_column in AnnotationModel.__table__.columns:
@@ -1479,9 +1479,10 @@ def spatial_lookup_point_columns(mat_info: dict):
             isinstance(annotation_column.type, Geometry)
             and "Z" in annotation_column.type.geometry_type.upper()
         ):
-            supervoxel_column_name = (
-                f"{annotation_column.name.rsplit('_', 1)[0]}_supervoxel_id"
-            )
+            field = annotation_column.name.rsplit("_", 1)[0]
+            supervoxel_column_name = f"{field}_supervoxel_id"
+            if lookup_fields is not None and field not in lookup_fields:
+                continue
             if getattr(SegmentationModel, supervoxel_column_name, None):
                 spatial_columns.append(annotation_column.name)
     return AnnotationModel, spatial_columns

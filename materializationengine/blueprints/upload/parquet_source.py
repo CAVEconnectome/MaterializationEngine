@@ -18,7 +18,7 @@ import os
 import posixpath
 import struct
 from urllib.parse import quote
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 from urllib.parse import unquote, urlparse
 
 import pandas as pd
@@ -348,11 +348,17 @@ def plan_parquet_parts(
 
 
 def iter_parquet_part(
-    uri: str, root: str, pieces: List[List[Any]], batch_size: int
+    uri: str,
+    root: str,
+    pieces: List[List[Any]],
+    batch_size: int,
+    exact_columns: Sequence[str] = (),
 ) -> Iterator[pd.DataFrame]:
     """The rows of a part's row groups as DataFrames of at most batch_size rows.
 
     Hive partition values are added as columns, unless a file has a column by that name.
+    exact_columns, integer columns with nulls, come as Python ints and None rather than
+    float64, which cannot hold 64-bit ids exactly.
     """
     fs, _ = filesystem_for(uri)
     for piece in pieces:
@@ -372,6 +378,9 @@ def iter_parquet_part(
                         break
                     batch = batch.slice(max(first - start, 0), first + count - max(start, first))
                 df = batch.to_pandas()
+                for name in exact_columns:
+                    if name in batch.schema.names:
+                        df[name] = batch.column(name).to_pandas(integer_object_nulls=True)
                 for key, value in partition_values.items():
                     if key not in df.columns:
                         df[key] = value
