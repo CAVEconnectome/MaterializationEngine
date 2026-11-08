@@ -3,8 +3,8 @@
 uwsgi builds the app once in the master and forks the workers from it, and the cheaper algorithm
 keeps spawning fresh workers under load. Each new worker used to pay for its first connections,
 its datastack info lookup and its table metadata on its first user request. register_prewarm runs
-prewarm_worker in every worker right after the fork (connections must not be opened in the master:
-a forked socket shared by two workers interleaves their queries).
+after_fork in every worker right after the fork: it first drops the database clients inherited
+from the master (a socket shared by two processes interleaves their queries), then prewarms.
 """
 import logging
 import time
@@ -64,15 +64,27 @@ def prewarm_worker(app) -> None:
     logger.info(f"prewarmed {warmed} in {time.perf_counter() - t0:.2f}s")
 
 
+def after_fork(app) -> None:
+    """Run in each uwsgi worker right after it is forked from the master.
+
+    The master built the app, and create_app opens database clients (the staging client, at
+    least). Forget them without closing them first: their sockets are shared with the master and
+    the sibling workers, and using them from two processes interleaves the protocol. Then prewarm.
+    """
+    from materializationengine.database import reset_database_connections
+
+    reset_database_connections(close_connections=False)
+    if app.config.get("WEB_PREWARM", True):
+        prewarm_worker(app)
+
+
 def register_prewarm(app) -> None:
-    """Run prewarm_worker after every uwsgi fork. A no-op outside uwsgi (celery, tests, flask run)."""
-    if not app.config.get("WEB_PREWARM", True):
-        return
+    """Run after_fork after every uwsgi fork. A no-op outside uwsgi (celery, tests, flask run)."""
     try:
         from uwsgidecorators import postfork  # only importable inside uwsgi
     except ImportError:
         return
 
     @postfork
-    def _prewarm():
-        prewarm_worker(app)
+    def _after_fork():
+        after_fork(app)

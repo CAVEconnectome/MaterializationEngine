@@ -143,8 +143,8 @@ class DatabaseConnectionManager:
     
     def get_session_factory(self, database_name: str):
         """Get or create scoped session factory for a database."""
+        engine = self.get_engine(database_name)  # also marks the engine as recently used (trim)
         if database_name not in self._session_factories:
-            engine = self.get_engine(database_name)
             self._session_factories[database_name] = scoped_session(
                 sessionmaker(
                     bind=engine,

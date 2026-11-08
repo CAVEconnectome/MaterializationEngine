@@ -22,6 +22,8 @@ class AdbcProbe(Base):
     created = sa.Column(sa.DateTime)
     valid = sa.Column(sa.Boolean)
     small = sa.Column(sa.Integer)
+    tiny = sa.Column(sa.SmallInteger)  # no dtype_map entry: pd.read_sql infers Int64
+    single = sa.Column(sa.REAL)  # float4
     size = sa.Column(sa.Float)
     root_id = sa.Column(sa.BigInteger)
     name = sa.Column(sa.String)
@@ -37,11 +39,12 @@ def engine(database_uri):
     t0 = datetime.datetime(2020, 11, 4, 7, 37, 1, 605960)
     with e.begin() as conn:
         conn.execute(AdbcProbe.__table__.insert(), [
-            dict(id=i, created=t0 + datetime.timedelta(seconds=i), valid=i % 3 != 0, small=i * 7,
+            dict(id=i, created=t0 + datetime.timedelta(seconds=i), valid=i % 3 != 0, small=i * 7, tiny=i,
+                 single=i / 3,
                  size=i / 3, root_id=864691136031763387 + i, name=f"n{i}", amount=i,
                  pt=f"POINTZ({i} {2 * i} {3 * i})")
             for i in range(1, 50)
-        ] + [dict(id=50, created=None, valid=None, small=None, size=None, root_id=None, name=None,
+        ] + [dict(id=50, created=None, valid=None, small=None, tiny=None, single=None, size=None, root_id=None, name=None,
                        amount=None, pt=None)])  # a row of NULLs
     yield e
     AdbcProbe.__table__.drop(e, checkfirst=True)
@@ -60,7 +63,7 @@ def fetch(engine, use_adbc, *columns):
         session.close()
 
 
-SCALARS = [AdbcProbe.id, AdbcProbe.created, AdbcProbe.valid, AdbcProbe.small, AdbcProbe.size,
+SCALARS = [AdbcProbe.id, AdbcProbe.created, AdbcProbe.valid, AdbcProbe.small, AdbcProbe.tiny, AdbcProbe.size,
            AdbcProbe.root_id, AdbcProbe.name]
 
 
@@ -90,6 +93,49 @@ class TestAdbcFetch:
         expected = fetch(engine, False, AdbcProbe.id, AdbcProbe.amount)
         monkeypatch.setattr(q, "_read_sql_adbc", lambda *a: pytest.fail("ADBC used for numeric"))
         pd.testing.assert_frame_equal(fetch(engine, True, AdbcProbe.id, AdbcProbe.amount), expected)
+
+    def test_float4_falls_back_to_read_sql(self, engine, monkeypatch):
+        expected = fetch(engine, False, AdbcProbe.id, AdbcProbe.single)
+        monkeypatch.setattr(q, "_read_sql_adbc", lambda *a: pytest.fail("ADBC used for float4"))
+        pd.testing.assert_frame_equal(fetch(engine, True, AdbcProbe.id, AdbcProbe.single), expected)
+
+    def test_a_terminated_connection_is_replaced(self, engine, database_uri):
+        with Flask(__name__).test_request_context():
+            key, conn = q._adbc_connection(engine)
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_backend_pid()")
+                pid = cur.fetchone()[0]
+            with sa.create_engine(database_uri).connect() as other:
+                other.execute(sa.text(f"SELECT pg_terminate_backend({pid})"))
+            assert q._read_sql_adbc("SELECT 1 AS one", engine).column("one").to_pylist() == [1]
+
+    def test_a_cancelled_query_is_not_retried(self, engine, monkeypatch):
+        app = Flask(__name__)
+        app.config["QUERY_STATEMENT_TIMEOUT_SECONDS"] = 0.1
+        calls = []
+        real = q._adbc_connection
+        monkeypatch.setattr(q, "_adbc_connection", lambda e: calls.append(1) or real(e))
+        with app.test_request_context(), pytest.raises(Exception) as err:
+            q._read_sql_adbc("SELECT pg_sleep(1)", engine)
+        assert getattr(err.value, "sqlstate", None) == "57014"
+        assert calls == [1]
+
+    def test_cached_connections_are_bounded(self, database_uri):
+        app = Flask(__name__)
+        app.config["ADBC_CONNECTIONS_KEPT"] = 2
+        engines = [sa.create_engine(f"{database_uri}?application_name=adbc_lru_{i}") for i in range(3)]
+        with app.test_request_context():
+            q._adbc_connections().clear()
+            first = q._adbc_connection(engines[0])[1]
+            q._adbc_connection(engines[1])
+            q._adbc_connection(engines[0])  # reuse: engines[1] is now the least recently used
+            q._adbc_connection(engines[2])
+            kept = [k[1] for k in q._adbc_connections()]
+        assert kept == [str(engines[0].url), str(engines[2].url)]
+        with first.cursor() as cur:  # the reused connection survived the eviction
+            cur.execute("SELECT 1")
+        for e in engines:
+            e.dispose()
 
     def test_raw_geometry_skips_adbc(self, engine, monkeypatch):
         # ADBC returns PostGIS's binary format; keep geometry on the pd.read_sql path
@@ -143,6 +189,15 @@ class TestWebRequestPools:
         app.add_url_rule("/ping", "ping", lambda: "ok")
         return app
 
+    def test_session_scope_marks_its_engine_recent(self, monkeypatch):
+        m = self.manager_with(["a", "b", "c"])
+        with m.session_scope("a"):  # the path most code uses, through get_session_factory
+            pass
+        with m.session_scope("a"):  # a cache hit must still refresh recency
+            pass
+        m.trim(2)
+        assert set(m._engines) == {"c", "a"}
+
     def test_a_request_keeps_pools(self, monkeypatch):
         # through a real request: Flask pops the request context before the app-context
         # teardown runs, so the hook must not rely on has_request_context()
@@ -174,6 +229,17 @@ class TestWebRequestPools:
 
 
 class TestPrewarm:
+    def test_after_fork_forgets_inherited_clients_even_without_prewarm(self, monkeypatch):
+        from materializationengine import prewarm
+        calls = []
+        monkeypatch.setattr(database, "reset_database_connections", lambda close_connections: calls.append(close_connections))
+        monkeypatch.setattr(prewarm, "prewarm_worker", lambda app: pytest.fail("prewarm is disabled"))
+        app = Flask(__name__)
+        app.config["WEB_PREWARM"] = False
+        prewarm.after_fork(app)
+        assert calls == [False]  # forget without closing: the sockets are shared with the master
+
+
     def test_register_prewarm_is_a_no_op_outside_uwsgi(self):
         from materializationengine.prewarm import register_prewarm
         register_prewarm(Flask(__name__))  # uwsgidecorators is not importable here

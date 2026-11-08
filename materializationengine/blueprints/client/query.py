@@ -1,5 +1,6 @@
 import itertools
 import logging
+from collections import OrderedDict
 import os
 import tempfile
 import threading
@@ -398,16 +399,20 @@ def _execute_query(
         raise
 
 
-# One ADBC connection per database, process and thread. Keyed by pid so a forked worker never
-# reuses a socket it inherited from its parent.
+# Cached ADBC connections, per thread, least recently used first. Keyed by pid so a forked worker
+# never reuses a socket it inherited from its parent. At most ADBC_CONNECTIONS_KEPT (default:
+# WEB_DB_ENGINES_KEPT, 4) are kept; the least recently used is closed when another is opened.
 _adbc_local = threading.local()
 
-# Arrow types the ADBC path converts exactly like pd.read_sql(dtype_backend="numpy_nullable").
+# Arrow types the ADBC path converts, mapped to what pd.read_sql(dtype_backend="numpy_nullable")
+# infers when dtype_map has no override: every integer width to Int64, double to Float64 (float4
+# columns use pd.read_sql, see _adbc_handles_query).
+# Columns with a dtype_map type (Integer -> Int32, Float -> Float32, ...) are cast afterwards.
 # Anything else (geometry, numeric, json, arrays, ...) falls back to pd.read_sql.
 _ADBC_PANDAS_TYPES = {
-    pa.int64(): pd.Int64Dtype(), pa.int32(): pd.Int32Dtype(), pa.int16(): pd.Int16Dtype(),
-    pa.float64(): pd.Float64Dtype(), pa.float32(): pd.Float32Dtype(), pa.bool_(): pd.BooleanDtype(),
-    pa.string(): pd.StringDtype(), pa.large_string(): pd.StringDtype(),
+    pa.int64(): pd.Int64Dtype(), pa.int32(): pd.Int64Dtype(), pa.int16(): pd.Int64Dtype(),
+    pa.int8(): pd.Int64Dtype(), pa.float64(): pd.Float64Dtype(),
+    pa.bool_(): pd.BooleanDtype(), pa.string(): pd.StringDtype(), pa.large_string(): pd.StringDtype(),
 } if adbc_postgresql is not None else {}
 
 
@@ -422,6 +427,12 @@ def _adbc_handles_query(query) -> bool:
         coltype = column.type
         if isinstance(coltype, sa_types.Numeric) and not isinstance(coltype, sa_types.Float):
             return False  # Decimal: fix_decimal expects Decimal objects
+        if isinstance(coltype, sa_types.REAL) or (
+            isinstance(coltype, sa_types.Float) and (getattr(coltype, "precision", None) or 53) <= 24
+        ):
+            # float4: pd.read_sql parses Postgres's shortest text form (0.33333334), while widening
+            # ADBC's float32 gives 0.3333333432674408, a different value
+            return False
         if not isinstance(coltype, _ADBC_SQL_TYPES) or isinstance(coltype, Geometry):
             return False
     return True
@@ -438,38 +449,76 @@ def _adbc_uri(engine) -> str:
     return "postgresql://" + uri.split("://", 1)[1]
 
 
+def _adbc_connections() -> "OrderedDict":
+    conns = getattr(_adbc_local, "conns", None)
+    if conns is None:
+        conns = _adbc_local.conns = OrderedDict()
+    return conns
+
+
+def _close_adbc(key, conn) -> None:
+    if key[0] != os.getpid():
+        return  # inherited from the parent process: closing it would disconnect the parent's socket
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def _drop_adbc_connection(key) -> None:
+    conn = _adbc_connections().pop(key, None)
+    if conn is not None:
+        _close_adbc(key, conn)
+
+
 def _adbc_connection(engine):
     timeout = statement_timeout_ms()
     key = (os.getpid(), str(engine.url), timeout)
-    conns = getattr(_adbc_local, "conns", None)
-    if conns is None:
-        conns = _adbc_local.conns = {}
+    conns = _adbc_connections()
     conn = conns.get(key)
-    if conn is None:
-        conn = adbc_postgresql.connect(_adbc_uri(engine), autocommit=True)
-        if timeout:
-            with conn.cursor() as cur:
-                cur.execute(f"SET statement_timeout = {timeout}")
-        conns[key] = conn
+    if conn is not None:
+        conns.move_to_end(key)
+        return key, conn
+    keep = int(get_config_param("ADBC_CONNECTIONS_KEPT", get_config_param("WEB_DB_ENGINES_KEPT", 4)))
+    while conns and len(conns) >= max(keep, 1):
+        old_key, old_conn = conns.popitem(last=False)
+        _close_adbc(old_key, old_conn)
+    conn = adbc_postgresql.connect(_adbc_uri(engine), autocommit=True)
+    if timeout:
+        with conn.cursor() as cur:
+            cur.execute(f"SET statement_timeout = {timeout}")
+    conns[key] = conn
     return key, conn
+
+
+def _is_connection_failure(exc) -> bool:
+    """A dead or terminated connection (worth one retry on a new one), as opposed to a cancelled
+    query or an SQL error. ADBC reports a closed socket as OperationalError without a sqlstate."""
+    if not isinstance(exc, adbc_postgresql.OperationalError):
+        return False
+    sqlstate = getattr(exc, "sqlstate", None)
+    return sqlstate is None or sqlstate.startswith("08") or sqlstate in ("57P01", "57P02", "57P03")
 
 
 def _read_sql_adbc(statement: str, engine):
     """Run *statement* over ADBC (binary COPY straight into Arrow). Returns a pyarrow Table, or
-    None when a column has a type the pandas conversion below does not handle."""
-    key, conn = _adbc_connection(engine)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(statement)
-            table = cur.fetch_arrow_table()
-    except Exception:
-        # a broken or cancelled connection is not reused
-        _adbc_local.conns.pop(key, None)
+    None when a column has a type the pandas conversion below does not handle.
+
+    A cached connection can be dead (Cloud SQL restart, a dropped version's connections
+    terminated): that is retried once on a new connection. Cancellations and SQL errors are not.
+    """
+    for attempt in (1, 2):
+        key, conn = _adbc_connection(engine)
         try:
-            conn.close()
-        except Exception:
-            pass
-        raise
+            with conn.cursor() as cur:
+                cur.execute(statement)
+                table = cur.fetch_arrow_table()
+            break
+        except Exception as e:
+            _drop_adbc_connection(key)  # a broken or cancelled connection is not reused
+            if attempt == 1 and _is_connection_failure(e):
+                continue
+            raise
     if not all(_adbc_supported(f) for f in table.schema):
         return None
     return table
