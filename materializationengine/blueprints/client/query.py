@@ -529,6 +529,9 @@ def _read_sql_adbc(statement: str, engine):
 def _adbc_table_to_dataframe(table, dtypes: dict) -> pd.DataFrame:
     """Arrow from ADBC to the DataFrame pd.read_sql(dtype_backend="numpy_nullable") would build,
     including its inference quirks, so a response does not depend on the fetch path."""
+    # Columns that are SQL NULL in every row, decided before NaNs become nulls below: pd.read_sql
+    # infers Float64 for a column of NaNs, and string only for one of NULLs.
+    all_null = {f.name for f in table.schema if table.num_rows and table.column(f.name).null_count == table.num_rows}
     # pd.read_sql treats a Postgres NaN as missing; ADBC keeps it as a valid NaN.
     for i, field in enumerate(table.schema):
         if pa.types.is_floating(field.type):
@@ -546,7 +549,7 @@ def _adbc_table_to_dataframe(table, dtypes: dict) -> pd.DataFrame:
             continue
         if table.num_rows == 0:
             df[k] = df[k].astype(object)
-        elif table.column(k).null_count == table.num_rows and str(df[k].dtype) != "string":
+        elif k in all_null and str(df[k].dtype) != "string":
             df[k] = df[k].astype(pd.StringDtype())
     return df
 

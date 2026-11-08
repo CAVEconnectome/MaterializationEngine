@@ -8,6 +8,7 @@ import pytest
 import sqlalchemy as sa
 from flask import Flask
 from geoalchemy2 import Geometry
+from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -25,6 +26,7 @@ class AdbcProbe(Base):
     small = sa.Column(sa.Integer)
     tiny = sa.Column(sa.SmallInteger)  # no dtype_map entry: pd.read_sql infers Int64
     single = sa.Column(sa.REAL)  # float4
+    dbl = sa.Column(DOUBLE_PRECISION)  # double without a dtype_map entry
     size = sa.Column(sa.Float)
     root_id = sa.Column(sa.BigInteger)
     name = sa.Column(sa.String)
@@ -89,6 +91,35 @@ class TestAdbcFetch:
         finally:
             with engine.begin() as conn:
                 conn.execute(sa.text("UPDATE adbc_probe SET size = 1.0 / 3 WHERE id = 1"))
+
+    @pytest.mark.parametrize("values", [("NaN", "NaN"), ("NaN", None), (None, None)],
+                             ids=["only NaN", "NaN and NULL", "only NULL"])
+    def test_unmapped_double_of_nan_and_null_matches_read_sql(self, engine, values):
+        # pd.read_sql infers Float64 for NaNs (then masks them) but string for a column of NULLs only
+        with engine.begin() as conn:
+            for row_id, v in zip((1, 2), values):
+                conn.execute(sa.text("UPDATE adbc_probe SET dbl = CAST(:v AS double precision) WHERE id = :id"),
+                             {"v": v, "id": row_id})
+        try:
+            def two_rows(use_adbc):
+                app = Flask(__name__)
+                app.config["QUERY_FETCH_WITH_ADBC"] = use_adbc
+                session = sessionmaker(bind=engine)()
+                try:
+                    with app.test_request_context():
+                        query = session.query(AdbcProbe).with_entities(AdbcProbe.id, AdbcProbe.dbl) \
+                            .filter(AdbcProbe.id.in_([1, 2])).order_by(AdbcProbe.id)
+                        return q._execute_query(session, engine, query, fix_wkb=False, direct_sql_pandas=True)
+                finally:
+                    session.close()
+            got, expected = two_rows(True), two_rows(False)
+            assert str(expected["dbl"].dtype) == ("string" if values == (None, None) else "Float64")
+            pd.testing.assert_frame_equal(got, expected)
+            assert pa.RecordBatch.from_pandas(got).schema.equals(pa.RecordBatch.from_pandas(expected).schema,
+                                                                 check_metadata=True)
+        finally:
+            with engine.begin() as conn:
+                conn.execute(sa.text("UPDATE adbc_probe SET dbl = NULL WHERE id IN (1, 2)"))
 
     def test_only_null_rows_match_read_sql(self, engine):
         # an unmapped column (SmallInteger) that is NULL in every returned row: pd.read_sql infers string
