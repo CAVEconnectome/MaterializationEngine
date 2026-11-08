@@ -31,6 +31,7 @@ from materializationengine.utils import get_config_param
 try:
     import adbc_driver_postgresql.dbapi as adbc_postgresql
     import pyarrow as pa
+    import pyarrow.compute as pc
 except ImportError:  # pragma: no cover - both are dependencies; stay usable without them
     adbc_postgresql = None
 
@@ -526,17 +527,27 @@ def _read_sql_adbc(statement: str, engine):
 
 
 def _adbc_table_to_dataframe(table, dtypes: dict) -> pd.DataFrame:
+    """Arrow from ADBC to the DataFrame pd.read_sql(dtype_backend="numpy_nullable") would build,
+    including its inference quirks, so a response does not depend on the fetch path."""
+    # pd.read_sql treats a Postgres NaN as missing; ADBC keeps it as a valid NaN.
+    for i, field in enumerate(table.schema):
+        if pa.types.is_floating(field.type):
+            column = table.column(i)
+            table = table.set_column(i, field, pc.if_else(pc.is_nan(column), pa.scalar(None, field.type), column))
     df = table.to_pandas(types_mapper=_ADBC_PANDAS_TYPES.get, coerce_temporal_nanoseconds=True)
     for k, dtype in dtypes.items():
         if k in df.columns and str(df[k].dtype) != str(dtype) and not str(dtype).startswith("datetime"):
             df[k] = df[k].astype(dtype)
-    if table.num_rows == 0:
-        # pd.read_sql has no values to infer from, so a column without a dtype_map type (String,
-        # SmallInteger) comes back as object, which the response then declares as Arrow null.
-        # Keep that, so an empty response's schema does not depend on the fetch path.
-        for k in df.columns:
-            if k not in dtypes:
-                df[k] = df[k].astype(object)
+    # A column without a dtype_map type gets its dtype from pd.read_sql's inference, which has
+    # nothing to go on when there are no values: with no rows it stays object (the response then
+    # declares Arrow null); with only NULLs it becomes string.
+    for k in df.columns:
+        if k in dtypes:
+            continue
+        if table.num_rows == 0:
+            df[k] = df[k].astype(object)
+        elif table.column(k).null_count == table.num_rows and str(df[k].dtype) != "string":
+            df[k] = df[k].astype(pd.StringDtype())
     return df
 
 

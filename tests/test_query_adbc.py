@@ -76,6 +76,36 @@ class TestAdbcFetch:
         pd.testing.assert_frame_equal(got, expected)
 
 
+    def test_nan_is_missing_like_read_sql(self, engine):
+        # pd.read_sql turns a Postgres NaN into a missing value; ADBC must too
+        with engine.begin() as conn:
+            conn.execute(sa.text("UPDATE adbc_probe SET size = 'NaN' WHERE id = 1"))
+        try:
+            got, expected = fetch(engine, True, *SCALARS), fetch(engine, False, *SCALARS)
+            assert expected["size"].isna().tolist()[:2] == [True, False]
+            pd.testing.assert_frame_equal(got, expected)
+            assert pa.RecordBatch.from_pandas(got).column("size").null_count == \
+                pa.RecordBatch.from_pandas(expected).column("size").null_count
+        finally:
+            with engine.begin() as conn:
+                conn.execute(sa.text("UPDATE adbc_probe SET size = 1.0 / 3 WHERE id = 1"))
+
+    def test_only_null_rows_match_read_sql(self, engine):
+        # an unmapped column (SmallInteger) that is NULL in every returned row: pd.read_sql infers string
+        def only_null(use_adbc):
+            app = Flask(__name__)
+            app.config["QUERY_FETCH_WITH_ADBC"] = use_adbc
+            session = sessionmaker(bind=engine)()
+            try:
+                with app.test_request_context():
+                    query = session.query(AdbcProbe).with_entities(*SCALARS).filter(AdbcProbe.id == 50)
+                    return q._execute_query(session, engine, query, fix_wkb=False, direct_sql_pandas=True)
+            finally:
+                session.close()
+        got, expected = only_null(True), only_null(False)
+        pd.testing.assert_frame_equal(got, expected)
+        assert pa.RecordBatch.from_pandas(got).schema.equals(pa.RecordBatch.from_pandas(expected).schema, check_metadata=True)
+
     def test_adbc_is_used_for_scalar_columns(self, engine, monkeypatch):
         calls = []
         real = q._read_sql_adbc
@@ -369,13 +399,23 @@ class TestSessionTransactions:
         finally:
             e.dispose()
 
-    def test_a_request_ends_the_cached_session_transaction(self, test_app, database_uri, aligned_volume_name):
-        app = test_app.application
-        before = self.idle_in_transaction(database_uri)
-        with app.app_context():
+    def test_a_request_ends_the_cached_session_transaction(self, database_uri, aligned_volume_name, monkeypatch):
+        # a separate app, so the request gets its own app context and its teardown runs when the
+        # request returns (not when some enclosing context exits)
+        app = Flask(__name__)
+        app.config["SQLALCHEMY_DATABASE_URI"] = database_uri
+        database.init_db_lifecycle(app)
+        monkeypatch.setattr(database, "dynamic_annotation_cache", database.DynamicMaterializationCache())
+
+        def handler():
             db = database.dynamic_annotation_cache.get_db(aligned_volume_name)
             # what QueryManager does: read through the client's scoped session
             db.database.session.execute(sa.text("SELECT count(*) FROM annotation_table_metadata")).scalar()
-            assert self.idle_in_transaction(database_uri) == before + 1
-            app.test_client().get("/materialize/version")  # its teardown runs the real hooks
-        assert self.idle_in_transaction(database_uri) == before
+            return str(self.idle_in_transaction(database_uri))
+
+        app.add_url_rule("/read", "read", handler)
+        before = self.idle_in_transaction(database_uri)
+        response = app.test_client().get("/read")
+        assert response.status_code == 200
+        assert int(response.get_data()) == before + 1  # the transaction was open during the request
+        assert self.idle_in_transaction(database_uri) == before  # and ended when it returned
