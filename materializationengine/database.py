@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from contextlib import contextmanager
 from urllib.parse import urlparse
 
@@ -39,19 +40,54 @@ def reflect_tables(sql_base, database_name):
 KEEP_DB_CONNECTIONS_FLAG = "keep_db_connections"
 
 
-def cleanup_after_app_context() -> None:
-    """Dispose the connection pools when an app context ends, unless asked to keep them.
+# Set on g by a before_request hook (see init_db_lifecycle), so teardown can tell an API request
+# from a celery task. has_request_context() cannot: Flask pops the request context before it runs
+# the app context's teardown.
+WEB_REQUEST_FLAG = "db_web_request"
 
-    Every celery task runs in its own app context, so disposing after each one makes the
-    next task open new connections. That is fine for long tasks, but the spatial lookup
-    runs ~1 s sub-batch tasks: on ltv7 (2026-10-24) they opened ~60 connections/s and
-    held a 2-vCPU Cloud SQL instance at 100% CPU. Tasks that keep their pools only use
-    the staging and aligned-volume databases, which are never dropped, so the idle
-    connections they leave cannot block a DROP DATABASE of an expired version.
+
+def cleanup_after_app_context() -> None:
+    """Release database connections when an app context ends.
+
+    Celery tasks: dispose the connection pools unless asked to keep them. Every celery task runs
+    in its own app context, so disposing after each one makes the next task open new
+    connections. That is fine for long tasks, but the spatial lookup runs ~1 s sub-batch tasks:
+    on ltv7 (2026-10-24) they opened ~60 connections/s and held a 2-vCPU Cloud SQL instance at
+    100% CPU. Tasks that keep their pools only use the staging and aligned-volume databases,
+    which are never dropped, so the idle connections they leave cannot block a DROP DATABASE of
+    an expired version.
+
+    API requests: keep the most recently used pools (WEB_DB_ENGINES_KEPT) and dispose the rest.
+    Disposing every pool made each request open a new connection through the Cloud SQL proxy:
+    ~70 ms of a ~190 ms one-neuron synapse query on ltv7 (2026-11-08). Dropping an expired
+    version stays safe: periodic_database_removal terminates its connections first, and
+    pool_pre_ping replaces a terminated connection on the next checkout.
     """
+    # Always end the cached DynamicAnnotationInterface sessions' transactions, even when the pools
+    # are kept. QueryManager queries through them, and nothing else committed or rolled them back,
+    # so every API worker held one transaction open for its whole life, with an AccessShareLock on
+    # every table it had queried. On minnie (2026-11-08) 11 such sessions, up to 4.6 h old, held
+    # synapses_pni_2 in mat1926 and every pg_repack of it timed out waiting for its lock.
+    dynamic_annotation_cache.end_transactions()
     if g.get(KEEP_DB_CONNECTIONS_FLAG):
         return
+    if g.get(WEB_REQUEST_FLAG):
+        db_manager.release_sessions()
+        db_manager.trim(int(get_config_param("WEB_DB_ENGINES_KEPT", 4)))
+        return
     db_manager.cleanup()
+
+
+def init_db_lifecycle(app) -> None:
+    """Register the hooks that release database connections at the end of a request or task."""
+
+    @app.before_request
+    def _mark_web_request():
+        setattr(g, WEB_REQUEST_FLAG, True)
+
+    @app.teardown_appcontext
+    def _release_db_connections(exception=None):
+        cleanup_after_app_context()
 
 
 def ping_connection(session):
@@ -69,12 +105,14 @@ class DatabaseConnectionManager:
     """Manages database connections and session lifecycle."""
     
     def __init__(self):
-        self._engines = {}
+        self._engines = OrderedDict()  # least recently used first, see trim()
         self._session_factories = {}
         
     def get_engine(self, database_name: str):
         """Get or create SQLAlchemy engine with proper pooling configuration."""
-        if database_name not in self._engines:
+        if database_name in self._engines:
+            self._engines.move_to_end(database_name)
+        else:
             SQL_URI_CONFIG = current_app.config["SQLALCHEMY_DATABASE_URI"]
             sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
             sql_uri = f"{sql_base_uri}/{database_name}"
@@ -105,8 +143,8 @@ class DatabaseConnectionManager:
     
     def get_session_factory(self, database_name: str):
         """Get or create scoped session factory for a database."""
+        engine = self.get_engine(database_name)  # also marks the engine as recently used (trim)
         if database_name not in self._session_factories:
-            engine = self.get_engine(database_name)
             self._session_factories[database_name] = scoped_session(
                 sessionmaker(
                     bind=engine,
@@ -135,6 +173,26 @@ class DatabaseConnectionManager:
         finally:
             session.close()
     
+    def release_sessions(self):
+        """Return every scoped session's connection to its pool, keeping the pools."""
+        for database_name, session_factory in list(self._session_factories.items()):
+            try:
+                session_factory.remove()
+            except Exception as e:
+                celery_logger.error(f"Error cleaning up sessions for {database_name}: {e}")
+
+    def trim(self, keep: int):
+        """Dispose all but the *keep* most recently used engines."""
+        while len(self._engines) > max(keep, 0):
+            database_name, engine = self._engines.popitem(last=False)
+            session_factory = self._session_factories.pop(database_name, None)
+            try:
+                if session_factory is not None:
+                    session_factory.remove()
+                engine.dispose()
+            except Exception as e:
+                celery_logger.error(f"Error disposing engine for {database_name}: {e}")
+
     def cleanup(self):
         """Cleanup any remaining sessions and dispose of engine pools."""
         for database_name, session_factory in list(self._session_factories.items()):
@@ -190,6 +248,18 @@ class DynamicMaterializationCache:
         )
         self._clients[database] = mat_client
         return self._clients[database]
+
+    def end_transactions(self):
+        """Roll back and release every cached client's session; the next use starts a new one."""
+        for database, client in list(self._clients.items()):
+            db = getattr(client, "_database", None)
+            if db is None:
+                continue
+            try:
+                db.session.remove()  # scoped_session: close (rolls back) and forget this thread's session
+                db.close_session()
+            except Exception as e:
+                celery_logger.warning(f"Error ending the session transaction for {database}: {e}")
 
     def invalidate_cache(self):
         self._clients = {}
