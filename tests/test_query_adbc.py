@@ -136,30 +136,41 @@ class TestWebRequestPools:
         m.trim(2)
         assert list(m._engines) == ["c", "a"]
 
-    def test_request_teardown_keeps_pools(self, monkeypatch):
+    def app_with_lifecycle(self, kept=4):
+        app = Flask(__name__)
+        app.config["WEB_DB_ENGINES_KEPT"] = kept
+        database.init_db_lifecycle(app)  # the same hooks create_app registers
+        app.add_url_rule("/ping", "ping", lambda: "ok")
+        return app
+
+    def test_a_request_keeps_pools(self, monkeypatch):
+        # through a real request: Flask pops the request context before the app-context
+        # teardown runs, so the hook must not rely on has_request_context()
         m = self.manager_with(["a", "b"])
         monkeypatch.setattr(database, "db_manager", m)
-        app = Flask(__name__)
-        app.config["WEB_DB_ENGINES_KEPT"] = 4
-        with app.test_request_context():
-            database.cleanup_after_app_context()
+        assert self.app_with_lifecycle().test_client().get("/ping").status_code == 200
         assert list(m._engines) == ["a", "b"]
 
-    def test_request_teardown_bounds_pools(self, monkeypatch):
+    def test_a_request_bounds_pools(self, monkeypatch):
         m = self.manager_with(["a", "b", "c"])
         monkeypatch.setattr(database, "db_manager", m)
-        app = Flask(__name__)
-        app.config["WEB_DB_ENGINES_KEPT"] = 1
-        with app.test_request_context():
-            database.cleanup_after_app_context()
+        self.app_with_lifecycle(kept=1).test_client().get("/ping")
         assert list(m._engines) == ["c"]
 
-    def test_non_request_context_still_disposes(self, monkeypatch):
+    def test_a_non_request_app_context_still_disposes(self, monkeypatch):
         m = self.manager_with(["a", "b"])
         monkeypatch.setattr(database, "db_manager", m)
-        with Flask(__name__).app_context():
-            database.cleanup_after_app_context()
+        with self.app_with_lifecycle().app_context():
+            pass
         assert not m._engines
+
+    def test_a_task_that_keeps_connections_keeps_them(self, monkeypatch):
+        from flask import g
+        m = self.manager_with(["a", "b"])
+        monkeypatch.setattr(database, "db_manager", m)
+        with self.app_with_lifecycle().app_context():
+            setattr(g, database.KEEP_DB_CONNECTIONS_FLAG, True)
+        assert list(m._engines) == ["a", "b"]
 
 
 class TestPrewarm:

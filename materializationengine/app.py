@@ -21,7 +21,7 @@ from materializationengine.blueprints.upload.api import spatial_lookup_bp, uploa
 from materializationengine.blueprints.upload.models import init_staging_database
 from materializationengine.blueprints.upload.storage import StorageService
 from materializationengine.config import config, configure_app
-from materializationengine.database import cleanup_after_app_context, db_manager
+from materializationengine.database import db_manager, init_db_lifecycle
 from materializationengine.prewarm import register_prewarm
 from materializationengine.health import health_bp
 from materializationengine.limiter import limiter
@@ -178,9 +178,7 @@ def create_app(config_name: str = None):
 
         return jsonify({aligned_volume: n_versions}), 200
 
-    @app.teardown_appcontext
-    def shutdown_session(exception=None):
-        cleanup_after_app_context()
+    init_db_lifecycle(app)
 
     register_prewarm(app)
 

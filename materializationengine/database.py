@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from urllib.parse import urlparse
 
 from dynamicannotationdb import DynamicAnnotationInterface
-from flask import current_app, g, has_request_context
+from flask import current_app, g
 from sqlalchemy import MetaData, create_engine
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.pool import QueuePool
@@ -40,29 +40,48 @@ def reflect_tables(sql_base, database_name):
 KEEP_DB_CONNECTIONS_FLAG = "keep_db_connections"
 
 
-def cleanup_after_app_context() -> None:
-    """Dispose the connection pools when an app context ends, unless asked to keep them.
+# Set on g by a before_request hook (see init_db_lifecycle), so teardown can tell an API request
+# from a celery task. has_request_context() cannot: Flask pops the request context before it runs
+# the app context's teardown.
+WEB_REQUEST_FLAG = "db_web_request"
 
-    Every celery task runs in its own app context, so disposing after each one makes the
-    next task open new connections. That is fine for long tasks, but the spatial lookup
-    runs ~1 s sub-batch tasks: on ltv7 (2026-10-24) they opened ~60 connections/s and
-    held a 2-vCPU Cloud SQL instance at 100% CPU. Tasks that keep their pools only use
-    the staging and aligned-volume databases, which are never dropped, so the idle
-    connections they leave cannot block a DROP DATABASE of an expired version.
+
+def cleanup_after_app_context() -> None:
+    """Release database connections when an app context ends.
+
+    Celery tasks: dispose the connection pools unless asked to keep them. Every celery task runs
+    in its own app context, so disposing after each one makes the next task open new
+    connections. That is fine for long tasks, but the spatial lookup runs ~1 s sub-batch tasks:
+    on ltv7 (2026-10-24) they opened ~60 connections/s and held a 2-vCPU Cloud SQL instance at
+    100% CPU. Tasks that keep their pools only use the staging and aligned-volume databases,
+    which are never dropped, so the idle connections they leave cannot block a DROP DATABASE of
+    an expired version.
+
+    API requests: keep the most recently used pools (WEB_DB_ENGINES_KEPT) and dispose the rest.
+    Disposing every pool made each request open a new connection through the Cloud SQL proxy:
+    ~70 ms of a ~190 ms one-neuron synapse query on ltv7 (2026-11-08). Dropping an expired
+    version stays safe: periodic_database_removal terminates its connections first, and
+    pool_pre_ping replaces a terminated connection on the next checkout.
     """
     if g.get(KEEP_DB_CONNECTIONS_FLAG):
         return
-    if has_request_context():
-        # An API request. Disposing here made every request open a new connection through
-        # the Cloud SQL proxy: ~70 ms of a ~190 ms one-neuron synapse query on ltv7
-        # (2026-11-08). Keep the most recently used pools instead and dispose the rest, which
-        # bounds the idle connections a worker holds. Dropping an expired version stays safe:
-        # periodic_database_removal terminates its connections first, and pool_pre_ping
-        # replaces a terminated connection on next checkout.
+    if g.get(WEB_REQUEST_FLAG):
         db_manager.release_sessions()
         db_manager.trim(int(get_config_param("WEB_DB_ENGINES_KEPT", 4)))
         return
     db_manager.cleanup()
+
+
+def init_db_lifecycle(app) -> None:
+    """Register the hooks that release database connections at the end of a request or task."""
+
+    @app.before_request
+    def _mark_web_request():
+        setattr(g, WEB_REQUEST_FLAG, True)
+
+    @app.teardown_appcontext
+    def _release_db_connections(exception=None):
+        cleanup_after_app_context()
 
 
 def ping_connection(session):
