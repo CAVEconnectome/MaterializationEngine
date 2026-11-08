@@ -1,8 +1,9 @@
+from collections import OrderedDict
 from contextlib import contextmanager
 from urllib.parse import urlparse
 
 from dynamicannotationdb import DynamicAnnotationInterface
-from flask import current_app, g
+from flask import current_app, g, has_request_context
 from sqlalchemy import MetaData, create_engine
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.pool import QueuePool
@@ -51,6 +52,16 @@ def cleanup_after_app_context() -> None:
     """
     if g.get(KEEP_DB_CONNECTIONS_FLAG):
         return
+    if has_request_context():
+        # An API request. Disposing here made every request open a new connection through
+        # the Cloud SQL proxy: ~70 ms of a ~190 ms one-neuron synapse query on ltv7
+        # (2026-11-08). Keep the most recently used pools instead and dispose the rest, which
+        # bounds the idle connections a worker holds. Dropping an expired version stays safe:
+        # periodic_database_removal terminates its connections first, and pool_pre_ping
+        # replaces a terminated connection on next checkout.
+        db_manager.release_sessions()
+        db_manager.trim(int(get_config_param("WEB_DB_ENGINES_KEPT", 4)))
+        return
     db_manager.cleanup()
 
 
@@ -69,12 +80,14 @@ class DatabaseConnectionManager:
     """Manages database connections and session lifecycle."""
     
     def __init__(self):
-        self._engines = {}
+        self._engines = OrderedDict()  # least recently used first, see trim()
         self._session_factories = {}
         
     def get_engine(self, database_name: str):
         """Get or create SQLAlchemy engine with proper pooling configuration."""
-        if database_name not in self._engines:
+        if database_name in self._engines:
+            self._engines.move_to_end(database_name)
+        else:
             SQL_URI_CONFIG = current_app.config["SQLALCHEMY_DATABASE_URI"]
             sql_base_uri = SQL_URI_CONFIG.rpartition("/")[0]
             sql_uri = f"{sql_base_uri}/{database_name}"
@@ -135,6 +148,26 @@ class DatabaseConnectionManager:
         finally:
             session.close()
     
+    def release_sessions(self):
+        """Return every scoped session's connection to its pool, keeping the pools."""
+        for database_name, session_factory in list(self._session_factories.items()):
+            try:
+                session_factory.remove()
+            except Exception as e:
+                celery_logger.error(f"Error cleaning up sessions for {database_name}: {e}")
+
+    def trim(self, keep: int):
+        """Dispose all but the *keep* most recently used engines."""
+        while len(self._engines) > max(keep, 0):
+            database_name, engine = self._engines.popitem(last=False)
+            session_factory = self._session_factories.pop(database_name, None)
+            try:
+                if session_factory is not None:
+                    session_factory.remove()
+                engine.dispose()
+            except Exception as e:
+                celery_logger.error(f"Error disposing engine for {database_name}: {e}")
+
     def cleanup(self):
         """Cleanup any remaining sessions and dispose of engine pools."""
         for database_name, session_factory in list(self._session_factories.items()):

@@ -22,6 +22,7 @@ from materializationengine.blueprints.upload.models import init_staging_database
 from materializationengine.blueprints.upload.storage import StorageService
 from materializationengine.config import config, configure_app
 from materializationengine.database import cleanup_after_app_context, db_manager
+from materializationengine.prewarm import register_prewarm
 from materializationengine.health import health_bp
 from materializationengine.limiter import limiter
 from materializationengine.memory_audit import init_memory_audit
@@ -180,5 +181,7 @@ def create_app(config_name: str = None):
     @app.teardown_appcontext
     def shutdown_session(exception=None):
         cleanup_after_app_context()
+
+    register_prewarm(app)
 
     return app
