@@ -177,3 +177,29 @@ class TestPrewarm:
     def test_register_prewarm_is_a_no_op_outside_uwsgi(self):
         from materializationengine.prewarm import register_prewarm
         register_prewarm(Flask(__name__))  # uwsgidecorators is not importable here
+
+
+class TestSessionTransactions:
+    """Cached DynamicAnnotationInterface sessions must not keep a transaction (and its table locks)
+    open after the request that used them."""
+
+    def idle_in_transaction(self, database_uri):
+        e = sa.create_engine(database_uri)
+        try:
+            with e.connect() as c:
+                return c.execute(sa.text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                    "AND state = 'idle in transaction'")).scalar()
+        finally:
+            e.dispose()
+
+    def test_a_request_ends_the_cached_session_transaction(self, test_app, database_uri, aligned_volume_name):
+        app = test_app.application
+        before = self.idle_in_transaction(database_uri)
+        with app.app_context():
+            db = database.dynamic_annotation_cache.get_db(aligned_volume_name)
+            # what QueryManager does: read through the client's scoped session
+            db.database.session.execute(sa.text("SELECT count(*) FROM annotation_table_metadata")).scalar()
+            assert self.idle_in_transaction(database_uri) == before + 1
+            app.test_client().get("/materialize/version")  # its teardown runs the real hooks
+        assert self.idle_in_transaction(database_uri) == before

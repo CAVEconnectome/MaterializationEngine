@@ -63,6 +63,12 @@ def cleanup_after_app_context() -> None:
     version stays safe: periodic_database_removal terminates its connections first, and
     pool_pre_ping replaces a terminated connection on the next checkout.
     """
+    # Always end the cached DynamicAnnotationInterface sessions' transactions, even when the pools
+    # are kept. QueryManager queries through them, and nothing else committed or rolled them back,
+    # so every API worker held one transaction open for its whole life, with an AccessShareLock on
+    # every table it had queried. On minnie (2026-11-08) 11 such sessions, up to 4.6 h old, held
+    # synapses_pni_2 in mat1926 and every pg_repack of it timed out waiting for its lock.
+    dynamic_annotation_cache.end_transactions()
     if g.get(KEEP_DB_CONNECTIONS_FLAG):
         return
     if g.get(WEB_REQUEST_FLAG):
@@ -242,6 +248,18 @@ class DynamicMaterializationCache:
         )
         self._clients[database] = mat_client
         return self._clients[database]
+
+    def end_transactions(self):
+        """Roll back and release every cached client's session; the next use starts a new one."""
+        for database, client in list(self._clients.items()):
+            db = getattr(client, "_database", None)
+            if db is None:
+                continue
+            try:
+                db.session.remove()  # scoped_session: close (rolls back) and forget this thread's session
+                db.close_session()
+            except Exception as e:
+                celery_logger.warning(f"Error ending the session transaction for {database}: {e}")
 
     def invalidate_cache(self):
         self._clients = {}
