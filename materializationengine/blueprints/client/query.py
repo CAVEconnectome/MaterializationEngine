@@ -25,6 +25,7 @@ from sqlalchemy.sql.selectable import Alias
 from sqlalchemy.sql.sqltypes import Boolean, DateTime, Integer, BigInteger, Float, String
 from sqlalchemy.sql import sqltypes as sa_types
 
+from materializationengine.config import as_bool
 from materializationengine.utils import get_config_param
 
 try:
@@ -529,6 +530,13 @@ def _adbc_table_to_dataframe(table, dtypes: dict) -> pd.DataFrame:
     for k, dtype in dtypes.items():
         if k in df.columns and str(df[k].dtype) != str(dtype) and not str(dtype).startswith("datetime"):
             df[k] = df[k].astype(dtype)
+    if table.num_rows == 0:
+        # pd.read_sql has no values to infer from, so a column without a dtype_map type (String,
+        # SmallInteger) comes back as object, which the response then declares as Arrow null.
+        # Keep that, so an empty response's schema does not depend on the fetch path.
+        for k in df.columns:
+            if k not in dtypes:
+                df[k] = df[k].astype(object)
     return df
 
 
@@ -551,9 +559,9 @@ def _execute_query_unguarded(
             # ADBC skips building a Python object per cell: 54,664 synapse rows in 0.33 s
             # instead of 0.67 s for pd.read_sql on ltv7 (2026-11-08), same DataFrame.
             table = None
-            if adbc_postgresql is not None and index_col is None and get_config_param(
-                "QUERY_FETCH_WITH_ADBC", True
-            ) not in (False, "false", "False", "0", 0) and _adbc_handles_query(query):
+            if adbc_postgresql is not None and index_col is None and as_bool(
+                get_config_param("QUERY_FETCH_WITH_ADBC", True), default=True, name="QUERY_FETCH_WITH_ADBC"
+            ) and _adbc_handles_query(query):
                 table = _read_sql_adbc(statement, engine)
             if table is not None:
                 df = _adbc_table_to_dataframe(table, dtypes)

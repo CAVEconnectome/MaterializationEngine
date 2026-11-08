@@ -7,28 +7,49 @@ after_fork in every worker right after the fork: it first drops the database cli
 from the master (a socket shared by two processes interleaves their queries), then prewarms.
 """
 import logging
+import os
 import time
 
 from flask import g
 
+from materializationengine.config import as_bool
+
 logger = logging.getLogger(__name__)
 
 
-def _recent_versions(aligned_volume: str, datastack: str, n: int) -> list:
+def _setting(app, name: str, default):
+    """app.config first, then the environment. This runs right after the fork, before any app
+    context, so get_config_param (which reads current_app) cannot be used."""
+    value = app.config.get(name)
+    return os.environ.get(name, default) if value is None else value
+
+
+def _recent_version_databases(aligned_volume: str, datastack: str, n: int) -> list:
+    """Database names of the datastack's n most recent valid versions. A virtual version (one
+    with a parent_version) reads its parent's database, as validate_datastack resolves it."""
     from dynamicannotationdb.models import AnalysisVersion
 
     from materializationengine.database import db_manager
 
     with db_manager.session_scope(aligned_volume) as session:
         rows = (
-            session.query(AnalysisVersion.version)
+            session.query(AnalysisVersion)
             .filter(AnalysisVersion.datastack == datastack)
             .filter(AnalysisVersion.valid == True)  # noqa: E712 - SQL expression
             .order_by(AnalysisVersion.time_stamp.desc())
             .limit(n)
             .all()
         )
-    return [r[0] for r in rows]
+        names = []
+        for v in rows:
+            if v.parent_version is not None:
+                parent = session.query(AnalysisVersion).filter(AnalysisVersion.id == v.parent_version).first()
+                if parent is None:
+                    continue
+                names.append(f"{parent.datastack}__mat{parent.version}")
+            else:
+                names.append(f"{datastack}__mat{v.version}")
+    return list(dict.fromkeys(names))
 
 
 def prewarm_worker(app) -> None:
@@ -41,7 +62,7 @@ def prewarm_worker(app) -> None:
     from materializationengine.info_client import get_relevant_datastack_info
 
     t0 = time.perf_counter()
-    n_versions = int(app.config.get("WEB_PREWARM_VERSIONS", 2))
+    n_versions = int(_setting(app, "WEB_PREWARM_VERSIONS", 2))
     warmed = []
     with app.app_context():
         # this is not a request, so without the flag the app-context teardown disposes every pool
@@ -53,14 +74,18 @@ def prewarm_worker(app) -> None:
                     session.execute("SELECT 1")
                 dynamic_annotation_cache.get_db(aligned_volume)
                 warmed.append(aligned_volume)
-                for version in _recent_versions(aligned_volume, datastack, n_versions):
-                    mat_db = f"{datastack}__mat{version}"
+                mat_dbs = _recent_version_databases(aligned_volume, datastack, n_versions)
+            except Exception as e:  # never keep a worker from starting
+                logger.warning(f"prewarm of {datastack} failed: {e}")
+                continue
+            for mat_db in mat_dbs:
+                try:
                     db = dynamic_annotation_cache.get_db(mat_db)
                     if query_module.adbc_postgresql is not None:
                         query_module._adbc_connection(db.database.engine)
                     warmed.append(mat_db)
-            except Exception as e:  # never keep a worker from starting
-                logger.warning(f"prewarm of {datastack} failed: {e}")
+                except Exception as e:  # one missing database does not stop the others
+                    logger.warning(f"prewarm of {mat_db} failed: {e}")
     logger.info(f"prewarmed {warmed} in {time.perf_counter() - t0:.2f}s")
 
 
@@ -74,7 +99,7 @@ def after_fork(app) -> None:
     from materializationengine.database import reset_database_connections
 
     reset_database_connections(close_connections=False)
-    if app.config.get("WEB_PREWARM", True):
+    if as_bool(_setting(app, "WEB_PREWARM", True), default=True, name="WEB_PREWARM"):
         prewarm_worker(app)
 
 

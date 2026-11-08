@@ -3,6 +3,7 @@ requests keep (but bound) their connection pools."""
 import datetime
 
 import pandas as pd
+import pyarrow as pa
 import pytest
 import sqlalchemy as sa
 from flask import Flask
@@ -154,9 +155,14 @@ class TestAdbcFetch:
             finally:
                 session.close()
         got, expected = empty(True), empty(False)
-        assert len(got) == len(expected) == 0
-        assert list(got.columns) == list(expected.columns)
+        pd.testing.assert_frame_equal(got, expected)
+        # the response's schema (Arrow types and pandas metadata) too
+        assert pa.RecordBatch.from_pandas(got).schema.equals(pa.RecordBatch.from_pandas(expected).schema, check_metadata=True)
 
+    def test_the_adbc_flag_accepts_config_strings(self, engine, monkeypatch):
+        monkeypatch.setattr(q, "_read_sql_adbc", lambda *a: pytest.fail("ADBC used with the flag off"))
+        for off in ("off", "no", "FALSE", "0"):
+            fetch(engine, off, *SCALARS)
 
     def test_a_failed_query_drops_its_connection(self, engine):
         app = Flask(__name__)
@@ -167,6 +173,78 @@ class TestAdbcFetch:
             assert q._read_sql_adbc("SELECT 1 AS one", engine).column("one").to_pylist() == [1]
 
 
+
+
+class StrBool(Base):
+    __tablename__ = "adbc_str_bool"
+    id = sa.Column(sa.BigInteger, primary_key=True)
+    label = sa.Column(sa.String)       # varchar
+    note = sa.Column(sa.Text)          # text
+    label_null = sa.Column(sa.String)  # NULL in every row
+    flag = sa.Column(sa.Boolean)
+    flag_null = sa.Column(sa.Boolean)  # NULL in every row
+
+
+STRBOOL_COLUMNS = [StrBool.id, StrBool.label, StrBool.note, StrBool.label_null, StrBool.flag, StrBool.flag_null]
+
+
+@pytest.fixture(scope="module")
+def strbool_engine(database_uri):
+    e = sa.create_engine(database_uri)
+    StrBool.__table__.drop(e, checkfirst=True)
+    StrBool.__table__.create(e)
+    with e.begin() as conn:
+        conn.execute(StrBool.__table__.insert(), [
+            dict(id=1, label="L2/3 IT", note="first", label_null=None, flag=True, flag_null=None),
+            dict(id=2, label=None, note="naïve ✓", label_null=None, flag=None, flag_null=None),
+            dict(id=3, label="", note=None, label_null=None, flag=False, flag_null=None),
+        ])
+    yield e
+    StrBool.__table__.drop(e, checkfirst=True)
+    e.dispose()
+
+
+class TestStringsAndBooleans:
+    """Strings and booleans are common, so they must take the ADBC path (no fallback) and come out
+    exactly as pd.read_sql returned them: pandas string / boolean, Arrow string / bool."""
+
+    def fetch(self, engine, use_adbc, empty=False, monkeypatch=None):
+        app = Flask(__name__)
+        app.config["QUERY_FETCH_WITH_ADBC"] = use_adbc
+        session = sessionmaker(bind=engine)()
+        try:
+            with app.test_request_context():
+                query = session.query(StrBool).with_entities(*STRBOOL_COLUMNS).order_by(StrBool.id)
+                if empty:
+                    query = query.filter(StrBool.id < 0)
+                return q._execute_query(session, engine, query, fix_wkb=False, direct_sql_pandas=True)
+        finally:
+            session.close()
+
+    def test_they_use_adbc(self, strbool_engine, monkeypatch):
+        calls = []
+        real = q._read_sql_adbc
+        monkeypatch.setattr(q, "_read_sql_adbc", lambda *a: calls.append(1) or real(*a))
+        self.fetch(strbool_engine, True)
+        assert calls == [1]
+
+    def test_types_and_values(self, strbool_engine):
+        df = self.fetch(strbool_engine, True)
+        assert {c: str(df[c].dtype) for c in ("label", "note", "label_null", "flag", "flag_null")} == {
+            "label": "string", "note": "string", "label_null": "string", "flag": "boolean", "flag_null": "boolean"}
+        assert df["label"].tolist() == ["L2/3 IT", pd.NA, ""]
+        assert df["note"].tolist() == ["first", "naïve ✓", pd.NA]
+        assert df["flag"].tolist() == [True, pd.NA, False]
+        schema = pa.RecordBatch.from_pandas(df).schema  # what the response carries
+        assert [str(schema.field(c).type) for c in ("label", "note", "flag")] == ["string", "string", "bool"]
+        client = pa.Table.from_batches([pa.RecordBatch.from_pandas(df)]).to_pandas()
+        assert str(client["label"].dtype) == "string" and str(client["flag"].dtype) == "boolean"
+
+    @pytest.mark.parametrize("empty", [False, True])
+    def test_same_as_read_sql(self, strbool_engine, empty):
+        new, old = self.fetch(strbool_engine, True, empty), self.fetch(strbool_engine, False, empty)
+        pd.testing.assert_frame_equal(new, old)
+        assert pa.RecordBatch.from_pandas(new).schema.equals(pa.RecordBatch.from_pandas(old).schema, check_metadata=True)
 
 
 class TestWebRequestPools:
@@ -229,6 +307,38 @@ class TestWebRequestPools:
 
 
 class TestPrewarm:
+    def test_web_prewarm_accepts_config_strings_and_the_environment(self, monkeypatch):
+        from materializationengine import prewarm
+        monkeypatch.setattr(database, "reset_database_connections", lambda close_connections: None)
+        monkeypatch.setattr(prewarm, "prewarm_worker", lambda app: pytest.fail("prewarm is disabled"))
+        app = Flask(__name__)
+        app.config["WEB_PREWARM"] = "False"
+        prewarm.after_fork(app)
+        app.config.pop("WEB_PREWARM")
+        monkeypatch.setenv("WEB_PREWARM", "0")
+        prewarm.after_fork(app)
+
+    def test_virtual_versions_resolve_to_their_parent_database(self, test_app, aligned_volume_name):
+        from dynamicannotationdb.models import AnalysisVersion
+        from materializationengine import prewarm
+        now = datetime.datetime.utcnow()
+        with test_app.application.app_context():
+            with database.db_manager.session_scope(aligned_volume_name) as s:
+                parent = AnalysisVersion(datastack="prewarm_parent", version=7, time_stamp=now, valid=True,
+                                         expires_on=now, status="AVAILABLE", is_merged=True)
+                s.add(parent)
+                s.flush()
+                s.add(AnalysisVersion(datastack="prewarm_virtual", version=7, time_stamp=now, valid=True,
+                                      expires_on=now, parent_version=parent.id, status="AVAILABLE", is_merged=True))
+            try:
+                assert prewarm._recent_version_databases(aligned_volume_name, "prewarm_virtual", 2) == [
+                    "prewarm_parent__mat7"]
+            finally:
+                with database.db_manager.session_scope(aligned_volume_name) as s:
+                    s.query(AnalysisVersion).filter(
+                        AnalysisVersion.datastack.in_(["prewarm_parent", "prewarm_virtual"])).delete(
+                        synchronize_session=False)
+
     def test_after_fork_forgets_inherited_clients_even_without_prewarm(self, monkeypatch):
         from materializationengine import prewarm
         calls = []
