@@ -13,6 +13,7 @@ One repack per database at a time. Where the chart enables it
 falls back to the workflow-queue Celery task.
 """
 
+import inspect
 import json
 import os
 import re
@@ -241,9 +242,11 @@ def _reconcile(status: Dict[str, Any]) -> Dict[str, Any]:
     fields = {"state": "failed", "error": f"Kubernetes Job {name}: {what}"}
     if latest.get("state") == "running":
         fields["cleanup"] = CLEANUP_HINT
-    lock_key = f"{LOCK_KEY_PREFIX}{latest.get('database')}"
-    if REDIS_CLIENT.get(lock_key) in (latest["job_id"], latest["job_id"].encode()):
-        REDIS_CLIENT.delete(lock_key)
+    database = latest.get("database")
+    if database:
+        lock_key = f"{LOCK_KEY_PREFIX}{database}"
+        if REDIS_CLIENT.get(lock_key) in (latest["job_id"], latest["job_id"].encode()):
+            REDIS_CLIENT.delete(lock_key)
     return _set_status(latest["job_id"], **fields)
 
 
@@ -259,8 +262,12 @@ def start_repack(database: str, table_name: str, **options) -> Dict[str, Any]:
     if holder:
         holder = holder.decode() if isinstance(holder, bytes) else holder
         raise RepackRefused(f"another repack is running in {database}: {holder!r}")
+    unknown = set(options) - _REPACK_OPTIONS
+    if unknown:
+        raise RepackRefused(f"unknown repack options: {sorted(unknown)}")
     job_id = f"{database}.{table_name}.{uuid.uuid4().hex[:8]}"
-    kwargs = {"job_id": job_id, "database": database, "table_name": table_name, **options, "order_by": order_by}
+    # validated and derived values last, so no option can replace them
+    kwargs = {**options, "job_id": job_id, "database": database, "table_name": table_name, "order_by": order_by}
     if k8s_jobs.maintenance_jobs_enabled():
         _set_status(job_id, state="queued", backend="kubernetes job", database=database,
                     table_name=table_name, options=options)
@@ -360,6 +367,10 @@ def run_repack(
         if REDIS_CLIENT.get(lock_key) in (job_id, job_id.encode()):
             REDIS_CLIENT.delete(lock_key)
 
+
+
+# The options start_repack accepts: run_repack's keyword arguments, less the ones it sets.
+_REPACK_OPTIONS = set(inspect.signature(run_repack).parameters) - {"job_id", "database", "table_name"}
 
 _FROZEN_NAME = re.compile(r"^(?P<datastack>.+)__mat(?P<version>\d+)$")
 

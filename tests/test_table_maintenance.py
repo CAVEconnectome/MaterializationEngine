@@ -280,6 +280,25 @@ class TestKubernetesJobs:
                                            {"finished": True, "succeeded": True, "failed": False, "reason": None})[1]
         assert tm.get_repack_status("j4")["state"] == "done"
 
+    def test_options_cannot_replace_validated_fields(self, scratch_db, real_redis, jobs_on):
+        submit, status, _ = jobs_on
+        status.return_value = {"finished": False, "active": False, "reason": None}
+        name, _ = scratch_db
+        with pytest.raises(tm.RepackRefused, match="unknown repack options"):
+            tm.start_repack(name, "synapses", job_id="other-job")  # database/table_name are positional
+        submit.assert_not_called()
+        out = tm.start_repack(name, "synapses", order_by="id", dry_run=True)
+        kwargs = submit.call_args.args[1]
+        assert kwargs["database"] == name and kwargs["table_name"] == "synapses" and kwargs["job_id"] == out["job_id"]
+
+    def test_a_record_without_a_database_leaves_locks_alone(self, scratch_db, real_redis, jobs_on):
+        _, status, _ = jobs_on
+        real_redis.set(f"{tm.LOCK_KEY_PREFIX}None", "j6")
+        tm._set_status("j6", state="running", k8s_job="repack-x")
+        status.return_value = {"finished": True, "succeeded": False, "failed": True, "reason": "gone"}
+        assert tm.get_repack_status("j6")["state"] == "failed"
+        assert real_redis.get(f"{tm.LOCK_KEY_PREFIX}None") == b"j6"
+
     def test_finished_records_are_not_looked_up(self, scratch_db, real_redis, jobs_on):
         _, status, _ = jobs_on
         tm._set_status("j5", state="done", k8s_job="repack-x")
