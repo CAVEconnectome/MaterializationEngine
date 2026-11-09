@@ -7,8 +7,10 @@ merge join over randomly ordered index reads. Reordering by id makes the merge j
 read both tables sequentially. pg_repack rewrites the table in id order while it stays
 readable and writable, taking an exclusive lock only briefly at the start and the swap.
 
-Runs on the workflow queue (the producer: non-preemptible and not evicted by the
-cluster autoscaler), one repack per database at a time.
+One repack per database at a time. Where the chart enables it
+(materialize.maintenanceJobs.enabled), each repack runs as its own Kubernetes Job
+(materializationengine/jobs/repack.py; see k8s_jobs.py for why not Celery). Elsewhere it
+falls back to the workflow-queue Celery task.
 """
 
 import json
@@ -205,27 +207,85 @@ def _set_status(job_id: str, **fields) -> Dict[str, Any]:
 
 def get_repack_status(job_id: str) -> Optional[Dict[str, Any]]:
     raw = REDIS_CLIENT.get(f"{STATUS_KEY_PREFIX}{job_id}")
-    return json.loads(raw) if raw else None
+    return _reconcile(json.loads(raw)) if raw else None
+
+
+_UNFINISHED = ("queued", "checking", "running")
+CLEANUP_HINT = (
+    "pg_repack may have left its trigger, log table and half-built copy behind; before repacking this "
+    "table again, run in the database: DROP EXTENSION pg_repack CASCADE; CREATE EXTENSION pg_repack;"
+)
+
+
+def _reconcile(status: Dict[str, Any]) -> Dict[str, Any]:
+    """A job recorded as unfinished whose Kubernetes Job has failed, finished without a
+    result, or disappeared is marked failed (and its database lock released), so a killed
+    pod shows up as a failure instead of "running" until the record expires."""
+    name = status.get("k8s_job")
+    if not name or status.get("state") not in _UNFINISHED:
+        return status
+    from materializationengine import k8s_jobs
+
+    try:
+        job = k8s_jobs.get_job_status(name)
+    except k8s_jobs.JobSubmissionError as e:
+        return {**status, "k8s_job_status": f"could not read the Job: {e}"}
+    if not job["finished"]:
+        return {**status, "k8s_job_status": job.get("reason") or ("running" if job.get("active") else "pending")}
+    # Re-read: the pod may have recorded its result between our read and the Job finishing.
+    raw = REDIS_CLIENT.get(f"{STATUS_KEY_PREFIX}{status['job_id']}")
+    latest = json.loads(raw) if raw else status
+    if latest.get("state") not in _UNFINISHED:
+        return latest
+    what = job.get("reason") or ("exited without recording a result" if job["succeeded"] else "failed")
+    fields = {"state": "failed", "error": f"Kubernetes Job {name}: {what}"}
+    if latest.get("state") == "running":
+        fields["cleanup"] = CLEANUP_HINT
+    lock_key = f"{LOCK_KEY_PREFIX}{latest.get('database')}"
+    if REDIS_CLIENT.get(lock_key) in (latest["job_id"], latest["job_id"].encode()):
+        REDIS_CLIENT.delete(lock_key)
+    return _set_status(latest["job_id"], **fields)
 
 
 def start_repack(database: str, table_name: str, **options) -> Dict[str, Any]:
-    """Validate the request now (so the API can refuse it) and queue the repack."""
+    """Validate the request now (so the API can refuse it), then start the repack: as a
+    Kubernetes Job where the deployment runs maintenance Jobs, else on the Celery queue."""
+    from materializationengine import k8s_jobs
+
     check_database(database)
     _check_name("table", table_name)
     order_by = _check_name("order_by column", options.get("order_by", "id"))
+    holder = REDIS_CLIENT.get(f"{LOCK_KEY_PREFIX}{database}")
+    if holder:
+        holder = holder.decode() if isinstance(holder, bytes) else holder
+        raise RepackRefused(f"another repack is running in {database}: {holder!r}")
     job_id = f"{database}.{table_name}.{uuid.uuid4().hex[:8]}"
-    _set_status(job_id, state="queued", database=database, table_name=table_name, options=options)
-    repack_table.apply_async(
-        kwargs={"job_id": job_id, "database": database, "table_name": table_name, **options, "order_by": order_by}
-    )
+    kwargs = {"job_id": job_id, "database": database, "table_name": table_name, **options, "order_by": order_by}
+    if k8s_jobs.maintenance_jobs_enabled():
+        _set_status(job_id, state="queued", backend="kubernetes job", database=database,
+                    table_name=table_name, options=options)
+        try:
+            name = k8s_jobs.submit_job(
+                "materializationengine.jobs.repack", kwargs, name_prefix=f"repack-{table_name}",
+                labels={"materialize-workload": "repack", "repack-database": database},
+            )
+        except k8s_jobs.JobSubmissionError as e:
+            return _set_status(job_id, state="failed", error=f"could not submit the Job: {e}")
+        _set_status(job_id, k8s_job=name)
+    else:
+        _set_status(job_id, state="queued", backend="celery", database=database, table_name=table_name,
+                    options=options)
+        repack_table.apply_async(kwargs=kwargs)
     return get_repack_status(job_id)
 
 
-# acks_late=False: a repack whose worker died must be cleaned up (pg_repack leaves its
-# trigger and half-built copy) before it is run again, so it is never redelivered.
 @celery.task(name="workflow:repack_table", bind=True, acks_late=False)
-def repack_table(
-    self,
+def repack_table(self, **kwargs) -> Dict[str, Any]:
+    """The Celery fallback for deployments without maintenance Jobs."""
+    return run_repack(**kwargs)
+
+
+def run_repack(
     job_id: str,
     database: str,
     table_name: str,
@@ -397,4 +457,4 @@ def list_repack_jobs(limit: int = 50) -> List[Dict[str, Any]]:
         if raw:
             jobs.append(json.loads(raw))
     jobs.sort(key=lambda j: j.get("updated_at", ""), reverse=True)
-    return jobs[:limit]
+    return [_reconcile(j) for j in jobs[:limit]]

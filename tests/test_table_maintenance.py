@@ -195,6 +195,118 @@ class TestRepackTask:
         assert not real_redis.exists(f"{tm.LOCK_KEY_PREFIX}{name}")
 
 
+class TestKubernetesJobs:
+    """start_repack submits a Job where the deployment runs them; a dead Job is a failure."""
+
+    @pytest.fixture
+    def jobs_on(self, monkeypatch):
+        from materializationengine import k8s_jobs
+
+        monkeypatch.setenv("MAINTENANCE_JOBS_ENABLED", "true")
+        with mock.patch.object(k8s_jobs, "submit_job", return_value="repack-synapses-abcde") as submit, \
+                mock.patch.object(k8s_jobs, "get_job_status") as status, \
+                mock.patch.object(tm.repack_table, "apply_async") as celery_task:
+            yield submit, status, celery_task
+
+    def test_submits_a_job_instead_of_a_celery_task(self, scratch_db, real_redis, jobs_on):
+        submit, status, celery_task = jobs_on
+        name, _ = scratch_db
+        status.return_value = {"finished": False, "active": False, "reason": None}
+        out = tm.start_repack(name, "synapses", dry_run=False, jobs=2)
+        celery_task.assert_not_called()
+        module, kwargs = submit.call_args.args[:2]
+        assert module == "materializationengine.jobs.repack"
+        assert kwargs["database"] == name and kwargs["table_name"] == "synapses" and kwargs["order_by"] == "id"
+        assert kwargs["dry_run"] is False and kwargs["job_id"] == out["job_id"]
+        assert submit.call_args.kwargs["labels"]["materialize-workload"] == "repack"
+        assert out["state"] == "queued" and out["backend"] == "kubernetes job" and out["k8s_job"] == "repack-synapses-abcde"
+        assert out["k8s_job_status"] == "pending"
+
+    def test_celery_without_jobs(self, scratch_db, real_redis, monkeypatch):
+        monkeypatch.delenv("MAINTENANCE_JOBS_ENABLED", raising=False)
+        name, _ = scratch_db
+        with mock.patch.object(tm.repack_table, "apply_async") as celery_task:
+            out = tm.start_repack(name, "synapses")
+        assert celery_task.call_args.kwargs["kwargs"]["job_id"] == out["job_id"] and out["backend"] == "celery"
+
+    def test_refused_up_front_while_another_repack_holds_the_database(self, scratch_db, real_redis, jobs_on):
+        submit, _, _ = jobs_on
+        name, _ = scratch_db
+        real_redis.set(f"{tm.LOCK_KEY_PREFIX}{name}", "other-job")
+        with pytest.raises(tm.RepackRefused, match="other-job"):
+            tm.start_repack(name, "synapses")
+        submit.assert_not_called()
+
+    def test_submission_failure_is_recorded(self, scratch_db, real_redis, jobs_on):
+        from materializationengine import k8s_jobs
+
+        submit, _, _ = jobs_on
+        submit.side_effect = k8s_jobs.JobSubmissionError("forbidden")
+        out = tm.start_repack(scratch_db[0], "synapses")
+        assert out["state"] == "failed" and "forbidden" in out["error"]
+
+    def test_a_killed_job_mid_repack_is_failed_with_cleanup_and_frees_the_database(self, scratch_db, real_redis, jobs_on):
+        _, status, _ = jobs_on
+        name, _ = scratch_db
+        tm._set_status("j1", state="running", database=name, table_name="synapses", k8s_job="repack-synapses-abcde")
+        real_redis.set(f"{tm.LOCK_KEY_PREFIX}{name}", "j1")
+        status.return_value = {"finished": True, "succeeded": False, "failed": True,
+                               "reason": "the Job no longer exists"}
+        out = tm.get_repack_status("j1")
+        assert out["state"] == "failed" and "no longer exists" in out["error"]
+        assert "DROP EXTENSION pg_repack CASCADE" in out["cleanup"]
+        assert not real_redis.exists(f"{tm.LOCK_KEY_PREFIX}{name}")
+        assert tm.list_repack_jobs()[0]["state"] == "failed"  # persisted
+
+    def test_a_job_that_died_before_pg_repack_needs_no_cleanup(self, scratch_db, real_redis, jobs_on):
+        _, status, _ = jobs_on
+        tm._set_status("j2", state="queued", database=scratch_db[0], k8s_job="repack-x")
+        status.return_value = {"finished": True, "succeeded": False, "failed": True,
+                               "reason": "Failed: BackoffLimitExceeded; container job Error (exit 1)"}
+        out = tm.get_repack_status("j2")
+        assert out["state"] == "failed" and "exit 1" in out["error"] and "cleanup" not in out
+
+    def test_a_running_job_is_left_alone(self, scratch_db, real_redis, jobs_on):
+        _, status, _ = jobs_on
+        tm._set_status("j3", state="running", database=scratch_db[0], k8s_job="repack-x")
+        status.return_value = {"finished": False, "active": True, "reason": None}
+        out = tm.get_repack_status("j3")
+        assert out["state"] == "running" and out["k8s_job_status"] == "running"
+
+    def test_a_result_recorded_as_the_job_finished_wins(self, scratch_db, real_redis, jobs_on):
+        _, status, _ = jobs_on
+        tm._set_status("j4", state="running", database=scratch_db[0], k8s_job="repack-x")
+        status.side_effect = lambda name: (tm._set_status("j4", state="done"),
+                                           {"finished": True, "succeeded": True, "failed": False, "reason": None})[1]
+        assert tm.get_repack_status("j4")["state"] == "done"
+
+    def test_finished_records_are_not_looked_up(self, scratch_db, real_redis, jobs_on):
+        _, status, _ = jobs_on
+        tm._set_status("j5", state="done", k8s_job="repack-x")
+        assert tm.get_repack_status("j5")["state"] == "done"
+        status.assert_not_called()
+
+
+class TestRepackJobEntrypoint:
+    @pytest.mark.parametrize("state,code", [("done", 0), ("dry run", 0), ("refused", 0), ("failed", 1)])
+    def test_exit_status(self, monkeypatch, state, code):
+        from materializationengine.jobs import repack
+
+        monkeypatch.setenv("MAINTENANCE_JOB_ARGS", '{"job_id": "db.t.1", "database": "db", "table_name": "t"}')
+        app = mock.MagicMock()
+        with mock.patch("materializationengine.app.create_app", return_value=app), \
+                mock.patch.object(tm, "run_repack", return_value={"state": state}) as run:
+            assert repack.main() == code
+        run.assert_called_once_with(job_id="db.t.1", database="db", table_name="t")
+        app.app_context.assert_called_once()
+
+    def test_no_job_id(self, monkeypatch):
+        from materializationengine.jobs import repack
+
+        monkeypatch.setenv("MAINTENANCE_JOB_ARGS", "{}")
+        assert repack.main() == 2
+
+
 class TestEndpoints:
     @pytest.fixture
     def client(self):
