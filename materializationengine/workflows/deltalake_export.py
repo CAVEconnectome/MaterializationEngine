@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import os
@@ -102,6 +103,25 @@ class DeltaLakeOutputSpec:
             if isinstance(self.max_row_group_size, bool) or not isinstance(self.max_row_group_size, int) \
                     or self.max_row_group_size < 1:
                 raise ValueError("DeltaLakeOutputSpec.max_row_group_size must be a positive integer")
+
+
+def apply_spec_overrides(specs: list, overrides: dict) -> None:
+    """Set the given DeltaLakeOutputSpec fields on every spec, in place.
+
+    ``name_suffix`` is appended to each spec's name (e.g. ``"__test1"``) so a second
+    export of the same version writes beside the first instead of colliding with it.
+    """
+    allowed = {f.name for f in dataclasses.fields(DeltaLakeOutputSpec)} - {"name"}
+    unknown = set(overrides) - allowed - {"name_suffix"}
+    if unknown:
+        raise ValueError(f"unknown output spec override(s): {sorted(unknown)}")
+    for spec in specs:
+        for key, value in overrides.items():
+            if key == "name_suffix":
+                spec.name = f"{spec.name}{value}"
+            else:
+                setattr(spec, key, value)
+        spec.__post_init__()  # re-validate (e.g. a non-positive max_row_group_size)
 
 
 def apply_default_row_group_size(specs: list[DeltaLakeOutputSpec], default: int | None) -> None:
@@ -2498,6 +2518,7 @@ def run_deltalake_export(
     output_specs: list[dict] | None = None,
     job_id: str | None = None,
     optimize_runner: Callable[..., None] | None = None,
+    spec_overrides: dict | None = None,
 ) -> None:
     """Orchestrate a full Delta Lake export for one table, without Celery.
 
@@ -2525,6 +2546,11 @@ def run_deltalake_export(
         Only the regular-table path is routed through this. The view path is a
         different two-pass algorithm whose optimizes are interleaved with
         re-partitioning, and it still runs serially.
+    spec_overrides
+        Applied to every resolved output spec (discovered or given): any
+        DeltaLakeOutputSpec field (e.g. ``max_row_group_size``, ``n_partitions``),
+        plus ``name_suffix``, appended to each spec's name. See
+        :func:`apply_spec_overrides`.
     """
     from dynamicannotationdb.key_utils import build_segmentation_table_name
     from sqlalchemy import create_engine
@@ -2660,6 +2686,8 @@ def run_deltalake_export(
             )
             resolved_specs = discover_default_output_specs(source, engine)
 
+        if spec_overrides:
+            apply_spec_overrides(resolved_specs, spec_overrides)
         apply_default_row_group_size(
             resolved_specs, get_config_param("DELTALAKE_MAX_ROW_GROUP_SIZE", None)
         )
@@ -2751,8 +2779,10 @@ def run_deltalake_export(
             redis_callback(rows_so_far, total)
 
         def _optimize_callback(spec_name: str, action: str) -> None:
+            # "vacuum" is reported once a lake's optimize task (which ends with its
+            # vacuum) has finished -- not when a vacuum starts.
             msg = (
-                f"Vacuuming Delta Lake '{spec_name}'..."
+                f"Optimized and vacuumed Delta Lake '{spec_name}'"
                 if action == "vacuum"
                 else f"Optimizing Delta Lake '{spec_name}' ({action})..."
             )

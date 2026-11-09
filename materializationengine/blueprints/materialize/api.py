@@ -1,5 +1,6 @@
 import datetime
 import json
+import re
 import logging
 import os
 import shlex
@@ -1043,6 +1044,97 @@ class WriteDeltalakeResource(Resource):
             }, 404
 
         return progress, 200
+
+
+@mat_bp.route(
+    "/materialize/run/write_deltalake_version/datastack/<string:datastack_name>/version/<int(signed=True):version>/"
+)
+class WriteDeltalakeVersionResource(Resource):
+    @auth_requires_dataset_admin(table_arg="datastack_name")
+    @mat_bp.doc("Export every table of a version to Delta Lake (one RayJob)", security="apikey")
+    def post(self, datastack_name: str, version: int):
+        """Export all of a frozen version's tables to Delta Lake as one RayJob.
+
+        JSON body (all optional): ``tables`` (list; default all), ``include_views`` (bool),
+        ``max_streams`` (tables streaming at once; default
+        DELTALAKE_MAX_CONCURRENT_TABLE_STREAMS, else 2), ``config`` (a
+        DELTALAKE_EXPORT_CONFIG object for this run), ``name_suffix`` (appended to every
+        output spec name, to export a version again beside an earlier export).
+        ``?workers=`` caps the Ray workers.
+        """
+        import uuid
+
+        from materializationengine.rayjobs import RayJobSubmissionError, ray_enabled, submit_rayjob
+        from materializationengine.workflows.deltalake_version_export import (
+            load_export_config,
+            set_version_status,
+        )
+
+        if not ray_enabled():
+            return abort(501, "Ray is not enabled on this deployment")
+        if version == -1:
+            version = get_latest_version(datastack_name)
+        body = request.json if request.is_json and request.json else {}
+        if not isinstance(body, dict):
+            return abort(400, "body must be a JSON object")
+        tables = body.get("tables")
+        if tables is not None and (not isinstance(tables, list) or not all(isinstance(t, str) for t in tables)):
+            return abort(400, "tables must be a list of table names")
+        max_streams = body.get("max_streams")
+        if max_streams is not None and (not isinstance(max_streams, int) or isinstance(max_streams, bool)
+                                        or max_streams < 1):
+            return abort(400, "max_streams must be a positive integer")
+        name_suffix = body.get("name_suffix")
+        if name_suffix is not None and not re.fullmatch(r"[A-Za-z0-9_]+", str(name_suffix)):
+            return abort(400, "name_suffix may contain only letters, digits and underscores")
+        config = body.get("config")
+        if config is not None:
+            try:
+                load_export_config(config)
+            except (TypeError, ValueError) as exc:
+                return abort(400, f"invalid config: {exc}")
+
+        job_id = uuid.uuid4().hex
+        entrypoint = (
+            "python -m materializationengine.rayjobs.entrypoints.deltalake_export_version"
+            f" --datastack {shlex.quote(datastack_name)} --version {int(version)} --job-id {job_id}"
+        )
+        if tables:
+            entrypoint += " --tables " + " ".join(shlex.quote(t) for t in tables)
+        if body.get("include_views"):
+            entrypoint += " --include-views"
+        if max_streams:
+            entrypoint += f" --max-streams {int(max_streams)}"
+        if config is not None:
+            entrypoint += f" --config {shlex.quote(json.dumps(config))}"
+        if name_suffix:
+            entrypoint += f" --name-suffix {shlex.quote(name_suffix)}"
+        try:
+            rayjob_name = submit_rayjob(
+                entrypoint=entrypoint,
+                name_prefix=f"mat-deltalake-v{int(version)}",
+                num_workers=request.args.get("workers", type=int),
+                metadata={"datastack": datastack_name, "version": str(version), "job-id": job_id},
+            )
+        except RayJobSubmissionError as exc:
+            return abort(500, f"failed to submit RayJob: {exc}")
+        set_version_status(datastack_name, version, job_id, state="submitted", rayjob=rayjob_name)
+        return {"message": f"Delta Lake export of {datastack_name} v{version} submitted as RayJob",
+                "job_id": job_id, "rayjob_name": rayjob_name}, 200
+
+    @auth_requires_dataset_admin(table_arg="datastack_name")
+    @mat_bp.doc("Progress of a version's Delta Lake export", security="apikey")
+    def get(self, datastack_name: str, version: int):
+        """State of each table of a version export (``?job_id=`` from the POST)."""
+        from materializationengine.workflows.deltalake_version_export import get_version_status
+
+        job_id = request.args.get("job_id")
+        if not job_id:
+            return abort(400, "job_id is required")
+        status = get_version_status(datastack_name, version, job_id)
+        if status is None:
+            return abort(404, f"no version export {job_id} for {datastack_name} v{version}")
+        return status, 200
 
 
 @mat_bp.route("/materialize/ray/job/<string:job_name>/")
