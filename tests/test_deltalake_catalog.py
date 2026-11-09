@@ -143,3 +143,98 @@ class TestEndpoint:
         with mock.patch.object(cat, "list_exports", return_value=[]) as listed:
             client.get("/api/v3/datastack/minnie65_phase3_v1/version/2253/deltalake?all_statuses=true")
         assert listed.call_args.kwargs["statuses"] is None
+
+
+class TestExpiry:
+    """Lakes of an expired, no-longer-valid version are marked deleting, removed and
+    marked deleted; everything else is left alone."""
+
+    def _setup(self, aligned_volume, tmp_path):
+        from datetime import datetime, timedelta
+
+        from dynamicannotationdb.models import AnalysisVersion
+
+        name, engine = aligned_volume
+        AnalysisVersion.__table__.create(engine, checkfirst=True)
+        now = datetime.utcnow()
+        versions = {7: (False, now - timedelta(days=1)),   # expired, database dropped
+                    8: (True, now - timedelta(days=1)),    # expired but kept (delete_threshold)
+                    9: (False, now + timedelta(days=1))}   # still being built
+        with engine.begin() as conn:
+            for v, (valid, expires) in versions.items():
+                conn.execute(AnalysisVersion.__table__.insert().values(
+                    datastack="ds", version=v, time_stamp=now, valid=valid, expires_on=expires, status="AVAILABLE"))
+        uris = {}
+        for v in versions:
+            root = tmp_path / "ds" / f"v{v}" / "synapses"
+            root.mkdir(parents=True)
+            lakes = [lake(root, "id", 3), lake(root, "post_pt_root_id", 3)]
+            cat.record_writing(name, "ds", v, "synapses", lakes)
+            cat.record_finished(name, "ds", v, "synapses", lakes, expected_rows=3)
+            uris[v] = [x["uri"] for x in lakes]
+        return name, engine, uris
+
+    def test_only_expired_invalid_versions_lose_their_lakes(self, aligned_volume, tmp_path):
+        import os
+
+        from materializationengine.workflows import deltalake_expiry as ex
+
+        name, engine, uris = self._setup(aligned_volume, tmp_path)
+        assert ex.remove_expired_lakes(name, "ds", dry_run=True) == [
+            {"version": 7, "dry_run": True, "lakes": uris[7]}]
+        assert all(os.path.exists(u) for u in uris[7])
+
+        [result] = ex.remove_expired_lakes(name, "ds")
+        assert result["version"] == 7 and result["failed"] == [] and result["objects"] >= 4
+        assert not any(os.path.exists(u) for u in uris[7])
+        assert all(os.path.exists(u) for v in (8, 9) for u in uris[v])
+        with engine.connect() as conn:
+            got = {(r["version"], r["status"], r["deleted_at"] is not None)
+                   for r in conn.execute("SELECT * FROM deltalake_exports")}
+        assert got == {(7, "deleted", True), (8, "complete", False), (9, "complete", False)}
+        assert [x["version"] for x in cat.list_exports(name, "ds")] == [9, 9, 8, 8]  # not listed once deleting
+        assert ex.remove_expired_lakes(name, "ds") == []  # nothing left to do
+
+    def test_a_failed_removal_is_retried(self, aligned_volume, tmp_path):
+        import os
+
+        from materializationengine.workflows import deltalake_expiry as ex
+
+        name, engine, uris = self._setup(aligned_volume, tmp_path)
+        real = ex.remove_lake_files
+        calls = []
+
+        def flaky(uri):
+            calls.append(uri)
+            if len(calls) == 1:
+                raise OSError("503 from storage")
+            return real(uri)
+
+        with mock.patch.object(ex, "remove_lake_files", side_effect=flaky):
+            [first] = ex.remove_expired_lakes(name, "ds")
+        assert len(first["failed"]) == 1 and len(first["deleted"]) == 1
+        with engine.connect() as conn:
+            v7 = {r["spec_name"]: dict(r) for r in conn.execute("SELECT * FROM deltalake_exports WHERE version = 7")}
+        failed_spec = [s for s, r in v7.items() if r["status"] == "deleting"]
+        assert len(failed_spec) == 1 and "503 from storage" in v7[failed_spec[0]]["error"]
+
+        [second] = ex.remove_expired_lakes(name, "ds")
+        assert second["failed"] == [] and len(second["deleted"]) == 1
+        assert not any(os.path.exists(u) for u in uris[7])
+
+    def test_refuses_a_uri_outside_the_version(self, aligned_volume, tmp_path):
+        from materializationengine.workflows import deltalake_expiry as ex
+
+        with pytest.raises(ValueError, match="refusing"):
+            ex._check_lake_uri("gs://bucket/ds/v7", "ds", 7)
+        with pytest.raises(ValueError, match="refusing"):
+            ex._check_lake_uri("gs://bucket/ds/v70/t/id", "ds", 7)
+        ex._check_lake_uri("gs://bucket/ds/v7/t/id", "ds", 7)
+
+    @pytest.mark.parametrize("value,expected", [
+        (True, True), (False, False), ("true", True), ("false", False), ("0", False), ("False", False)])
+    def test_flag(self, value, expected):
+        from materializationengine.workflows import deltalake_expiry as ex
+
+        with mock.patch("materializationengine.utils.get_config_param", return_value=value):
+            assert ex.delete_expired_enabled() is expected

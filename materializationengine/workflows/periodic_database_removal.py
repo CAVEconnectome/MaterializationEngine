@@ -192,6 +192,20 @@ def remove_expired_databases(delete_threshold: int = 5, datastack: str = None) -
 
                 remove_db_cron_info.append(dropped_dbs)
 
+            # After the session above has committed: versions it just expired are now
+            # invalid, so their lakes go too, along with any left by an earlier run.
+            from materializationengine.workflows.deltalake_expiry import (
+                delete_expired_enabled,
+                remove_expired_lakes,
+            )
+
+            if delete_expired_enabled():
+                try:
+                    for result in remove_expired_lakes(aligned_volume, datastack):
+                        celery_logger.info(f"Delta Lake exports of {datastack}: {result}")
+                except Exception as e:
+                    celery_logger.error(f"Failed to remove expired Delta Lake exports of {datastack}: {e}")
+
         except Exception as e:
             celery_logger.error(f"Error processing datastack {datastack}: {e}")
             continue

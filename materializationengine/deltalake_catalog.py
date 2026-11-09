@@ -13,8 +13,10 @@ DynamicAnnotationDB migration is involved.
 Lifecycle, written by run_deltalake_export: a row per output spec is `writing` before
 any data is streamed, `complete` once the lake exists, its optimize has finished and its
 row count matches the source (MaterializedMetadata for tables, the streamed count for
-views), else `failed` with the reason. A later step marks rows `deleted` when the
-version expires, before the files are removed, so queries stop using a lake first.
+views), else `failed` with the reason. When the version expires
+(workflows/deltalake_expiry.py) its rows go `deleting` before any file is removed, so
+readers stop using a lake first, then `deleted` once its files are gone; a row left
+`deleting` by a failed removal is retried on the next run.
 
 Catalog writes never fail an export: a lake missing from the catalog is only invisible
 to the catalog's readers, which is safe; an export failed by a catalog hiccup is not.
@@ -31,7 +33,7 @@ import sqlalchemy as sa
 logger = logging.getLogger(__name__)
 
 TABLE_NAME = "deltalake_exports"
-STATUSES = ("writing", "complete", "failed", "deleted")
+STATUSES = ("writing", "complete", "failed", "deleting", "deleted")
 
 _metadata = sa.MetaData()
 catalog = sa.Table(
@@ -211,6 +213,38 @@ def list_exports(aligned_volume: str, datastack: str, version: Optional[int] = N
                 d[k] = json.loads(d[k])
         out.append(d)
     return out
+
+
+def versions_with_lakes(aligned_volume: str, datastack: str) -> List[int]:
+    """Versions that still have lakes on storage: any row not yet `deleted`."""
+    engine = _engine(aligned_volume)
+    q = (sa.select([catalog.c.version]).distinct()
+         .where(sa.and_(catalog.c.datastack == datastack, catalog.c.status != "deleted"))
+         .order_by(catalog.c.version))
+    with engine.connect() as conn:
+        return [int(r[0]) for r in conn.execute(q)]
+
+
+def mark_deleting(aligned_volume: str, datastack: str, version: int) -> List[Dict]:
+    """Mark every lake of a version not yet deleted as `deleting`, and return them.
+
+    Done before any file is removed, so that readers of the catalog (listing only
+    `complete` lakes) stop using the version's lakes first. Rows already `deleting`
+    (a removal that failed part way) keep their first deleted_at and are returned again.
+    """
+    engine = _engine(aligned_volume)
+    where = sa.and_(catalog.c.datastack == datastack, catalog.c.version == int(version),
+                    catalog.c.status != "deleted")
+    with engine.begin() as conn:
+        conn.execute(catalog.update().where(sa.and_(where, catalog.c.status != "deleting"))
+                     .values(status="deleting", deleted_at=_now()))
+        rows = conn.execute(sa.select([catalog.c.table_name, catalog.c.spec_name, catalog.c.uri])
+                            .where(where).order_by(catalog.c.table_name, catalog.c.spec_name)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_deleted(aligned_volume: str, datastack: str, version: int, table_name: str, spec_name: str) -> None:
+    _set(aligned_volume, datastack, version, table_name, spec_name, status="deleted", error=None)
 
 
 def safely(fn, *args, **kwargs):

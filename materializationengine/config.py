@@ -148,6 +148,9 @@ class BaseConfig:
 
     # Delta Lake export settings
     DELTALAKE_OUTPUT_BUCKET = os.environ.get("DELTALAKE_OUTPUT_BUCKET", "")
+    # remove_expired_databases also deletes the catalogued Delta Lake exports of versions
+    # it has expired (workflows/deltalake_expiry.py). "false" keeps them.
+    DELTALAKE_DELETE_EXPIRED = os.environ.get("DELTALAKE_DELETE_EXPIRED", "true").lower() not in ("false", "0", "no")
     DELTALAKE_FLUSH_THRESHOLD_BYTES = int(
         os.environ.get("DELTALAKE_FLUSH_THRESHOLD_BYTES", 2 * 1024 * 1024 * 1024)
     )
