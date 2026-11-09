@@ -47,6 +47,7 @@ from materializationengine.workflows.deltalake_export import (
 from materializationengine.workflows.deltalake_export import _serial_optimize_runner
 from materializationengine.workflows.deltalake_export import apply_default_row_group_size
 from materializationengine.workflows.deltalake_export import _table_geometry_columns
+from materializationengine.workflows.deltalake_export import stream_table_to_arrow
 
 # ---------------------------------------------------------------------------
 # 4.1  discover_default_output_specs
@@ -1312,7 +1313,7 @@ class TestTableSource:
             segmentation_table="synapse__seg",
         )
         assert '"synapse"' in source.from_clause
-        assert "JOIN" in source.from_clause
+        assert "LEFT JOIN" in source.from_clause
         assert '"synapse__seg"' in source.from_clause
         assert source.table_names == ["synapse", "synapse__seg"]
 
@@ -2226,3 +2227,41 @@ class TestReleaseFreedHeap:
         """No-op off glibc; must never raise, since it runs in a finally block."""
         _release_freed_heap()
         _release_freed_heap()
+
+
+class TestStreamKeepsAnnotationsWithoutSegmentation:
+    """An annotation whose supervoxel lookup produced no segmentation row is still a
+    row of the table (the query api's LEFT JOIN returns it with null ids, and
+    MaterializedMetadata counts it), so the export must keep it. On ltv7 v2253,
+    spine_bigger_test_4 lost 247 such rows to an inner join."""
+
+    def test_left_join_with_and_without_limit(self, mat_metadata):
+        import uuid
+
+        import sqlalchemy as sa
+        from sqlalchemy.engine.url import make_url
+
+        url = make_url(mat_metadata["sql_uri"])
+        base = f"{url.drivername}://{url.username}:{url.password}@{url.host}:{url.port or 5432}"
+        name = f"stream_test_{uuid.uuid4().hex[:8]}"
+        admin = sa.create_engine(f"{base}/postgres", isolation_level="AUTOCOMMIT")
+        with admin.connect() as conn:
+            conn.execute(f"CREATE DATABASE {name}")
+        engine = sa.create_engine(f"{base}/{name}")
+        try:
+            with engine.begin() as conn:
+                conn.execute("CREATE TABLE anno (id bigint PRIMARY KEY, valid boolean)")
+                conn.execute("CREATE TABLE anno__seg (id bigint PRIMARY KEY, pt_root_id bigint)")
+                conn.execute("INSERT INTO anno VALUES (1, true), (2, true), (3, true)")
+                conn.execute("INSERT INTO anno__seg VALUES (1, 10), (3, 30)")
+            source = TableSource(annotation_table="anno", segmentation_table="anno__seg")
+            conn_str = f"postgresql://{url.username}:{url.password}@{url.host}:{url.port or 5432}/{name}"
+            for limit in (None, 10):
+                table = pa.Table.from_batches(list(stream_table_to_arrow(conn_str, source, row_limit=limit)))
+                got = sorted(zip(table.column("id").to_pylist(), table.column("pt_root_id").to_pylist()))
+                assert got == [(1, 10), (2, None), (3, 30)], limit
+        finally:
+            engine.dispose()
+            with admin.connect() as conn:
+                conn.execute(f"DROP DATABASE IF EXISTS {name}")
+            admin.dispose()

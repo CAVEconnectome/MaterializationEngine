@@ -63,10 +63,13 @@ class TableSource:
 
     @property
     def from_clause(self) -> str:
-        """SQL FROM fragment: single table or JOIN."""
+        """SQL FROM fragment: single table or LEFT JOIN."""
         if self.segmentation_table is None:
             return f'"{self.annotation_table}"'
-        return f'"{self.annotation_table}" JOIN "{self.segmentation_table}" USING (id)'
+        # LEFT JOIN, as the query api's QueryManager does: an annotation whose
+        # supervoxel lookup never produced a segmentation row is still a row of the
+        # table, with null supervoxel and root ids, and MaterializedMetadata counts it.
+        return f'"{self.annotation_table}" LEFT JOIN "{self.segmentation_table}" USING (id)'
 
     @property
     def table_names(self) -> list[str]:
@@ -960,7 +963,7 @@ def stream_table_to_arrow(
         seg = source.segmentation_table
         from_clause = (
             f'(SELECT * FROM "{anno}" LIMIT {int(row_limit)}) "{anno}" '
-            f'JOIN "{seg}" USING (id)'
+            f'LEFT JOIN "{seg}" USING (id)'
         )
         query = f"SELECT {select_clause} FROM {from_clause}"
     else:
