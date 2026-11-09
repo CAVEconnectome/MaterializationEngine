@@ -21,12 +21,14 @@ from materializationengine.info_client import (
 from materializationengine.models import MaterializedMetadata
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
 from materializationengine.utils import check_read_permission
+from werkzeug.exceptions import HTTPException
 
 sql_query_warning = """Query was executed using streaming via CSV, which can mangle types.
 Please upgrade to caveclient > 8.0.0 to avoid type mangling.
 Because you may have been affected by mangled types, this change is breaking, but it should provide an improved experience."""
 def unhandled_exception(e):
-    status_code = 500
+    # an abort() (404, 413, 504, ...) keeps its status; anything else is a 500
+    status_code = e.code if isinstance(e, HTTPException) and e.code else 500
     user_ip = str(request.remote_addr)
     tb = traceback.format_exception(e, value=e, tb=e.__traceback__)
 
@@ -44,7 +46,7 @@ def unhandled_exception(e):
 
     resp = {
         "code": status_code,
-        "message": str(e),
+        "message": e.description if isinstance(e, HTTPException) else str(e),
         "traceback": tb,
     }
 

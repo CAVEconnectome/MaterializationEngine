@@ -259,6 +259,7 @@ def pytest_collection_modifyitems(session, config, items):
         "TestUpdateRootIds",
         "TestCreateFrozenVersion",
         "TestQueryEndpointParity",
+        "TestLakeEndpointParity",
     ]
 
     # filter items and remove non-class based tests

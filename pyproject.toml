@@ -58,6 +58,9 @@ dependencies = [
     # the RayCluster spec (values ray.rayVersion / terraform var ray_version).
     # These two must be bumped together.
     "ray[default]==2.57.0",
+    "duckdb>=1.1",
+    "sqlglot>=25",
+    "obstore>=0.6",
 ]
 authors = [
     { name = "Forrest Collman", email = "forrestc@alleninstitute.org" },

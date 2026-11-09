@@ -554,7 +554,38 @@ def _adbc_table_to_dataframe(table, dtypes: dict) -> pd.DataFrame:
     return df
 
 
+def _query_dtypes(query) -> dict:
+    dtypes = {}
+    for k in query.statement.columns.keys():
+        coltype = query.statement.columns[k].type
+        if type(coltype) in dtype_map:
+            dtypes[k] = dtype_map[type(coltype)]
+    return dtypes
+
+
 def _execute_query_unguarded(
+    session, engine, query, fix_wkb, fix_decimal, n_threads, index_col, get_count,
+    direct_sql_pandas,
+):
+    def on_postgres():
+        return _execute_query_on_postgres(
+            session, engine, query, fix_wkb, fix_decimal, n_threads, index_col, get_count,
+            direct_sql_pandas)
+
+    # A frozen version's query can be answered from its Delta Lake exports (lake_query).
+    # Only where the response is the ADBC path's: direct_sql_pandas, types it converts.
+    if index_col is None and (get_count or (direct_sql_pandas and _adbc_handles_query(query))):
+        from materializationengine.blueprints.client import lake_query
+
+        def to_dataframe(table):
+            df = _adbc_table_to_dataframe(table, _query_dtypes(query))
+            return fix_columns_with_query(df, query, fix_wkb=fix_wkb, fix_decimal=fix_decimal, n_threads=n_threads)
+
+        return lake_query.execute(engine, query, get_count, on_postgres, to_dataframe)
+    return on_postgres()
+
+
+def _execute_query_on_postgres(
     session, engine, query, fix_wkb, fix_decimal, n_threads, index_col, get_count,
     direct_sql_pandas,
 ):
