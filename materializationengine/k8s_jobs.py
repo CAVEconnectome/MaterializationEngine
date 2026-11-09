@@ -121,7 +121,10 @@ def submit_job(module: str, kwargs: dict, name_prefix: str, labels: dict | None 
     env[ARGS_ENV] = {"name": ARGS_ENV, "value": json.dumps(kwargs, default=str)}
     main["env"] = list(env.values())
 
-    namespace = meta.get("namespace") or _namespace()
+    # The namespace reads use (get_job_status), whatever the template says, so a Job is
+    # never looked for where it was not created.
+    namespace = _namespace()
+    meta["namespace"] = namespace
     batch, _ = _apis()
     try:
         created = batch.create_namespaced_job(namespace=namespace, body=job)
@@ -135,53 +138,74 @@ def submit_job(module: str, kwargs: dict, name_prefix: str, labels: dict | None 
 def get_job_status(name: str) -> dict:
     """Normalised status of a Job: exists, finished, succeeded, failed, and why.
 
-    A Job deleted (or garbage collected after ttlSecondsAfterFinished) reports
-    exists=False. The reason for a failure comes from the Job's Failed condition
-    (DeadlineExceeded, BackoffLimitExceeded) and, when there is one, from the pod's
-    terminated container state (OOMKilled, Error with an exit code) or its eviction.
+    A Job is finished only once none of its pods can still be running: a Job deleted
+    with background propagation (404 here), or marked failed, can still have a pod
+    terminating with pg_repack inside it, and calling that finished would let the caller
+    release the database lock under a live repack. Pods that cannot be listed count as
+    possibly live. The failure reason comes from the Job's Failed condition
+    (DeadlineExceeded, BackoffLimitExceeded) and from its pod (OOMKilled, exit code,
+    eviction).
     """
     namespace = _namespace()
     batch, core = _apis()
+    live, detail = _pods(core, namespace, name)
     try:
         job = batch.read_namespaced_job(name=name, namespace=namespace)
     except Exception as exc:
-        if getattr(exc, "status", None) == 404:
-            return {"name": name, "exists": False, "finished": True, "succeeded": False, "failed": True,
-                    "reason": "the Job no longer exists"}
-        raise JobSubmissionError(f"failed to read Job {name} in {namespace}: {exc}") from exc
+        if getattr(exc, "status", None) != 404:
+            raise JobSubmissionError(f"failed to read Job {name} in {namespace}: {exc}") from exc
+        if live:
+            return {"name": name, "exists": False, "active": True, "finished": False, "succeeded": False,
+                    "failed": False, "reason": f"the Job was deleted; {live}"}
+        return {"name": name, "exists": False, "finished": True, "succeeded": False, "failed": True,
+                "reason": "the Job no longer exists"}
 
     status = job.status
     conditions = {c.type: c for c in (status.conditions or []) if c.status == "True"}
     succeeded = "Complete" in conditions or bool(status.succeeded)
-    failed = "Failed" in conditions or bool(status.failed)
+    failed = ("Failed" in conditions or bool(status.failed)) and not succeeded
     reason = None
     if "Failed" in conditions:
         c = conditions["Failed"]
         reason = f"{c.reason}: {c.message}" if c.message else c.reason
-    if failed or not succeeded:
-        detail = _pod_detail(core, namespace, name)
-        if detail:
-            reason = f"{reason}; {detail}" if reason else detail
-    return {"name": name, "exists": True, "active": bool(status.active), "finished": succeeded or failed,
-            "succeeded": succeeded, "failed": failed and not succeeded, "reason": reason}
+    if detail and not succeeded:
+        reason = f"{reason}; {detail}" if reason else detail
+    finished = (succeeded or failed) and not live
+    if (succeeded or failed) and live:
+        reason = f"{reason}; {live}" if reason else live
+    return {"name": name, "exists": True, "active": bool(status.active) or bool(live), "finished": finished,
+            "succeeded": succeeded and finished, "failed": failed and finished, "reason": reason}
 
 
-def _pod_detail(core, namespace: str, job_name: str) -> str | None:
+_TERMINAL_PHASES = ("Succeeded", "Failed")
+
+
+def _pods(core, namespace: str, job_name: str):
+    """(why a pod may still be running or None, failure detail or None) for a Job's pods."""
     try:
         pods = core.list_namespaced_pod(namespace=namespace, label_selector=f"job-name={job_name}").items
-    except Exception:
-        return None
+    except Exception as exc:
+        return f"its pods could not be listed ({exc})", None
+    live, detail = None, None
     for pod in pods:
+        if pod.status.phase not in _TERMINAL_PHASES:
+            state = "terminating" if pod.metadata.deletion_timestamp else (pod.status.phase or "unknown").lower()
+            live = live or f"pod {pod.metadata.name} is still {state}"
+        if detail:
+            continue
         if pod.status.reason:  # e.g. Evicted
-            return f"pod {pod.metadata.name} {pod.status.reason}: {pod.status.message or ''}".strip()
+            detail = f"pod {pod.metadata.name} {pod.status.reason}: {pod.status.message or ''}".strip()
+            continue
         for cs in pod.status.container_statuses or []:
             term = cs.state.terminated if cs.state else None
             if term and term.exit_code:
-                return f"container {cs.name} {term.reason or 'terminated'} (exit {term.exit_code})"
+                detail = f"container {cs.name} {term.reason or 'terminated'} (exit {term.exit_code})"
+                break
             waiting = cs.state.waiting if cs.state else None
             if waiting and waiting.reason not in (None, "ContainerCreating", "PodInitializing"):
-                return f"container {cs.name} waiting: {waiting.reason}"
-    return None
+                detail = f"container {cs.name} waiting: {waiting.reason}"
+                break
+    return live, detail
 
 
 def job_kwargs() -> dict:

@@ -23,6 +23,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+import redis
 from celery.utils.log import get_task_logger
 from sqlalchemy import bindparam, text
 
@@ -197,13 +198,42 @@ def build_repack_command(db_url, table: str, order_by: str, jobs: int, dry_run: 
     return cmd
 
 
-def _set_status(job_id: str, **fields) -> Dict[str, Any]:
+def _set_status(job_id: str, only_if_state_in=None, **fields) -> Dict[str, Any]:
+    """Merge fields into the job's status record, atomically.
+
+    The api (submitting, reconciling) and the job's runner both write the record. A
+    plain read-modify-write would let one writer's stale snapshot drop the other's
+    fields -- e.g. the runner's progress write losing the k8s_job name, after which a
+    killed Job would never be reconciled. WATCH/MULTI retries on a concurrent write.
+    With only_if_state_in, the fields are merged only if the record's state is still
+    one of those (returns the record unchanged otherwise).
+    """
     key = f"{STATUS_KEY_PREFIX}{job_id}"
-    raw = REDIS_CLIENT.get(key)
-    status = json.loads(raw) if raw else {"job_id": job_id}
-    status.update(fields, updated_at=datetime.now(timezone.utc).isoformat())
-    REDIS_CLIENT.set(key, json.dumps(status, default=str), ex=STATUS_TTL_SECONDS)
-    return status
+    with REDIS_CLIENT.pipeline() as pipe:
+        while True:
+            try:
+                pipe.watch(key)
+                raw = pipe.get(key)
+                status = json.loads(raw) if raw else {"job_id": job_id}
+                if only_if_state_in is not None and status.get("state") not in only_if_state_in:
+                    pipe.unwatch()
+                    return status
+                status.update(fields, updated_at=datetime.now(timezone.utc).isoformat())
+                pipe.multi()
+                pipe.set(key, json.dumps(status, default=str), ex=STATUS_TTL_SECONDS)
+                pipe.execute()
+                return status
+            except redis.WatchError:
+                continue
+
+
+# Delete the lock only if this job still holds it: a GET then DELETE could remove a lock
+# that a newer repack acquired in between.
+_RELEASE_LOCK = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
+
+
+def _release_lock(database: str, job_id: str) -> None:
+    REDIS_CLIENT.eval(_RELEASE_LOCK, 1, f"{LOCK_KEY_PREFIX}{database}", job_id)
 
 
 def get_repack_status(job_id: str) -> Optional[Dict[str, Any]]:
@@ -242,12 +272,10 @@ def _reconcile(status: Dict[str, Any]) -> Dict[str, Any]:
     fields = {"state": "failed", "error": f"Kubernetes Job {name}: {what}"}
     if latest.get("state") == "running":
         fields["cleanup"] = CLEANUP_HINT
-    database = latest.get("database")
-    if database:
-        lock_key = f"{LOCK_KEY_PREFIX}{database}"
-        if REDIS_CLIENT.get(lock_key) in (latest["job_id"], latest["job_id"].encode()):
-            REDIS_CLIENT.delete(lock_key)
-    return _set_status(latest["job_id"], **fields)
+    updated = _set_status(latest["job_id"], only_if_state_in=_UNFINISHED, **fields)
+    if updated.get("state") == "failed" and latest.get("database"):
+        _release_lock(latest["database"], latest["job_id"])
+    return updated
 
 
 def start_repack(database: str, table_name: str, **options) -> Dict[str, Any]:
@@ -364,8 +392,7 @@ def run_repack(
         celery_logger.error(f"Repack {job_id} failed: {e}", exc_info=True)
         return _set_status(job_id, state="failed", error=str(e), seconds=round(time.time() - started))
     finally:
-        if REDIS_CLIENT.get(lock_key) in (job_id, job_id.encode()):
-            REDIS_CLIENT.delete(lock_key)
+        _release_lock(database, job_id)
 
 
 

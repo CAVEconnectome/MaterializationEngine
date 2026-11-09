@@ -5,6 +5,7 @@ command was checked end to end against Postgres 18 with pg_repack 1.5.3. Needs r
 localhost:6390 (`docker run -d --rm -p 6390:6379 redis:7`), or those tests are skipped.
 """
 
+import json
 import os
 import subprocess
 import uuid
@@ -299,11 +300,71 @@ class TestKubernetesJobs:
         assert tm.get_repack_status("j6")["state"] == "failed"
         assert real_redis.get(f"{tm.LOCK_KEY_PREFIX}None") == b"j6"
 
+    def test_reconcile_does_not_overwrite_a_result_written_meanwhile(self, scratch_db, real_redis, jobs_on):
+        _, status, _ = jobs_on
+        tm._set_status("j7", state="running", database=scratch_db[0], k8s_job="repack-x")
+        real_redis.set(f"{tm.LOCK_KEY_PREFIX}{scratch_db[0]}", "someone-else")
+        real_get = real_redis.get
+        calls = {"n": 0}
+
+        def get(key):  # the runner records "done" right after reconcile's re-read
+            calls["n"] += 1
+            raw = real_get(key)
+            if calls["n"] == 2 and key.endswith("j7"):
+                real_redis.set(key, raw.replace(b'"running"', b'"done"'))
+            return raw
+
+        status.return_value = {"finished": True, "succeeded": True, "failed": False, "reason": None}
+        with mock.patch.object(real_redis, "get", side_effect=get):
+            tm.get_repack_status("j7")
+        assert tm.get_repack_status("j7")["state"] == "done"
+        assert real_redis.get(f"{tm.LOCK_KEY_PREFIX}{scratch_db[0]}") == b"someone-else"
+
     def test_finished_records_are_not_looked_up(self, scratch_db, real_redis, jobs_on):
         _, status, _ = jobs_on
         tm._set_status("j5", state="done", k8s_job="repack-x")
         assert tm.get_repack_status("j5")["state"] == "done"
         status.assert_not_called()
+
+
+class TestStatusRecord:
+    def test_a_concurrent_write_is_merged_not_lost(self, real_redis):
+        """The runner's progress write must not drop the k8s_job the api added meanwhile."""
+        tm._set_status("j1", state="queued")
+        key = f"{tm.STATUS_KEY_PREFIX}j1"
+        other = redis.StrictRedis(host="localhost", port=REDIS_PORT, db=13)
+        real_pipeline = real_redis.pipeline
+        injected = {"done": False}
+
+        def pipeline(*a, **k):
+            pipe = real_pipeline(*a, **k)
+            real_get = pipe.get
+
+            def get(name):
+                raw = real_get(name)
+                if not injected["done"]:  # another writer lands between our read and write
+                    injected["done"] = True
+                    other.set(key, raw.replace(b'"queued"', b'"queued", "k8s_job": "repack-x"'))
+                return raw
+            pipe.get = get
+            return pipe
+
+        with mock.patch.object(real_redis, "pipeline", side_effect=pipeline):
+            tm._set_status("j1", state="checking")
+        record = json.loads(real_redis.get(key))  # raw: get_repack_status would reconcile repack-x
+        assert record["state"] == "checking" and record["k8s_job"] == "repack-x"
+
+    def test_only_if_state_in(self, real_redis):
+        tm._set_status("j2", state="done")
+        assert tm._set_status("j2", only_if_state_in=("running",), state="failed")["state"] == "done"
+        assert tm.get_repack_status("j2")["state"] == "done"
+
+    def test_releasing_a_lock_spares_a_newer_owner(self, real_redis):
+        real_redis.set(f"{tm.LOCK_KEY_PREFIX}db", "new-job")
+        tm._release_lock("db", "old-job")
+        assert real_redis.get(f"{tm.LOCK_KEY_PREFIX}db") == b"new-job"
+        tm._release_lock("db", "new-job")
+        assert not real_redis.exists(f"{tm.LOCK_KEY_PREFIX}db")
 
 
 class TestRepackJobEntrypoint:
