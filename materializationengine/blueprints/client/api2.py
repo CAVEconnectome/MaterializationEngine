@@ -746,6 +746,39 @@ class DatastackVersions(Resource):
 
 
 @client_bp.route(
+    "/datastack/<string:datastack_name>/version/<int(signed=True):version>/deltalake"
+)
+class DatastackVersionDeltaLakes(Resource):
+    method_decorators = [
+        limit_by_category("fast_query"),
+        auth_requires_permission("view", table_arg="datastack_name"),
+    ]
+
+    @client_bp.doc("version delta lakes", security="apikey")
+    def get(self, datastack_name: str, version: int):
+        """The Delta Lake copies of a version's tables (complete ones; ?all_statuses=true
+        for every status), one entry per lake: table, spec (partitioning, sort key, row
+        group size), location, rows, bytes, files and columns.
+
+        Args:
+            datastack_name (str): datastack name
+            version (int): version number
+        """
+        from materializationengine import deltalake_catalog
+
+        aligned_volume_name, _ = get_relevant_datastack_info(datastack_name)
+        all_statuses = str(request.args.get("all_statuses", "")).lower() in ("1", "true", "yes")
+        lakes = deltalake_catalog.list_exports(
+            aligned_volume_name, datastack_name, version,
+            statuses=None if all_statuses else ("complete",),
+        )
+        for lake in lakes:
+            if str(lake.get("uri", "")).startswith("gs://"):
+                lake["https_url"] = "https://storage.googleapis.com/" + lake["uri"][len("gs://"):]
+        return lakes, 200
+
+
+@client_bp.route(
     "/datastack/<string:datastack_name>/version/<int(signed=True):version>"
 )
 class DatastackVersion(Resource):

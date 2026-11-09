@@ -2559,7 +2559,15 @@ def run_deltalake_export(
     from materializationengine.models import MaterializedMetadata
     from materializationengine.utils import get_config_param
 
+    from materializationengine import deltalake_catalog
+
     datastack = datastack_info["datastack"]
+    aligned_volume = (datastack_info.get("aligned_volume") or {}).get("name")
+    catalog_lakes: list = []  # the lakes this export recorded in the catalog as `writing`
+
+    def _catalog_lakes(specs, uri_base):
+        return [{"spec_name": s.name, "uri": f"{uri_base}/{s.name}", "partition_by": s.partition_by,
+                 "spec": json.loads(json.dumps(dataclasses.asdict(s), default=str))} for s in specs]
 
     # --- Job-scoped helpers that bind job_id into Redis key calls ---
     def _log(message: str) -> None:
@@ -2747,6 +2755,14 @@ def run_deltalake_export(
                     f"Delete the existing Delta Lake before re-exporting."
                 )
 
+        # --- Catalog: these lakes are being written (see deltalake_catalog) ---
+        if aligned_volume:
+            catalog_lakes = _catalog_lakes(resolved_specs, output_uri_base)
+            deltalake_catalog.safely(
+                deltalake_catalog.record_writing, aligned_volume, datastack, version,
+                table_name, catalog_lakes, job_id=job_id,
+            )
+
         # Boundary computation / partition sizing differs by relation kind and
         # is handled per-branch below: views can't be counted or sampled
         # upfront (it would execute the full view), so the table-only steps
@@ -2925,6 +2941,11 @@ def run_deltalake_export(
                 jobs, optimize_kwargs, _optimize_callback
             )
     except Exception as e:
+        if catalog_lakes:
+            deltalake_catalog.safely(
+                deltalake_catalog.record_failed, aligned_volume, datastack, version, table_name,
+                [lake["spec_name"] for lake in catalog_lakes], f"{type(e).__name__}: {e}",
+            )
         try:
             _log(f"Export failed: {e}")
             _set_status(
@@ -2938,6 +2959,24 @@ def run_deltalake_export(
                 exc_info=True,
             )
         raise
+
+    # --- Catalog: each lake is complete only if its row count matches the source ---
+    if catalog_lakes:
+        final_lakes = _catalog_lakes(resolved_specs, output_uri_base)  # n_partitions, bounds now resolved
+        written = {lake["spec_name"] for lake in final_lakes}
+        deltalake_catalog.safely(
+            deltalake_catalog.forget, aligned_volume, datastack, version, table_name,
+            [lake["spec_name"] for lake in catalog_lakes if lake["spec_name"] not in written],
+        )
+        bad = deltalake_catalog.safely(
+            deltalake_catalog.record_finished, aligned_volume, datastack, version, table_name,
+            final_lakes, row_count,
+        )
+        if bad:
+            message = f"Delta Lake(s) {bad} do not match the source's {row_count} rows; recorded as failed"
+            _log(message)
+            _set_status(status="failed", total_rows=row_count, phase="failed", error=message)
+            raise RuntimeError(message)
 
     _log("Export complete.")
     _set_status(
