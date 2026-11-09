@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import threading
+import uuid
 
 import yaml
 
@@ -92,18 +93,27 @@ def _load_template() -> dict:
     return template
 
 
-def submit_job(module: str, kwargs: dict, name_prefix: str, labels: dict | None = None,
+def job_name(name_prefix: str) -> str:
+    """A new, unique Job name: the prefix as a DNS label plus a random suffix.
+
+    Chosen by the caller rather than by generateName, so the caller can record it before
+    the Job exists: a Job whose creation response is lost (timeout, api restart) is still
+    found by its name. Jobs outlive their pods (ttlSecondsAfterFinished), so the suffix
+    keeps a resubmission from colliding with its predecessor.
+    """
+    return f"{dns_label(name_prefix, fallback='maintenance')}-{uuid.uuid4().hex[:6]}"
+
+
+def submit_job(module: str, kwargs: dict, name: str, labels: dict | None = None,
                active_deadline_seconds: int | None = None) -> str:
-    """Create a Job running `python -m module` with kwargs, and return its generated name.
+    """Create the Job `name` (from job_name) running `python -m module` with kwargs.
 
     Returns once the Job is accepted; poll it with get_job_status.
     """
     job = _load_template()
     meta = job.setdefault("metadata", {})
-    meta.pop("name", None)
-    # generateName: Jobs outlive their pods (ttlSecondsAfterFinished), so a fixed name
-    # would collide with its own predecessor.
-    meta["generateName"] = f"{dns_label(name_prefix, fallback='maintenance')}-"
+    meta.pop("generateName", None)
+    meta["name"] = name
     all_labels = {k: label_value(v) for k, v in (labels or {}).items()}
     meta.setdefault("labels", {}).update(all_labels)
 
@@ -127,10 +137,9 @@ def submit_job(module: str, kwargs: dict, name_prefix: str, labels: dict | None 
     meta["namespace"] = namespace
     batch, _ = _apis()
     try:
-        created = batch.create_namespaced_job(namespace=namespace, body=job)
+        batch.create_namespaced_job(namespace=namespace, body=job)
     except Exception as exc:
         raise JobSubmissionError(f"failed to create Job in {namespace}: {exc}") from exc
-    name = created.metadata.name if hasattr(created, "metadata") else created["metadata"]["name"]
     logger.info("submitted Job %s in %s: python -m %s", name, namespace, module)
     return name
 
@@ -148,12 +157,16 @@ def get_job_status(name: str) -> dict:
     """
     namespace = _namespace()
     batch, core = _apis()
-    live, detail = _pods(core, namespace, name)
+    # The Job first, then its pods: listed the other way round, a pod that started
+    # between an empty pod list and a 404 for a Job being deleted would go unseen.
     try:
         job = batch.read_namespaced_job(name=name, namespace=namespace)
     except Exception as exc:
         if getattr(exc, "status", None) != 404:
             raise JobSubmissionError(f"failed to read Job {name} in {namespace}: {exc}") from exc
+        job = None
+    live, detail = _pods(core, namespace, name)
+    if job is None:
         if live:
             return {"name": name, "exists": False, "active": True, "finished": False, "succeeded": False,
                     "failed": False, "reason": f"the Job was deleted; {live}"}

@@ -213,6 +213,9 @@ class TestKubernetesJobs:
         submit, status, celery_task = jobs_on
         name, _ = scratch_db
         status.return_value = {"finished": False, "active": False, "reason": None}
+        recorded = []
+        submit.side_effect = lambda module, kwargs, name, **k: recorded.append(
+            json.loads(real_redis.get(f"{tm.STATUS_KEY_PREFIX}{kwargs['job_id']}")).get("k8s_job")) or name
         out = tm.start_repack(name, "synapses", dry_run=False, jobs=2)
         celery_task.assert_not_called()
         module, kwargs = submit.call_args.args[:2]
@@ -220,7 +223,9 @@ class TestKubernetesJobs:
         assert kwargs["database"] == name and kwargs["table_name"] == "synapses" and kwargs["order_by"] == "id"
         assert kwargs["dry_run"] is False and kwargs["job_id"] == out["job_id"]
         assert submit.call_args.kwargs["labels"]["materialize-workload"] == "repack"
-        assert out["state"] == "queued" and out["backend"] == "kubernetes job" and out["k8s_job"] == "repack-synapses-abcde"
+        assert out["state"] == "queued" and out["backend"] == "kubernetes job"
+        assert out["k8s_job"].startswith("repack-synapses-") and out["k8s_job"] == submit.call_args.kwargs["name"]
+        assert recorded == [out["k8s_job"]]  # in redis before the Job was created
         assert out["k8s_job_status"] == "pending"
 
     def test_celery_without_jobs(self, scratch_db, real_redis, monkeypatch):
@@ -241,10 +246,20 @@ class TestKubernetesJobs:
     def test_submission_failure_is_recorded(self, scratch_db, real_redis, jobs_on):
         from materializationengine import k8s_jobs
 
-        submit, _, _ = jobs_on
+        submit, status, _ = jobs_on
         submit.side_effect = k8s_jobs.JobSubmissionError("forbidden")
+        status.return_value = {"exists": False, "finished": True, "failed": True}
         out = tm.start_repack(scratch_db[0], "synapses")
         assert out["state"] == "failed" and "forbidden" in out["error"]
+
+    def test_a_job_created_despite_an_error_is_kept(self, scratch_db, real_redis, jobs_on):
+        from materializationengine import k8s_jobs
+
+        submit, status, _ = jobs_on
+        submit.side_effect = k8s_jobs.JobSubmissionError("read timed out")
+        status.return_value = {"exists": True, "finished": False, "active": True, "reason": None}
+        out = tm.start_repack(scratch_db[0], "synapses")
+        assert out["state"] == "queued" and out["k8s_job"] and "the Job exists" in out["submit_warning"]
 
     def test_a_killed_job_mid_repack_is_failed_with_cleanup_and_frees_the_database(self, scratch_db, real_redis, jobs_on):
         _, status, _ = jobs_on

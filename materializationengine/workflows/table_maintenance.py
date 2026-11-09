@@ -297,16 +297,25 @@ def start_repack(database: str, table_name: str, **options) -> Dict[str, Any]:
     # validated and derived values last, so no option can replace them
     kwargs = {**options, "job_id": job_id, "database": database, "table_name": table_name, "order_by": order_by}
     if k8s_jobs.maintenance_jobs_enabled():
+        # The Job's name is recorded before the Job is created, so a Job whose creation
+        # response never arrives (api restart, timeout) is still reconciled by name.
+        name = k8s_jobs.job_name(f"repack-{table_name}")
         _set_status(job_id, state="queued", backend="kubernetes job", database=database,
-                    table_name=table_name, options=options)
+                    table_name=table_name, options=options, k8s_job=name)
         try:
-            name = k8s_jobs.submit_job(
-                "materializationengine.jobs.repack", kwargs, name_prefix=f"repack-{table_name}",
+            k8s_jobs.submit_job(
+                "materializationengine.jobs.repack", kwargs, name=name,
                 labels={"materialize-workload": "repack", "repack-database": database},
             )
         except k8s_jobs.JobSubmissionError as e:
-            return _set_status(job_id, state="failed", error=f"could not submit the Job: {e}")
-        _set_status(job_id, k8s_job=name)
+            try:  # the create may have been accepted even though the call failed
+                created = k8s_jobs.get_job_status(name).get("exists")
+            except k8s_jobs.JobSubmissionError:
+                created = None
+            if created is False:
+                return _set_status(job_id, state="failed", error=f"could not submit the Job: {e}")
+            _set_status(job_id, submit_warning=f"Job creation reported an error ({e}); "
+                                               f"{'the Job exists' if created else 'could not tell whether the Job exists'}")
     else:
         _set_status(job_id, state="queued", backend="celery", database=database, table_name=table_name,
                     options=options)
