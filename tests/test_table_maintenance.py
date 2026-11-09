@@ -6,6 +6,7 @@ localhost:6390 (`docker run -d --rm -p 6390:6379 redis:7`), or those tests are s
 """
 
 import json
+from datetime import datetime, timedelta, timezone
 import os
 import subprocess
 import uuid
@@ -226,6 +227,7 @@ class TestKubernetesJobs:
         assert out["state"] == "queued" and out["backend"] == "kubernetes job"
         assert out["k8s_job"].startswith("repack-synapses-") and out["k8s_job"] == submit.call_args.kwargs["name"]
         assert recorded == [out["k8s_job"]]  # in redis before the Job was created
+        assert out["submitted_at"] and out["queued_at"]
         assert out["k8s_job_status"] == "pending"
 
     def test_celery_without_jobs(self, scratch_db, real_redis, monkeypatch):
@@ -260,11 +262,13 @@ class TestKubernetesJobs:
         status.return_value = {"exists": True, "finished": False, "active": True, "reason": None}
         out = tm.start_repack(scratch_db[0], "synapses")
         assert out["state"] == "queued" and out["k8s_job"] and "the Job exists" in out["submit_warning"]
+        assert out["submitted_at"]
 
     def test_a_killed_job_mid_repack_is_failed_with_cleanup_and_frees_the_database(self, scratch_db, real_redis, jobs_on):
         _, status, _ = jobs_on
         name, _ = scratch_db
-        tm._set_status("j1", state="running", database=name, table_name="synapses", k8s_job="repack-synapses-abcde")
+        tm._set_status("j1", state="running", database=name, table_name="synapses", k8s_job="repack-synapses-abcde",
+                       submitted_at="2026-11-09T00:00:00+00:00")
         real_redis.set(f"{tm.LOCK_KEY_PREFIX}{name}", "j1")
         status.return_value = {"finished": True, "succeeded": False, "failed": True,
                                "reason": "the Job no longer exists"}
@@ -276,7 +280,7 @@ class TestKubernetesJobs:
 
     def test_a_job_that_died_before_pg_repack_needs_no_cleanup(self, scratch_db, real_redis, jobs_on):
         _, status, _ = jobs_on
-        tm._set_status("j2", state="queued", database=scratch_db[0], k8s_job="repack-x")
+        tm._set_status("j2", state="queued", database=scratch_db[0], k8s_job="repack-x", submitted_at="2026-11-09T00:00:00+00:00")
         status.return_value = {"finished": True, "succeeded": False, "failed": True,
                                "reason": "Failed: BackoffLimitExceeded; container job Error (exit 1)"}
         out = tm.get_repack_status("j2")
@@ -310,7 +314,7 @@ class TestKubernetesJobs:
     def test_a_record_without_a_database_leaves_locks_alone(self, scratch_db, real_redis, jobs_on):
         _, status, _ = jobs_on
         real_redis.set(f"{tm.LOCK_KEY_PREFIX}None", "j6")
-        tm._set_status("j6", state="running", k8s_job="repack-x")
+        tm._set_status("j6", state="running", k8s_job="repack-x", submitted_at="2026-11-09T00:00:00+00:00")
         status.return_value = {"finished": True, "succeeded": False, "failed": True, "reason": "gone"}
         assert tm.get_repack_status("j6")["state"] == "failed"
         assert real_redis.get(f"{tm.LOCK_KEY_PREFIX}None") == b"j6"
@@ -334,6 +338,29 @@ class TestKubernetesJobs:
             tm.get_repack_status("j7")
         assert tm.get_repack_status("j7")["state"] == "done"
         assert real_redis.get(f"{tm.LOCK_KEY_PREFIX}{scratch_db[0]}") == b"someone-else"
+
+    def test_a_missing_job_is_not_failed_while_its_submission_is_unresolved(self, scratch_db, real_redis, jobs_on):
+        _, status, _ = jobs_on
+        now = datetime.now(timezone.utc)
+        tm._set_status("j8", state="queued", database=scratch_db[0], k8s_job="repack-x", queued_at=now.isoformat())
+        status.return_value = {"exists": False, "finished": True, "succeeded": False, "failed": True, "reason": "gone"}
+        out = tm.get_repack_status("j8")
+        assert out["state"] == "queued" and out["k8s_job_status"] == "submitting"
+        # a submitter that died: past the grace period the missing Job is a failure
+        old = (now - timedelta(seconds=tm.SUBMIT_GRACE_SECONDS + 5)).isoformat()
+        tm._set_status("j9", state="queued", database=scratch_db[0], k8s_job="repack-y", queued_at=old)
+        assert tm.get_repack_status("j9")["state"] == "failed"
+
+    def test_a_job_seen_alive_on_the_second_look_is_not_failed(self, scratch_db, real_redis, jobs_on):
+        _, status, _ = jobs_on
+        name, _ = scratch_db
+        tm._set_status("j10", state="running", database=name, k8s_job="repack-x", submitted_at="2026-11-09T00:00:00+00:00")
+        real_redis.set(f"{tm.LOCK_KEY_PREFIX}{name}", "j10")
+        status.side_effect = [{"exists": False, "finished": True, "succeeded": False, "failed": True, "reason": "gone"},
+                              {"exists": True, "finished": False, "active": True, "reason": None}]
+        out = tm.get_repack_status("j10")
+        assert out["state"] == "running" and out["k8s_job_status"] == "running"
+        assert real_redis.get(f"{tm.LOCK_KEY_PREFIX}{name}") == b"j10"
 
     def test_finished_records_are_not_looked_up(self, scratch_db, real_redis, jobs_on):
         _, status, _ = jobs_on

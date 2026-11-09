@@ -248,26 +248,63 @@ CLEANUP_HINT = (
 )
 
 
+# How long a record whose Job creation is unresolved (no submitted_at) is left alone when
+# its Job cannot be found: the submitter may still be creating it. Past this, the
+# submitter is presumed dead and the missing Job is a failure.
+SUBMIT_GRACE_SECONDS = 300
+
+
+def _submission_unresolved(status: Dict[str, Any]) -> bool:
+    if status.get("submitted_at"):
+        return False
+    try:
+        queued = datetime.fromisoformat(status.get("queued_at") or status.get("updated_at"))
+    except (TypeError, ValueError):
+        return False
+    return (datetime.now(timezone.utc) - queued).total_seconds() < SUBMIT_GRACE_SECONDS
+
+
 def _reconcile(status: Dict[str, Any]) -> Dict[str, Any]:
     """A job recorded as unfinished whose Kubernetes Job has failed, finished without a
     result, or disappeared is marked failed (and its database lock released), so a killed
-    pod shows up as a failure instead of "running" until the record expires."""
+    pod shows up as a failure instead of "running" until the record expires.
+
+    A Job that cannot be found while its creation is still unresolved is not a failure
+    (start_repack records the name before creating it). And the Job is observed once more
+    after re-reading the record, right before it is marked failed: a runner that recorded
+    progress since the first look has a Job that exists now.
+    """
     name = status.get("k8s_job")
     if not name or status.get("state") not in _UNFINISHED:
         return status
     from materializationengine import k8s_jobs
 
-    try:
-        job = k8s_jobs.get_job_status(name)
-    except k8s_jobs.JobSubmissionError as e:
-        return {**status, "k8s_job_status": f"could not read the Job: {e}"}
+    def observe():
+        try:
+            return k8s_jobs.get_job_status(name), None
+        except k8s_jobs.JobSubmissionError as e:
+            return None, {**status, "k8s_job_status": f"could not read the Job: {e}"}
+
+    def pending(job, record):
+        return {**record, "k8s_job_status": job.get("reason") or ("running" if job.get("active") else "pending")}
+
+    job, unreadable = observe()
+    if unreadable:
+        return unreadable
     if not job["finished"]:
-        return {**status, "k8s_job_status": job.get("reason") or ("running" if job.get("active") else "pending")}
+        return pending(job, status)
     # Re-read: the pod may have recorded its result between our read and the Job finishing.
     raw = REDIS_CLIENT.get(f"{STATUS_KEY_PREFIX}{status['job_id']}")
     latest = json.loads(raw) if raw else status
     if latest.get("state") not in _UNFINISHED:
         return latest
+    if not job.get("exists", True) and _submission_unresolved(latest):
+        return {**latest, "k8s_job_status": "submitting"}
+    job, unreadable = observe()  # a fresh look before acting on it
+    if unreadable:
+        return unreadable
+    if not job["finished"]:
+        return pending(job, latest)
     what = job.get("reason") or ("exited without recording a result" if job["succeeded"] else "failed")
     fields = {"state": "failed", "error": f"Kubernetes Job {name}: {what}"}
     if latest.get("state") == "running":
@@ -301,7 +338,8 @@ def start_repack(database: str, table_name: str, **options) -> Dict[str, Any]:
         # response never arrives (api restart, timeout) is still reconciled by name.
         name = k8s_jobs.job_name(f"repack-{table_name}")
         _set_status(job_id, state="queued", backend="kubernetes job", database=database,
-                    table_name=table_name, options=options, k8s_job=name)
+                    table_name=table_name, options=options, k8s_job=name,
+                    queued_at=datetime.now(timezone.utc).isoformat())
         try:
             k8s_jobs.submit_job(
                 "materializationengine.jobs.repack", kwargs, name=name,
@@ -314,8 +352,11 @@ def start_repack(database: str, table_name: str, **options) -> Dict[str, Any]:
                 created = None
             if created is False:
                 return _set_status(job_id, state="failed", error=f"could not submit the Job: {e}")
-            _set_status(job_id, submit_warning=f"Job creation reported an error ({e}); "
-                                               f"{'the Job exists' if created else 'could not tell whether the Job exists'}")
+            extra = {"submitted_at": datetime.now(timezone.utc).isoformat()} if created else {}
+            _set_status(job_id, **extra, submit_warning=f"Job creation reported an error ({e}); "
+                        f"{'the Job exists' if created else 'could not tell whether the Job exists'}")
+        else:
+            _set_status(job_id, submitted_at=datetime.now(timezone.utc).isoformat())
     else:
         _set_status(job_id, state="queued", backend="celery", database=database, table_name=table_name,
                     options=options)
