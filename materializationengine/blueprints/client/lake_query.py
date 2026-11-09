@@ -134,9 +134,16 @@ def version_lakes(datastack: str, version: int) -> Tuple[Dict[str, List[Dict]], 
     from materializationengine import deltalake_catalog as cat
 
     aligned_volume, pcg = datastack_info(datastack)
-    by_table: Dict[str, List[Dict]] = {}
+    # a re-export writes a second complete set of copies; serve only the newest copy of each
+    # sort order, so planning reads one Delta log per sort order rather than one per export
+    newest: Dict[Tuple[str, Optional[str]], Dict] = {}
     for row in cat.list_exports(aligned_volume, datastack, version):
-        by_table.setdefault(row["table_name"], []).append(row)
+        key = (row["table_name"], row.get("partition_by"))
+        if key not in newest or str(row.get("completed_at") or "") > str(newest[key].get("completed_at") or ""):
+            newest[key] = row
+    by_table: Dict[str, List[Dict]] = {}
+    for (table, _), row in sorted(newest.items(), key=lambda kv: (kv[0][0], str(kv[0][1]))):
+        by_table.setdefault(table, []).append(row)
     with _lakes_lock:
         _lakes_cache[key] = (now, by_table, pcg)
     return by_table, pcg
@@ -595,8 +602,10 @@ def _read_chunk(uri, chunk: Chunk, columns: List[str]) -> Optional[pa.Table]:
 def choose_lake(lakes: List[Dict], predicates: List[Tuple]) -> Tuple[Dict, List[LakeFile]]:
     """The copy whose files that can hold a match add up to the fewest bytes."""
     best = None
-    for lake in lakes:
-        log = lake_log(lake["uri"])
+    # cold logs are one round trip chain each; load them side by side
+    logs = list(_pool().map(lambda lake: lake_log(lake["uri"]), lakes)) if len(lakes) > 1 \
+        else [lake_log(lake["uri"]) for lake in lakes]
+    for lake, log in zip(lakes, logs):
         files = [f for f in log.files
                  if all(_may_match(*f.stats.get(c, (None, None)), op, v) for c, op, v in predicates)]
         # ties (a small table, or no usable predicate) go to the copy sorted by a

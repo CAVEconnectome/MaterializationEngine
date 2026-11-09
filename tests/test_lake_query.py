@@ -35,6 +35,29 @@ LAKE_COLUMNS = {"id", "valid", "size", "post_pt_root_id", "post_pt_supervoxel_id
                 "ctr_pt_position_x", "ctr_pt_position_y", "ctr_pt_position_z"}
 
 
+class TestVersionLakes:
+    def test_reexport_serves_only_the_newest_copy_of_each_sort_order(self, monkeypatch):
+        from materializationengine import deltalake_catalog as cat
+
+        def row(table, part, suffix, done):
+            return {"table_name": table, "partition_by": part, "spec_name": f"{part}{suffix}",
+                    "uri": f"/lakes/{table}/{part}{suffix}", "completed_at": done}
+
+        rows = [row("syn", "post_pt_root_id", "__s7", "2026-11-09T14:54"),
+                row("syn", "pre_pt_root_id", "__s7", "2026-11-09T14:54"),
+                row("syn", "post_pt_root_id", "__s8", "2026-11-09T15:28"),
+                row("syn", "pre_pt_root_id", "__s8", "2026-11-09T15:28"),
+                row("nuc", "id", "", "2026-11-09T14:50")]
+        monkeypatch.setattr(cat, "list_exports", lambda *a, **k: rows)
+        monkeypatch.setattr(lq, "datastack_info", lambda ds: ("av", "pcg"))
+        lq._lakes_cache.clear()
+        by_table, pcg = lq.version_lakes("ds", 1)
+        assert pcg == "pcg"
+        assert sorted(l["spec_name"] for l in by_table["syn"]) == ["post_pt_root_id__s8", "pre_pt_root_id__s8"]
+        assert [l["spec_name"] for l in by_table["nuc"]] == ["id"]
+        lq._lakes_cache.clear()
+
+
 class TestPlan:
     def plan(self, sql, count=False, columns=LAKE_COLUMNS):
         lakes = {"synapses_pni_2": [{"spec_name": "post_pt_root_id"}]}
