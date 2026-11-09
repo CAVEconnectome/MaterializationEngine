@@ -130,6 +130,59 @@ class TestStatistics:
     def test_may_match(self, lo, hi, op, value, expected):
         assert lq._may_match(lo, hi, op, value) is expected
 
+    def test_row_mask_keeps_rows_matching_every_predicate(self):
+        t = pa.table({"a": pa.array([1, 2, 3, 4, None], pa.int64()), "b": pa.array([10, 20, 30, 40, 50], pa.int32())})
+        mask = lq._row_mask(t, [("a", "in", [2, 4, 9]), ("b", "between", (15, 45)), ("b", "lt", 41)])
+        assert t.filter(mask).column("a").to_pylist() == [2, 4]
+        # a literal pyarrow cannot compare is left to DuckDB rather than dropping rows
+        assert lq._row_mask(t, [("a", "eq", "x")]) is None
+        assert lq._row_mask(t, [("missing", "eq", 1)]) is None
+
+
+class TestChooseLake:
+    """Copies of one table sorted by a and by b, both split into files that each span the
+    whole range of the other column, so file statistics cannot tell the copies apart."""
+
+    @pytest.fixture
+    def lakes(self, tmp_path):
+        from deltalake import WriterProperties, write_deltalake
+
+        n = 20000
+        table = pa.table({"id": pa.array(range(n), pa.int64()),
+                          "a": pa.array([(i * 7919) % n for i in range(n)], pa.int64()),
+                          "b": pa.array([(i * 104729) % n for i in range(n)], pa.int64())})
+        out = []
+        for key in ("a", "b"):
+            uri = str(tmp_path / key)
+            # file f holds rows with id % 4 == f, sorted by the key within the file: every file
+            # covers the key's whole range, yet its row groups are narrow in the key
+            import pyarrow.compute as pc
+            for f in range(4):
+                part = table.filter(pc.equal(pc.bit_wise_and(table.column("id"), 3), f)).sort_by(key)
+                write_deltalake(uri, part, mode="append",
+                                writer_properties=WriterProperties(max_row_group_size=500))
+            out.append({"uri": uri, "spec_name": key, "partition_by": key})
+        lq._logs.items.clear()
+        lq._footers.items.clear()
+        yield out
+        lq._logs.items.clear()
+        lq._footers.items.clear()
+
+    def test_the_copy_sorted_by_the_filter_wins_when_files_tie(self, lakes):
+        preds = [("b", "in", [5, 9000, 17000])]
+        lake, files = lq.choose_lake(lakes, preds, ["id", "a", "b"])
+        assert lake["spec_name"] == "b" and len(files) == 4
+        assert lq.choose_lake(lakes, [("a", "eq", 3)], ["id", "a", "b"])[0]["spec_name"] == "a"
+
+    def test_read_keeps_only_matching_rows(self, lakes):
+        preds = [("b", "in", [5, 9000, 17000])]
+        lake, files = lq.choose_lake(lakes, preds, ["id", "b"])
+        fetch = lq.Fetch("t", lake, files, ["id", "b"], preds, None)
+        chunks = list(fetch.chunks())
+        assert 0 < sum(len(c.groups) for c in chunks) < 4 * 3 + 1
+        got = pa.concat_tables(fetch.read(chunks))
+        assert sorted(got.column("b").to_pylist()) == [5, 9000, 17000]
+
 
 DATASTACK, VERSION, TABLE = "test_aligned_volume", 1, "test_synapse_table"
 URL = f"/materialize/api/v3/datastack/{DATASTACK}/version/{VERSION}/table/{TABLE}/query"

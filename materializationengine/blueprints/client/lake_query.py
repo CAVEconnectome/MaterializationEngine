@@ -73,6 +73,7 @@ CRUD_COLUMNS = ("created", "deleted", "superceded_id")
 FOOTER_BYTES = 256 * 1024   # one request usually holds a file's whole footer
 MERGE_GAP = 64 * 1024       # column chunks closer than this are fetched as one range
 STREAM_ROW_GROUPS = 64      # row groups fetched per round when a LIMIT can stop early
+ROW_GROUPS_PER_READ = 4     # row groups per ranged GET: bounds the fetched bytes held at once
 
 
 class LakeQueryError(Exception):
@@ -530,6 +531,18 @@ def _footer(uri: str, f: LakeFile):
 
 _pools: Dict[int, cf.ThreadPoolExecutor] = {}
 _pools_lock = threading.Lock()
+_read_slots: Dict[int, threading.BoundedSemaphore] = {}
+
+
+def _reads_in_flight() -> threading.BoundedSemaphore:
+    """Reads of row groups running at once in this process. Each holds up to
+    ROW_GROUPS_PER_READ row groups of fetched bytes (~0.8 MB each at 10k rows), so this,
+    not the thread pool, bounds a query's transient memory."""
+    pid = os.getpid()
+    with _pools_lock:
+        if pid not in _read_slots:
+            _read_slots[pid] = threading.BoundedSemaphore(int(_config("QUERY_LAKE_READS_IN_FLIGHT", 16)))
+        return _read_slots[pid]
 
 
 def _pool() -> cf.ThreadPoolExecutor:
@@ -571,7 +584,38 @@ def _plan_file(uri, f, predicates, columns, sample):
     return Chunk(f, groups, size)
 
 
-def _read_chunk(uri, chunk: Chunk, columns: List[str]) -> Optional[pa.Table]:
+def _row_mask(table: pa.Table, predicates: List[Tuple]):
+    """Rows of `table` that satisfy the statistics predicates, or None for all of them.
+
+    The predicates are top-level AND conjuncts of the query's WHERE, which DuckDB applies
+    again in full, so dropping rows that fail one keeps every row the query can return.
+    A predicate pyarrow cannot evaluate (a literal of another type) is left to DuckDB."""
+    import pyarrow.compute as pc
+
+    mask = None
+    for name, op, value in predicates:
+        if name not in table.column_names:
+            continue
+        col = table.column(name)
+        try:
+            if op == "in":
+                m = pc.is_in(col, value_set=pa.array(value).cast(col.type))
+            elif op == "between":
+                lo, hi = (pa.scalar(v).cast(col.type) for v in value)
+                m = pc.and_(pc.greater_equal(col, lo), pc.less_equal(col, hi))
+            else:
+                fn = {"eq": pc.equal, "gt": pc.greater, "ge": pc.greater_equal,
+                      "lt": pc.less, "le": pc.less_equal}.get(op)
+                if fn is None:
+                    continue
+                m = fn(col, pa.scalar(value).cast(col.type))
+        except (pa.ArrowInvalid, pa.ArrowNotImplementedError, pa.ArrowTypeError, TypeError):
+            continue
+        mask = m if mask is None else pc.and_(mask, m)
+    return mask
+
+
+def _read_chunk(uri, chunk: Chunk, columns: List[str], predicates: List[Tuple] = ()) -> Optional[pa.Table]:
     import obstore
     import pyarrow.parquet as pq
 
@@ -594,27 +638,55 @@ def _read_chunk(uri, chunk: Chunk, columns: List[str]) -> Optional[pa.Table]:
             merged.append([a, b])
     data = obstore.get_ranges(_store(uri), unquote(chunk.file.path),
                               starts=[a for a, _ in merged], ends=[b for _, b in merged])
-    pieces = [(a, bytes(d)) for (a, _), d in zip(merged, data)]
-    return pq.ParquetFile(_Fetched(chunk.file.size, pieces), metadata=meta).read_row_groups(
-        chunk.groups, columns=present)
+    pieces = [(a, memoryview(d)) for (a, _), d in zip(merged, data)]  # no copy of the fetched bytes
+    reader = pq.ParquetFile(_Fetched(chunk.file.size, pieces), metadata=meta)
+    # decode a row group at a time and keep only its matching rows, so a query never holds
+    # the decoded row groups it reads, only what can survive its WHERE
+    kept = []
+    for r in chunk.groups:
+        t = reader.read_row_group(r, columns=present)
+        mask = _row_mask(t, predicates)
+        if mask is not None:
+            t = t.filter(mask)
+        if t.num_rows:
+            kept.append(t)
+    del reader, pieces, data
+    if not kept:
+        return None
+    return pa.concat_tables(kept) if len(kept) > 1 else kept[0]
 
 
-def choose_lake(lakes: List[Dict], predicates: List[Tuple]) -> Tuple[Dict, List[LakeFile]]:
-    """The copy whose files that can hold a match add up to the fewest bytes."""
-    best = None
+def choose_lake(lakes: List[Dict], predicates: List[Tuple],
+                columns: Optional[List[str]] = None) -> Tuple[Dict, List[LakeFile]]:
+    """The copy whose row groups that can hold a match add up to the fewest bytes.
+
+    File statistics alone cannot tell the copies apart once a filter touches every file
+    (125 random root ids hit all ten files of every copy), yet only the copy sorted by the
+    filtered column prunes row groups. So the copies sorted by a filtered column, and the
+    cheapest copy by file bytes, are costed on their footers' row-group statistics."""
     # cold logs are one round trip chain each; load them side by side
     logs = list(_pool().map(lambda lake: lake_log(lake["uri"]), lakes)) if len(lakes) > 1 \
         else [lake_log(lake["uri"]) for lake in lakes]
+    filtered = {c for c, _, _ in predicates}
+    candidates = []
     for lake, log in zip(lakes, logs):
         files = [f for f in log.files
                  if all(_may_match(*f.stats.get(c, (None, None)), op, v) for c, op, v in predicates)]
-        # ties (a small table, or no usable predicate) go to the copy sorted by a
-        # filtered column, whose row groups the footers then prune best
-        keyed = 0 if lake.get("partition_by") in {c for c, _, _ in predicates} else 1
-        cost = (sum(f.size for f in files), keyed, len(files))
-        if best is None or cost < best[0]:
-            best = (cost, lake, files)
-    return best[1], best[2]
+        keyed = 0 if lake.get("partition_by") in filtered else 1
+        candidates.append({"lake": lake, "files": files, "keyed": keyed,
+                           "file_bytes": sum(f.size for f in files)})
+    if len(candidates) == 1:
+        return candidates[0]["lake"], candidates[0]["files"]
+    by_files = min(candidates, key=lambda c: (c["file_bytes"], c["keyed"], len(c["files"])))
+    if not predicates:
+        return by_files["lake"], by_files["files"]
+    costed = [c for c in candidates if c["keyed"] == 0 or c is by_files]
+    cols = sorted(columns) if columns else sorted(filtered)
+    for c in costed:
+        futures = [_pool().submit(_plan_file, c["lake"]["uri"], f, predicates, cols, None) for f in c["files"]]
+        c["rg_bytes"] = sum(fut.result().bytes for fut in futures)
+    best = min(costed, key=lambda c: (c["rg_bytes"], c["keyed"], len(c["files"])))
+    return best["lake"], best["files"]
 
 
 @dataclass
@@ -634,7 +706,15 @@ class Fetch:
             yield fut.result()
 
     def read(self, chunks: List[Chunk]) -> List[pa.Table]:
-        futures = [_pool().submit(_read_chunk, self.lake["uri"], c, self.columns) for c in chunks if c.groups]
+        slots = _reads_in_flight()
+
+        def read_one(piece: Chunk):
+            with slots:
+                return _read_chunk(self.lake["uri"], piece, self.columns, self.predicates)
+
+        pieces = [Chunk(c.file, c.groups[i:i + ROW_GROUPS_PER_READ], 0)
+                  for c in chunks for i in range(0, len(c.groups), ROW_GROUPS_PER_READ)]
+        futures = [_pool().submit(read_one, piece) for piece in pieces]
         return [t for t in (fut.result() for fut in futures) if t is not None and t.num_rows]
 
 
@@ -680,7 +760,7 @@ def _run_plan(plan: Plan, lakes: Dict[str, List[Dict]], count: bool) -> Tuple[pa
     budget = int(_config("QUERY_LAKE_MAX_BYTES", 512 * 1024 ** 2))
     fetches = {}
     for table in plan.tables:
-        lake, files = choose_lake(lakes[table], plan.predicates[table])
+        lake, files = choose_lake(lakes[table], plan.predicates[table], sorted(plan.columns[table]))
         fetches[table] = Fetch(table, lake, files, sorted(plan.columns[table]), plan.predicates[table],
                                plan.samples.get(table))
     facts = {"lakes": {t: f.lake["spec_name"] for t, f in fetches.items()}, "row_groups": 0, "bytes": 0}
@@ -707,6 +787,30 @@ def _run_plan(plan: Plan, lakes: Dict[str, List[Dict]], count: bool) -> Tuple[pa
         return _normalize(con.sql(sql).to_arrow_table()), facts
     finally:
         con.close()
+        _release_memory()
+
+
+def _release_memory() -> None:
+    """Hand freed query memory back to the OS. Arrow's pool and glibc both keep freed pages,
+    so without this a uwsgi worker's rss ratchets up with every lake query it serves
+    (measured in the image: 510 -> 623 MB over six identical reads; ~440 MB with this)."""
+    try:
+        pa.default_memory_pool().release_unused()
+    except Exception:
+        pass
+    global _malloc_trim
+    if _malloc_trim is None:
+        try:
+            import ctypes
+
+            _malloc_trim = ctypes.CDLL("libc.so.6").malloc_trim
+        except (OSError, AttributeError):
+            _malloc_trim = False  # not glibc (macOS): nothing to trim
+    if _malloc_trim:
+        _malloc_trim(0)
+
+
+_malloc_trim = None
 
 
 def _run_streaming(con, plan: Plan, fetch: Fetch, budget: int, facts: Dict) -> pa.Table:
