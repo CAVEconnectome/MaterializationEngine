@@ -7,10 +7,13 @@ merge join over randomly ordered index reads. Reordering by id makes the merge j
 read both tables sequentially. pg_repack rewrites the table in id order while it stays
 readable and writable, taking an exclusive lock only briefly at the start and the swap.
 
-Runs on the workflow queue (the producer: non-preemptible and not evicted by the
-cluster autoscaler), one repack per database at a time.
+One repack per database at a time. Where the chart enables it
+(materialize.maintenanceJobs.enabled), each repack runs as its own Kubernetes Job
+(materializationengine/jobs/repack.py; see k8s_jobs.py for why not Celery). Elsewhere it
+falls back to the workflow-queue Celery task.
 """
 
+import inspect
 import json
 import os
 import re
@@ -20,6 +23,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+import redis
 from celery.utils.log import get_task_logger
 from sqlalchemy import bindparam, text
 
@@ -194,38 +198,179 @@ def build_repack_command(db_url, table: str, order_by: str, jobs: int, dry_run: 
     return cmd
 
 
-def _set_status(job_id: str, **fields) -> Dict[str, Any]:
+def _set_status(job_id: str, only_if_state_in=None, **fields) -> Dict[str, Any]:
+    """Merge fields into the job's status record, atomically.
+
+    The api (submitting, reconciling) and the job's runner both write the record. A
+    plain read-modify-write would let one writer's stale snapshot drop the other's
+    fields -- e.g. the runner's progress write losing the k8s_job name, after which a
+    killed Job would never be reconciled. WATCH/MULTI retries on a concurrent write.
+    With only_if_state_in, the fields are merged only if the record's state is still
+    one of those (returns the record unchanged otherwise).
+    """
     key = f"{STATUS_KEY_PREFIX}{job_id}"
-    raw = REDIS_CLIENT.get(key)
-    status = json.loads(raw) if raw else {"job_id": job_id}
-    status.update(fields, updated_at=datetime.now(timezone.utc).isoformat())
-    REDIS_CLIENT.set(key, json.dumps(status, default=str), ex=STATUS_TTL_SECONDS)
-    return status
+    with REDIS_CLIENT.pipeline() as pipe:
+        while True:
+            try:
+                pipe.watch(key)
+                raw = pipe.get(key)
+                status = json.loads(raw) if raw else {"job_id": job_id}
+                if only_if_state_in is not None and status.get("state") not in only_if_state_in:
+                    pipe.unwatch()
+                    return status
+                status.update(fields, updated_at=datetime.now(timezone.utc).isoformat())
+                pipe.multi()
+                pipe.set(key, json.dumps(status, default=str), ex=STATUS_TTL_SECONDS)
+                pipe.execute()
+                return status
+            except redis.WatchError:
+                continue
+
+
+# Delete the lock only if this job still holds it: a GET then DELETE could remove a lock
+# that a newer repack acquired in between.
+_RELEASE_LOCK = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
+
+
+def _release_lock(database: str, job_id: str) -> None:
+    REDIS_CLIENT.eval(_RELEASE_LOCK, 1, f"{LOCK_KEY_PREFIX}{database}", job_id)
 
 
 def get_repack_status(job_id: str) -> Optional[Dict[str, Any]]:
     raw = REDIS_CLIENT.get(f"{STATUS_KEY_PREFIX}{job_id}")
-    return json.loads(raw) if raw else None
+    return _reconcile(json.loads(raw)) if raw else None
+
+
+_UNFINISHED = ("queued", "checking", "running")
+CLEANUP_HINT = (
+    "pg_repack may have left its trigger, log table and half-built copy behind; before repacking this "
+    "table again, run in the database: DROP EXTENSION pg_repack CASCADE; CREATE EXTENSION pg_repack;"
+)
+
+
+# How long a record whose Job creation is unresolved (no submitted_at) is left alone when
+# its Job cannot be found: the submitter may still be creating it. Past this, the
+# submitter is presumed dead and the missing Job is a failure.
+SUBMIT_GRACE_SECONDS = 300
+
+
+def _submission_unresolved(status: Dict[str, Any]) -> bool:
+    if status.get("submitted_at"):
+        return False
+    try:
+        queued = datetime.fromisoformat(status.get("queued_at") or status.get("updated_at"))
+    except (TypeError, ValueError):
+        return False
+    return (datetime.now(timezone.utc) - queued).total_seconds() < SUBMIT_GRACE_SECONDS
+
+
+def _reconcile(status: Dict[str, Any]) -> Dict[str, Any]:
+    """A job recorded as unfinished whose Kubernetes Job has failed, finished without a
+    result, or disappeared is marked failed (and its database lock released), so a killed
+    pod shows up as a failure instead of "running" until the record expires.
+
+    A Job that cannot be found while its creation is still unresolved is not a failure
+    (start_repack records the name before creating it). And the Job is observed once more
+    after re-reading the record, right before it is marked failed: a runner that recorded
+    progress since the first look has a Job that exists now.
+    """
+    name = status.get("k8s_job")
+    if not name or status.get("state") not in _UNFINISHED:
+        return status
+    from materializationengine import k8s_jobs
+
+    def observe():
+        try:
+            return k8s_jobs.get_job_status(name), None
+        except k8s_jobs.JobSubmissionError as e:
+            return None, {**status, "k8s_job_status": f"could not read the Job: {e}"}
+
+    def pending(job, record):
+        return {**record, "k8s_job_status": job.get("reason") or ("running" if job.get("active") else "pending")}
+
+    job, unreadable = observe()
+    if unreadable:
+        return unreadable
+    if not job["finished"]:
+        return pending(job, status)
+    # Re-read: the pod may have recorded its result between our read and the Job finishing.
+    raw = REDIS_CLIENT.get(f"{STATUS_KEY_PREFIX}{status['job_id']}")
+    latest = json.loads(raw) if raw else status
+    if latest.get("state") not in _UNFINISHED:
+        return latest
+    if not job.get("exists", True) and _submission_unresolved(latest):
+        return {**latest, "k8s_job_status": "submitting"}
+    job, unreadable = observe()  # a fresh look before acting on it
+    if unreadable:
+        return unreadable
+    if not job["finished"]:
+        return pending(job, latest)
+    what = job.get("reason") or ("exited without recording a result" if job["succeeded"] else "failed")
+    fields = {"state": "failed", "error": f"Kubernetes Job {name}: {what}"}
+    if latest.get("state") == "running":
+        fields["cleanup"] = CLEANUP_HINT
+    updated = _set_status(latest["job_id"], only_if_state_in=_UNFINISHED, **fields)
+    if updated.get("state") == "failed" and latest.get("database"):
+        _release_lock(latest["database"], latest["job_id"])
+    return updated
 
 
 def start_repack(database: str, table_name: str, **options) -> Dict[str, Any]:
-    """Validate the request now (so the API can refuse it) and queue the repack."""
+    """Validate the request now (so the API can refuse it), then start the repack: as a
+    Kubernetes Job where the deployment runs maintenance Jobs, else on the Celery queue."""
+    from materializationengine import k8s_jobs
+
     check_database(database)
     _check_name("table", table_name)
     order_by = _check_name("order_by column", options.get("order_by", "id"))
+    holder = REDIS_CLIENT.get(f"{LOCK_KEY_PREFIX}{database}")
+    if holder:
+        holder = holder.decode() if isinstance(holder, bytes) else holder
+        raise RepackRefused(f"another repack is running in {database}: {holder!r}")
+    unknown = set(options) - _REPACK_OPTIONS
+    if unknown:
+        raise RepackRefused(f"unknown repack options: {sorted(unknown)}")
     job_id = f"{database}.{table_name}.{uuid.uuid4().hex[:8]}"
-    _set_status(job_id, state="queued", database=database, table_name=table_name, options=options)
-    repack_table.apply_async(
-        kwargs={"job_id": job_id, "database": database, "table_name": table_name, **options, "order_by": order_by}
-    )
+    # validated and derived values last, so no option can replace them
+    kwargs = {**options, "job_id": job_id, "database": database, "table_name": table_name, "order_by": order_by}
+    if k8s_jobs.maintenance_jobs_enabled():
+        # The Job's name is recorded before the Job is created, so a Job whose creation
+        # response never arrives (api restart, timeout) is still reconciled by name.
+        name = k8s_jobs.job_name(f"repack-{table_name}")
+        _set_status(job_id, state="queued", backend="kubernetes job", database=database,
+                    table_name=table_name, options=options, k8s_job=name,
+                    queued_at=datetime.now(timezone.utc).isoformat())
+        try:
+            k8s_jobs.submit_job(
+                "materializationengine.jobs.repack", kwargs, name=name,
+                labels={"materialize-workload": "repack", "repack-database": database},
+            )
+        except k8s_jobs.JobSubmissionError as e:
+            try:  # the create may have been accepted even though the call failed
+                created = k8s_jobs.get_job_status(name).get("exists")
+            except k8s_jobs.JobSubmissionError:
+                created = None
+            if created is False:
+                return _set_status(job_id, state="failed", error=f"could not submit the Job: {e}")
+            extra = {"submitted_at": datetime.now(timezone.utc).isoformat()} if created else {}
+            _set_status(job_id, **extra, submit_warning=f"Job creation reported an error ({e}); "
+                        f"{'the Job exists' if created else 'could not tell whether the Job exists'}")
+        else:
+            _set_status(job_id, submitted_at=datetime.now(timezone.utc).isoformat())
+    else:
+        _set_status(job_id, state="queued", backend="celery", database=database, table_name=table_name,
+                    options=options)
+        repack_table.apply_async(kwargs=kwargs)
     return get_repack_status(job_id)
 
 
-# acks_late=False: a repack whose worker died must be cleaned up (pg_repack leaves its
-# trigger and half-built copy) before it is run again, so it is never redelivered.
 @celery.task(name="workflow:repack_table", bind=True, acks_late=False)
-def repack_table(
-    self,
+def repack_table(self, **kwargs) -> Dict[str, Any]:
+    """The Celery fallback for deployments without maintenance Jobs."""
+    return run_repack(**kwargs)
+
+
+def run_repack(
     job_id: str,
     database: str,
     table_name: str,
@@ -297,9 +442,12 @@ def repack_table(
         celery_logger.error(f"Repack {job_id} failed: {e}", exc_info=True)
         return _set_status(job_id, state="failed", error=str(e), seconds=round(time.time() - started))
     finally:
-        if REDIS_CLIENT.get(lock_key) in (job_id, job_id.encode()):
-            REDIS_CLIENT.delete(lock_key)
+        _release_lock(database, job_id)
 
+
+
+# The options start_repack accepts: run_repack's keyword arguments, less the ones it sets.
+_REPACK_OPTIONS = set(inspect.signature(run_repack).parameters) - {"job_id", "database", "table_name"}
 
 _FROZEN_NAME = re.compile(r"^(?P<datastack>.+)__mat(?P<version>\d+)$")
 
@@ -397,4 +545,4 @@ def list_repack_jobs(limit: int = 50) -> List[Dict[str, Any]]:
         if raw:
             jobs.append(json.loads(raw))
     jobs.sort(key=lambda j: j.get("updated_at", ""), reverse=True)
-    return jobs[:limit]
+    return [_reconcile(j) for j in jobs[:limit]]
