@@ -413,9 +413,9 @@ def key_columns(lake: Dict) -> set:
     return keys
 
 
-def _build_coordinated(lake: Dict, wait: bool = True) -> Optional[LakeIndex]:
-    """Build a missing index, or wait for the worker that is already building it (without
-    `wait`, None: a prewarming worker moves on rather than wait)."""
+def _build_coordinated(lake: Dict, wait: bool = True) -> Tuple[Optional[LakeIndex], str]:
+    """Build a missing index ("built"), or wait for the worker that is already building it
+    ("awaited"); without `wait`, (None, "building elsewhere"): a prewarming worker moves on."""
     uri = lake["uri"]
     lock, token = f"{_KEY}:build:{uri}", uuid.uuid4().hex
     try:
@@ -424,14 +424,14 @@ def _build_coordinated(lake: Dict, wait: bool = True) -> Optional[LakeIndex]:
         logger.warning("lake index: no redis lock for %s (%s); building here", uri, e)
         mine = True
     if not mine and not wait:
-        return None
+        return None, "building elsewhere"
     if not mine:
         deadline = time.monotonic() + float(_config("QUERY_LAKE_INDEX_WAIT_SECONDS", 20))
         while time.monotonic() < deadline:
             time.sleep(0.25)
             index = read(uri)
             if index is not None:
-                return index
+                return index, "awaited"
             try:
                 if not _redis().exists(lock):  # the builder gave up: take over
                     break
@@ -444,7 +444,7 @@ def _build_coordinated(lake: Dict, wait: bool = True) -> Optional[LakeIndex]:
             write(index)
         except Exception as e:  # a worker that cannot write still has the index for itself
             logger.warning("lake index of %s could not be stored: %s: %s", uri, type(e).__name__, e)
-        return index
+        return index, "built"
     finally:
         if mine:
             try:
@@ -469,7 +469,8 @@ class _Cache:
             return self.items.get(uri)
 
     def get(self, lake: Dict, build_missing: bool = True, wait: bool = True) -> Tuple[Optional[LakeIndex], str]:
-        """(index, how it was found: memory, stored, built, missing, or building elsewhere)."""
+        """(index, how it was found: memory, stored, built, awaited (another worker's build),
+        missing, or building elsewhere)."""
         uri = lake["uri"]
         with self.lock:
             hit = self.items.get(uri)
@@ -490,9 +491,9 @@ class _Cache:
             if index is None:
                 if not build_missing:
                     return None, "missing"
-                index, how = _build_coordinated(lake, wait), "built"
+                index, how = _build_coordinated(lake, wait)
                 if index is None:
-                    return None, "building elsewhere"
+                    return None, how
             self.put(index)
             return index, how
 
