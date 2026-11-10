@@ -312,11 +312,13 @@ def build(uri: str, key_columns: Iterable[str] = ()) -> LakeIndex:
     columns = [f.name for f in schema]
     numeric = [f.name for f in schema if _numeric(f.type)]
 
-    # footers are parsed and reduced as they arrive: a parsed footer is ~1.6 MB, so holding
-    # all of a 300-file lake's at once would take a worker's whole memory budget
-    with cf.ThreadPoolExecutor(int(_config("QUERY_LAKE_REQUESTS_IN_FLIGHT", 64)),
+    # each footer is parsed and reduced to arrays at once (a parsed footer is ~1.6 MB), and only
+    # QUERY_LAKE_INDEX_BUILD_THREADS at a time: with 64, building minnie's synapse copy left a
+    # worker at ~590 MB rss, past uwsgi's reload limit
+    with cf.ThreadPoolExecutor(int(_config("QUERY_LAKE_INDEX_BUILD_THREADS", 16)),
                                thread_name_prefix="lake-index") as pool:
         entries = list(pool.map(lambda ps: _file_entry(uri, ps[0], int(ps[1]), columns), zip(paths, sizes)))
+    _release_memory()
 
     footer_lens = np.array([e[0] for e in entries], np.int64)
     rg_file = np.concatenate([np.full(len(e[1]), i, np.int32) for i, e in enumerate(entries)] or [np.zeros(0, np.int32)])
@@ -358,6 +360,20 @@ def build(uri: str, key_columns: Iterable[str] = ()) -> LakeIndex:
     logger.info("lake index of %s: %d files, %d row groups, row-group stats on %s, %.1f MB, built in %.2fs",
                 uri, len(paths), index.n_row_groups, sorted(rg_stats), index.nbytes() / 1e6, time.perf_counter() - t0)
     return index
+
+
+def _release_memory() -> None:
+    """Hand the parsed footers' freed memory back to the OS (Arrow's pool and glibc keep it)."""
+    try:
+        pa.default_memory_pool().release_unused()
+    except Exception:
+        pass
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass  # not glibc (macOS)
 
 
 def write(index: LakeIndex) -> None:
