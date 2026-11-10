@@ -86,7 +86,34 @@ def prewarm_worker(app) -> None:
                     warmed.append(mat_db)
                 except Exception as e:  # one missing database does not stop the others
                     logger.warning(f"prewarm of {mat_db} failed: {e}")
+            if as_bool(_setting(app, "QUERY_LAKE_PREWARM", True), default=True, name="QUERY_LAKE_PREWARM"):
+                warmed += _prewarm_lakes(datastack, mat_dbs)
     logger.info(f"prewarmed {warmed} in {time.perf_counter() - t0:.2f}s")
+
+
+def _prewarm_lakes(datastack: str, mat_dbs: list) -> list:
+    """Planning indexes of the lakes this worker's first lake queries are likely to read: the
+    recent versions' copies of the most queried tables, and the most queried lakes, by the
+    tallies the workers keep in redis (lake_index). A virtual version's database is its
+    parent's, and so is its catalog."""
+    from materializationengine.blueprints.client import lake_query
+
+    versions = {}
+    for name in mat_dbs:
+        m = lake_query._FROZEN_DB.match(name)
+        if m:
+            versions.setdefault(m["datastack"], []).append(int(m["version"]))
+    out = []
+    for ds, vs in versions.items():
+        t0 = time.perf_counter()
+        try:
+            done = lake_query.prewarm(ds, vs)
+        except Exception as e:  # never keep a worker from starting
+            logger.warning(f"lake prewarm of {ds} failed: {type(e).__name__}: {e}")
+            continue
+        logger.info(f"lake prewarm of {ds} v{vs}: {done} in {time.perf_counter() - t0:.2f}s")
+        out.append(f"lakes:{ds}:{len(done)}")
+    return out
 
 
 def after_fork(app) -> None:

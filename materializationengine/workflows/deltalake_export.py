@@ -2980,6 +2980,16 @@ def run_deltalake_export(
             _log(message)
             _set_status(status="failed", total_rows=row_count, phase="failed", error=message)
             raise RuntimeError(message)
+        # the lake query planning index, stored next to each lake, so no API worker has to
+        # read every footer of a new lake (best effort: a missing index is built on first use)
+        from materializationengine.blueprints.client import lake_index
+
+        for lake in final_lakes:
+            try:
+                lake_index.build_and_store(lake["uri"], lake_index.key_columns(lake))
+            except Exception:
+                celery_logger.warning("%s (v%d): no planning index for %s", table_name, version,
+                                      lake["uri"], exc_info=True)
 
     _log("Export complete.")
     _set_status(

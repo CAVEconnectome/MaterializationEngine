@@ -34,8 +34,11 @@ Modes, QUERY_LAKE_BACKEND (a request's X-Query-Backend header overrides it):
   shadow  Postgres answers; the lake runs too, and the timings and whether the two
           results agree are logged. For validating the lake path on real traffic.
 
-Frozen lakes never change, so their Delta logs and Parquet footers are cached per
-process (QUERY_LAKE_LOG_CACHE lakes, QUERY_LAKE_FOOTER_CACHE footers). A query that
+Planning reads only each copy's planning index (lake_index: file and row-group byte
+ranges and statistics, stored next to the lake, a few MB for minnie's synapse copies),
+and only of the copies laid out by a filtered column. A read fetches a file's footer in
+the same request as its column chunks; raw footers are cached per process within
+QUERY_LAKE_FOOTER_CACHE_MB, indexes up to QUERY_LAKE_INDEX_CACHE lakes. A query that
 would fetch more than QUERY_LAKE_MAX_BYTES (default 512 MiB) of column chunks is refused
 with a request to narrow it, as Postgres's statement timeout refuses an expensive one.
 """
@@ -44,7 +47,6 @@ import concurrent.futures as cf
 import io
 import logging
 import os
-import random
 import re
 import threading
 import time
@@ -55,6 +57,8 @@ from urllib.parse import unquote
 
 import numpy as np
 import pyarrow as pa
+
+from materializationengine.blueprints.client import lake_index as li
 
 logger = logging.getLogger(__name__)
 
@@ -407,126 +411,114 @@ def _may_match(lo, hi, op, value) -> bool:
     return True
 
 
-@dataclass
-class LakeFile:
-    path: str
-    size: int
-    stats: Dict[str, Tuple]
+def _match(lo: np.ndarray, hi: np.ndarray, op: str, value) -> np.ndarray:
+    """_may_match over arrays of minimums and maximums (an unknown bound is its type's extreme)."""
+    everything = np.ones(len(lo), bool)
+    values = list(value) if op in ("in", "between") else [value]
+    ints = np.issubdtype(lo.dtype, np.integer)
+    if any(isinstance(v, bool) or not isinstance(v, (int, float, np.integer, np.floating)) for v in values):
+        return everything
+    if ints and not all(isinstance(v, (int, np.integer)) for v in values):
+        return everything  # a fractional literal against integers: let DuckDB decide
+    try:
+        if op == "in":
+            v = np.unique(np.array(values, dtype=lo.dtype))
+            if not len(v):
+                return np.zeros(len(lo), bool)
+            i = np.searchsorted(v, lo, side="left")
+            return (i < len(v)) & (v[np.minimum(i, len(v) - 1)] <= hi)
+        if op == "between":
+            a, b = (np.array(x, dtype=lo.dtype) for x in value)
+            return (hi >= a) & (lo <= b)
+        x = np.array(value, dtype=lo.dtype)
+        if op == "eq":
+            return (lo <= x) & (hi >= x)
+        if op == "gt":
+            return hi > x
+        if op == "ge":
+            return hi >= x
+        if op == "lt":
+            return lo < x
+        if op == "le":
+            return lo <= x
+    except (OverflowError, TypeError, ValueError):
+        pass
+    return everything
 
 
 @dataclass
-class LakeLog:
-    uri: str
-    columns: List[str]
-    files: List[LakeFile]
+class Chunk:
+    file: int           # the file's number in the lake's index
+    groups: List[int]   # row groups of that file to read, by their number in the file
+    bytes: int
 
 
-class _LRU:
-    def __init__(self, size_param: str, default: int):
-        self.size_param, self.default = size_param, default
+def select(index: "li.LakeIndex", predicates: List[Tuple], columns: List[str],
+           sample: Optional[float] = None) -> List[Chunk]:
+    """The row groups, per file in file order, that can hold a row matching every predicate,
+    from the index's file and row-group statistics alone (no I/O)."""
+    keep_files = np.ones(len(index.paths), bool)
+    for c, op, v in predicates:
+        if c in index.file_stats:
+            keep_files &= _match(*index.file_stats[c], op, v)
+    keep = keep_files[index.rg_file]
+    for c, op, v in predicates:
+        if c in index.rg_stats and keep.any():
+            keep &= _match(*index.rg_stats[c], op, v)
+    if sample is not None:
+        keep &= np.random.random(len(keep)) * 100.0 < sample
+    positions = [index.column_pos[c] for c in columns if c in index.column_pos]
+    rows = np.nonzero(keep)[0]
+    if not len(rows):
+        return []
+    rg_bytes = index.col_sizes[rows][:, positions].astype(np.int64).sum(axis=1) if positions \
+        else np.zeros(len(rows), np.int64)
+    files = index.rg_file[rows]
+    cuts = np.nonzero(np.diff(files))[0] + 1
+    chunks = []
+    for part, part_bytes in zip(np.split(np.arange(len(rows)), cuts), np.split(rg_bytes, cuts)):
+        chunks.append(Chunk(int(files[part[0]]), index.rg_index[rows[part]].tolist(), int(part_bytes.sum())))
+    return chunks
+
+
+class _BytesLRU:
+    """Raw footers by (lake, path), least recently used dropped first, within a byte budget."""
+
+    def __init__(self, budget_param: str, default_mb: int):
+        self.budget_param, self.default_mb = budget_param, default_mb
         self.items: "OrderedDict" = OrderedDict()
+        self.size = 0
         self.lock = threading.Lock()
 
-    def get(self, key, load):
+    def get(self, key) -> Optional[bytes]:
         with self.lock:
             if key in self.items:
                 self.items.move_to_end(key)
                 return self.items[key]
-        value = load()
+        return None
+
+    def put(self, key, value: bytes) -> None:
+        budget = int(float(_config(self.budget_param, self.default_mb)) * 1024 ** 2)
+        if len(value) > budget:
+            return
         with self.lock:
+            if key in self.items:
+                return
             self.items[key] = value
-            limit = int(_config(self.size_param, self.default))
-            while len(self.items) > max(1, limit):
-                self.items.popitem(last=False)
-        return value
+            self.size += len(value)
+            while self.size > budget:
+                _, old = self.items.popitem(last=False)
+                self.size -= len(old)
+
+    def clear(self):
+        with self.lock:
+            self.items.clear()
+            self.size = 0
 
 
-# Per process, and uwsgi runs many: ltv7's api pods give 16 processes 1 GiB between them.
-_logs = _LRU("QUERY_LAKE_LOG_CACHE", 64)
-_footers = _LRU("QUERY_LAKE_FOOTER_CACHE", 128)
-_stores: Dict[Tuple[int, str], object] = {}
-_stores_lock = threading.Lock()
-
-
-def lake_log(uri: str) -> LakeLog:
-    def load():
-        from deltalake import DeltaTable
-
-        dt = DeltaTable(uri)
-        adds = pa.table(dt.get_add_actions(flatten=True))
-        schema = dt.schema().to_arrow()
-        schema = schema if isinstance(schema, pa.Schema) else pa.schema(schema)
-        names = [f.name for f in schema]
-        stats_cols = {n: (adds.column(f"min.{n}").to_pylist(), adds.column(f"max.{n}").to_pylist())
-                      for n in names if f"min.{n}" in adds.column_names and f"max.{n}" in adds.column_names}
-        paths, sizes = adds.column("path").to_pylist(), adds.column("size_bytes").to_pylist()
-        files = [LakeFile(p, int(s), {n: (lo[i], hi[i]) for n, (lo, hi) in stats_cols.items()})
-                 for i, (p, s) in enumerate(zip(paths, sizes))]
-        return LakeLog(uri, names, files)
-
-    return _logs.get(uri, load)
-
-
-def _store(uri: str):
-    """An obstore store rooted at a lake: GCS (application credentials) or local."""
-    import obstore.store
-
-    key = (os.getpid(), uri)
-    with _stores_lock:
-        if key in _stores:
-            return _stores[key]
-    if "://" in uri:
-        store = obstore.store.from_url(uri)
-    else:
-        store = obstore.store.LocalStore(os.path.abspath(uri))
-    with _stores_lock:
-        _stores[key] = store
-    return store
-
-
-class _Fetched(io.RawIOBase):
-    """A Parquet file of which only some byte ranges were fetched."""
-
-    def __init__(self, size, pieces):
-        self.size, self.pieces, self.pos = size, pieces, 0
-
-    def readable(self):
-        return True
-
-    def seekable(self):
-        return True
-
-    def tell(self):
-        return self.pos
-
-    def seek(self, offset, whence=0):
-        self.pos = {0: offset, 1: self.pos + offset, 2: self.size + offset}[whence]
-        return self.pos
-
-    def readinto(self, buffer):
-        n = min(len(buffer), self.size - self.pos)
-        for start, data in self.pieces:
-            if start <= self.pos and self.pos + n <= start + len(data):
-                buffer[:n] = data[self.pos - start:self.pos - start + n]
-                self.pos += n
-                return n
-        raise IOError(f"bytes {self.pos}-{self.pos + n} were not fetched")
-
-
-def _footer(uri: str, f: LakeFile):
-    """The parsed footer of a lake file, cached (only the parsed form is kept)."""
-    import obstore
-    import pyarrow.parquet as pq
-
-    def load():
-        store, path = _store(uri), unquote(f.path)
-        tail = bytes(obstore.get_range(store, path, start=max(0, f.size - FOOTER_BYTES), end=f.size))
-        need = int.from_bytes(tail[-8:-4], "little") + 8
-        if need > len(tail):
-            tail = bytes(obstore.get_range(store, path, start=f.size - need, end=f.size))
-        return pq.ParquetFile(_Fetched(f.size, [(f.size - len(tail), tail)])).metadata
-
-    return _footers.get((uri, f.path), load)
+# Per process, and uwsgi runs many: a raw footer of minnie's synapse copies is ~220 KB
+# (parsed, ~1.6 MB, so only the raw bytes are kept and parsed again per read: 1.5 ms).
+_footers = _BytesLRU("QUERY_LAKE_FOOTER_CACHE_MB", 16)
 
 
 _pools: Dict[int, cf.ThreadPoolExecutor] = {}
@@ -552,36 +544,6 @@ def _pool() -> cf.ThreadPoolExecutor:
             _pools[pid] = cf.ThreadPoolExecutor(int(_config("QUERY_LAKE_REQUESTS_IN_FLIGHT", 64)),
                                                 thread_name_prefix="lake-read")
         return _pools[pid]
-
-
-@dataclass
-class Chunk:
-    file: LakeFile
-    groups: List[int]
-    bytes: int
-
-
-def _row_group_stats(meta, r, index, column):
-    i = index.get(column)
-    if i is None:
-        return None, None
-    st = meta.row_group(r).column(i).statistics
-    if st is None or not st.has_min_max:
-        return None, None
-    return st.min, st.max
-
-
-def _plan_file(uri, f, predicates, columns, sample):
-    meta = _footer(uri, f)
-    index = {meta.schema.column(i).name: i for i in range(meta.num_columns)}
-    groups = []
-    for r in range(meta.num_row_groups):
-        if all(_may_match(*_row_group_stats(meta, r, index, c), op, v) for c, op, v in predicates):
-            if sample is None or random.random() * 100.0 < sample:
-                groups.append(r)
-    size = sum(meta.row_group(r).column(index[c]).total_compressed_size
-               for r in groups for c in columns if c in index)
-    return Chunk(f, groups, size)
 
 
 def _row_mask(table: pa.Table, predicates: List[Tuple]):
@@ -615,31 +577,67 @@ def _row_mask(table: pa.Table, predicates: List[Tuple]):
     return mask
 
 
-def _read_chunk(uri, chunk: Chunk, columns: List[str], predicates: List[Tuple] = ()) -> Optional[pa.Table]:
+def _footer_meta(index: "li.LakeIndex", f: int, tail: Optional[bytes] = None):
+    """A file's parsed footer, from `tail` or the raw-footer cache or one GET (then cached)."""
+    key = (index.uri, index.paths[f])
+    size = int(index.sizes[f])
+    if tail is None:
+        tail = _footers.get(key)
+    if tail is None:
+        tail = li.fetch_footer(index.uri, index.paths[f], size)
+    _footers.put(key, tail)
+    return li.parse_footer(size, tail), tail
+
+
+def _check(index: "li.LakeIndex", f: int, meta, groups: List[int]) -> None:
+    """The footer agrees with the index (a lake rewritten under the same uri would not)."""
+    first = int(index.rg_first[f])
+    n = int(index.rg_first[f + 1]) - first
+    bad = meta.num_row_groups != n
+    if not bad and groups:
+        col = meta.row_group(groups[0]).column(0)
+        start = col.dictionary_page_offset if col.has_dictionary_page else col.data_page_offset
+        bad = start != int(index.rg_start[first + groups[0]])
+    if bad:
+        li.cache.drop(index.uri)
+        raise LakeQueryError(f"the planning index of {index.uri} does not match {index.paths[f]}; "
+                             f"it will be rebuilt, retry the query", 503)
+
+
+def _read_chunk(index: "li.LakeIndex", chunk: Chunk, columns: List[str], predicates: List[Tuple] = (),
+                meta=None) -> Optional[pa.Table]:
+    """Fetch and decode the chunk's column chunks, keeping only rows that can match. Without
+    `meta`, the file's footer is fetched in the same request (it is needed to decode)."""
     import obstore
     import pyarrow.parquet as pq
 
     if not chunk.groups:
         return None
-    meta = _footer(uri, chunk.file)
-    index = {meta.schema.column(i).name: i for i in range(meta.num_columns)}
-    present = [c for c in columns if c in index]
-    ranges = []
-    for r in chunk.groups:
-        for c in present:
-            col = meta.row_group(r).column(index[c])
-            start = col.dictionary_page_offset if col.has_dictionary_page else col.data_page_offset
-            ranges.append((start, start + col.total_compressed_size))
+    f = chunk.file
+    size = int(index.sizes[f])
+    positions = [index.column_pos[c] for c in columns if c in index.column_pos]
+    present = [index.columns[i] for i in positions]
+    rows = int(index.rg_first[f]) + np.asarray(chunk.groups, np.int64)
     merged = []
-    for a, b in sorted(ranges):
+    for a, b in sorted(index.chunk_ranges(rows, positions)):
         if merged and a - merged[-1][1] < MERGE_GAP:
             merged[-1][1] = max(merged[-1][1], b)
         else:
             merged.append([a, b])
-    data = obstore.get_ranges(_store(uri), unquote(chunk.file.path),
-                              starts=[a for a, _ in merged], ends=[b for _, b in merged])
+    tail = None
+    if meta is None:
+        tail = _footers.get((index.uri, index.paths[f]))
+    footer_range = [] if meta is not None or tail is not None else [(size - int(index.footer_lens[f]), size)]
+    ranges = merged + footer_range
+    data = obstore.get_ranges(li.store(index.uri), unquote(index.paths[f]),
+                              starts=[a for a, _ in ranges], ends=[b for _, b in ranges])
+    if footer_range:
+        tail, data = bytes(data[-1]), data[:-1]
+    if meta is None:
+        meta, _ = _footer_meta(index, f, tail)
+    _check(index, f, meta, chunk.groups)
     pieces = [(a, memoryview(d)) for (a, _), d in zip(merged, data)]  # no copy of the fetched bytes
-    reader = pq.ParquetFile(_Fetched(chunk.file.size, pieces), metadata=meta)
+    reader = pq.ParquetFile(li.Fetched(size, pieces), metadata=meta)
     # decode a row group at a time and keep only its matching rows, so a query never holds
     # the decoded row groups it reads, only what can survive its WHERE
     kept = []
@@ -656,79 +654,76 @@ def _read_chunk(uri, chunk: Chunk, columns: List[str], predicates: List[Tuple] =
     return pa.concat_tables(kept) if len(kept) > 1 else kept[0]
 
 
-def choose_lake(lakes: List[Dict], predicates: List[Tuple],
-                columns: Optional[List[str]] = None) -> Tuple[Dict, List[LakeFile]]:
-    """The copy whose row groups that can hold a match add up to the fewest bytes.
+def _lake_columns(lake: Dict) -> Optional[set]:
+    cols = lake.get("columns")
+    if not cols:
+        return None
+    return {c["name"] if isinstance(c, dict) else str(c) for c in cols}
 
-    File statistics alone cannot tell the copies apart once a filter touches every file
-    (125 random root ids hit all ten files of every copy), yet only the copy sorted by the
-    filtered column prunes row groups. So the copies sorted by a filtered column, and the
-    cheapest copy by file bytes, are costed on their footers' row-group statistics."""
-    # cold logs are one round trip chain each; load them side by side
-    logs = list(_pool().map(lambda lake: lake_log(lake["uri"]), lakes)) if len(lakes) > 1 \
-        else [lake_log(lake["uri"]) for lake in lakes]
+
+def choose_lake(lakes: List[Dict], predicates: List[Tuple], columns: List[str],
+                sample: Optional[float] = None) -> Tuple[Dict, "li.LakeIndex", List[Chunk], str]:
+    """The copy whose row groups that can hold a match add up to the fewest bytes, with them.
+
+    Only the copies laid out by a filtered column can prune row groups (125 random root ids
+    hit every file of every copy, yet only the copy sorted by that column has narrow row
+    groups), so only their indexes are loaded and costed. A filter no copy is laid out by
+    costs them all; no filter at all reads the smallest copy."""
+    needed = set(columns)
+    usable = [l for l in lakes if _lake_columns(l) is None or needed <= _lake_columns(l)] or lakes
     filtered = {c for c, _, _ in predicates}
-    candidates = []
-    for lake, log in zip(lakes, logs):
-        files = [f for f in log.files
-                 if all(_may_match(*f.stats.get(c, (None, None)), op, v) for c, op, v in predicates)]
-        keyed = 0 if lake.get("partition_by") in filtered else 1
-        candidates.append({"lake": lake, "files": files, "keyed": keyed,
-                           "file_bytes": sum(f.size for f in files)})
-    if len(candidates) == 1:
-        return candidates[0]["lake"], candidates[0]["files"]
-    by_files = min(candidates, key=lambda c: (c["file_bytes"], c["keyed"], len(c["files"])))
+    keyed = [l for l in usable if li.key_columns(l) & filtered]
     if not predicates:
-        return by_files["lake"], by_files["files"]
-    costed = [c for c in candidates if c["keyed"] == 0 or c is by_files]
-    cols = sorted(columns) if columns else sorted(filtered)
-    for c in costed:
-        futures = [_pool().submit(_plan_file, c["lake"]["uri"], f, predicates, cols, None) for f in c["files"]]
-        c["rg_bytes"] = sum(fut.result().bytes for fut in futures)
-    best = min(costed, key=lambda c: (c["rg_bytes"], c["keyed"], len(c["files"])))
-    return best["lake"], best["files"]
+        candidates = [min(usable, key=lambda l: (l.get("bytes") or float("inf"), l.get("spec_name") or ""))]
+    else:
+        candidates = keyed or usable
+    loaded = list(_pool().map(li.get, candidates)) if len(candidates) > 1 else [li.get(candidates[0])]
+    best = None
+    for lake, (index, how) in zip(candidates, loaded):
+        chunks = select(index, predicates, columns, sample)
+        cost = (sum(c.bytes for c in chunks), 0 if lake in keyed else 1, len(chunks))
+        if best is None or cost < best[0]:
+            best = (cost, lake, index, chunks, how)
+    return best[1], best[2], best[3], best[4]
 
 
 @dataclass
 class Fetch:
     table: str
     lake: Dict
-    files: List[LakeFile]
+    index: "li.LakeIndex"
+    chunks: List[Chunk]
     columns: List[str]
     predicates: List[Tuple]
-    sample: Optional[float]
-
-    def chunks(self):
-        """Each candidate file's row groups, footers fetched concurrently, in file order."""
-        futures = [_pool().submit(_plan_file, self.lake["uri"], f, self.predicates, self.columns, self.sample)
-                   for f in self.files]
-        for fut in futures:
-            yield fut.result()
 
     def read(self, chunks: List[Chunk]) -> List[pa.Table]:
         slots = _reads_in_flight()
+        pieces = [Chunk(c.file, c.groups[i:i + ROW_GROUPS_PER_READ], 0)
+                  for c in chunks for i in range(0, len(c.groups), ROW_GROUPS_PER_READ)]
+        per_file: Dict[int, int] = {}
+        for p in pieces:
+            per_file[p.file] = per_file.get(p.file, 0) + 1
+        # a file read in several pieces: its footer is fetched and parsed once, alongside
+        # them (submitted first, outside the read slots, so a piece waiting on it cannot
+        # keep it from running); a file read in one piece fetches it with its chunks
+        metas = {f: _pool().submit(_footer_meta, self.index, f) for f, n in per_file.items() if n > 1}
 
         def read_one(piece: Chunk):
             with slots:
-                return _read_chunk(self.lake["uri"], piece, self.columns, self.predicates)
+                meta = metas[piece.file].result()[0] if piece.file in metas else None
+                return _read_chunk(self.index, piece, self.columns, self.predicates, meta)
 
-        pieces = [Chunk(c.file, c.groups[i:i + ROW_GROUPS_PER_READ], 0)
-                  for c in chunks for i in range(0, len(c.groups), ROW_GROUPS_PER_READ)]
         futures = [_pool().submit(read_one, piece) for piece in pieces]
         return [t for t in (fut.result() for fut in futures) if t is not None and t.num_rows]
 
 
-def _empty(log: LakeLog, columns: List[str]) -> pa.Table:
-    from deltalake import DeltaTable
-
-    schema = DeltaTable(log.uri).schema().to_arrow()
-    schema = schema if isinstance(schema, pa.Schema) else pa.schema(schema)
-    return pa.schema([schema.field(c) for c in columns]).empty_table()
+def _empty(index: "li.LakeIndex", columns: List[str]) -> pa.Table:
+    return pa.schema([index.schema.field(c) for c in columns if c in index.column_pos]).empty_table()
 
 
-def _concat(tables: List[pa.Table], log: LakeLog, columns: List[str]) -> pa.Table:
+def _concat(tables: List[pa.Table], index: "li.LakeIndex", columns: List[str]) -> pa.Table:
     if not tables:
-        return _empty(log, columns)
+        return _empty(index, columns)
     return pa.concat_tables(tables, promote_options="permissive")
 
 
@@ -758,12 +753,16 @@ def _normalize(table: pa.Table) -> pa.Table:
 
 def _run_plan(plan: Plan, lakes: Dict[str, List[Dict]], count: bool) -> Tuple[pa.Table, Dict]:
     budget = int(_config("QUERY_LAKE_MAX_BYTES", 512 * 1024 ** 2))
-    fetches = {}
+    t0 = time.perf_counter()
+    fetches, found = {}, {}
     for table in plan.tables:
-        lake, files = choose_lake(lakes[table], plan.predicates[table], sorted(plan.columns[table]))
-        fetches[table] = Fetch(table, lake, files, sorted(plan.columns[table]), plan.predicates[table],
-                               plan.samples.get(table))
-    facts = {"lakes": {t: f.lake["spec_name"] for t, f in fetches.items()}, "row_groups": 0, "bytes": 0}
+        cols = sorted(plan.columns[table])
+        lake, index, chunks, found[table] = choose_lake(lakes[table], plan.predicates[table], cols,
+                                                        plan.samples.get(table))
+        fetches[table] = Fetch(table, lake, index, chunks, cols, plan.predicates[table])
+    facts = {"lakes": {t: f.lake["spec_name"] for t, f in fetches.items()}, "index": found,
+             "plan_seconds": round(time.perf_counter() - t0, 4), "row_groups": 0, "bytes": 0,
+             "_used": {t: f.lake for t, f in fetches.items()}}
     con = _duckdb()
     try:
         if plan.streamable:
@@ -771,7 +770,7 @@ def _run_plan(plan: Plan, lakes: Dict[str, List[Dict]], count: bool) -> Tuple[pa
             return _run_streaming(con, plan, fetch, budget, facts), facts
         data = {}
         for table, fetch in fetches.items():
-            chunks = list(fetch.chunks())
+            chunks = fetch.chunks
             size = sum(c.bytes for c in chunks)
             facts["row_groups"] += sum(len(c.groups) for c in chunks)
             facts["bytes"] += size
@@ -780,7 +779,7 @@ def _run_plan(plan: Plan, lakes: Dict[str, List[Dict]], count: bool) -> Tuple[pa
                     f"the query would read {facts['bytes'] / 1e9:.1f} GB of {table}, more than the "
                     f"{budget / 1e9:.1f} GB a query may read: narrow it with a filter on an indexed "
                     f"column (a root id, the id or a bounding box)", 413)
-            data[table] = _concat(fetch.read(chunks), lake_log(fetch.lake["uri"]), fetch.columns)
+            data[table] = _concat(fetch.read(chunks), fetch.index, fetch.columns)
         for table, arrow in data.items():
             con.register(table, arrow)
         sql = f"SELECT count(*) AS count FROM ({plan.sql}) AS lake_count" if count else plan.sql
@@ -821,7 +820,6 @@ def _run_streaming(con, plan: Plan, fetch: Fetch, budget: int, facts: Dict) -> p
     want = plan.limit + plan.offset
     tree = sqlglot.parse_one(plan.sql, read="duckdb")
     tree.set("offset", None)
-    log = lake_log(fetch.lake["uri"])
     got: List[pa.Table] = []
     n = 0
     pending: List[Chunk] = []
@@ -834,7 +832,7 @@ def _run_streaming(con, plan: Plan, fetch: Fetch, budget: int, facts: Dict) -> p
         pending.clear()
         if not tables:
             return
-        con.register(fetch.table, _concat(tables, log, fetch.columns))
+        con.register(fetch.table, _concat(tables, fetch.index, fetch.columns))
         part = con.sql(tree.limit(want - n).sql(dialect="duckdb")).to_arrow_table()
         con.unregister(fetch.table)
         if part.num_rows:
@@ -842,7 +840,7 @@ def _run_streaming(con, plan: Plan, fetch: Fetch, budget: int, facts: Dict) -> p
             n += part.num_rows
 
     groups = 0
-    for chunk in fetch.chunks():
+    for chunk in fetch.chunks:
         if not chunk.groups:
             continue
         pending.append(chunk)
@@ -861,7 +859,7 @@ def _run_streaming(con, plan: Plan, fetch: Fetch, budget: int, facts: Dict) -> p
     if got:
         result = pa.concat_tables(got, promote_options="permissive")
     else:
-        con.register(fetch.table, _empty(log, fetch.columns))
+        con.register(fetch.table, _empty(fetch.index, fetch.columns))
         result = con.sql(tree.limit(0).sql(dialect="duckdb")).to_arrow_table()
     return _normalize(result.slice(plan.offset, plan.limit))
 
@@ -873,13 +871,32 @@ def answer(sql: str, datastack: str, version: int, count: bool = False) -> Tuple
         raise LakeQueryError(f"{datastack} v{version} has no lakes", 404)
 
     def columns(table):
+        # the catalog lists each lake's columns; an older row without them needs its index
         cols = set()
         for lake in lakes[table]:
-            cols |= set(lake_log(lake["uri"]).columns)
+            cols |= _lake_columns(lake) or set(li.get(lake)[0].columns)
         return cols
 
     plan = plan_query(sql, lakes, pcg, columns, count=count)
-    return _run_plan(plan, lakes, count)
+    table, facts = _run_plan(plan, lakes, count)
+    used = facts.pop("_used")
+    for name, lake in used.items():
+        _pool().submit(li.record_use, datastack, name, [lake])
+    return table, facts
+
+
+def prewarm(datastack: str, versions: List[int]) -> List[str]:
+    """Fill a new worker's lake planning indexes (see lake_index.prewarm) and load the
+    libraries a lake query uses, so its first lake request is not a cold one."""
+    import duckdb  # noqa: F401
+    import obstore  # noqa: F401
+    import pyarrow.parquet  # noqa: F401
+    import sqlglot
+
+    sqlglot.parse_one("SELECT t.a FROM t WHERE t.a IN (1, 2)", read="postgres").sql(dialect="duckdb")
+    _duckdb().close()
+    budget = float(_config("QUERY_LAKE_PREWARM_SECONDS", 10))
+    return li.prewarm(datastack, versions, lambda v: version_lakes(datastack, v)[0], budget)
 
 
 def tables_with_lakes(sql: str, datastack: str, version: int) -> bool:

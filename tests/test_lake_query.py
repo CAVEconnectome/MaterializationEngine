@@ -139,12 +139,68 @@ class TestStatistics:
         assert lq._row_mask(t, [("missing", "eq", 1)]) is None
 
 
+class FakeRedis:
+    """The few redis commands lake_index uses."""
+
+    def __init__(self):
+        self.kv, self.z = {}, {}
+
+    def set(self, key, value, nx=False, ex=None):
+        if nx and key in self.kv:
+            return None
+        self.kv[key] = value
+        return True
+
+    def get(self, key):
+        return self.kv.get(key)
+
+    def exists(self, key):
+        return int(key in self.kv)
+
+    def delete(self, key):
+        self.kv.pop(key, None)
+
+    def pipeline(self, transaction=False):
+        redis, ops = self, []
+
+        class P:
+            def zincrby(self, key, n, member):
+                ops.append(lambda: redis.z.setdefault(key, {}).__setitem__(member, redis.z.get(key, {}).get(member, 0) + n))
+
+            def expire(self, key, ttl):
+                ops.append(lambda: True)
+
+            def zrevrange(self, key, a, b, withscores=False):
+                ops.append(lambda: sorted(redis.z.get(key, {}).items(), key=lambda kv: -kv[1])[a:b + 1])
+
+            def execute(self):
+                return [op() for op in ops]
+
+        return P()
+
+
+@pytest.fixture
+def fake_redis(monkeypatch):
+    from materializationengine.blueprints.client import lake_index as li
+
+    r = FakeRedis()
+    monkeypatch.setattr(li, "_redis", lambda: r)
+    return r
+
+
+def _clear_caches():
+    from materializationengine.blueprints.client import lake_index as li
+
+    li.cache.clear()
+    lq._footers.clear()
+
+
 class TestChooseLake:
     """Copies of one table sorted by a and by b, both split into files that each span the
     whole range of the other column, so file statistics cannot tell the copies apart."""
 
     @pytest.fixture
-    def lakes(self, tmp_path):
+    def lakes(self, tmp_path, fake_redis):
         from deltalake import WriterProperties, write_deltalake
 
         n = 20000
@@ -162,26 +218,101 @@ class TestChooseLake:
                 write_deltalake(uri, part, mode="append",
                                 writer_properties=WriterProperties(max_row_group_size=500))
             out.append({"uri": uri, "spec_name": key, "partition_by": key})
-        lq._logs.items.clear()
-        lq._footers.items.clear()
+        _clear_caches()
         yield out
-        lq._logs.items.clear()
-        lq._footers.items.clear()
+        _clear_caches()
 
     def test_the_copy_sorted_by_the_filter_wins_when_files_tie(self, lakes):
         preds = [("b", "in", [5, 9000, 17000])]
-        lake, files = lq.choose_lake(lakes, preds, ["id", "a", "b"])
-        assert lake["spec_name"] == "b" and len(files) == 4
+        lake, index, chunks, how = lq.choose_lake(lakes, preds, ["id", "a", "b"])
+        assert lake["spec_name"] == "b" and len(index.paths) == 4 and how == "built"
+        assert 0 < sum(len(c.groups) for c in chunks) <= 4 * 3
         assert lq.choose_lake(lakes, [("a", "eq", 3)], ["id", "a", "b"])[0]["spec_name"] == "a"
+
+    def test_only_the_keyed_copy_is_loaded(self, lakes):
+        from materializationengine.blueprints.client import lake_index as li
+
+        lq.choose_lake(lakes, [("b", "eq", 7)], ["id", "b"])
+        assert li.cache.peek(lakes[1]["uri"]) is not None and li.cache.peek(lakes[0]["uri"]) is None
 
     def test_read_keeps_only_matching_rows(self, lakes):
         preds = [("b", "in", [5, 9000, 17000])]
-        lake, files = lq.choose_lake(lakes, preds, ["id", "b"])
-        fetch = lq.Fetch("t", lake, files, ["id", "b"], preds, None)
-        chunks = list(fetch.chunks())
-        assert 0 < sum(len(c.groups) for c in chunks) < 4 * 3 + 1
+        lake, index, chunks, _ = lq.choose_lake(lakes, preds, ["id", "b"])
+        fetch = lq.Fetch("t", lake, index, chunks, ["id", "b"], preds)
         got = pa.concat_tables(fetch.read(chunks))
         assert sorted(got.column("b").to_pylist()) == [5, 9000, 17000]
+        # read again, now from cached raw footers, in pieces of a file sharing one footer
+        lq._footers.clear()
+        many = [lq.Chunk(c.file, list(range(int(index.rg_first[c.file + 1] - index.rg_first[c.file]))), 0)
+                for c in chunks]
+        everything = pa.concat_tables(fetch.read(many))
+        assert sorted(everything.column("b").to_pylist()) == [5, 9000, 17000]
+        assert lq._footers.size > 0
+
+    def test_the_index_is_stored_next_to_the_lake_and_reloaded(self, lakes):
+        from materializationengine.blueprints.client import lake_index as li
+
+        lq.choose_lake(lakes, [("a", "eq", 3)], ["id", "a"])
+        li.cache.clear()
+        index, how = li.get(lakes[0])
+        assert how == "stored" and index.rg_stats.keys() >= {"a"}
+        again = li.LakeIndex.from_bytes(index.to_bytes())
+        assert again.paths == index.paths and (again.col_sizes == index.col_sizes).all()
+        assert again.schema.equals(index.schema)
+
+    def test_an_index_that_does_not_match_the_catalog_is_rebuilt(self, lakes):
+        from materializationengine.blueprints.client import lake_index as li
+
+        index, _ = li.get(lakes[0])
+        li.cache.clear()
+        stale = dict(lakes[0], files=len(index.paths) + 1)
+        assert li.get(stale)[1] == "built"
+
+    def test_a_footer_that_disagrees_with_the_index_is_refused(self, lakes):
+        lake, index, chunks, _ = lq.choose_lake(lakes, [("a", "eq", 3)], ["id", "a"])
+        index.rg_start[int(index.rg_first[chunks[0].file]) + chunks[0].groups[0]] += 1
+        with pytest.raises(lq.LakeQueryError, match="does not match"):
+            lq._read_chunk(index, chunks[0], ["id", "a"])
+
+    def test_another_workers_build_is_awaited(self, lakes, fake_redis, monkeypatch):
+        from materializationengine.blueprints.client import lake_index as li
+
+        fake_redis.set(f"cave:lakeidx:build:{lakes[0]['uri']}", "other")
+        monkeypatch.setattr(li, "build", lambda *a, **k: pytest.fail("built while another worker builds"))
+        assert li.cache.get(lakes[0], wait=False) == (None, "building elsewhere")
+        # the other worker finishes: its stored index is picked up
+        monkeypatch.undo()
+        monkeypatch.setattr(li, "_redis", lambda: fake_redis)
+        li.write(li.build(lakes[0]["uri"]))
+        monkeypatch.setattr(li, "build", lambda *a, **k: pytest.fail("built though it was stored"))
+        assert li.get(lakes[0])[1] == "stored"
+
+    def test_prewarm_loads_hot_tables_of_recent_versions(self, lakes, fake_redis):
+        from materializationengine.blueprints.client import lake_index as li
+
+        for _ in range(3):
+            li.record_use("ds", "syn", [lakes[1]])
+        li.record_use("ds", "syn", [lakes[0]])
+        catalog = {10: {"syn": lakes}}
+        targets = li.prewarm_targets("ds", [10], lambda v: catalog[v])
+        assert [t[0]["uri"] for t in targets][:2] == [lakes[1]["uri"], lakes[0]["uri"]]
+        assert all(may_build for _, may_build in targets)
+        done = li.prewarm("ds", [10], lambda v: catalog[v], budget_seconds=30)
+        assert len(done) == 2 and li.cache.peek(lakes[1]["uri"]) is not None
+
+
+class TestIndexOfPartitionedLake:
+    def test_hive_partition_column_is_not_a_file_column(self, tmp_path, fake_redis):
+        from deltalake import write_deltalake
+
+        from materializationengine.blueprints.client import lake_index as li
+
+        uri = str(tmp_path / "p")
+        write_deltalake(uri, pa.table({"x": pa.array(range(100), pa.int64()), "part": [i // 50 for i in range(100)]}),
+                        partition_by=["part"])
+        index = li.build(uri)
+        assert index.columns == ["x"] and len(index.paths) == 2
+        assert lq.select(index, [("x", "lt", 10)], ["x"])[0].groups == [0]
 
 
 DATASTACK, VERSION, TABLE = "test_aligned_volume", 1, "test_synapse_table"
@@ -224,7 +355,7 @@ def exported(test_app, tmp_path_factory, mat_metadata):
 
 
 @pytest.fixture
-def api(test_app, monkeypatch, mat_metadata):
+def api(test_app, monkeypatch, mat_metadata, fake_redis):
     import middle_auth_client.decorators as auth
     from materializationengine.blueprints.client import common, datastack
 
@@ -234,6 +365,7 @@ def api(test_app, monkeypatch, mat_metadata):
     monkeypatch.setattr(common, "get_relevant_datastack_info", info)
     monkeypatch.setattr(lq, "datastack_info", info)
     lq._lakes_cache.clear()
+    _clear_caches()
     return test_app.application.test_client()
 
 
@@ -312,10 +444,10 @@ class TestLakeEndpointParity:
         assert facts["lakes"][TABLE] in names
         if any(n.startswith("post_pt_root_id") for n in names):  # small tables keep only the id copy
             assert facts["lakes"][TABLE].startswith("post_pt_root_id")
-        n_groups = sum(lq._footer(lake["uri"], f).num_row_groups
-                       for lake in exported if lake["spec_name"] == facts["lakes"][TABLE]
-                       for f in lq.lake_log(lake["uri"]).files)
-        assert facts["row_groups"] < n_groups
+        from materializationengine.blueprints.client import lake_index as li
+
+        (lake,) = [lake for lake in exported if lake["spec_name"] == facts["lakes"][TABLE]]
+        assert facts["row_groups"] < li.get(lake)[0].n_row_groups
         assert set(table.column("post_pt_root_id").to_pylist()) == {root}
 
     def test_too_big_is_refused_not_sent_to_postgres(self, api, exported, monkeypatch):
