@@ -300,6 +300,8 @@ class TestChooseLake:
         li.record_use("ds", "syn", [lakes[1]], version=9)
         li.record_use("other", "syn", [lakes[1]], version=8)
         assert li.hot_versions("ds", 2) == [9]
+        assert li.prewarm_targets("other", [], lambda v: {}) == [({"uri": lakes[1]["uri"]}, False)]  # only its own lakes
+        assert li.prewarm_targets("third", [], lambda v: {}) == []
         done = li.prewarm("ds", [10], lambda v: catalog[v], budget_seconds=30)
         assert len(done) == 2 and li.cache.peek(lakes[1]["uri"]) is not None
 

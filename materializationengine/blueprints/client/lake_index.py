@@ -550,7 +550,7 @@ def record_use(datastack: str, table: str, lakes: List[Dict], version: Optional[
             p.zincrby(f"{_KEY}:versions:{day}", 1, json.dumps([datastack, int(version)]))
             p.expire(f"{_KEY}:versions:{day}", ttl)
         for lake in lakes:
-            p.zincrby(f"{_KEY}:lakes:{day}", 1, lake["uri"])
+            p.zincrby(f"{_KEY}:lakes:{day}", 1, json.dumps([datastack, lake["uri"]]))
             p.zincrby(f"{_KEY}:tables:{day}", 1, json.dumps([datastack, table, lake.get("partition_by")]))
         p.expire(f"{_KEY}:lakes:{day}", ttl)
         p.expire(f"{_KEY}:tables:{day}", ttl)
@@ -594,7 +594,7 @@ def prewarm_targets(datastack: str, versions: List[int], lakes_of) -> List[Tuple
     targets, seen = [], set()
     try:
         hot_tables = [json.loads(m) for m, _ in _top("tables", n_tables * 4)]
-        hot_lakes = [m for m, _ in _top("lakes", n_lakes)]
+        hot_lakes = [u for ds, u in (json.loads(m) for m, _ in _top("lakes", n_lakes * 4)) if ds == datastack][:n_lakes]
     except Exception as e:
         logger.warning("lake prewarm: no use tallies from redis (%s)", e)
         hot_tables, hot_lakes = [], []
