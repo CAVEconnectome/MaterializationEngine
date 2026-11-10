@@ -24,22 +24,23 @@ def _setting(app, name: str, default):
     return os.environ.get(name, default) if value is None else value
 
 
-def _recent_version_databases(aligned_volume: str, datastack: str, n: int) -> list:
-    """Database names of the datastack's n most recent valid versions. A virtual version (one
-    with a parent_version) reads its parent's database, as validate_datastack resolves it."""
+def _recent_version_databases(aligned_volume: str, datastack: str, n: int, versions=None) -> list:
+    """Database names of the datastack's n most recent valid versions (of `versions`, if given).
+    A virtual version (one with a parent_version) reads its parent's database, as
+    validate_datastack resolves it."""
     from dynamicannotationdb.models import AnalysisVersion
 
     from materializationengine.database import db_manager
 
     with db_manager.session_scope(aligned_volume) as session:
-        rows = (
+        q = (
             session.query(AnalysisVersion)
             .filter(AnalysisVersion.datastack == datastack)
             .filter(AnalysisVersion.valid == True)  # noqa: E712 - SQL expression
-            .order_by(AnalysisVersion.time_stamp.desc())
-            .limit(n)
-            .all()
         )
+        if versions is not None:
+            q = q.filter(AnalysisVersion.version.in_(list(versions)))
+        rows = q.order_by(AnalysisVersion.time_stamp.desc()).limit(n).all()
         names = []
         for v in rows:
             if v.parent_version is not None:
@@ -78,6 +79,20 @@ def prewarm_worker(app) -> None:
             except Exception as e:  # never keep a worker from starting
                 logger.warning(f"prewarm of {datastack} failed: {e}")
                 continue
+            lakes_on = as_bool(_setting(app, "QUERY_LAKE_PREWARM", True), default=True, name="QUERY_LAKE_PREWARM")
+            if lakes_on:
+                # the versions queried most (lake queries tally them in redis): their databases
+                # too, since a frozen query still opens its version's database and table metadata
+                try:
+                    from materializationengine.blueprints.client import lake_index
+
+                    n_hot = int(_setting(app, "QUERY_LAKE_PREWARM_VERSIONS", 2))
+                    hot = lake_index.hot_versions(datastack, n_hot)
+                    if hot:
+                        mat_dbs = list(dict.fromkeys(
+                            mat_dbs + _recent_version_databases(aligned_volume, datastack, n_hot, hot)))
+                except Exception as e:
+                    logger.warning(f"prewarm of {datastack}'s most queried versions failed: {e}")
             for mat_db in mat_dbs:
                 try:
                     db = dynamic_annotation_cache.get_db(mat_db)
@@ -86,7 +101,7 @@ def prewarm_worker(app) -> None:
                     warmed.append(mat_db)
                 except Exception as e:  # one missing database does not stop the others
                     logger.warning(f"prewarm of {mat_db} failed: {e}")
-            if as_bool(_setting(app, "QUERY_LAKE_PREWARM", True), default=True, name="QUERY_LAKE_PREWARM"):
+            if lakes_on:
                 warmed += _prewarm_lakes(datastack, mat_dbs)
     logger.info(f"prewarmed {warmed} in {time.perf_counter() - t0:.2f}s")
 

@@ -881,7 +881,7 @@ def answer(sql: str, datastack: str, version: int, count: bool = False) -> Tuple
     table, facts = _run_plan(plan, lakes, count)
     used = facts.pop("_used")
     for name, lake in used.items():
-        _pool().submit(li.record_use, datastack, name, [lake])
+        _pool().submit(li.record_use, datastack, name, [lake], version)
     return table, facts
 
 

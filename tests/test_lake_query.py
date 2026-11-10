@@ -297,6 +297,9 @@ class TestChooseLake:
         targets = li.prewarm_targets("ds", [10], lambda v: catalog[v])
         assert [t[0]["uri"] for t in targets][:2] == [lakes[1]["uri"], lakes[0]["uri"]]
         assert all(may_build for _, may_build in targets)
+        li.record_use("ds", "syn", [lakes[1]], version=9)
+        li.record_use("other", "syn", [lakes[1]], version=8)
+        assert li.hot_versions("ds", 2) == [9]
         done = li.prewarm("ds", [10], lambda v: catalog[v], budget_seconds=30)
         assert len(done) == 2 and li.cache.peek(lakes[1]["uri"]) is not None
 

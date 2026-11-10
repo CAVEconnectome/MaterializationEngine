@@ -525,11 +525,14 @@ def _day(offset: int = 0) -> str:
     return (datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=offset)).strftime("%Y%m%d")
 
 
-def record_use(datastack: str, table: str, lakes: List[Dict]) -> None:
-    """Tally the lakes a query read, for prewarming (best effort, never raises)."""
+def record_use(datastack: str, table: str, lakes: List[Dict], version: Optional[int] = None) -> None:
+    """Tally the lakes (and version) a query read, for prewarming (best effort, never raises)."""
     try:
         day, ttl = _day(), 86400 * (_TALLY_DAYS + 1)
         p = _redis().pipeline(transaction=False)
+        if version is not None:
+            p.zincrby(f"{_KEY}:versions:{day}", 1, json.dumps([datastack, int(version)]))
+            p.expire(f"{_KEY}:versions:{day}", ttl)
         for lake in lakes:
             p.zincrby(f"{_KEY}:lakes:{day}", 1, lake["uri"])
             p.zincrby(f"{_KEY}:tables:{day}", 1, json.dumps([datastack, table, lake.get("partition_by")]))
@@ -552,6 +555,16 @@ def _top(kind: str, n: int) -> List[Tuple[str, float]]:
             member = member.decode() if isinstance(member, bytes) else member
             totals[member] = totals.get(member, 0.0) + score
     return sorted(totals.items(), key=lambda kv: -kv[1])[:n]
+
+
+def hot_versions(datastack: str, n: int) -> List[int]:
+    """The datastack's n versions queried most from lakes over the last week."""
+    out = []
+    for member, _ in _top("versions", 4 * n):
+        ds, v = json.loads(member)
+        if ds == datastack:
+            out.append(int(v))
+    return out[:n]
 
 
 def prewarm_targets(datastack: str, versions: List[int], lakes_of) -> List[Tuple[Dict, bool]]:
