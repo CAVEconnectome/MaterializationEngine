@@ -222,6 +222,44 @@ class TestExpiry:
         assert second["failed"] == [] and len(second["deleted"]) == 1
         assert not any(os.path.exists(u) for u in uris[7])
 
+    def test_the_catalog_service_is_told_before_any_file_goes(self, aligned_volume, tmp_path):
+        from materializationengine import catalog_service
+        from materializationengine.workflows import deltalake_expiry as ex
+
+        name, engine, uris = self._setup(aligned_volume, tmp_path)
+        order = []
+
+        def deregister(ds, version, dry_run=False):
+            order.append(("deregister", version, dry_run))
+            return uris[version]
+
+        with mock.patch.object(catalog_service, "enabled", return_value=True), \
+                mock.patch.object(catalog_service, "deregister_version", side_effect=deregister), \
+                mock.patch.object(ex, "remove_lake_files", side_effect=lambda u: order.append(("rm", u)) or 1):
+            [dry] = ex.remove_expired_lakes(name, "ds", dry_run=True)
+            assert dry["catalog_assets"] == uris[7] and order == [("deregister", 7, True)]
+            order.clear()
+            [result] = ex.remove_expired_lakes(name, "ds")
+        assert order == [("deregister", 7, False)] + [("rm", u) for u in uris[7]]
+        assert result["catalog_assets"] == uris[7] and result["failed"] == []
+
+    def test_files_stay_if_the_catalog_service_fails(self, aligned_volume, tmp_path):
+        import os
+
+        from materializationengine import catalog_service
+        from materializationengine.workflows import deltalake_expiry as ex
+
+        name, engine, uris = self._setup(aligned_volume, tmp_path)
+        with mock.patch.object(catalog_service, "enabled", return_value=True), \
+                mock.patch.object(catalog_service, "deregister_version", side_effect=RuntimeError("503")):
+            [result] = ex.remove_expired_lakes(name, "ds")
+        assert "503" in result["error"] and result["deleted"] == []
+        assert all(os.path.exists(u) for u in uris[7])
+        assert {x["status"] for x in cat.list_exports(name, "ds", 7, statuses=None)} == {"complete"}
+
+        [retry] = ex.remove_expired_lakes(name, "ds")  # the service is back (here: not configured)
+        assert len(retry["deleted"]) == 2 and not any(os.path.exists(u) for u in uris[7])
+
     def test_refuses_a_uri_outside_the_version(self, aligned_volume, tmp_path):
         from materializationengine.workflows import deltalake_expiry as ex
 

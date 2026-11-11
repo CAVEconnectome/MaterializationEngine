@@ -1137,6 +1137,29 @@ class WriteDeltalakeVersionResource(Resource):
         return status, 200
 
 
+@mat_bp.route(
+    "/materialize/run/write_deltalake_version/datastack/<string:datastack_name>/version/<int(signed=True):version>/catalog/"
+)
+class RegisterDeltalakeVersionResource(Resource):
+    @auth_requires_dataset_admin(table_arg="datastack_name")
+    @mat_bp.doc("Register a version's complete Delta lakes with the catalog service", security="apikey")
+    def post(self, datastack_name: str, version: int):
+        """Register every complete lake of a version (``?table_name=`` for one table) with
+        the catalog service. Exports do this themselves; this backfills lakes exported
+        before CATALOG_SERVICE_URL was set, or whose registration failed."""
+        from materializationengine import catalog_service
+
+        if not catalog_service.enabled():
+            return abort(501, "CATALOG_SERVICE_URL is not set on this deployment")
+        if version == -1:
+            version = get_latest_version(datastack_name)
+        datastack_info = get_datastack_info(datastack_name)
+        result = catalog_service.register_version(
+            datastack_info["aligned_volume"]["name"], datastack_name, version,
+            table_name=request.args.get("table_name"))
+        return {"version": version, **result}, 200
+
+
 @mat_bp.route("/materialize/ray/job/<string:job_name>/")
 class RayJobResource(Resource):
     """Status of a RayJob.

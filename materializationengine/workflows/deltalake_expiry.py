@@ -10,8 +10,8 @@ the version is still served (a version kept past expiry by delete_threshold stay
 and so keeps its lakes). A version being built is not yet valid but has not expired
 either, so it is left alone.
 
-How: the version's rows are marked `deleting` first, so the catalog stops listing them
-as complete before any file disappears; then each lake's files are removed and its row
+How: the version's assets in the catalog service (catalog_service) are deleted and its
+rows marked `deleting` first, so neither catalog lists them before any file disappears; then each lake's files are removed and its row
 marked `deleted`. A lake whose removal fails stays `deleting`, and since `deleting`
 rows still count as present, the next run tries it again.
 
@@ -89,11 +89,30 @@ def remove_lake_files(uri: str) -> int:
 
 
 def remove_version_lakes(aligned_volume: str, datastack: str, version: int, dry_run: bool = False) -> Dict:
-    """Mark a version's lakes deleting, delete their files, and mark them deleted."""
+    """Deregister a version's lakes from the catalog service, mark them deleting, delete
+    their files, and mark them deleted.
+
+    The service's assets go first, like the `deleting` mark, so nothing lists a lake whose
+    files are going. If they can't be removed, the files are left for the next run.
+    """
+    from materializationengine import catalog_service
+
     if dry_run:
         rows = cat.list_exports(aligned_volume, datastack, version,
                                 statuses=[s for s in cat.STATUSES if s != "deleted"])
-        return {"version": version, "dry_run": True, "lakes": [r["uri"] for r in rows]}
+        out = {"version": version, "dry_run": True, "lakes": [r["uri"] for r in rows]}
+        if catalog_service.enabled():
+            out["catalog_assets"] = catalog_service.deregister_version(datastack, version, dry_run=True)
+        return out
+    deregistered = []
+    if catalog_service.enabled():
+        try:
+            deregistered = catalog_service.deregister_version(datastack, version)
+        except Exception as e:
+            logger.exception("%s v%d: could not deregister lakes from the catalog service; "
+                             "keeping their files until the next run", datastack, version)
+            return {"version": version, "deleted": [], "failed": [], "objects": 0,
+                    "error": f"catalog service: {type(e).__name__}: {e}"}
     removed, failed, objects = [], [], 0
     for row in cat.mark_deleting(aligned_volume, datastack, version):
         try:
@@ -108,7 +127,8 @@ def remove_version_lakes(aligned_volume: str, datastack: str, version: int, dry_
             failed.append(row["uri"])
     logger.info("%s v%d: deleted %d lake(s) (%d objects), %d failed", datastack, version, len(removed),
                 objects, len(failed))
-    return {"version": version, "deleted": removed, "failed": failed, "objects": objects}
+    return {"version": version, "deleted": removed, "failed": failed, "objects": objects,
+            "catalog_assets": deregistered}
 
 
 def remove_expired_lakes(aligned_volume: str, datastack: str, dry_run: bool = False) -> List[Dict]:

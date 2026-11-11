@@ -66,6 +66,9 @@ class BaseConfig:
     AUTH_URI = f"{GLOBAL_SERVER_URL}/auth"
     SCHEMA_SERVICE_ENDPOINT = f"{GLOBAL_SERVER_URL}/schema/"
     SEGMENTATION_ENDPOINT = f"{GLOBAL_SERVER_URL}/segmentation"
+    # The CAVE catalog service (e.g. https://<local server>/catalog) that exported Delta
+    # lakes are registered with; unset, they are not registered.
+    CATALOG_SERVICE_URL = os.environ.get("CATALOG_SERVICE_URL", "")
     MASTER_NAME = os.environ.get("MASTER_NAME", None)
     MATERIALIZATION_ROW_CHUNK_SIZE = 500
     QUERY_LIMIT_SIZE = 200000

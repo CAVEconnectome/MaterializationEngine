@@ -2991,6 +2991,17 @@ def run_deltalake_export(
                 celery_logger.warning("%s (v%d): no planning index for %s", table_name, version,
                                       lake["uri"], exc_info=True)
 
+        # the catalog service, once the lakes are complete and indexed (best effort, like
+        # the internal catalog: register_version backfills a lake whose registration failed)
+        from materializationengine import catalog_service
+
+        if catalog_service.enabled():
+            result = deltalake_catalog.safely(
+                catalog_service.register_version, aligned_volume, datastack, version, table_name)
+            if result is not None:
+                _log(f"Catalog service: registered {len(result['registered'])} lake(s)"
+                     + (f", failed {result['failed']}" if result["failed"] else ""))
+
     _log("Export complete.")
     _set_status(
         status="complete",
