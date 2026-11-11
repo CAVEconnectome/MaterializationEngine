@@ -96,6 +96,11 @@ profile = [
     "scalene",
     "pyinstrument",
 ]
+# Building views from the Delta lakes with Daft on Ray (the view pilot). Not in the image
+# unless built with --group views-pilot.
+views-pilot = [
+    "daft[ray,deltalake]==0.7.26",
+]
 
 [tool.uv]
 default-groups = ["dev", "docs", "lint", "profile"]

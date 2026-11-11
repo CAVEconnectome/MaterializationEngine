@@ -1,0 +1,979 @@
+{
+  "database": "minnie65_phase3_v1__mat1966",
+  "views": [
+    {
+      "name": "aibs_broad_types_merged",
+      "kind": "view",
+      "definition": " WITH baylor AS (\n         SELECT subquery.id,\n            subquery.created,\n            subquery.deleted,\n            subquery.superceded_id,\n            subquery.valid,\n            subquery.target_id,\n            subquery.classification_system,\n            subquery.cell_type,\n            subquery.row_num\n           FROM ( SELECT baylor_log_reg_cell_type_coarse_v1.id,\n                    baylor_log_reg_cell_type_coarse_v1.created,\n                    baylor_log_reg_cell_type_coarse_v1.deleted,\n                    baylor_log_reg_cell_type_coarse_v1.superceded_id,\n                    baylor_log_reg_cell_type_coarse_v1.valid,\n                    baylor_log_reg_cell_type_coarse_v1.target_id,\n                    baylor_log_reg_cell_type_coarse_v1.classification_system,\n                    baylor_log_reg_cell_type_coarse_v1.cell_type,\n                    row_number() OVER (PARTITION BY baylor_log_reg_cell_type_coarse_v1.target_id ORDER BY baylor_log_reg_cell_type_coarse_v1.cell_type) AS row_num\n                   FROM baylor_log_reg_cell_type_coarse_v1) subquery\n          WHERE subquery.row_num = 1\n        )\n SELECT COALESCE(ct.target_id, multifeature.target_id, baylor.target_id) AS target_id,\n        CASE\n            WHEN ct.classification_system_source <> 'aibs_metamodel_celltypes_v661'::text AND ct.classification_system IS NOT NULL THEN replace(ct.classification_system, '_neuron'::text, ''::text)\n            WHEN multifeature.classification_system IS NOT NULL THEN multifeature.classification_system::text\n            WHEN baylor.cell_type IS NOT NULL THEN replace(baylor.cell_type::text, '_neuron'::text, ''::text)\n            ELSE replace(ct.classification_system, '_neuron'::text, ''::text)\n        END AS broad_type,\n        CASE\n            WHEN ct.classification_system_source <> 'aibs_metamodel_celltypes_v661'::text AND ct.classification_system IS NOT NULL THEN ct.classification_system_source\n            WHEN multifeature.classification_system IS NOT NULL THEN 'cell_type_multifeature_combo'::text\n            WHEN baylor.cell_type IS NOT NULL THEN 'baylor_log_reg_cell_type_coarse_v1'::text\n            ELSE ct.classification_system_source\n        END AS broad_type_source\n   FROM aibs_cell_types_merged ct\n     FULL JOIN baylor ON ct.target_id = baylor.target_id\n     FULL JOIN cell_type_multifeature_combo multifeature ON COALESCE(ct.target_id, baylor.target_id) = multifeature.target_id;",
+      "reads": [
+        "aibs_cell_types_merged",
+        "baylor_log_reg_cell_type_coarse_v1",
+        "cell_type_multifeature_combo"
+      ],
+      "columns": [
+        {
+          "name": "target_id",
+          "type": "bigint"
+        },
+        {
+          "name": "broad_type",
+          "type": "text"
+        },
+        {
+          "name": "broad_type_source",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "name": "aibs_cell_info",
+      "kind": "view",
+      "definition": " SELECT DISTINCT nucs.id,\n    nucs.pt_root_id,\n    nucs.pt_supervoxel_id,\n    nucs.pt_position,\n    nucs.volume AS nuc_volume,\n    broad.broad_type,\n    broad.broad_type_source,\n    cell.cell_type,\n    cell.cell_type_source,\n    mtypes.mtype,\n    mtypes.mtype_source,\n    COALESCE(proof.dendrite_cleaned, false) AS dendrite_cleaned,\n    COALESCE(proof.axon_cleaned, false) AS axon_cleaned,\n    proof.dendrite_strategy,\n    proof.axon_strategy,\n    func_area.tag AS visual_area,\n    multifeature.cell_type AS meso_type\n   FROM nucleus_detection_lookup_v1 nucs\n     LEFT JOIN aibs_broad_types_merged broad ON nucs.id = broad.target_id\n     LEFT JOIN aibs_cell_types_merged cell ON nucs.id = cell.target_id\n     LEFT JOIN aibs_mtypes_merged mtypes ON nucs.id = mtypes.target_id\n     LEFT JOIN bdp_proofreading_status_and_strategy proof ON nucs.pt_root_id = proof.pt_root_id\n     LEFT JOIN nucleus_functional_area_assignment func_area ON nucs.id = func_area.target_id\n     LEFT JOIN cell_type_multifeature_combo multifeature ON nucs.id = multifeature.target_id;",
+      "reads": [
+        "aibs_broad_types_merged",
+        "aibs_cell_types_merged",
+        "aibs_mtypes_merged",
+        "bdp_proofreading_status_and_strategy",
+        "cell_type_multifeature_combo",
+        "nucleus_detection_lookup_v1",
+        "nucleus_functional_area_assignment"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint"
+        },
+        {
+          "name": "pt_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "pt_supervoxel_id",
+          "type": "bigint"
+        },
+        {
+          "name": "pt_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "nuc_volume",
+          "type": "double precision"
+        },
+        {
+          "name": "broad_type",
+          "type": "text"
+        },
+        {
+          "name": "broad_type_source",
+          "type": "text"
+        },
+        {
+          "name": "cell_type",
+          "type": "character varying"
+        },
+        {
+          "name": "cell_type_source",
+          "type": "text"
+        },
+        {
+          "name": "mtype",
+          "type": "character varying"
+        },
+        {
+          "name": "mtype_source",
+          "type": "text"
+        },
+        {
+          "name": "dendrite_cleaned",
+          "type": "boolean"
+        },
+        {
+          "name": "axon_cleaned",
+          "type": "boolean"
+        },
+        {
+          "name": "dendrite_strategy",
+          "type": "text"
+        },
+        {
+          "name": "axon_strategy",
+          "type": "text"
+        },
+        {
+          "name": "visual_area",
+          "type": "character varying"
+        },
+        {
+          "name": "meso_type",
+          "type": "character varying"
+        }
+      ]
+    },
+    {
+      "name": "aibs_cell_info_pos",
+      "kind": "view",
+      "definition": " SELECT id,\n    pt_root_id,\n    pt_supervoxel_id,\n    st_x(pt_position) AS pt_position_x,\n    st_y(pt_position) AS pt_position_y,\n    st_z(pt_position) AS pt_position_z,\n    nuc_volume,\n    broad_type,\n    broad_type_source,\n    cell_type,\n    cell_type_source,\n    mtype,\n    mtype_source,\n    dendrite_cleaned,\n    axon_cleaned,\n    dendrite_strategy,\n    axon_strategy,\n    visual_area\n   FROM aibs_cell_info info;",
+      "reads": [
+        "aibs_cell_info"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint"
+        },
+        {
+          "name": "pt_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "pt_supervoxel_id",
+          "type": "bigint"
+        },
+        {
+          "name": "pt_position_x",
+          "type": "double precision"
+        },
+        {
+          "name": "pt_position_y",
+          "type": "double precision"
+        },
+        {
+          "name": "pt_position_z",
+          "type": "double precision"
+        },
+        {
+          "name": "nuc_volume",
+          "type": "double precision"
+        },
+        {
+          "name": "broad_type",
+          "type": "text"
+        },
+        {
+          "name": "broad_type_source",
+          "type": "text"
+        },
+        {
+          "name": "cell_type",
+          "type": "character varying"
+        },
+        {
+          "name": "cell_type_source",
+          "type": "text"
+        },
+        {
+          "name": "mtype",
+          "type": "character varying"
+        },
+        {
+          "name": "mtype_source",
+          "type": "text"
+        },
+        {
+          "name": "dendrite_cleaned",
+          "type": "boolean"
+        },
+        {
+          "name": "axon_cleaned",
+          "type": "boolean"
+        },
+        {
+          "name": "dendrite_strategy",
+          "type": "text"
+        },
+        {
+          "name": "axon_strategy",
+          "type": "text"
+        },
+        {
+          "name": "visual_area",
+          "type": "character varying"
+        }
+      ]
+    },
+    {
+      "name": "aibs_cell_types_merged",
+      "kind": "view",
+      "definition": " SELECT COALESCE(corrections.target_id, multifeature.target_id, base.target_id) AS target_id,\n    COALESCE(corrections.classification_system, multifeature.classification_system::text, base.classification_system::text) AS classification_system,\n    COALESCE(corrections.cell_type, base.cell_type) AS cell_type,\n    COALESCE(corrections.classification_system_source,\n        CASE\n            WHEN multifeature.classification_system IS NOT NULL THEN 'cell_type_multifeature_combo'::text\n            ELSE NULL::text\n        END, 'aibs_metamodel_celltypes_v661'::text) AS classification_system_source,\n    COALESCE(corrections.cell_type_source, 'aibs_metamodel_celltypes_v661'::text) AS cell_type_source\n   FROM aibs_metamodel_celltypes_v661 base\n     FULL JOIN aibs_manual_cell_types corrections ON base.target_id = corrections.target_id\n     FULL JOIN cell_type_multifeature_combo multifeature ON COALESCE(corrections.target_id, base.target_id) = multifeature.target_id;",
+      "reads": [
+        "aibs_manual_cell_types",
+        "aibs_metamodel_celltypes_v661",
+        "cell_type_multifeature_combo"
+      ],
+      "columns": [
+        {
+          "name": "target_id",
+          "type": "bigint"
+        },
+        {
+          "name": "classification_system",
+          "type": "text"
+        },
+        {
+          "name": "cell_type",
+          "type": "character varying"
+        },
+        {
+          "name": "classification_system_source",
+          "type": "text"
+        },
+        {
+          "name": "cell_type_source",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "name": "aibs_manual_cell_types",
+      "kind": "view",
+      "definition": " WITH processed_corrections AS (\n         SELECT corrections_1.target_id,\n                CASE\n                    WHEN lower(corrections_1.classification_system::text) = 'excitatory_neuron'::text THEN 'excitatory'::text\n                    WHEN lower(corrections_1.classification_system::text) = 'inhibitory_neuron'::text THEN 'inhibitory'::text\n                    WHEN lower(corrections_1.classification_system::text) = 'nonneuron'::text THEN 'nonneuron'::text\n                    ELSE NULL::text\n                END AS classification_system,\n                CASE\n                    WHEN lower(corrections_1.cell_type::text) ~~ '%unsure%'::text THEN NULL::character varying\n                    WHEN corrections_1.cell_type::text = '5P-PT'::text THEN '5P-ET'::character varying\n                    ELSE corrections_1.cell_type\n                END AS cell_type\n           FROM aibs_metamodel_celltypes_v661_corrections corrections_1\n        ), processed_corrections2 AS (\n         SELECT corrections2_1.target_id,\n                CASE\n                    WHEN lower(corrections2_1.classification_system::text) = 'excitatory_neuron'::text THEN 'excitatory'::text\n                    WHEN lower(corrections2_1.classification_system::text) = 'inhibitory_neuron'::text THEN 'inhibitory'::text\n                    WHEN lower(corrections2_1.classification_system::text) = 'nonneuron'::text THEN 'nonneuron'::text\n                    ELSE NULL::text\n                END AS classification_system\n           FROM aibs_metamodel_mtypes_v661_v2_corrections corrections2_1\n        ), processed_slanted AS (\n         SELECT slanted_1.target_id,\n                CASE\n                    WHEN lower(slanted_1.classification_system::text) = 'aibs_coarse_excitatory'::text THEN 'excitatory'::text\n                    WHEN lower(slanted_1.classification_system::text) = 'aibs_coarse_inhibitory'::text THEN 'inhibitory'::text\n                    WHEN lower(slanted_1.classification_system::text) = 'aibs_coarse_nonneuronal'::text THEN 'nonneuron'::text\n                    ELSE NULL::text\n                END AS classification_system,\n                CASE\n                    WHEN lower(slanted_1.cell_type::text) ~~ '%unsure%'::text THEN NULL::character varying\n                    WHEN slanted_1.cell_type::text = '5P-PT'::text THEN '5P-ET'::character varying\n                    ELSE slanted_1.cell_type\n                END AS cell_type\n           FROM allen_v1_column_types_slanted_ref slanted_1\n        ), processed_nonneuron AS (\n         SELECT nonneuron_1.target_id,\n                CASE\n                    WHEN lower(nonneuron_1.classification_system::text) = 'aibs_coarse_excitatory'::text THEN 'excitatory'::text\n                    WHEN lower(nonneuron_1.classification_system::text) = 'aibs_coarse_inhibitory'::text THEN 'inhibitory'::text\n                    WHEN lower(nonneuron_1.classification_system::text) = 'aibs_coarse_nonneuronal'::text THEN 'nonneuron'::text\n                    ELSE NULL::text\n                END AS classification_system,\n                CASE\n                    WHEN lower(nonneuron_1.cell_type::text) ~~ '%unsure%'::text THEN NULL::character varying\n                    WHEN nonneuron_1.cell_type::text = '5P-PT'::text THEN '5P-ET'::character varying\n                    ELSE nonneuron_1.cell_type\n                END AS cell_type\n           FROM aibs_column_nonneuronal_ref nonneuron_1\n        )\n SELECT COALESCE(corrections2.target_id, corrections.target_id, slanted.target_id, nonneuron.target_id) AS target_id,\n    COALESCE(corrections2.classification_system, corrections.classification_system, slanted.classification_system, nonneuron.classification_system) AS classification_system,\n    COALESCE(corrections.cell_type, slanted.cell_type, nonneuron.cell_type) AS cell_type,\n        CASE\n            WHEN corrections2.classification_system IS NOT NULL THEN 'aibs_metamodel_mtypes_v661_v2_corrections'::text\n            WHEN corrections.classification_system IS NOT NULL THEN 'aibs_metamodel_celltypes_v661_corrections'::text\n            WHEN slanted.classification_system IS NOT NULL THEN 'allen_v1_column_types_slanted_ref'::text\n            WHEN nonneuron.classification_system IS NOT NULL THEN 'aibs_column_nonneuronal_ref'::text\n            ELSE NULL::text\n        END AS classification_system_source,\n        CASE\n            WHEN corrections.cell_type IS NOT NULL THEN 'aibs_metamodel_celltypes_v661_corrections'::text\n            WHEN slanted.cell_type IS NOT NULL THEN 'allen_v1_column_types_slanted_ref'::text\n            WHEN nonneuron.cell_type IS NOT NULL THEN 'aibs_column_nonneuronal_ref'::text\n            ELSE NULL::text\n        END AS cell_type_source\n   FROM processed_corrections corrections\n     FULL JOIN processed_slanted slanted ON corrections.target_id = slanted.target_id\n     FULL JOIN processed_nonneuron nonneuron ON COALESCE(corrections.target_id, slanted.target_id) = nonneuron.target_id\n     FULL JOIN processed_corrections2 corrections2 ON COALESCE(corrections.target_id, slanted.target_id, nonneuron.target_id) = corrections2.target_id\n  WHERE COALESCE(corrections.cell_type, slanted.cell_type, nonneuron.cell_type) IS NOT NULL OR COALESCE(corrections2.classification_system, corrections.classification_system, slanted.classification_system, nonneuron.classification_system) IS NOT NULL;",
+      "reads": [
+        "aibs_column_nonneuronal_ref",
+        "aibs_metamodel_celltypes_v661_corrections",
+        "aibs_metamodel_mtypes_v661_v2_corrections",
+        "allen_v1_column_types_slanted_ref"
+      ],
+      "columns": [
+        {
+          "name": "target_id",
+          "type": "bigint"
+        },
+        {
+          "name": "classification_system",
+          "type": "text"
+        },
+        {
+          "name": "cell_type",
+          "type": "character varying"
+        },
+        {
+          "name": "classification_system_source",
+          "type": "text"
+        },
+        {
+          "name": "cell_type_source",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "name": "aibs_metamodel_celltypes_v661_mv",
+      "kind": "materialized view",
+      "definition": " SELECT 'cell_type'::text AS column_name,\n    distinct_col1.col_value\n   FROM ( SELECT DISTINCT aibs_metamodel_celltypes_v661.cell_type AS col_value\n           FROM aibs_metamodel_celltypes_v661\n          WHERE aibs_metamodel_celltypes_v661.cell_type IS NOT NULL) distinct_col1\nUNION ALL\n SELECT 'classification_system'::text AS column_name,\n    distinct_col2.col_value\n   FROM ( SELECT DISTINCT aibs_metamodel_celltypes_v661.classification_system AS col_value\n           FROM aibs_metamodel_celltypes_v661\n          WHERE aibs_metamodel_celltypes_v661.classification_system IS NOT NULL) distinct_col2;",
+      "reads": [
+        "aibs_metamodel_celltypes_v661"
+      ],
+      "columns": [
+        {
+          "name": "column_name",
+          "type": "text"
+        },
+        {
+          "name": "col_value",
+          "type": "character varying"
+        }
+      ]
+    },
+    {
+      "name": "aibs_mtypes_merged",
+      "kind": "view",
+      "definition": " SELECT COALESCE(corrections.target_id, metamodel.target_id, col.target_id) AS target_id,\n    COALESCE(corrections.cell_type, col.cell_type, metamodel.cell_type) AS mtype,\n        CASE\n            WHEN corrections.cell_type IS NOT NULL THEN 'aibs_metamodel_mtypes_v661_v2_corrections'::text\n            WHEN col.cell_type IS NOT NULL THEN 'allen_column_mtypes_v2'::text\n            ELSE 'aibs_metamodel_mtypes_v661_v2'::text\n        END AS mtype_source\n   FROM aibs_metamodel_mtypes_v661_v2 metamodel\n     FULL JOIN allen_column_mtypes_v2 col ON metamodel.target_id = col.target_id\n     FULL JOIN aibs_metamodel_mtypes_v661_v2_corrections corrections ON COALESCE(metamodel.target_id, col.target_id) = corrections.target_id;",
+      "reads": [
+        "aibs_metamodel_mtypes_v661_v2",
+        "aibs_metamodel_mtypes_v661_v2_corrections",
+        "allen_column_mtypes_v2"
+      ],
+      "columns": [
+        {
+          "name": "target_id",
+          "type": "bigint"
+        },
+        {
+          "name": "mtype",
+          "type": "character varying"
+        },
+        {
+          "name": "mtype_source",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "name": "bdp_proofreading_status_and_strategy",
+      "kind": "view",
+      "definition": " SELECT minnie3.pt_root_id,\n    minnie3.pt_supervoxel_id,\n    COALESCE(ps.status_dendrite, false) AS dendrite_cleaned,\n    COALESCE(ps.status_axon, false) AS axon_cleaned,\n    regexp_replace(ps.strategy_dendrite::text, '^dendrite_'::text, ''::text) AS dendrite_strategy,\n    regexp_replace(ps.strategy_axon::text, '^axon_'::text, ''::text) AS axon_strategy\n   FROM proofreading_status_and_strategy__minnie3_v1 minnie3\n     JOIN proofreading_status_and_strategy ps ON minnie3.id = ps.id;",
+      "reads": [
+        "proofreading_status_and_strategy",
+        "proofreading_status_and_strategy__minnie3_v1"
+      ],
+      "columns": [
+        {
+          "name": "pt_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "pt_supervoxel_id",
+          "type": "bigint"
+        },
+        {
+          "name": "dendrite_cleaned",
+          "type": "boolean"
+        },
+        {
+          "name": "axon_cleaned",
+          "type": "boolean"
+        },
+        {
+          "name": "dendrite_strategy",
+          "type": "text"
+        },
+        {
+          "name": "axon_strategy",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "name": "connections_with_nuclei",
+      "kind": "view",
+      "definition": " WITH synapse_grouped AS (\n         SELECT synapses_pni_2__minnie3_v1_merge.pre_pt_root_id,\n            synapses_pni_2__minnie3_v1_merge.post_pt_root_id,\n            count(*) AS n_syn,\n            sum(synapses_pni_2__minnie3_v1_merge.size) AS sum_size\n           FROM synapses_pni_2__minnie3_v1_merge\n          WHERE synapses_pni_2__minnie3_v1_merge.pre_pt_root_id <> synapses_pni_2__minnie3_v1_merge.post_pt_root_id\n          GROUP BY synapses_pni_2__minnie3_v1_merge.pre_pt_root_id, synapses_pni_2__minnie3_v1_merge.post_pt_root_id\n        )\n SELECT sg.pre_pt_root_id,\n    sg.post_pt_root_id,\n    sg.n_syn,\n    sg.sum_size,\n    COALESCE(pre_nuclei.id, '-1'::integer::bigint) AS pre_nuc_id,\n    COALESCE(post_nuclei.id, '-1'::integer::bigint) AS post_nuc_id\n   FROM synapse_grouped sg\n     LEFT JOIN single_neurons pre_nuclei ON sg.pre_pt_root_id = pre_nuclei.pt_root_id\n     LEFT JOIN single_neurons post_nuclei ON sg.post_pt_root_id = post_nuclei.pt_root_id;",
+      "reads": [
+        "single_neurons",
+        "synapses_pni_2__minnie3_v1_merge"
+      ],
+      "columns": [
+        {
+          "name": "pre_pt_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "post_pt_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "n_syn",
+          "type": "bigint"
+        },
+        {
+          "name": "sum_size",
+          "type": "double precision"
+        },
+        {
+          "name": "pre_nuc_id",
+          "type": "bigint"
+        },
+        {
+          "name": "post_nuc_id",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "name": "nucleus_alternative_points__minnie3_v1_merge",
+      "kind": "view",
+      "definition": " SELECT nucleus_alternative_points.id,\n    nucleus_alternative_points.created,\n    nucleus_alternative_points.deleted,\n    nucleus_alternative_points.superceded_id,\n    nucleus_alternative_points.valid,\n    nucleus_alternative_points.target_id,\n    nucleus_alternative_points.pt_position,\n    nucleus_alternative_points__minnie3_v1.pt_supervoxel_id,\n    nucleus_alternative_points__minnie3_v1.pt_root_id\n   FROM nucleus_alternative_points\n     JOIN nucleus_alternative_points__minnie3_v1 USING (id);",
+      "reads": [
+        "nucleus_alternative_points",
+        "nucleus_alternative_points__minnie3_v1"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint"
+        },
+        {
+          "name": "created",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "deleted",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "superceded_id",
+          "type": "bigint"
+        },
+        {
+          "name": "valid",
+          "type": "boolean"
+        },
+        {
+          "name": "target_id",
+          "type": "bigint"
+        },
+        {
+          "name": "pt_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "pt_supervoxel_id",
+          "type": "bigint"
+        },
+        {
+          "name": "pt_root_id",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "name": "nucleus_detection_lookup_v1",
+      "kind": "view",
+      "definition": " SELECT nucleus_detection_v0__minnie3_v1_merge.id,\n    nucleus_detection_v0__minnie3_v1_merge.volume,\n    nucleus_detection_v0__minnie3_v1_merge.pt_position,\n    COALESCE(nucleus_alternative_points__minnie3_v1_merge.pt_root_id, nucleus_detection_v0__minnie3_v1_merge.pt_root_id) AS pt_root_id,\n    nucleus_detection_v0__minnie3_v1_merge.pt_root_id AS orig_root_id,\n    COALESCE(nucleus_alternative_points__minnie3_v1_merge.pt_supervoxel_id, nucleus_detection_v0__minnie3_v1_merge.pt_supervoxel_id) AS pt_supervoxel_id,\n    COALESCE(nucleus_alternative_points__minnie3_v1_merge.pt_position, nucleus_detection_v0__minnie3_v1_merge.pt_position) AS pt_position_lookup\n   FROM nucleus_detection_v0__minnie3_v1_merge\n     LEFT JOIN nucleus_alternative_points__minnie3_v1_merge ON nucleus_alternative_points__minnie3_v1_merge.target_id = nucleus_detection_v0__minnie3_v1_merge.id;",
+      "reads": [
+        "nucleus_alternative_points__minnie3_v1_merge",
+        "nucleus_detection_v0__minnie3_v1_merge"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint"
+        },
+        {
+          "name": "volume",
+          "type": "double precision"
+        },
+        {
+          "name": "pt_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "pt_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "orig_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "pt_supervoxel_id",
+          "type": "bigint"
+        },
+        {
+          "name": "pt_position_lookup",
+          "type": "geometry(PointZ)"
+        }
+      ]
+    },
+    {
+      "name": "nucleus_detection_v0__minnie3_v1_merge",
+      "kind": "view",
+      "definition": " SELECT nucleus_detection_v0.id,\n    nucleus_detection_v0.created,\n    nucleus_detection_v0.deleted,\n    nucleus_detection_v0.superceded_id,\n    nucleus_detection_v0.valid,\n    nucleus_detection_v0.pt_position,\n    nucleus_detection_v0.volume,\n    nucleus_detection_v0.bb_start_position,\n    nucleus_detection_v0.bb_end_position,\n    nucleus_detection_v0__minnie3_v1.pt_supervoxel_id,\n    nucleus_detection_v0__minnie3_v1.pt_root_id\n   FROM nucleus_detection_v0\n     JOIN nucleus_detection_v0__minnie3_v1 USING (id);",
+      "reads": [
+        "nucleus_detection_v0",
+        "nucleus_detection_v0__minnie3_v1"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint"
+        },
+        {
+          "name": "created",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "deleted",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "superceded_id",
+          "type": "bigint"
+        },
+        {
+          "name": "valid",
+          "type": "boolean"
+        },
+        {
+          "name": "pt_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "volume",
+          "type": "double precision"
+        },
+        {
+          "name": "bb_start_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "bb_end_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "pt_supervoxel_id",
+          "type": "bigint"
+        },
+        {
+          "name": "pt_root_id",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "name": "single_neurons",
+      "kind": "view",
+      "definition": " WITH merged AS (\n         SELECT n.id,\n            n.pt_position,\n            n.pt_root_id,\n            n.pt_supervoxel_id,\n            r.cell_type\n           FROM nucleus_detection_lookup_v1 n\n             LEFT JOIN nucleus_ref_neuron_svm r ON n.id = r.target_id\n        ), valid_pt_root_ids AS (\n         WITH merged AS (\n                 SELECT n.id,\n                    n.pt_position,\n                    n.pt_root_id,\n                    n.pt_supervoxel_id,\n                    r.cell_type\n                   FROM nucleus_detection_lookup_v1 n\n                     LEFT JOIN nucleus_ref_neuron_svm r ON n.id = r.target_id\n                ), grouped_counts AS (\n                 SELECT merged.pt_root_id,\n                    count(*) FILTER (WHERE merged.cell_type::text = 'neuron'::text) AS neuron_count\n                   FROM merged\n                  GROUP BY merged.pt_root_id\n                 HAVING count(*) FILTER (WHERE merged.cell_type::text = 'neuron'::text) = 1\n                )\n         SELECT grouped_counts.pt_root_id\n           FROM grouped_counts\n        )\n SELECT id,\n    pt_root_id,\n    pt_position,\n    pt_supervoxel_id\n   FROM merged m\n  WHERE cell_type::text = 'neuron'::text AND (pt_root_id IN ( SELECT valid_pt_root_ids.pt_root_id\n           FROM valid_pt_root_ids));",
+      "reads": [
+        "nucleus_detection_lookup_v1",
+        "nucleus_ref_neuron_svm"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint"
+        },
+        {
+          "name": "pt_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "pt_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "pt_supervoxel_id",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "name": "soma_counts",
+      "kind": "view",
+      "definition": " WITH merged AS (\n         SELECT n.id,\n            n.volume,\n            n.pt_position,\n            n.pt_root_id,\n            n.orig_root_id,\n            n.pt_supervoxel_id,\n            n.pt_position_lookup,\n            r.cell_type\n           FROM nucleus_detection_lookup_v1 n\n             LEFT JOIN nucleus_ref_neuron_svm r ON n.id = r.target_id\n        ), grouped_counts AS (\n         SELECT merged.pt_root_id,\n            count(*) FILTER (WHERE merged.cell_type::text = 'neuron'::text) AS neuron_count,\n            count(*) AS total_count\n           FROM merged\n          GROUP BY merged.pt_root_id\n        )\n SELECT m.id,\n    m.pt_position,\n    m.pt_root_id,\n    m.pt_supervoxel_id,\n    m.cell_type,\n    g.neuron_count,\n    g.total_count\n   FROM merged m\n     JOIN grouped_counts g ON m.pt_root_id = g.pt_root_id;",
+      "reads": [
+        "nucleus_detection_lookup_v1",
+        "nucleus_ref_neuron_svm"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint"
+        },
+        {
+          "name": "pt_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "pt_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "pt_supervoxel_id",
+          "type": "bigint"
+        },
+        {
+          "name": "cell_type",
+          "type": "character varying"
+        },
+        {
+          "name": "neuron_count",
+          "type": "bigint"
+        },
+        {
+          "name": "total_count",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "name": "synapse_target_predictions_ssa_count_by_post",
+      "kind": "view",
+      "definition": " SELECT post_pt_root_id,\n    count(\n        CASE\n            WHEN tag::text = 'soma'::text THEN 1\n            ELSE NULL::integer\n        END) AS count_soma,\n    count(\n        CASE\n            WHEN tag::text = 'spine'::text THEN 1\n            ELSE NULL::integer\n        END) AS count_spine,\n    count(\n        CASE\n            WHEN tag::text = 'shaft'::text THEN 1\n            ELSE NULL::integer\n        END) AS count_shaft\n   FROM synapse_target_predictions_ssa_join\n  GROUP BY post_pt_root_id;",
+      "reads": [
+        "synapse_target_predictions_ssa_join"
+      ],
+      "columns": [
+        {
+          "name": "post_pt_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "count_soma",
+          "type": "bigint"
+        },
+        {
+          "name": "count_spine",
+          "type": "bigint"
+        },
+        {
+          "name": "count_shaft",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "name": "synapse_target_predictions_ssa_count_by_pre",
+      "kind": "view",
+      "definition": " SELECT pre_pt_root_id,\n    count(\n        CASE\n            WHEN tag::text = 'soma'::text THEN 1\n            ELSE NULL::integer\n        END) AS count_soma,\n    count(\n        CASE\n            WHEN tag::text = 'spine'::text THEN 1\n            ELSE NULL::integer\n        END) AS count_spine,\n    count(\n        CASE\n            WHEN tag::text = 'shaft'::text THEN 1\n            ELSE NULL::integer\n        END) AS count_shaft\n   FROM synapse_target_predictions_ssa_join\n  GROUP BY pre_pt_root_id;",
+      "reads": [
+        "synapse_target_predictions_ssa_join"
+      ],
+      "columns": [
+        {
+          "name": "pre_pt_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "count_soma",
+          "type": "bigint"
+        },
+        {
+          "name": "count_spine",
+          "type": "bigint"
+        },
+        {
+          "name": "count_shaft",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "name": "synapse_target_predictions_ssa_join",
+      "kind": "view",
+      "definition": " SELECT s.id,\n    s.pre_pt_position,\n    s.ctr_pt_position,\n    s.post_pt_position,\n    s.size,\n    s.pre_pt_supervoxel_id,\n    s.pre_pt_root_id,\n    s.post_pt_supervoxel_id,\n    s.post_pt_root_id,\n    stp.tag\n   FROM ( SELECT synapses_pni_2__minnie3_v1_merge.id,\n            synapses_pni_2__minnie3_v1_merge.created,\n            synapses_pni_2__minnie3_v1_merge.deleted,\n            synapses_pni_2__minnie3_v1_merge.superceded_id,\n            synapses_pni_2__minnie3_v1_merge.valid,\n            synapses_pni_2__minnie3_v1_merge.pre_pt_position,\n            synapses_pni_2__minnie3_v1_merge.ctr_pt_position,\n            synapses_pni_2__minnie3_v1_merge.post_pt_position,\n            synapses_pni_2__minnie3_v1_merge.size,\n            synapses_pni_2__minnie3_v1_merge.pre_pt_supervoxel_id,\n            synapses_pni_2__minnie3_v1_merge.pre_pt_root_id,\n            synapses_pni_2__minnie3_v1_merge.post_pt_supervoxel_id,\n            synapses_pni_2__minnie3_v1_merge.post_pt_root_id\n           FROM synapses_pni_2__minnie3_v1_merge) s\n     JOIN synapse_target_predictions_ssa stp ON s.id = stp.target_id;",
+      "reads": [
+        "synapses_pni_2__minnie3_v1_merge",
+        "synapse_target_predictions_ssa"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint"
+        },
+        {
+          "name": "pre_pt_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "ctr_pt_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "post_pt_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "size",
+          "type": "double precision"
+        },
+        {
+          "name": "pre_pt_supervoxel_id",
+          "type": "bigint"
+        },
+        {
+          "name": "pre_pt_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "post_pt_supervoxel_id",
+          "type": "bigint"
+        },
+        {
+          "name": "post_pt_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "tag",
+          "type": "character varying"
+        }
+      ]
+    },
+    {
+      "name": "synapse_target_predictions_ssa_mv",
+      "kind": "materialized view",
+      "definition": " SELECT DISTINCT 'tag'::text AS column_name,\n    tag AS col_value\n   FROM synapse_target_predictions_ssa\n  WHERE tag IS NOT NULL;",
+      "reads": [
+        "synapse_target_predictions_ssa"
+      ],
+      "columns": [
+        {
+          "name": "column_name",
+          "type": "text"
+        },
+        {
+          "name": "col_value",
+          "type": "character varying"
+        }
+      ]
+    },
+    {
+      "name": "synapses_pni_2__minnie3_v1_merge",
+      "kind": "view",
+      "definition": " SELECT synapses_pni_2.id,\n    synapses_pni_2.created,\n    synapses_pni_2.deleted,\n    synapses_pni_2.superceded_id,\n    synapses_pni_2.valid,\n    synapses_pni_2.pre_pt_position,\n    synapses_pni_2.ctr_pt_position,\n    synapses_pni_2.post_pt_position,\n    synapses_pni_2.size,\n    synapses_pni_2__minnie3_v1.pre_pt_supervoxel_id,\n    synapses_pni_2__minnie3_v1.pre_pt_root_id,\n    synapses_pni_2__minnie3_v1.post_pt_supervoxel_id,\n    synapses_pni_2__minnie3_v1.post_pt_root_id\n   FROM synapses_pni_2\n     JOIN synapses_pni_2__minnie3_v1 USING (id);",
+      "reads": [
+        "synapses_pni_2",
+        "synapses_pni_2__minnie3_v1"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint"
+        },
+        {
+          "name": "created",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "deleted",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "superceded_id",
+          "type": "bigint"
+        },
+        {
+          "name": "valid",
+          "type": "boolean"
+        },
+        {
+          "name": "pre_pt_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "ctr_pt_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "post_pt_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "size",
+          "type": "double precision"
+        },
+        {
+          "name": "pre_pt_supervoxel_id",
+          "type": "bigint"
+        },
+        {
+          "name": "pre_pt_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "post_pt_supervoxel_id",
+          "type": "bigint"
+        },
+        {
+          "name": "post_pt_root_id",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "name": "synapses_pni_2_in_degree",
+      "kind": "view",
+      "definition": " SELECT post_pt_root_id AS root_id,\n    count(id) AS n_input,\n    avg(size) AS avg_input_size\n   FROM synapses_pni_2__minnie3_v1_merge\n  WHERE pre_pt_root_id <> post_pt_root_id\n  GROUP BY post_pt_root_id;",
+      "reads": [
+        "synapses_pni_2__minnie3_v1_merge"
+      ],
+      "columns": [
+        {
+          "name": "root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "n_input",
+          "type": "bigint"
+        },
+        {
+          "name": "avg_input_size",
+          "type": "double precision"
+        }
+      ]
+    },
+    {
+      "name": "synapses_pni_2_in_out_degree",
+      "kind": "view",
+      "definition": " SELECT synapses_pni_2_in_degree.root_id,\n    synapses_pni_2_in_degree.n_input,\n    synapses_pni_2_in_degree.avg_input_size,\n    synapses_pni_2_out_degree.n_output,\n    synapses_pni_2_out_degree.avg_output_size\n   FROM synapses_pni_2_in_degree\n     JOIN synapses_pni_2_out_degree USING (root_id);",
+      "reads": [
+        "synapses_pni_2_in_degree",
+        "synapses_pni_2_out_degree"
+      ],
+      "columns": [
+        {
+          "name": "root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "n_input",
+          "type": "bigint"
+        },
+        {
+          "name": "avg_input_size",
+          "type": "double precision"
+        },
+        {
+          "name": "n_output",
+          "type": "bigint"
+        },
+        {
+          "name": "avg_output_size",
+          "type": "double precision"
+        }
+      ]
+    },
+    {
+      "name": "synapses_pni_2_out_degree",
+      "kind": "view",
+      "definition": " SELECT pre_pt_root_id AS root_id,\n    count(id) AS n_output,\n    avg(size) AS avg_output_size\n   FROM synapses_pni_2__minnie3_v1_merge\n  WHERE pre_pt_root_id <> post_pt_root_id\n  GROUP BY pre_pt_root_id;",
+      "reads": [
+        "synapses_pni_2__minnie3_v1_merge"
+      ],
+      "columns": [
+        {
+          "name": "root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "n_output",
+          "type": "bigint"
+        },
+        {
+          "name": "avg_output_size",
+          "type": "double precision"
+        }
+      ]
+    },
+    {
+      "name": "synapses_pni_2_v1_filtered_view",
+      "kind": "view",
+      "definition": " SELECT id,\n    st_x(pre_pt_position) AS pre_pt_position_x,\n    st_y(pre_pt_position) AS pre_pt_position_y,\n    st_z(pre_pt_position) AS pre_pt_position_z,\n    st_x(ctr_pt_position) AS ctr_pt_position_x,\n    st_y(ctr_pt_position) AS ctr_pt_position_y,\n    st_z(ctr_pt_position) AS ctr_pt_position_z,\n    st_x(post_pt_position) AS post_pt_position_x,\n    st_y(post_pt_position) AS post_pt_position_y,\n    st_z(post_pt_position) AS post_pt_position_z,\n    size,\n    pre_pt_supervoxel_id,\n    pre_pt_root_id,\n    post_pt_supervoxel_id,\n    post_pt_root_id\n   FROM synapses_pni_2__minnie3_v1_merge;",
+      "reads": [
+        "synapses_pni_2__minnie3_v1_merge"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint"
+        },
+        {
+          "name": "pre_pt_position_x",
+          "type": "double precision"
+        },
+        {
+          "name": "pre_pt_position_y",
+          "type": "double precision"
+        },
+        {
+          "name": "pre_pt_position_z",
+          "type": "double precision"
+        },
+        {
+          "name": "ctr_pt_position_x",
+          "type": "double precision"
+        },
+        {
+          "name": "ctr_pt_position_y",
+          "type": "double precision"
+        },
+        {
+          "name": "ctr_pt_position_z",
+          "type": "double precision"
+        },
+        {
+          "name": "post_pt_position_x",
+          "type": "double precision"
+        },
+        {
+          "name": "post_pt_position_y",
+          "type": "double precision"
+        },
+        {
+          "name": "post_pt_position_z",
+          "type": "double precision"
+        },
+        {
+          "name": "size",
+          "type": "double precision"
+        },
+        {
+          "name": "pre_pt_supervoxel_id",
+          "type": "bigint"
+        },
+        {
+          "name": "pre_pt_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "post_pt_supervoxel_id",
+          "type": "bigint"
+        },
+        {
+          "name": "post_pt_root_id",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "name": "synapses_with_target_tags_v2",
+      "kind": "view",
+      "definition": " SELECT s.id,\n    s.created,\n    s.deleted,\n    s.superceded_id,\n    s.valid,\n    s.pre_pt_position,\n    s.ctr_pt_position,\n    s.post_pt_position,\n    s.size,\n    s.pre_pt_supervoxel_id,\n    s.pre_pt_root_id,\n    s.post_pt_supervoxel_id,\n    s.post_pt_root_id,\n    p.tag,\n    p.value\n   FROM synapses_pni_2__minnie3_v1_merge s\n     LEFT JOIN synapse_target_predictions_ssa_v2 p ON s.id = p.target_id;",
+      "reads": [
+        "synapses_pni_2__minnie3_v1_merge",
+        "synapse_target_predictions_ssa_v2"
+      ],
+      "columns": [
+        {
+          "name": "id",
+          "type": "bigint"
+        },
+        {
+          "name": "created",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "deleted",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "superceded_id",
+          "type": "bigint"
+        },
+        {
+          "name": "valid",
+          "type": "boolean"
+        },
+        {
+          "name": "pre_pt_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "ctr_pt_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "post_pt_position",
+          "type": "geometry(PointZ)"
+        },
+        {
+          "name": "size",
+          "type": "double precision"
+        },
+        {
+          "name": "pre_pt_supervoxel_id",
+          "type": "bigint"
+        },
+        {
+          "name": "pre_pt_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "post_pt_supervoxel_id",
+          "type": "bigint"
+        },
+        {
+          "name": "post_pt_root_id",
+          "type": "bigint"
+        },
+        {
+          "name": "tag",
+          "type": "character varying"
+        },
+        {
+          "name": "value",
+          "type": "double precision"
+        }
+      ]
+    }
+  ]
+}

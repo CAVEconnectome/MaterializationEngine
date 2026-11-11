@@ -2,7 +2,8 @@ version = 1
 revision = 3
 requires-python = "==3.12.*"
 resolution-markers = [
-    "sys_platform != 'win32'",
+    "sys_platform == 'darwin'",
+    "sys_platform != 'darwin' and sys_platform != 'win32'",
     "sys_platform == 'win32'",
 ]
 
@@ -729,6 +730,32 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f2/2e/e2dbd629481b499b14516eed933f3276eb3239f7cee2dcfa4ee6b44d4711/cryptography-45.0.5-cp37-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:7259038202a47fdecee7e62e0fd0b0738b6daa335354396c6ddebdbe1206af2a", size = 4554189, upload-time = "2025-07-02T13:05:46.045Z" },
     { url = "https://files.pythonhosted.org/packages/f8/ea/a78a0c38f4c8736287b71c2ea3799d173d5ce778c7d6e3c163a95a05ad2a/cryptography-45.0.5-cp37-abi3-win32.whl", hash = "sha256:1e1da5accc0c750056c556a93c3e9cb828970206c68867712ca5805e46dc806f", size = 2911769, upload-time = "2025-07-02T13:05:48.329Z" },
     { url = "https://files.pythonhosted.org/packages/79/b3/28ac139109d9005ad3f6b6f8976ffede6706a6478e21c889ce36c840918e/cryptography-45.0.5-cp37-abi3-win_amd64.whl", hash = "sha256:90cb0a7bb35959f37e23303b7eed0a32280510030daba3f7fdfbb65defde6a97", size = 3390016, upload-time = "2025-07-02T13:05:50.811Z" },
+]
+
+[[package]]
+name = "daft"
+version = "0.7.26"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "pyarrow" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0d/91/f5e6aa0e441a4e1caefa2d15fc649e6206982d4b320ceaee6dade290de4e/daft-0.7.26.tar.gz", hash = "sha256:ec9034fecd87a76ed1dfb6bba059f81f60a4a363dc6a743ab616175d10ffd3b4", size = 3389855, upload-time = "2026-10-06T19:51:17.379Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/69/53/041db3eba4fc5c2e59fec49b04dc95d99e02024b648f91cfdbaeb6ea8684/daft-0.7.26-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:57e08253601ebf5aa3da9931306dc059af2dc91de9dcccc279293a0fbf88ac64", size = 55733536, upload-time = "2026-10-06T19:50:36.186Z" },
+    { url = "https://files.pythonhosted.org/packages/1f/f0/0afab885023a205e13ea981613c966ed17bfdb7f107281d32d9d84caba6c/daft-0.7.26-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:8b6e7b8d4e802f15e0f5facb9e019723837d970fa6271449537fe0d594c7aea7", size = 51601501, upload-time = "2026-10-06T19:50:40.887Z" },
+    { url = "https://files.pythonhosted.org/packages/c1/70/194f3b32d9dd949fc1fc9e44c72b4344b68cd560661c9fdb905bf5a1903c/daft-0.7.26-cp310-abi3-manylinux_2_24_aarch64.whl", hash = "sha256:a57d2db079a9736acd65fdff8951ea31d9626f4cb0fa70caec5e298c63005f85", size = 54127726, upload-time = "2026-10-06T19:50:46.489Z" },
+    { url = "https://files.pythonhosted.org/packages/51/b3/b569a3806e64b23d1377adabb7520f0ee91f74cced28f3f244a29eac2cf9/daft-0.7.26-cp310-abi3-manylinux_2_24_x86_64.whl", hash = "sha256:c4e47f5c2bd4d24183c79bee2d8ce340bed0478c6095cd493325d476c02cb01c", size = 56333298, upload-time = "2026-10-06T19:50:51.58Z" },
+    { url = "https://files.pythonhosted.org/packages/0c/82/6b2b09aaf5bc424b0abc720ac0905900105cc09a834bc67f36d5440a9a0b/daft-0.7.26-cp310-abi3-win_amd64.whl", hash = "sha256:dc629070c275f25bbabb07d21efcaa1b35cbdf57ed618c5d0b3bf50ae63f44ab", size = 55046619, upload-time = "2026-10-06T19:50:56.935Z" },
+]
+
+[package.optional-dependencies]
+deltalake = [
+    { name = "deltalake" },
+]
+ray = [
+    { name = "ray", extra = ["client", "data"] },
 ]
 
 [[package]]
@@ -1903,6 +1930,9 @@ profile = [
     { name = "pyinstrument" },
     { name = "scalene" },
 ]
+views-pilot = [
+    { name = "daft", extra = ["deltalake", "ray"] },
+]
 
 [package.metadata]
 requires-dist = [
@@ -1970,6 +2000,7 @@ profile = [
     { name = "pyinstrument" },
     { name = "scalene" },
 ]
+views-pilot = [{ name = "daft", extras = ["ray", "deltalake"], specifier = "==0.7.26" }]
 
 [[package]]
 name = "matplotlib-inline"
@@ -3260,6 +3291,15 @@ wheels = [
 ]
 
 [package.optional-dependencies]
+client = [
+    { name = "grpcio" },
+]
+data = [
+    { name = "fsspec" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+]
 default = [
     { name = "aiohttp" },
     { name = "aiohttp-cors" },
