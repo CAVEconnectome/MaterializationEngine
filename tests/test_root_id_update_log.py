@@ -230,9 +230,11 @@ class TestRuns:
         md_ = pq.ParquetFile(path).metadata
         assert [md_.row_group(r).num_rows for r in range(md_.num_row_groups)] == [4, 4, 1]
         assert "DELTA_BINARY_PACKED" in md_.row_group(0).column(0).encodings
-        # the log's per-file stats hold each run's window, so readers skip runs on time alone
+        # the log's per-file stats hold each run's window, so readers skip runs on time alone;
+        # deltalake >= 1.6 keeps them to the millisecond (the data keeps microseconds)
         stats = DeltaTable(str(table_dir(tmp_path))).get_add_actions(flatten=True)
-        assert stats.column("max.end_time_stamp").to_pylist() == [log._utc(RUN_TS)]
+        run_end_ms = log._utc(RUN_TS).replace(microsecond=log._utc(RUN_TS).microsecond // 1000 * 1000)
+        assert stats.column("max.end_time_stamp").to_pylist() == [run_end_ms]
 
     def test_a_time_filter_reads_only_the_runs_in_the_window(self, bucket):
         import polars as pl

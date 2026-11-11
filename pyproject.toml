@@ -44,7 +44,7 @@ dependencies = [
     "cryptography>=44.0.2",
     "kvdbclient[extensions]",
     "adbc-driver-postgresql>=1.11.0",
-    "deltalake>=1.5.0",
+    "deltalake>=1.6.0",
     "polars>=1.39.3",
     # Creates RayJob CRs from the api. Small, pure-python; needed wherever a job
     # can be submitted, which is the api pods.
@@ -99,6 +99,10 @@ profile = [
 
 [tool.uv]
 default-groups = ["dev", "docs", "lint", "profile"]
+
+[tool.uv.sources]
+# CatalogClient (catalog_service.py) is on CAVEclient's catalog branch until it is released
+caveclient = { git = "https://github.com/CAVEconnectome/CAVEclient", branch = "catalog" }
 
 [tool.hatch.metadata]
 allow-direct-references = true

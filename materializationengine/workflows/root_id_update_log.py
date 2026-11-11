@@ -21,6 +21,11 @@ every lookup in the run used, shared by every table updated in that run. It is t
 carries its run's window, start_time_stamp (the previous run's lookup time) and end_time_stamp
 (this run's); repeated within a file they cost almost nothing (about 0.1% of the data), and the
 log's per-file min/max of them let any Delta reader skip whole runs without the manifest.
+Those log stats are only accurate to the millisecond (deltalake >= 1.6 truncates timestamp
+stats; the data keeps microseconds), so a reader that skips files on them (pl.scan_delta does)
+can wrongly drop a run when a bound falls inside the millisecond of that run's end: filter a
+run by its own end_time_stamp with == or >= on the data (DeltaTable(...).to_pyarrow_table, or
+after collecting), not through scan_delta. The window filters below are unaffected.
 
 Each run's rows are sorted by (root_column, id), with id delta-encoded and row groups of
 ROW_GROUP_ROWS, so a reader fetches only the row groups and columns a query needs. Moving a
