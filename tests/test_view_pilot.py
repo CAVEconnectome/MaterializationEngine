@@ -1,6 +1,8 @@
 """The view pilot's three engines build the same lake for minnie's views (local Postgres,
 local Delta lakes, Daft's local runner)."""
 
+import json
+
 import pytest
 from sqlalchemy.engine.url import make_url
 
@@ -74,18 +76,21 @@ class TestEndpoint:
                 mock.patch("materializationengine.rayjobs.submit_rayjob", return_value="mat-view-pilot-v2253-x") as submit:
             r = client.post(self.URL + "?workers=6", json={
                 "views": ["synapses_pni_2_in_out_degree", "connections_with_nuclei"], "engines": ["duckdb", "daft"],
-                "rounds": 2, "duckdb_memory": "24GB", "image_tag": "vDeltaVersion12-viewpilot"})
+                "rounds": 2, "duckdb_memory": "24GB", "image_tag": "vDeltaVersion12-viewpilot",
+                "task_resources": {"num_cpus": 8, "memory": 32000000000}})
         assert r.status_code == 200, r.get_data()
         kw = submit.call_args.kwargs
         assert "view_pilot --datastack minnie65_phase3_v1 --version 2253 --run-id " in kw["entrypoint"]
         assert "--views synapses_pni_2_in_out_degree connections_with_nuclei --engines duckdb daft" in kw["entrypoint"]
         assert "--rounds 2" in kw["entrypoint"] and "--duckdb-memory 24GB" in kw["entrypoint"]
         assert kw["image_tag"] == "vDeltaVersion12-viewpilot" and kw["num_workers"] == 6
+        assert json.loads(kw["env"]["RAY_VIEW_PILOT_RESOURCES"]) == {"num_cpus": 8, "memory": 32000000000}
         assert r.json["results"] == f"gs://bucket/deltalake/minnie65_phase3_v1/v2253/_pilot/{r.json['run_id']}/results.json"
 
     @pytest.mark.parametrize("body", [
         {}, {"views": "connections"}, {"views": ["a; rm -rf"]}, {"views": ["v"], "engines": ["spark"]},
         {"views": ["v"], "rounds": 0}, {"views": ["v"], "duckdb_memory": "lots"}, {"views": ["v"], "image_tag": "a b"},
+        {"views": ["v"], "task_resources": {"num_gpus": 1}}, {"views": ["v"], "task_resources": "big"},
     ])
     def test_bad_requests(self, client, body):
         from unittest import mock

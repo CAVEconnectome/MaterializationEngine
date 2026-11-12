@@ -1172,7 +1172,9 @@ class ViewPilotResource(Resource):
 
         JSON body: ``views`` (required), ``engines`` (default postgres, duckdb, daft),
         ``rounds`` (default 1), ``duckdb_memory`` (e.g. "24GB"), ``image_tag`` (default
-        VIEW_PILOT_IMAGE_TAG: an image built with the views-pilot dependency group).
+        VIEW_PILOT_IMAGE_TAG: an image built with the views-pilot dependency group),
+        ``task_resources`` (Ray options for the Postgres and DuckDB tasks, e.g.
+        {"num_cpus": 8, "memory": 32000000000}; default one CPU, which fits any worker).
         ``?workers=`` caps the Ray workers.
         """
         import uuid
@@ -1197,6 +1199,12 @@ class ViewPilotResource(Resource):
         image_tag = body.get("image_tag") or get_config_param("VIEW_PILOT_IMAGE_TAG", None)
         if image_tag is not None and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", str(image_tag)):
             return abort(400, "image_tag is not a valid image tag")
+        resources = body.get("task_resources")
+        if resources is not None and not (
+                isinstance(resources, dict) and resources
+                and set(resources) <= {"num_cpus", "memory", "resources"}
+                and all(isinstance(v, (int, float, dict)) and not isinstance(v, bool) for v in resources.values())):
+            return abort(400, "task_resources must be Ray options: num_cpus, memory, resources")
         if version == -1:
             version = get_latest_version(datastack_name)
 
@@ -1215,6 +1223,7 @@ class ViewPilotResource(Resource):
                 num_workers=request.args.get("workers", type=int),
                 metadata={"datastack": datastack_name, "version": str(version), "view-pilot": run_id},
                 image_tag=image_tag,
+                env={"RAY_VIEW_PILOT_RESOURCES": json.dumps(resources)} if resources else None,
             )
         except RayJobSubmissionError as exc:
             return abort(500, f"failed to submit RayJob: {exc}")

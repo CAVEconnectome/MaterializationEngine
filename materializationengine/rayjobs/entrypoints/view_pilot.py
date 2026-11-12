@@ -3,7 +3,8 @@
 For each view and round, each engine builds the view into its own flat lake under
 <DELTALAKE_OUTPUT_BUCKET>/<datastack>/v<version>/_pilot/<run_id>/r<round>/<engine>/<view>
 (see workflows/view_pilot.py). Postgres and DuckDB run as one Ray task each on a worker
-(RAY_VIEW_PILOT_RESOURCES, JSON Ray task options, sizes it; DuckDB uses that many threads);
+(RAY_VIEW_PILOT_RESOURCES, JSON Ray task options, sizes it, default one CPU so it fits any
+worker; DuckDB uses that many threads);
 Daft runs from the driver on the whole Ray cluster. Engines run one at a time, so timings
 don't share a machine. The results -- seconds, rows, bytes, checksum per build, and whether
 the engines agree per view -- are logged and written to <run>/results.json.
@@ -27,7 +28,7 @@ logger = logging.getLogger("ray.view_pilot")
 
 def _task_options() -> dict:
     raw = os.environ.get("RAY_VIEW_PILOT_RESOURCES", "").strip()
-    options = json.loads(raw) if raw else {"num_cpus": 4}
+    options = json.loads(raw) if raw else {"num_cpus": 1}
     if not isinstance(options, dict):
         raise SystemExit("RAY_VIEW_PILOT_RESOURCES must be a JSON object of Ray task options")
     return options
@@ -79,7 +80,7 @@ def main() -> int:
     ray.init()
     logger.info("ray cluster resources: %s", ray.cluster_resources())
     options = _task_options()
-    threads = int(options.get("num_cpus", 4))
+    threads = max(1, int(options.get("num_cpus", 1)))
 
     @ray.remote(max_retries=0)
     def on_worker(engine, view, out_uri, plan, lakes, connection_string, columns, threads, duckdb_memory):
