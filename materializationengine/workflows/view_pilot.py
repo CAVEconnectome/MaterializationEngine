@@ -300,31 +300,79 @@ def plan_view(view: str, defs: Dict[str, str], cols: Dict[str, List[Dict]], lake
     return lv.lake_sql(view, defs, lake_cols, pcg, lv.point_names(cols, lake_cols))
 
 
+def _cluster_cpus() -> Optional[float]:
+    try:
+        import ray
+
+        return float(ray.cluster_resources().get("CPU", 0)) if ray.is_initialized() else None
+    except Exception:
+        return None
+
+
+def _wait_for_cluster(cpus: Optional[float], wait: float, timeout: float = 600.0) -> None:
+    """Before a retry: wait, then until the Ray cluster has its CPUs back (a preempted
+    worker's replacement has joined), at most timeout seconds."""
+    time.sleep(wait)
+    deadline = time.monotonic() + timeout
+    while cpus and (_cluster_cpus() or 0) < cpus and time.monotonic() < deadline:
+        time.sleep(10)
+
+
+def _build(engine: str, view: str, out_uri: str, plan, lakes, connection_string, columns,
+           duckdb_threads, duckdb_memory) -> Dict:
+    if engine == "postgres":
+        build_postgres(connection_string, view, columns, out_uri)
+        return {}
+    uris = {t: lakes[t]["uri"] for t in plan.lakes}
+    if engine in ("duckdb", "duckdb_arrow"):
+        return build_duckdb(plan.sql, uris, out_uri, duckdb_threads, duckdb_memory,
+                            reader="arrow" if engine == "duckdb_arrow" else "native")
+    if engine == "daft":
+        return build_daft(plan.sql, uris, out_uri)
+    raise ValueError(f"unknown engine {engine!r}")
+
+
 def run_one(engine: str, view: str, out_uri: str, *, plan: Optional[lv.LakeView] = None,
             lakes: Optional[Dict[str, Dict]] = None, connection_string: Optional[str] = None,
             columns: Optional[List[Dict]] = None, duckdb_threads: Optional[int] = None,
-            duckdb_memory: Optional[str] = None) -> Dict:
-    """Build one view with one engine into out_uri; the result record (never raises)."""
+            duckdb_memory: Optional[str] = None, attempts: int = 1, retry_wait: float = 30.0) -> Dict:
+    """Build one view with one engine into out_uri; the result record (never raises).
+
+    A failed build is tried again, up to attempts in all: Daft on Ray can't rebuild work a
+    lost (preempted) worker held -- ObjectReconstructionFailedError -- so the whole view is
+    built again once the cluster has its CPUs back. That is safe because a build commits
+    only the files it reports writing (_to_delta), so a failed attempt's leftovers in
+    out_uri stay out of the table. "seconds" is the attempt that finished; failed attempts
+    are listed in "failed_attempts", and "total_seconds" covers them all.
+    """
     result = {"engine": engine, "view": view, "uri": out_uri}
-    try:
+    failed = []
+    cpus = _cluster_cpus()
+    first = time.perf_counter()
+    for attempt in range(1, max(1, attempts) + 1):
         started = time.perf_counter()
-        if engine == "postgres":
-            build_postgres(connection_string, view, columns, out_uri)
-        else:
-            uris = {t: lakes[t]["uri"] for t in plan.lakes}
-            if engine in ("duckdb", "duckdb_arrow"):
-                result.update(build_duckdb(
-                    plan.sql, uris, out_uri, duckdb_threads, duckdb_memory,
-                    reader="arrow" if engine == "duckdb_arrow" else "native"))
-            elif engine == "daft":
-                result.update(build_daft(plan.sql, uris, out_uri))
-            else:
-                raise ValueError(f"unknown engine {engine!r}")
-        result["seconds"] = round(time.perf_counter() - started, 3)
+        try:
+            result.update(_build(engine, view, out_uri, plan, lakes, connection_string, columns,
+                                 duckdb_threads, duckdb_memory))
+            result["seconds"] = round(time.perf_counter() - started, 3)
+            break
+        except Exception as e:
+            logger.exception("%s: %s failed (attempt %d of %d)", view, engine, attempt, attempts)
+            failed.append({"attempt": attempt, "seconds": round(time.perf_counter() - started, 3),
+                           "error": f"{type(e).__name__}: {e}"[:2000]})
+            if attempt < attempts:
+                _wait_for_cluster(cpus, retry_wait)
+    if failed:
+        result["failed_attempts"] = failed
+    result["total_seconds"] = round(time.perf_counter() - first, 3)
+    if "seconds" not in result:
+        result["error"] = failed[-1]["error"]
+        return result
+    try:
         result.update(summarize(out_uri))
     except Exception as e:
-        logger.exception("%s: %s failed", view, engine)
-        result["error"] = f"{type(e).__name__}: {e}"[:2000]
+        logger.exception("%s: %s built, but could not summarise its lake", view, engine)
+        result["error"] = f"summarise: {type(e).__name__}: {e}"[:2000]
     return result
 
 

@@ -43,6 +43,8 @@ def main() -> int:
     parser.add_argument("--engines", nargs="+", default=["postgres", "duckdb", "daft"])
     parser.add_argument("--rounds", type=int, default=1)
     parser.add_argument("--duckdb-memory", default=None, help="DuckDB memory_limit, e.g. 24GB")
+    parser.add_argument("--attempts", type=int, default=3,
+                        help="tries per Daft build: a lost worker fails the build, which is run again")
     args = parser.parse_args()
 
     from materializationengine.app import create_app
@@ -106,7 +108,7 @@ def main() -> int:
                     continue
                 plan = plans.get(view)
                 if engine == "daft":
-                    result = vp.run_one(engine, view, out_uri, plan=plan, lakes=lakes)
+                    result = vp.run_one(engine, view, out_uri, plan=plan, lakes=lakes, attempts=args.attempts)
                 else:
                     result = ray.get(on_worker.options(**options).remote(
                         engine, view, out_uri, plan, lakes, connection_string, cols[view], threads,

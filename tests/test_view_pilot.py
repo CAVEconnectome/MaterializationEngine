@@ -53,6 +53,34 @@ class TestViewPilot:
         assert "error" in r and "seconds" not in r
         assert vp.compare([r]) == {"v": {"agree": False, "engines": [], "failed": ["duckdb"]}}
 
+    def test_a_failed_attempt_is_built_again(self, tmp_path, monkeypatch):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        calls = []
+
+        def flaky(sql, lakes, out_uri):
+            calls.append(out_uri)
+            pq.write_table(pa.table({"id": pa.array([len(calls)] * 5, pa.int64())}), f"{out_uri}/part-{len(calls)}.parquet")
+            if len(calls) == 1:  # wrote a file, then lost its worker
+                raise RuntimeError("ObjectReconstructionFailedError")
+            return {"convert_seconds": vp._to_delta(out_uri, paths=[f"{out_uri}/part-2.parquet"])}
+
+        monkeypatch.setattr(vp, "build_daft", flaky)
+        (tmp_path / "out").mkdir()
+        r = vp.run_one("daft", "v", str(tmp_path / "out"), plan=vp.lv.LakeView("SELECT 1", set(), []), lakes={},
+                       attempts=3, retry_wait=0)
+        assert len(calls) == 2 and "error" not in r
+        assert r["rows"] == 5  # the failed attempt's file is not in the table
+        assert [a["attempt"] for a in r["failed_attempts"]] == [1] and "Reconstruction" in r["failed_attempts"][0]["error"]
+        assert r["total_seconds"] >= r["seconds"]
+
+    def test_gives_up_after_its_attempts(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(vp, "build_daft", lambda sql, lakes, out_uri: (_ for _ in ()).throw(RuntimeError("down")))
+        r = vp.run_one("daft", "v", str(tmp_path / "x"), plan=vp.lv.LakeView("SELECT 1", set(), []), lakes={},
+                       attempts=2, retry_wait=0)
+        assert r["error"] == "RuntimeError: down" and len(r["failed_attempts"]) == 2 and "rows" not in r
+
 
 class TestEndpoint:
     @pytest.fixture
