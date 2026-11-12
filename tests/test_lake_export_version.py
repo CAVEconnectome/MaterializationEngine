@@ -45,7 +45,10 @@ def export_version(frozen, tmp_path, tables, **kw):
     recorder = Recorder()
     info = {"datastack": DATASTACK, "aligned_volume": {"name": ALIGNED}, "segmentation_source": "graphene://x/pcg"}
     settings = kw.pop("settings", None) or settings_for(tmp_path)
-    result = run_version(info, VERSION, "vjob", [TableRequest(t) for t in tables], settings,
+    # as the entrypoint does: the suffix is every table's override, and the stage is told it
+    overrides = {"name_suffix": kw["name_suffix"]} if kw.get("name_suffix") else {}
+    result = run_version(info, VERSION, "vjob", [TableRequest(t, spec_overrides=dict(overrides)) for t in tables],
+                         settings,
                          kw.pop("executor", None) or ThreadExecutor(4), inputs=inputs,
                          status=VersionStatus(DATASTACK, VERSION, "vjob", write=recorder), **kw)
     return result, recorder
@@ -74,6 +77,16 @@ class TestVersion:
         assert {t: s["state"] for t, s in status.last("tables").items()} == {TABLE: "done", CELLS: "done"}
         # a table was reported running along the way (get_version_status folds its progress in)
         assert any(s["state"] == "running" for u in status.updates if "tables" in u for s in u["tables"].values())
+
+    def test_the_stage_gets_the_suffix_and_the_cluster(self, frozen, cells, catalog, statuses, tmp_path):
+        seen = []
+        result, status = export_version(frozen, tmp_path, [CELLS], views=True, views_stage=seen.append,
+                                        name_suffix="_b", cluster=lambda: {"cpus": 16, "workers": 8})
+        (ctx,) = seen
+        assert ctx.name_suffix == "_b" and ctx.cluster == {"cpus": 16, "workers": 8}
+        assert {lake["spec_name"] for lake in ctx.lakes} == {"id_b"}
+        assert result["views"]["detail"]["cluster"] == {"cpus": 16, "workers": 8}
+        assert status.last("stages")["views"]["detail"]["cluster"]["workers"] == 8
 
     def test_views_not_asked_for_are_skipped(self, frozen, cells, catalog, statuses, tmp_path):
         called = []

@@ -63,6 +63,12 @@ class RayExecutor:
                 pass
 
 
+def cluster_now(ray) -> dict:
+    """The cluster's CPUs and live worker nodes (the head runs no tasks)."""
+    workers = [n for n in ray.nodes() if n.get("Alive") and n.get("Resources", {}).get("CPU", 0) > 0]
+    return {"cpus": ray.cluster_resources().get("CPU", 0), "workers": len(workers)}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Export tables of a frozen version to Delta Lake via Ray")
     parser.add_argument("--datastack", required=True)
@@ -133,9 +139,19 @@ def main(argv=None) -> int:
         executor = RayExecutor(settings.range_retries)
         if args.version_job:
             status.update(rayjob=os.environ.get("RAY_JOB_NAME") or None)
+            if args.views:
+                # Keep the job's workers through the tables' tail into the views stage:
+                # the autoscaler drops a worker idle for a minute, and as optimizes finish
+                # most are, just before the stage needs them all.
+                from ray.autoscaler.sdk import request_resources
+
+                workers = settings.workers_for(args.max_streams)
+                request_resources(bundles=[{"CPU": settings.worker_cpus}] * workers)
+                logger.info("holding %d worker(s) of %d CPU for the views stage", workers, settings.worker_cpus)
             result = run_version(datastack_info, args.version, args.job_id, requests, settings, executor,
                                  views=args.views, views_stage=views_stage, skipped=skipped,
-                                 max_streams=args.max_streams, source=source, status=status)
+                                 max_streams=args.max_streams, source=source, status=status,
+                                 name_suffix=args.name_suffix, cluster=lambda: cluster_now(ray))
             summaries, ok = result["tables"], result["state"] == "done"
             logger.info("views stage: %s", result["views"])
         else:

@@ -50,6 +50,11 @@ class VersionContext:
     settings: ExportSettings
     tables: Dict[str, Dict]  # every table's export summary (all complete)
     lakes: List[Dict]  # the version's complete lakes, as deltalake_catalog.list_exports returns them
+    # appended to every table lake's spec name in this job (an export beside an earlier
+    # one); a view's lakes should carry it too
+    name_suffix: Optional[str] = None
+    # the job's Ray cluster as the stage starts (CPUs, workers), when the caller reports it
+    cluster: Dict = field(default_factory=dict)
 
 
 @dataclass
@@ -112,8 +117,13 @@ def run_version(datastack_info: Dict, version: int, job_id: str, requests: Seque
                 settings: ExportSettings, executor: Executor, views: bool = False,
                 views_stage: Optional[Callable] = None, skipped: Sequence[str] = (),
                 max_streams: Optional[int] = None, source: Optional[ExportSource] = None,
-                inputs: Optional[Callable] = None, status: Optional[VersionStatus] = None) -> Dict:
-    """Export the tables, then (if asked, and every table is complete) the views stage."""
+                inputs: Optional[Callable] = None, status: Optional[VersionStatus] = None,
+                name_suffix: Optional[str] = None, cluster: Optional[Callable[[], Dict]] = None) -> Dict:
+    """Export the tables, then (if asked, and every table is complete) the views stage.
+
+    cluster: reports the job's cluster (e.g. {"cpus", "workers"}) as the views stage starts;
+    it is recorded in the stage's status and passed to the stage.
+    """
     from materializationengine import deltalake_catalog as cat
     from materializationengine.workflows import deltalake_version_export as dve
 
@@ -139,10 +149,19 @@ def run_version(datastack_info: Dict, version: int, job_id: str, requests: Seque
         stages["views"] = {"state": "running"}
         status.update(stages=stages)
         lakes = cat.safely(cat.list_exports, aligned_volume, datastack, version) if aligned_volume else []
+        found = {}
+        if cluster is not None:
+            try:
+                found = cluster()
+            except Exception:
+                logger.warning("could not read the cluster", exc_info=True)
+            logger.info("views stage starts on %s", found)
         ctx = VersionContext(datastack_info=datastack_info, datastack=datastack, version=int(version),
                              aligned_volume=aligned_volume, job_id=job_id, settings=settings,
-                             tables=summaries, lakes=lakes or [])
+                             tables=summaries, lakes=lakes or [], name_suffix=name_suffix, cluster=found)
         result = run_views_stage(ctx, views_stage)
+        if found:
+            result.detail = {**result.detail, "cluster": found}
     stages["views"] = asdict(result)
     state = "failed" if failed or result.state == "failed" else "done"
     status.update(state=state, stages=stages, failed_tables=failed)
