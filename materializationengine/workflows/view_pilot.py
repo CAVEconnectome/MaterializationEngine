@@ -7,7 +7,9 @@ what deltalake_catalog lists, so a pilot lake is never served or registered:
 - postgres: SELECT * FROM the view in the frozen database (points as ST_X/Y/Z), streamed
   through ADBC, as the view export reads a view.
 - duckdb: lake_views.lake_sql over the version's lakes (one copy of each table, from the
-  catalog), on one node.
+  catalog), on one node, with DuckDB's own Parquet reader on the lakes' files; duckdb_arrow
+  the same through pyarrow datasets, which on ltv7 spent most of its time reading. Both
+  record DuckDB's seconds per operator type.
 - daft: the same SQL with daft.sql, on the Ray cluster when one is running.
 
 Every engine's rows are written by the same write_deltalake, so the lakes have the same
@@ -31,7 +33,9 @@ from materializationengine.blueprints.client import lake_views as lv
 logger = logging.getLogger(__name__)
 
 ENGINES = ("postgres", "duckdb", "daft")
+EXTRA_ENGINES = ("duckdb_arrow",)  # DuckDB reading the lakes through pyarrow, to compare read paths
 FLOAT_DIGITS = 3
+DUCKDB_EXTENSIONS = "/opt/duckdb_extensions"
 
 
 def view_definitions(engine) -> Tuple[Dict[str, str], Dict[str, List[Dict]]]:
@@ -95,8 +99,46 @@ def build_postgres(connection_string: str, view: str, columns: List[Dict], out_u
         _write(cur.fetch_record_batch(), out_uri)
 
 
+def _gcs_token() -> str:
+    """A bearer token from the pod's own credentials (GOOGLE_APPLICATION_CREDENTIALS)."""
+    import google.auth
+    import google.auth.transport.requests
+
+    credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/devstorage.read_only"])
+    credentials.refresh(google.auth.transport.requests.Request())
+    return credentials.token
+
+
+def _operator_seconds(profile: Dict) -> Dict[str, float]:
+    """Seconds per operator type (summed over threads) from DuckDB's JSON profile, plus
+    the bytes it read (io.total_bytes_read, as "bytes_read")."""
+    out: Dict[str, float] = {}
+
+    def walk(node):
+        name = node.get("type") or node.get("operator_type") or node.get("operator_name")
+        timing = node.get("timing", node.get("operator_timing"))
+        if name and timing is not None:
+            out[name] = round(out.get(name, 0.0) + float(timing), 3)
+        for child in node.get("children") or []:
+            walk(child)
+
+    for root in profile.get("operator") or [profile]:
+        walk(root)
+    out = dict(sorted(out.items(), key=lambda kv: -kv[1]))
+    if (profile.get("io") or {}).get("total_bytes_read") is not None:
+        out["bytes_read"] = int(profile["io"]["total_bytes_read"])
+    return out
+
+
 def build_duckdb(sql: str, lakes: Dict[str, str], out_uri: str, threads: Optional[int] = None,
-                 memory_limit: Optional[str] = None) -> None:
+                 memory_limit: Optional[str] = None, reader: str = "native") -> Dict:
+    """DuckDB on one node. reader "native": DuckDB's own Parquet reader on each lake's files
+    (httpfs, with a token from the pod's credentials for gs://); "arrow": the lakes as
+    pyarrow datasets (DeltaTable.to_pyarrow_dataset), read through pyarrow's scanner.
+    Returns DuckDB's seconds per operator type."""
+    import os
+    import tempfile
+
     import duckdb
     from deltalake import DeltaTable
 
@@ -105,9 +147,33 @@ def build_duckdb(sql: str, lakes: Dict[str, str], out_uri: str, threads: Optiona
         con.execute(f"SET threads = {int(threads)}")
     if memory_limit:
         con.execute(f"SET memory_limit = '{memory_limit}'")
-    for table, uri in lakes.items():
-        con.register(table, DeltaTable(uri).to_pyarrow_dataset())
-    _write(con.sql(sql).fetch_record_batch(), out_uri)
+    if reader == "native":
+        files = {t: DeltaTable(uri).file_uris() for t, uri in lakes.items()}
+        if any(f.startswith("gs://") for fs in files.values() for f in fs):
+            if os.path.isdir(DUCKDB_EXTENSIONS):  # baked into the image (Dockerfile)
+                con.execute(f"SET extension_directory = '{DUCKDB_EXTENSIONS}'")
+            else:
+                con.execute("INSTALL httpfs")
+            con.execute("LOAD httpfs")
+            con.execute(f"CREATE SECRET gcs (TYPE gcs, BEARER_TOKEN '{_gcs_token()}')")
+        for table, fs in files.items():
+            listed = ", ".join("'" + f.replace("'", "''") + "'" for f in fs)
+            con.execute(f'CREATE VIEW "{table}" AS SELECT * FROM read_parquet([{listed}])')
+    elif reader == "arrow":
+        for table, uri in lakes.items():
+            con.register(table, DeltaTable(uri).to_pyarrow_dataset())
+    else:
+        raise ValueError(f"unknown DuckDB reader {reader!r}")
+    profile_path = os.path.join(tempfile.mkdtemp(), "profile.json")
+    con.execute("SET enable_profiling = 'json'")
+    con.execute(f"SET profiling_output = '{profile_path}'")
+    _write(con.sql(sql).to_arrow_reader(), out_uri)
+    con.execute("SET enable_profiling = 'no_output'")
+    try:
+        with open(profile_path) as fh:
+            return _operator_seconds(json.load(fh))
+    except (OSError, ValueError):
+        return {}
 
 
 def build_daft(sql: str, lakes: Dict[str, str], out_uri: str) -> None:
@@ -173,8 +239,10 @@ def run_one(engine: str, view: str, out_uri: str, *, plan: Optional[lv.LakeView]
             build_postgres(connection_string, view, columns, out_uri)
         else:
             uris = {t: lakes[t]["uri"] for t in plan.lakes}
-            if engine == "duckdb":
-                build_duckdb(plan.sql, uris, out_uri, duckdb_threads, duckdb_memory)
+            if engine in ("duckdb", "duckdb_arrow"):
+                result["operator_seconds"] = build_duckdb(
+                    plan.sql, uris, out_uri, duckdb_threads, duckdb_memory,
+                    reader="arrow" if engine == "duckdb_arrow" else "native")
             elif engine == "daft":
                 build_daft(plan.sql, uris, out_uri)
             else:

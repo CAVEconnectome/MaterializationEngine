@@ -38,11 +38,14 @@ class TestViewPilot:
         plan = vp.plan_view(view, defs, cols, lakes, PCG)
         url = make_url(str(engine.url))
         conn = f"postgresql://{url.username}:{url.password}@{url.host}:{url.port or 5432}/{url.database}"
+        engines = vp.ENGINES + vp.EXTRA_ENGINES
         results = [vp.run_one(e, view, str(tmp_path / e), plan=plan, lakes=lakes, connection_string=conn,
-                              columns=cols[view]) for e in vp.ENGINES]
-        assert [r.get("error") for r in results] == [None, None, None]
+                              columns=cols[view]) for e in engines]
+        assert [r.get("error") for r in results] == [None] * len(engines)
         assert results[0]["rows"] > 0 and results[0]["bytes"] > 0
-        assert vp.compare(results) == {view: {"agree": True, "engines": sorted(vp.ENGINES), "failed": []}}
+        assert vp.compare(results) == {view: {"agree": True, "engines": sorted(engines), "failed": []}}
+        by_engine = {r["engine"]: r for r in results}
+        assert by_engine["duckdb"]["operator_seconds"] and by_engine["duckdb_arrow"]["operator_seconds"]
 
     def test_a_failing_engine_is_recorded_not_raised(self, tmp_path):
         r = vp.run_one("duckdb", "v", str(tmp_path / "x"), plan=vp.lv.LakeView("SELECT nonsense", {"t"}, []),

@@ -45,6 +45,10 @@ RUN mkdir -p /home/nginx/.cloudvolume/secrets /home/nginx/tmp/shutdown \
 RUN rm -rf /usr/local/lib/python3.12/site-packages
 COPY --from=deps /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=deps /usr/local/bin /usr/local/bin
+# DuckDB's httpfs extension (gs:// reads), baked in so pods need no internet: the view
+# pilot points DuckDB at this directory when it exists.
+RUN python -c "import duckdb; c = duckdb.connect(); c.execute(\"SET extension_directory = '/opt/duckdb_extensions'\"); c.execute('INSTALL httpfs')" \
+  && chmod -R a+rX /opt/duckdb_extensions
 
 ENV UWSGI_INI=/app/uwsgi.ini \
     PATH="/app/.venv/bin:$PATH" \

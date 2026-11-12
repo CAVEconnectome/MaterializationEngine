@@ -1170,7 +1170,8 @@ class ViewPilotResource(Resource):
         """Build each view with each engine into lakes under <version>/_pilot/<run_id>/ and
         compare them (rayjobs/entrypoints/view_pilot.py).
 
-        JSON body: ``views`` (required), ``engines`` (default postgres, duckdb, daft),
+        JSON body: ``views`` (required), ``engines`` (default postgres, duckdb, daft; also
+        duckdb_arrow, DuckDB reading through pyarrow),
         ``rounds`` (default 1), ``duckdb_memory`` (e.g. "24GB"), ``image_tag`` (default
         VIEW_PILOT_IMAGE_TAG: an image built with the views-pilot dependency group),
         ``task_resources`` (Ray options for the Postgres and DuckDB tasks, e.g.
@@ -1190,8 +1191,8 @@ class ViewPilotResource(Resource):
         views, engines = body.get("views"), body.get("engines") or ["postgres", "duckdb", "daft"]
         if not isinstance(views, list) or not views or not all(isinstance(v, str) and name.fullmatch(v) for v in views):
             return abort(400, "views must be a list of view names")
-        if not isinstance(engines, list) or not set(engines) <= {"postgres", "duckdb", "daft"}:
-            return abort(400, "engines must be a list of postgres, duckdb, daft")
+        if not isinstance(engines, list) or not set(engines) <= {"postgres", "duckdb", "duckdb_arrow", "daft"}:
+            return abort(400, "engines must be a list of postgres, duckdb, duckdb_arrow, daft")
         rounds = body.get("rounds", 1)
         if not isinstance(rounds, int) or isinstance(rounds, bool) or not 1 <= rounds <= 10:
             return abort(400, "rounds must be an integer from 1 to 10")
