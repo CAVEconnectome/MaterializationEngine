@@ -33,6 +33,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 from materializationengine.workflows.lake_export.job import TableRequest, run_tables
 from materializationengine.workflows.lake_export.scheduler import Executor
 from materializationengine.workflows.lake_export.settings import ExportSettings
+from materializationengine.workflows.lake_export.source import ExportSource
 
 logger = logging.getLogger(__name__)
 
@@ -110,8 +111,8 @@ class VersionStatus:
 def run_version(datastack_info: Dict, version: int, job_id: str, requests: Sequence[TableRequest],
                 settings: ExportSettings, executor: Executor, views: bool = False,
                 views_stage: Optional[Callable] = None, skipped: Sequence[str] = (),
-                max_streams: Optional[int] = None, inputs: Optional[Callable] = None,
-                status: Optional[VersionStatus] = None) -> Dict:
+                max_streams: Optional[int] = None, source: Optional[ExportSource] = None,
+                inputs: Optional[Callable] = None, status: Optional[VersionStatus] = None) -> Dict:
     """Export the tables, then (if asked, and every table is complete) the views stage."""
     from materializationengine import deltalake_catalog as cat
     from materializationengine.workflows import deltalake_version_export as dve
@@ -124,8 +125,8 @@ def run_version(datastack_info: Dict, version: int, job_id: str, requests: Seque
                   tables={r.table: {"state": "pending", "kind": "table"} for r in requests})
 
     summaries = run_tables(datastack_info, version, requests, job_id_for=lambda t: dve.table_job_id(job_id, t),
-                           settings=settings, executor=executor, max_streams=max_streams, inputs=inputs,
-                           on_change=status.tables)
+                           settings=settings, executor=executor, max_streams=max_streams, source=source,
+                           inputs=inputs, on_change=status.tables)
     status.tables(summaries)
     failed = sorted(t for t, s in summaries.items() if s["state"] != "complete")
     stages["tables"] = {"state": "failed" if failed else "done", "failed": failed}

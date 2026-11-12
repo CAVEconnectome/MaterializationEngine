@@ -12,13 +12,14 @@ published.
 import dataclasses
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from materializationengine.workflows import deltalake_export as dx
 from materializationengine.workflows.lake_export import publish as pub
 from materializationengine.workflows.lake_export.ranges import cut_ranges
 from materializationengine.workflows.lake_export.settings import ExportSettings
+from materializationengine.workflows.lake_export.source import ExportSource, FrozenSource, source_from_dict
 from materializationengine.workflows.lake_export.sizing import TableSizing, size_table
 
 logger = logging.getLogger(__name__)
@@ -48,10 +49,20 @@ class TablePlan:
     bytes_per_row: int
     sizing: Dict  # TableSizing fields
     ranges: List[Tuple[int, int]]
+    # where the table is read from (ExportSource fields); a plan saved before sources is frozen
+    source: Dict = field(default_factory=lambda: FrozenSource().to_dict())
 
     @property
-    def source(self) -> "dx.TableSource":
+    def table_source(self) -> "dx.TableSource":
         return dx.TableSource(annotation_table=self.annotation_table, segmentation_table=self.segmentation_table)
+
+    @property
+    def export_source(self) -> ExportSource:
+        return source_from_dict(self.source)
+
+    @property
+    def row_filter(self) -> Optional[str]:
+        return self.export_source.row_filter(self.annotation_table)
 
     @property
     def output_specs(self) -> List["dx.DeltaLakeOutputSpec"]:
@@ -155,18 +166,22 @@ def plan_table(
     settings: ExportSettings,
     output_specs: Optional[Sequence[Dict]] = None,
     spec_overrides: Optional[Dict] = None,
+    source: Optional[ExportSource] = None,
 ) -> TablePlan:
-    """A new plan for exporting table (a table of the frozen database at connection_string)."""
+    """A new plan for exporting table, read from source (default: its frozen version's
+    database, at connection_string)."""
     import psycopg2
+
+    source = source or FrozenSource()
 
     dx._validate_identifier(table)
     if dx._classify_relation(connection_string, table) != "table":
         raise ValueError(f"{table!r} is not a table of {datastack} v{version}; views are not exported from SQL")
     if not settings.output_bucket:
         raise ValueError("DELTALAKE_OUTPUT_BUCKET is not set")
-    source = dx.TableSource(annotation_table=table, segmentation_table=segmentation_table)
-    bytes_per_row = dx.estimate_bytes_per_row(connection_string, source)
-    specs = resolve_specs(source, engine, connection_string, row_count, bytes_per_row, settings,
+    table_source = dx.TableSource(annotation_table=table, segmentation_table=segmentation_table)
+    bytes_per_row = dx.estimate_bytes_per_row(connection_string, table_source)
+    specs = resolve_specs(table_source, engine, connection_string, row_count, bytes_per_row, settings,
                           output_specs=output_specs, spec_overrides=spec_overrides)
     sizing: TableSizing = size_table(row_count, bytes_per_row, settings.sizing)
 
@@ -186,11 +201,11 @@ def plan_table(
         connection_string=connection_string,
         output_uri_base=f"{settings.output_bucket}/{datastack}/v{version}/{table}",
         annotation_table=table, segmentation_table=segmentation_table,
-        columns=dx._resolve_select_columns(connection_string, source, dx._DEFAULT_DROP_COLUMNS),
+        columns=dx._resolve_select_columns(connection_string, table_source, dx._DEFAULT_DROP_COLUMNS),
         specs=[json.loads(json.dumps(dataclasses.asdict(s), default=_json_default)) for s in specs],
-        geometry_columns=dx._table_geometry_columns(connection_string, source, specs),
+        geometry_columns=dx._table_geometry_columns(connection_string, table_source, specs),
         row_count=int(row_count), bytes_per_row=int(bytes_per_row),
-        sizing=dataclasses.asdict(sizing), ranges=ranges,
+        sizing=dataclasses.asdict(sizing), ranges=ranges, source=source.to_dict(),
     )
 
 

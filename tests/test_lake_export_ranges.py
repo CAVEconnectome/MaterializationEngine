@@ -110,6 +110,22 @@ class TestRangeQuery:
         with pytest.raises(ValueError):
             ranges.range_query(frozen["source"], ['id"; DROP TABLE x; --'], 0, 1)
 
+    def test_row_filter_and_inner_join(self, frozen):
+        """A source's filter is ANDed into the range; an inner join drops annotations with
+        no segmentation row (the fixture's segmentation lacks every 11th id)."""
+        lo, hi = frozen["span"]
+
+        def count(**kw):
+            sql = ranges.range_query(frozen["source"], ["id"], lo, hi, **kw)
+            return frozen["engine"].execute(f"SELECT count(*) FROM ({sql}) q").scalar()
+
+        assert count() == frozen["rows"]
+        assert count(join="inner") == frozen["engine"].execute(f"SELECT count(*) FROM {SEG}").scalar()
+        expected = frozen["engine"].execute(f"SELECT count(*) FROM {TABLE} WHERE size < 100").scalar()
+        assert count(row_filter=f'"{TABLE}".size < 100') == expected
+        with pytest.raises(KeyError):
+            ranges.range_query(frozen["source"], ["id"], lo, hi, join="outer")
+
 
 class TestCutRanges:
     def test_even_cover(self):

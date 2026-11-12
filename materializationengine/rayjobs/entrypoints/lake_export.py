@@ -93,6 +93,7 @@ def main(argv=None) -> int:
     from materializationengine.workflows import deltalake_version_export as dve
     from materializationengine.workflows.lake_export.job import TableRequest, run_tables
     from materializationengine.workflows.lake_export.settings import ExportSettings
+    from materializationengine.workflows.lake_export.source import FrozenSource
     from materializationengine.workflows.lake_export.version import VIEWS_STAGE_CONFIG, VersionStatus, \
         resolve_stage, run_version
 
@@ -102,7 +103,8 @@ def main(argv=None) -> int:
         status = VersionStatus(args.datastack, args.version, args.job_id) if args.version_job else None
         try:
             config = dve.load_export_config(args.config or get_config_param("DELTALAKE_EXPORT_CONFIG", None))
-            tables = args.tables or [t["table"] for t in dve.list_version_tables(args.datastack, args.version)]
+            source = FrozenSource()
+            tables = args.tables or [t["table"] for t in source.list_tables(args.datastack, args.version)]
             requests, skipped = [], []
             for table in tables:
                 skip, output_specs, overrides = dve.resolve_table_config(config, table)
@@ -133,13 +135,14 @@ def main(argv=None) -> int:
             status.update(rayjob=os.environ.get("RAY_JOB_NAME") or None)
             result = run_version(datastack_info, args.version, args.job_id, requests, settings, executor,
                                  views=args.views, views_stage=views_stage, skipped=skipped,
-                                 max_streams=args.max_streams, status=status)
+                                 max_streams=args.max_streams, source=source, status=status)
             summaries, ok = result["tables"], result["state"] == "done"
             logger.info("views stage: %s", result["views"])
         else:
             summaries = run_tables(datastack_info, args.version, requests, job_id_for=lambda t: args.job_id
                                    if len(requests) == 1 else dve.table_job_id(args.job_id, t),
-                                   settings=settings, executor=executor, max_streams=args.max_streams)
+                                   settings=settings, executor=executor, max_streams=args.max_streams,
+                                   source=source)
             ok = all(s["state"] == "complete" for s in summaries.values())
     for table, summary in summaries.items():
         logger.info("%s: %s", table, summary)

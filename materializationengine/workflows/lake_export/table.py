@@ -42,8 +42,9 @@ TERMINAL = ("complete", "failed")
 
 def run_range(plan: TablePlan, index: int) -> RangeResult:
     lo, hi = plan.ranges[index]
-    return export_range(plan.connection_string, plan.source, plan.columns, plan.output_specs,
-                        plan.geometry_columns, plan.output_uri_base, index, lo, hi, plan.flush_bytes)
+    return export_range(plan.connection_string, plan.table_source, plan.columns, plan.output_specs,
+                        plan.geometry_columns, plan.output_uri_base, index, lo, hi, plan.flush_bytes,
+                        row_filter=plan.row_filter, join=plan.export_source.join)
 
 
 def run_optimize(lake_uri: str, spec: Dict, column: Optional[str], values: Optional[Tuple],

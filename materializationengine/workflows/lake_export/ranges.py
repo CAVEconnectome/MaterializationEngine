@@ -24,12 +24,17 @@ STAGING = "staging"
 BATCH_SIZE_HINT = "adbc.postgresql.batch_size_hint_bytes"
 
 
-def range_query(source: "dx.TableSource", columns: Sequence[str], lo: int, hi: int) -> str:
+def range_query(source: "dx.TableSource", columns: Sequence[str], lo: int, hi: int,
+                row_filter: Optional[str] = None, join: str = "left") -> str:
     """SELECT columns of the export's FROM clause for lo <= id < hi.
 
-    The bound is applied to the segmentation side too, inside the LEFT JOIN: Postgres does
-    not carry a range qual across a LEFT JOIN's equivalence, so without it every range
-    would scan the whole segmentation table. With it, a range is an index merge join.
+    The bound is applied to the segmentation side too, inside the join: Postgres does not
+    carry a range qual across a LEFT JOIN's equivalence, so without it every range would
+    scan the whole segmentation table. With it, a range is an index merge join.
+
+    row_filter: SQL ANDed into the WHERE (the export source's, e.g. a live table's rows
+    as of a timestamp). join: "left" keeps annotations with no segmentation row, "inner"
+    drops them (as a merged version does).
     """
     lo, hi = int(lo), int(hi)
     select = ", ".join(f'"{dx._validate_identifier(c)}"' for c in columns)
@@ -37,9 +42,13 @@ def range_query(source: "dx.TableSource", columns: Sequence[str], lo: int, hi: i
     from_clause = anno
     if source.segmentation_table is not None:
         seg = f'"{dx._validate_identifier(source.segmentation_table)}"'
-        from_clause = (f"{anno} LEFT JOIN (SELECT * FROM {seg} WHERE id >= {lo} AND id < {hi}) {seg} "
+        kind = {"left": "LEFT JOIN", "inner": "JOIN"}[join]
+        from_clause = (f"{anno} {kind} (SELECT * FROM {seg} WHERE id >= {lo} AND id < {hi}) {seg} "
                        f"USING (id)")
-    return f"SELECT {select} FROM {from_clause} WHERE {anno}.id >= {lo} AND {anno}.id < {hi}"
+    where = f"{anno}.id >= {lo} AND {anno}.id < {hi}"
+    if row_filter:
+        where += f" AND ({row_filter})"
+    return f"SELECT {select} FROM {from_clause} WHERE {where}"
 
 
 def cut_ranges(lo: int, hi: int, n: int, id_bounds: Optional[Sequence] = None) -> List[Tuple[int, int]]:
@@ -94,11 +103,14 @@ def export_range(
     stage: Optional[str] = None,
     progress_callback=None,
     batch_bytes: Optional[int] = None,
+    row_filter: Optional[str] = None,
+    join: str = "left",
 ) -> RangeResult:
     """Stream ids [lo, hi) into a fresh staging table in each lake; returns its stage.
 
     progress_callback(rows) is called after each batch with the range's rows so far.
-    batch_bytes: ADBC's batch size hint (its default is ~16 MB).
+    batch_bytes: ADBC's batch size hint (its default is ~16 MB). row_filter, join: the
+    export source's (see range_query).
     """
     stage = stage or staging_name(range_index)
     staged = [dataclasses.replace(s, name=f"{s.name}/{stage}") for s in specs]
@@ -128,7 +140,7 @@ def export_range(
             with conn.cursor() as cur:
                 if batch_bytes:
                     cur.adbc_statement.set_options(**{BATCH_SIZE_HINT: str(int(batch_bytes))})
-                cur.execute(range_query(source, columns, lo, hi))
+                cur.execute(range_query(source, columns, lo, hi, row_filter=row_filter, join=join))
                 batches = iter(cur.fetch_record_batch())
                 while not failure:
                     t = time.monotonic()
