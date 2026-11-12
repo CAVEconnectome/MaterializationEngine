@@ -77,7 +77,7 @@ def register_lake(datastack: str, version: int, row: Dict, client=None) -> str:
     """Register one complete lake, given its internal catalog row; returns the asset id.
 
     An asset already registered at the lake's uri by an earlier export of the same lake
-    (since deleted, as run_deltalake_export refuses to overwrite one) is replaced. One
+    (since deleted, as the export refuses to overwrite one) is replaced. One
     registered by anyone else is left alone, and the registration fails on the catalog's
     duplicate-uri check.
     """

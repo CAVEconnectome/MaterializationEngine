@@ -187,6 +187,28 @@ class BaseConfig:
         if "DELTALAKE_OPTIMIZE_MAX_SPILL_SIZE_BYTES" in os.environ
         else None
     )
+    # The parallel export (workflows/lake_export; DELTA_LAKE_EXPORT_PLAN.md). Unset (or
+    # empty) keeps lake_export's defaults, in lake_export/settings.py and sizing.py.
+    # Postgres connections a job streams through at once, across its tables (the frozen
+    # database's CPU is what a parallel export saturates: minnie's 8 vCPUs at ~16).
+    DELTALAKE_EXPORT_MAX_STREAMS = os.environ.get("DELTALAKE_EXPORT_MAX_STREAMS")
+    # A table is split into id ranges of about RANGE_BYTES once it is SPLIT_MIN_BYTES.
+    DELTALAKE_EXPORT_RANGE_BYTES = os.environ.get("DELTALAKE_EXPORT_RANGE_BYTES")
+    DELTALAKE_EXPORT_SPLIT_MIN_BYTES = os.environ.get("DELTALAKE_EXPORT_SPLIT_MIN_BYTES")
+    # Optimize: Parquet bytes per partition-group task; a lake under WHOLE_LAKE_MAX_BYTES
+    # is optimized whole by one task.
+    DELTALAKE_EXPORT_OPTIMIZE_GROUP_BYTES = os.environ.get("DELTALAKE_EXPORT_OPTIMIZE_GROUP_BYTES")
+    DELTALAKE_EXPORT_WHOLE_LAKE_MAX_BYTES = os.environ.get("DELTALAKE_EXPORT_WHOLE_LAKE_MAX_BYTES")
+    # The export's Ray workers: CPUs (= range streams per worker) and memory, and how many
+    # (default: enough for the job's streams). The buffers' memory budget defaults to the
+    # worker's memory less 2 GiB.
+    DELTALAKE_RAY_WORKER_CPUS = os.environ.get("DELTALAKE_RAY_WORKER_CPUS")
+    DELTALAKE_RAY_WORKER_MEMORY = os.environ.get("DELTALAKE_RAY_WORKER_MEMORY")
+    DELTALAKE_RAY_MAX_WORKERS = os.environ.get("DELTALAKE_RAY_MAX_WORKERS")
+    DELTALAKE_EXPORT_WORKER_MEMORY_BUDGET_BYTES = os.environ.get("DELTALAKE_EXPORT_WORKER_MEMORY_BUDGET_BYTES")
+    # The version export's views stage: "module:function", called once every table of the
+    # version is exported (lake_export/version.py). Unset: no views stage.
+    DELTALAKE_EXPORT_VIEWS_STAGE = os.environ.get("DELTALAKE_EXPORT_VIEWS_STAGE")
 
     if os.environ.get("DAF_CREDENTIALS", None) is not None:
         with open(os.environ.get("DAF_CREDENTIALS"), "r") as f:

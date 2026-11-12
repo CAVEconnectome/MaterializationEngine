@@ -198,9 +198,7 @@ def discover_specs(datastack_name):
         _resolve_select_columns,
         _validate_identifier,
         discover_default_output_specs,
-        discover_view_output_specs,
         estimate_bytes_per_row,
-        estimate_view_rows,
         resolve_n_partitions,
     )
 
@@ -268,55 +266,50 @@ def discover_specs(datastack_name):
     # as a readable JSON error instead of an HTML 500 page that the wizard
     # reports as the opaque "Unexpected token '<'... is not valid JSON".
     try:
-        # Classify as table vs view. Views are materialized views cloned into the
-        # frozen DB; they are not tracked in MaterializedMetadata and have no
-        # segmentation join, so they need view-specific row-count and spec
-        # discovery.
+        # Only tables are exported: a version's views are built from its table lakes by
+        # the version export's views stage, not exported from SQL.
         relation_kind = _classify_relation(connection_string, table_name)
         if relation_kind is None:
             return jsonify(
                 {"error": f"Table {table_name!r} not found in version {version}"}
             ), 404
-        is_view = relation_kind == "view"
-
-        if is_view:
-            row_count = estimate_view_rows(engine, table_name)
-            source = TableSource(annotation_table=table_name)
-            resolved_specs = discover_view_output_specs(source, connection_string)
-        else:
-            # Look up row count.
-            with db_manager.session_scope(analysis_database) as session:
-                metadata_row = (
-                    session.query(MaterializedMetadata)
-                    .filter(MaterializedMetadata.table_name == table_name)
-                    .first()
-                )
-                if metadata_row is None:
-                    return jsonify(
-                        {
-                            "error": f"Table {table_name!r} not found in version {version}"
-                        }
-                    ), 404
-                row_count = metadata_row.row_count
-
-            # Detect segmentation table.
-            seg_table_name = build_segmentation_table_name(table_name, pcg_table_name)
-            has_seg_table = engine.dialect.has_table(engine, seg_table_name)
-            segmentation_table_name = seg_table_name if has_seg_table else None
-
-            source = TableSource(
-                annotation_table=table_name,
-                segmentation_table=segmentation_table_name,
+        if relation_kind == "view":
+            return jsonify(
+                {"error": f"{table_name!r} is a view: views are not exported from SQL; the version "
+                          f"export builds them from its table lakes (views: true)"}
+            ), 400
+        # Look up row count.
+        with db_manager.session_scope(analysis_database) as session:
+            metadata_row = (
+                session.query(MaterializedMetadata)
+                .filter(MaterializedMetadata.table_name == table_name)
+                .first()
             )
+            if metadata_row is None:
+                return jsonify(
+                    {
+                        "error": f"Table {table_name!r} not found in version {version}"
+                    }
+                ), 404
+            row_count = metadata_row.row_count
 
-            # Discover specs.
-            resolved_specs = discover_default_output_specs(source, engine)
+        # Detect segmentation table.
+        seg_table_name = build_segmentation_table_name(table_name, pcg_table_name)
+        has_seg_table = engine.dialect.has_table(engine, seg_table_name)
+        segmentation_table_name = seg_table_name if has_seg_table else None
+
+        source = TableSource(
+            annotation_table=table_name,
+            segmentation_table=segmentation_table_name,
+        )
+
+        # Discover specs.
+        resolved_specs = discover_default_output_specs(source, engine)
 
         bytes_per_row = estimate_bytes_per_row(connection_string, source)
 
         # For a small table, collapse to a single output — partitioning a tiny
-        # table just produces many undersized files. (For views the first spec
-        # is the flat base, so this keeps the flat export.)
+        # table just produces many undersized files.
         small_table_threshold_mb = int(
             get_config_param("DELTALAKE_SMALL_TABLE_THRESHOLD_MB", 200)
         )
@@ -371,12 +364,9 @@ def discover_specs(datastack_name):
             if auto:
                 raw["n_partitions"] = "auto"
 
-        # For views, row_count is a fast Postgres planner estimate (an exact
-        # count would execute the full view); it can be far off for aggregating
-        # views and is advisory only — the exact count is determined at export.
         cache_result = {
             "row_count": row_count,
-            "row_count_estimated": is_view,
+            "row_count_estimated": False,
             "bytes_per_row": bytes_per_row,
             "available_columns": available_columns,
             "geometry_columns": geometry_columns,
@@ -387,7 +377,7 @@ def discover_specs(datastack_name):
         # Return the result with resolved partition counts.
         result = {
             "row_count": row_count,
-            "row_count_estimated": is_view,
+            "row_count_estimated": False,
             "bytes_per_row": bytes_per_row,
             "available_columns": available_columns,
             "geometry_columns": geometry_columns,

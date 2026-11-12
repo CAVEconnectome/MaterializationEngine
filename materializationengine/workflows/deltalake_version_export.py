@@ -1,17 +1,14 @@
-"""Export every table of one frozen version to Delta Lake, as one job.
+"""A version's Delta Lake export: which tables, with which settings, and its status record.
 
-The per-table export (run_deltalake_export) is unchanged; this decides which tables, with
-which settings, and how many at once, and keeps one status record for the version.
+The export itself is workflows/lake_export (one RayJob per version, every table's id
+ranges sharing a budget of Postgres streams, DELTALAKE_EXPORT_MAX_STREAMS); this module
+lists a version's tables (biggest first), reads DELTALAKE_EXPORT_CONFIG, and keeps the
+version's status record, which get_version_status reads with each running table's
+progress folded in.
 
 Why one job per version rather than one per table: on ltv7 (2026-11-09) exporting the 27
 tables of v2253 one RayJob per table spent ~60-125 s per job just bringing a Ray cluster
 up, most of the 35 minutes. One cluster for the whole version pays that once.
-
-How many at once: a table export streams its rows out of the frozen database. One stream
-is limited by the exporter (~110-125k rows/s on both ltv and minnie), not the database,
-and used ~20% of minnie's disk read throughput, so a small number of concurrent streams
-(DELTALAKE_MAX_CONCURRENT_TABLE_STREAMS, default 2) keeps the version moving without
-starving production queries on the same instance. Biggest tables start first.
 
 Per-table settings come from DELTALAKE_EXPORT_CONFIG (JSON):
 
@@ -29,11 +26,10 @@ import json
 import logging
 from dataclasses import fields
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_CONCURRENT_TABLE_STREAMS = 2
 _VERSION_STATUS_TTL = 7 * 86400
 # PostGIS's catalog views live in every frozen database's public schema.
 _SYSTEM_VIEWS = {"geometry_columns", "geography_columns", "raster_columns", "raster_overviews"}
@@ -142,43 +138,3 @@ def get_version_status(datastack: str, version: int, job_id: str) -> Optional[Di
                 table["progress"] = {k: progress.get(k) for k in
                                      ("phase", "rows_processed", "total_rows", "percent_complete")}
     return status
-
-
-def run_tables(tables: List[Dict], start: Callable, wait: Callable, max_streams: int,
-               on_change: Callable[[Dict], None]) -> Dict[str, Dict]:
-    """Export tables at most max_streams at a time, in the given order.
-
-    start(table) returns a handle; wait(handles) blocks until one finishes and returns
-    (handle, error or None). Each table ends "done" or "failed" (with the error); a
-    failure does not stop the others. on_change gets the per-table states after every
-    change. Kept free of Ray so the scheduling can be tested on its own.
-    """
-    max_streams = max(1, int(max_streams))
-    states = {t["table"]: {"state": "pending", "rows": t.get("rows"), "kind": t.get("kind", "table")} for t in tables}
-    pending = list(tables)
-    running = {}
-    on_change(states)
-    while pending or running:
-        while pending and len(running) < max_streams:
-            t = pending.pop(0)
-            try:
-                running[start(t)] = t["table"]
-                states[t["table"]].update(state="running", started=_now())
-            except Exception as e:  # could not even be submitted
-                states[t["table"]].update(state="failed", error=f"{type(e).__name__}: {e}", finished=_now())
-            on_change(states)
-        if not running:
-            continue
-        handle, error = wait(list(running))
-        name = running.pop(handle)
-        if error is None:
-            states[name].update(state="done", finished=_now())
-        else:
-            states[name].update(state="failed", error=error, finished=_now())
-            logger.error("Delta Lake export of %s failed: %s", name, error)
-        on_change(states)
-    return states
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()

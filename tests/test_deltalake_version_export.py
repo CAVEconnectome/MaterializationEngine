@@ -1,6 +1,6 @@
-"""Exporting a whole version to Delta Lake: config, spec overrides, table listing,
-scheduling, the status record and the endpoint. Ray and the per-table export are
-replaced by fakes; run_deltalake_export itself is covered by test_deltalake_export.py."""
+"""Exporting to Delta Lake: config, spec overrides, table listing, the version's status
+record, and the export endpoints (Ray replaced by fakes). The export itself is covered by
+tests/test_lake_export_*.py."""
 
 import json
 import os
@@ -60,41 +60,6 @@ class TestSpecOverrides:
             dx.apply_spec_overrides([dx.DeltaLakeOutputSpec(name="id")], {"row_groups": 1})
         with pytest.raises(ValueError, match="positive integer"):
             dx.apply_spec_overrides([dx.DeltaLakeOutputSpec(name="id")], {"max_row_group_size": 0})
-
-
-class TestRunTables:
-    def _fake(self, fail=(), cannot_start=()):
-        events, running = [], []
-
-        def start(t):
-            if t["table"] in cannot_start:
-                raise RuntimeError("no workers")
-            running.append(t["table"])
-            events.append(("start", t["table"], len(running)))
-            return t["table"]
-
-        def wait(handles):
-            name = handles[0]  # oldest finishes first
-            running.remove(name)
-            events.append(("end", name))
-            return name, ("boom" if name in fail else None)
-        return start, wait, events
-
-    def test_at_most_max_streams_in_order(self):
-        start, wait, events = self._fake()
-        tables = [{"table": n, "rows": r} for n, r in [("big", 100), ("mid", 50), ("small", 1), ("tiny", 0)]]
-        changes = []
-        states = dve.run_tables(tables, start, wait, max_streams=2, on_change=lambda s: changes.append(json.dumps(s)))
-        assert [e[1] for e in events if e[0] == "start"] == ["big", "mid", "small", "tiny"]
-        assert max(e[2] for e in events if e[0] == "start") == 2
-        assert all(s["state"] == "done" for s in states.values()) and len(changes) > 4
-
-    def test_a_failure_does_not_stop_the_others(self):
-        start, wait, _ = self._fake(fail={"mid"}, cannot_start={"tiny"})
-        tables = [{"table": n} for n in ("big", "mid", "small", "tiny")]
-        states = dve.run_tables(tables, start, wait, max_streams=1, on_change=lambda s: None)
-        assert {n: s["state"] for n, s in states.items()} == {"big": "done", "mid": "failed", "small": "done", "tiny": "failed"}
-        assert states["mid"]["error"] == "boom" and "no workers" in states["tiny"]["error"]
 
 
 @pytest.fixture
@@ -192,18 +157,29 @@ class TestEndpoint:
                 mock.patch.object(dve, "set_version_status") as record:
             r = client.post(self.URL + "?workers=8", json={
                 "tables": ["synapses_pni_2", "nucleus_detection_v0"], "max_streams": 3, "name_suffix": "__s5",
-                "config": {"defaults": {"max_row_group_size": 10000}}})
+                "views": True, "config": {"defaults": {"max_row_group_size": 10000}}})
         assert r.status_code == 200, r.get_data()
         entry = submit.call_args.kwargs["entrypoint"]
-        assert "deltalake_export_version --datastack minnie65_phase3_v1 --version 2253" in entry
-        assert "--tables synapses_pni_2 nucleus_detection_v0" in entry and "--max-streams 3" in entry
+        assert "entrypoints.lake_export --datastack minnie65_phase3_v1 --version 2253" in entry
+        assert "--tables synapses_pni_2 nucleus_detection_v0" in entry and "--version-job" in entry
+        assert "--views" in entry and "--max-streams 3" in entry
         assert "--name-suffix __s5" in entry and "max_row_group_size" in entry
         assert submit.call_args.kwargs["num_workers"] == 8
+        assert submit.call_args.kwargs["worker_cpus"] == 2 and submit.call_args.kwargs["worker_memory"] == "11Gi"
         assert record.call_args.kwargs["state"] == "submitted" and r.json["rayjob_name"] == "mat-deltalake-v2253-x"
+
+    def test_workers_follow_the_streams(self, client):
+        with mock.patch("materializationengine.rayjobs.ray_enabled", return_value=True), \
+                mock.patch("materializationengine.rayjobs.submit_rayjob", return_value="x") as submit, \
+                mock.patch.object(dve, "set_version_status"):
+            client.post(self.URL, json={"max_streams": 16})
+        entry = submit.call_args.kwargs["entrypoint"]
+        assert "--views" not in entry and "--tables" not in entry
+        assert submit.call_args.kwargs["num_workers"] == 8  # 16 streams on 2-CPU workers
 
     @pytest.mark.parametrize("body", [
         {"tables": "synapses"}, {"max_streams": 0}, {"name_suffix": "a b; rm"},
-        {"config": {"defaults": {"bogus": 1}}},
+        {"config": {"defaults": {"bogus": 1}}}, {"include_views": True}, {"views": "yes"},
     ])
     def test_bad_requests(self, client, body):
         with mock.patch("materializationengine.rayjobs.ray_enabled", return_value=True), \
@@ -221,3 +197,37 @@ class TestEndpoint:
         with mock.patch.object(dve, "get_version_status", return_value=None):
             assert client.get(self.URL + "?job_id=j1").status_code == 404
         assert client.get(self.URL).status_code == 400
+
+
+class TestTableEndpoint:
+    client = TestEndpoint.client
+    URL = ("/api/v2/materialize/run/write_deltalake/datastack/minnie65_phase3_v1/version/2253/"
+           "table_name/synapses_pni_2/")
+
+    def test_submits_the_table(self, client):
+        specs = [{"name": "id", "partition_by": "id", "partition_strategy": "percentile_range"}]
+        with mock.patch("materializationengine.rayjobs.ray_enabled", return_value=True), \
+                mock.patch("materializationengine.rayjobs.submit_rayjob", return_value="mat-deltalake-x") as submit:
+            r = client.post(self.URL, json={"output_specs": specs})
+        assert r.status_code == 200, r.get_data()
+        assert r.json["backend"] == "ray" and r.json["rayjob_name"] == "mat-deltalake-x" and r.json["job_id"]
+        entry = submit.call_args.kwargs["entrypoint"]
+        assert "entrypoints.lake_export" in entry and "--tables synapses_pni_2" in entry
+        assert "--version-job" not in entry and "percentile_range" in entry
+        assert f"--job-id {r.json['job_id']}" in entry
+        assert submit.call_args.kwargs["name_prefix"] == "mat-deltalake-synapses-pni-2"
+
+    @pytest.mark.parametrize("query,body,status", [
+        ("?backend=celery", {}, 400),
+        ("", {"output_specs": {"name": "id"}}, 400),
+        ("", {"output_specs": [{"name": ""}]}, 400),
+    ])
+    def test_bad_requests(self, client, query, body, status):
+        with mock.patch("materializationengine.rayjobs.ray_enabled", return_value=True), \
+                mock.patch("materializationengine.rayjobs.submit_rayjob") as submit:
+            assert client.post(self.URL + query, json=body).status_code == status
+        submit.assert_not_called()
+
+    def test_needs_ray(self, client):
+        with mock.patch("materializationengine.rayjobs.ray_enabled", return_value=False):
+            assert client.post(self.URL, json={}).status_code == 501

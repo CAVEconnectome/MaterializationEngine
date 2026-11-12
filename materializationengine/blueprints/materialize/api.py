@@ -893,6 +893,11 @@ class WriteDeltalakeResource(Resource):
     def post(self, datastack_name: str, version: int, table_name: str):
         """Export a frozen materialization table to partitioned Delta Lake.
 
+        Runs as a RayJob (the parallel export, workflows/lake_export): the table is read as
+        id ranges at once when it is large, each committed to each lake in one transaction.
+        Optional JSON body: ``output_specs`` (a list of DeltaLakeOutputSpec objects).
+        ``?workers=`` caps the Ray workers. Poll the GET with the returned ``job_id``.
+
         Args:
             datastack_name (str): name of datastack from infoservice
             version (int): materialization version (-1 for latest)
@@ -900,14 +905,18 @@ class WriteDeltalakeResource(Resource):
         """
         import uuid
 
-        from materializationengine.workflows.deltalake_export import (
-            write_deltalake_table,
-        )
+        from materializationengine.rayjobs import RayJobSubmissionError, ray_enabled
+        from materializationengine.workflows.deltalake_export import DeltaLakeOutputSpec
+        from materializationengine.workflows.lake_export import submit as lake_submit
+        from materializationengine.workflows.lake_export.settings import ExportSettings
 
+        # ?backend=celery was the escape hatch to the Celery export, which is gone
+        if (request.args.get("backend") or "ray").lower() != "ray":
+            return abort(400, "Delta Lake exports run on Ray only; the Celery export was removed")
+        if not ray_enabled():
+            return abort(501, "Ray is not enabled on this deployment")
         if version == -1:
             version = get_latest_version(datastack_name)
-
-        datastack_info = get_datastack_info(datastack_name)
 
         # Accept optional output_specs from JSON body.
         output_specs = None
@@ -915,10 +924,6 @@ class WriteDeltalakeResource(Resource):
             output_specs = request.json.get("output_specs", None)
 
         if output_specs is not None:
-            from materializationengine.workflows.deltalake_export import (
-                DeltaLakeOutputSpec,
-            )
-
             if not isinstance(output_specs, list):
                 return abort(400, "output_specs must be a list")
             for item in output_specs:
@@ -930,88 +935,26 @@ class WriteDeltalakeResource(Resource):
                     return abort(400, f"invalid output_specs entry: {exc}")
 
         job_id = uuid.uuid4().hex
-
-        # Which engine runs the export is a DEPLOYMENT decision, not a caller
-        # one: it is driven by the chart (ray.enabled + ray.deltalakeExport), so
-        # the wizard does not offer a choice and clients need no changes to
-        # benefit. Same pipeline either way (run_deltalake_export); on Ray the
-        # RayJob CR is the durable record, so there is no ack to expire and no
-        # visibility_timeout redelivering a task that is still running, and the
-        # final per-spec optimize pass fans out across workers instead of
-        # running serially at max_concurrent_tasks=1.
-        #
-        # ?backend= remains as an operator escape hatch -- forcing celery to get
-        # a specific export off Ray without a redeploy, or forcing ray to smoke
-        # test before flipping the chart value for everyone. Not used by the UI.
-        from materializationengine.rayjobs import ray_deltalake_export_enabled
-
-        requested = (request.args.get("backend") or "").lower()
-        if requested not in ("", "ray", "celery"):
-            return abort(400, "backend must be 'ray' or 'celery'")
-        use_ray = (
-            ray_deltalake_export_enabled() if requested == "" else requested == "ray"
-        )
-
-        if use_ray:
-            from materializationengine.rayjobs import (
-                RayJobSubmissionError,
-                ray_enabled,
-                submit_rayjob,
+        settings = ExportSettings.from_config(current_app.config)
+        try:
+            rayjob_name = lake_submit.submit(
+                settings,
+                lake_submit.entrypoint(datastack_name, version, job_id, tables=[table_name],
+                                       output_specs=output_specs),
+                # DNS-label safe: table names allow underscores, RayJob names do not.
+                name_prefix=f"mat-deltalake-{table_name.replace('_', '-')}",
+                metadata={"datastack": datastack_name, "table": table_name, "version": str(version),
+                          "job-id": job_id},
+                num_workers=request.args.get("workers", type=int),
             )
-
-            # Only reachable when ?backend=ray was forced on a deployment without
-            # the platform; the server-side default already accounts for it.
-            if not ray_enabled():
-                return abort(501, "Ray is not enabled on this deployment")
-
-            entrypoint = (
-                "python -m materializationengine.rayjobs.entrypoints.deltalake_export"
-                f" --datastack {shlex.quote(datastack_name)}"
-                f" --version {int(version)}"
-                f" --table {shlex.quote(table_name)}"
-                f" --job-id {shlex.quote(job_id)}"
-            )
-            if output_specs is not None:
-                entrypoint += (
-                    f" --output-specs {shlex.quote(json.dumps(output_specs))}"
-                )
-
-            try:
-                rayjob_name = submit_rayjob(
-                    entrypoint=entrypoint,
-                    # DNS-label safe: table names allow underscores, RayJob names
-                    # do not.
-                    name_prefix=f"mat-deltalake-{table_name.replace('_', '-')}",
-                    num_workers=request.args.get("workers", type=int),
-                    metadata={
-                        "datastack": datastack_name,
-                        "table": table_name,
-                        "version": str(version),
-                        "job-id": job_id,
-                    },
-                )
-            except RayJobSubmissionError as exc:
-                return abort(500, f"failed to submit RayJob: {exc}")
-
-            return {
-                "message": f"Delta Lake export submitted as RayJob for {table_name} v{version}",
-                "job_id": job_id,
-                "backend": "ray",
-                "rayjob_name": rayjob_name,
-            }, 200
-
-        write_deltalake_table.s(
-            datastack_info,
-            version,
-            table_name,
-            output_specs=output_specs,
-            job_id=job_id,
-        ).apply_async()
+        except RayJobSubmissionError as exc:
+            return abort(500, f"failed to submit RayJob: {exc}")
 
         return {
-            "message": f"Delta Lake export enqueued for {table_name} v{version}",
+            "message": f"Delta Lake export submitted as RayJob for {table_name} v{version}",
             "job_id": job_id,
-            "backend": "celery",
+            "backend": "ray",
+            "rayjob_name": rayjob_name,
         }, 200
 
     @auth_requires_dataset_admin(table_arg="datastack_name")
@@ -1055,20 +998,25 @@ class WriteDeltalakeVersionResource(Resource):
     def post(self, datastack_name: str, version: int):
         """Export all of a frozen version's tables to Delta Lake as one RayJob.
 
-        JSON body (all optional): ``tables`` (list; default all), ``include_views`` (bool),
-        ``max_streams`` (tables streaming at once; default
-        DELTALAKE_MAX_CONCURRENT_TABLE_STREAMS, else 2), ``config`` (a
-        DELTALAKE_EXPORT_CONFIG object for this run), ``name_suffix`` (appended to every
-        output spec name, to export a version again beside an earlier export).
-        ``?workers=`` caps the Ray workers.
+        Every table's id ranges share one budget of Postgres streams (the parallel export,
+        workflows/lake_export); then, with ``views``, the views stage builds the version's
+        views from the table lakes (DELTALAKE_EXPORT_VIEWS_STAGE).
+
+        JSON body (all optional): ``tables`` (list; default all), ``views`` (bool),
+        ``max_streams`` (Postgres streams at once; default DELTALAKE_EXPORT_MAX_STREAMS),
+        ``config`` (a DELTALAKE_EXPORT_CONFIG object for this run), ``name_suffix``
+        (appended to every output spec name, to export a version again beside an earlier
+        export). ``?workers=`` caps the Ray workers.
         """
         import uuid
 
-        from materializationengine.rayjobs import RayJobSubmissionError, ray_enabled, submit_rayjob
+        from materializationengine.rayjobs import RayJobSubmissionError, ray_enabled
         from materializationengine.workflows.deltalake_version_export import (
             load_export_config,
             set_version_status,
         )
+        from materializationengine.workflows.lake_export import submit as lake_submit
+        from materializationengine.workflows.lake_export.settings import ExportSettings
 
         if not ray_enabled():
             return abort(501, "Ray is not enabled on this deployment")
@@ -1077,9 +1025,15 @@ class WriteDeltalakeVersionResource(Resource):
         body = request.json if request.is_json and request.json else {}
         if not isinstance(body, dict):
             return abort(400, "body must be a JSON object")
+        if "include_views" in body:
+            return abort(400, "include_views was removed: views are no longer exported from SQL; "
+                              "pass views: true to run the views stage after the tables")
         tables = body.get("tables")
         if tables is not None and (not isinstance(tables, list) or not all(isinstance(t, str) for t in tables)):
             return abort(400, "tables must be a list of table names")
+        views = body.get("views", False)
+        if not isinstance(views, bool):
+            return abort(400, "views must be true or false")
         max_streams = body.get("max_streams")
         if max_streams is not None and (not isinstance(max_streams, int) or isinstance(max_streams, bool)
                                         or max_streams < 1):
@@ -1095,26 +1049,17 @@ class WriteDeltalakeVersionResource(Resource):
                 return abort(400, f"invalid config: {exc}")
 
         job_id = uuid.uuid4().hex
-        entrypoint = (
-            "python -m materializationengine.rayjobs.entrypoints.deltalake_export_version"
-            f" --datastack {shlex.quote(datastack_name)} --version {int(version)} --job-id {job_id}"
-        )
-        if tables:
-            entrypoint += " --tables " + " ".join(shlex.quote(t) for t in tables)
-        if body.get("include_views"):
-            entrypoint += " --include-views"
-        if max_streams:
-            entrypoint += f" --max-streams {int(max_streams)}"
-        if config is not None:
-            entrypoint += f" --config {shlex.quote(json.dumps(config))}"
-        if name_suffix:
-            entrypoint += f" --name-suffix {shlex.quote(name_suffix)}"
+        settings = ExportSettings.from_config(current_app.config)
         try:
-            rayjob_name = submit_rayjob(
-                entrypoint=entrypoint,
+            rayjob_name = lake_submit.submit(
+                settings,
+                lake_submit.entrypoint(datastack_name, version, job_id, tables=tables, version_job=True,
+                                       views=views, config=config, name_suffix=name_suffix,
+                                       max_streams=max_streams),
                 name_prefix=f"mat-deltalake-v{int(version)}",
-                num_workers=request.args.get("workers", type=int),
                 metadata={"datastack": datastack_name, "version": str(version), "job-id": job_id},
+                max_streams=max_streams,
+                num_workers=request.args.get("workers", type=int),
             )
         except RayJobSubmissionError as exc:
             return abort(500, f"failed to submit RayJob: {exc}")

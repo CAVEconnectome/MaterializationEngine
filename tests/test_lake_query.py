@@ -348,12 +348,18 @@ def exported(test_app, tmp_path_factory, mat_metadata):
     frozen.dispose()
     info = {"datastack": DATASTACK, "aligned_volume": {"name": mat_metadata["aligned_volume"]},
             "segmentation_source": "graphene://local/test_pcg"}
+    from materializationengine.workflows.lake_export.job import TableRequest, run_tables
+    from materializationengine.workflows.lake_export.scheduler import ThreadExecutor
+    from materializationengine.workflows.lake_export.settings import ExportSettings
+
     with app.app_context(), \
             mock.patch.dict(app.config, {"DELTALAKE_OUTPUT_BUCKET": str(out), "DELTALAKE_MAX_ROW_GROUP_SIZE": 1}), \
-            mock.patch.object(dx, "set_deltalake_export_status"), mock.patch.object(dx, "append_deltalake_log"), \
-            mock.patch.object(dx, "_get_redis_client"):
+            mock.patch.object(dx, "append_deltalake_log"), mock.patch.object(dx, "_get_redis_client"):
         cat._ensured.clear()  # earlier tests recreate the aligned volume database
-        dx.run_deltalake_export(info, VERSION, TABLE)
+        # the export the API runs as a RayJob, in this process (units on threads)
+        summary = run_tables(info, VERSION, [TableRequest(TABLE)], job_id_for=lambda table: "parity",
+                             settings=ExportSettings.from_config(app.config), executor=ThreadExecutor(4))
+        assert summary[TABLE]["state"] == "complete", summary
         lakes = cat.list_exports(mat_metadata["aligned_volume"], DATASTACK, VERSION, table_name=TABLE)
     assert lakes, "the export recorded no complete lakes"
     yield lakes

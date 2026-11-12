@@ -10,10 +10,10 @@ database, so it outlives the version's database. MaterializationEngine owns the 
 and creates it when first needed (like the upload state database), so no
 DynamicAnnotationDB migration is involved.
 
-Lifecycle, written by run_deltalake_export: a row per output spec is `writing` before
-any data is streamed, `complete` once the lake exists, its optimize has finished and its
-row count matches the source (MaterializedMetadata for tables, the streamed count for
-views), else `failed` with the reason. When the version expires
+Lifecycle, written by the export (workflows/lake_export): a row per output spec is
+`writing` before any data is streamed, `complete` once the lake exists, its optimize has
+finished and its row count matches the source (MaterializedMetadata for tables), else
+`failed` with the reason. When the version expires
 (workflows/deltalake_expiry.py) its rows go `deleting` before any file is removed, so
 readers stop using a lake first, then `deleted` once its files are gone; a row left
 `deleting` by a failed removal is retried on the next run.
@@ -97,7 +97,7 @@ def record_writing(aligned_volume: str, datastack: str, version: int, table_name
     """Upsert a `writing` row for each lake: {"spec_name", "uri", "partition_by", "spec"}.
 
     A row for the same lake from an earlier export (whose lake was then deleted, since
-    run_deltalake_export refuses to overwrite one) is reset rather than duplicated.
+    the export refuses to overwrite one) is reset rather than duplicated.
     """
     from sqlalchemy.dialects.postgresql import insert
 

@@ -4,7 +4,6 @@ Tasks 4.1–4.5: output spec derivation, partition count heuristic,
 bucket boundary computation, and bucket assignment strategies.
 """
 
-import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -34,20 +33,13 @@ from materializationengine.workflows.deltalake_export import (
     compute_uniform_range_bounds,
     decode_geometry_columns,
     discover_default_output_specs,
-    discover_view_output_specs,
     estimate_bytes_per_row,
-    estimate_view_rows,
-    export_table_to_deltalake,
-    export_view_to_deltalake,
     morton_encode_3d,
     optimize_deltalake,
-    resolve_bounds,
     resolve_n_partitions,
 )
-from materializationengine.workflows.deltalake_export import _serial_optimize_runner
 from materializationengine.workflows.deltalake_export import apply_default_row_group_size
 from materializationengine.workflows.deltalake_export import _table_geometry_columns
-from materializationengine.workflows.deltalake_export import stream_table_to_arrow
 
 # ---------------------------------------------------------------------------
 # 4.1  discover_default_output_specs
@@ -176,7 +168,7 @@ class TestDiscoverDefaultOutputSpecs:
 
 
 # ---------------------------------------------------------------------------
-# _classify_relation / estimate_view_rows / discover_view_output_specs
+# _classify_relation
 # ---------------------------------------------------------------------------
 
 
@@ -201,123 +193,6 @@ class TestClassifyRelation:
     def test_missing_relation_returns_none(self, mock_fetchone):
         mock_fetchone.return_value = None
         assert _classify_relation("postgresql://localhost/db", "nope") is None
-
-
-class TestEstimateViewRows:
-    """estimate_view_rows uses reltuples when positive, else the EXPLAIN
-    planner estimate — never a full COUNT(*)."""
-
-    def _make_engine(self, fetch_results):
-        """Return a mock engine whose connection .execute().fetchone()
-        yields *fetch_results* in order."""
-        results = list(fetch_results)
-        conn = MagicMock()
-
-        def _execute(*args, **kwargs):
-            res = MagicMock()
-            res.fetchone.return_value = results.pop(0)
-            return res
-
-        conn.execute.side_effect = _execute
-        engine = MagicMock()
-        engine.connect.return_value.__enter__ = lambda s: conn
-        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
-        return engine, conn
-
-    def test_uses_reltuples_when_positive(self):
-        # reltuples query returns a positive value → used directly, no EXPLAIN.
-        engine, conn = self._make_engine([(12345.0,)])
-        assert estimate_view_rows(engine, "my_view") == 12345
-        assert conn.execute.call_count == 1
-
-    def test_explain_estimate_when_reltuples_negative(self):
-        # reltuples = -1 (never analyzed) → fall back to EXPLAIN planner estimate.
-        plan_json = [{"Plan": {"Plan Rows": 142358}}]
-        engine, conn = self._make_engine([(-1.0,), (plan_json,)])
-        assert estimate_view_rows(engine, "my_view") == 142358
-        assert conn.execute.call_count == 2
-
-    def test_explain_estimate_parses_json_string(self):
-        # Some drivers return the EXPLAIN JSON as a string.
-        import json as _json
-
-        plan_str = _json.dumps([{"Plan": {"Plan Rows": 999}}])
-        engine, _ = self._make_engine([(0.0,), (plan_str,)])
-        assert estimate_view_rows(engine, "my_view") == 999
-
-
-class TestDiscoverViewOutputSpecs:
-    """discover_view_output_specs infers specs from columns, not indexes."""
-
-    def _patch(self, columns, geometry_columns):
-        return (
-            patch(
-                "materializationengine.workflows.deltalake_export."
-                "_resolve_select_columns",
-                return_value=columns,
-            ),
-            patch(
-                "materializationengine.workflows.deltalake_export."
-                "_get_geometry_columns",
-                return_value=geometry_columns,
-            ),
-        )
-
-    def test_always_includes_flat_base(self):
-        # The flat (un-partitioned) base is always the first spec — it doubles
-        # as the staging lake that partitioned specs are derived from.
-        source = TableSource(annotation_table="my_view")
-        cols_patch, geom_patch = self._patch(
-            ["id", "pt_position", "score"], ["pt_position"]
-        )
-        with cols_patch, geom_patch:
-            specs = discover_view_output_specs(source, "postgresql://localhost/db")
-
-        assert specs[0].name == "flat"
-        assert specs[0].partition_by is None
-
-    def test_id_and_geometry(self):
-        source = TableSource(annotation_table="my_view")
-        cols_patch, geom_patch = self._patch(
-            ["id", "pt_position", "score"], ["pt_position"]
-        )
-        with cols_patch, geom_patch:
-            specs = discover_view_output_specs(source, "postgresql://localhost/db")
-
-        # flat + id + pt_position_morton
-        assert {s.name for s in specs} == {"flat", "id", "pt_position_morton"}
-        id_spec = next(s for s in specs if s.name == "id")
-        assert id_spec.partition_by == "id"
-        assert id_spec.partition_strategy == "percentile_range"
-        assert id_spec.source_table == "my_view"
-
-        morton_spec = next(s for s in specs if s.name == "pt_position_morton")
-        assert morton_spec.partition_by == "pt_position_morton"
-        assert morton_spec.partition_strategy == "uniform_range"
-        assert morton_spec.source_geometry_column == "pt_position"
-
-    def test_multiple_geometry_columns_use_prefix_priority(self):
-        source = TableSource(annotation_table="my_view")
-        # pt (rank 3) should win over bb (rank 4).
-        cols_patch, geom_patch = self._patch(
-            ["id", "bb_position", "pt_position"], ["bb_position", "pt_position"]
-        )
-        with cols_patch, geom_patch:
-            specs = discover_view_output_specs(source, "postgresql://localhost/db")
-
-        morton_specs = [s for s in specs if s.source_geometry_column is not None]
-        assert len(morton_specs) == 1
-        assert morton_specs[0].source_geometry_column == "pt_position"
-
-    def test_no_id_no_geometry_returns_flat_only(self):
-        source = TableSource(annotation_table="my_view")
-        cols_patch, geom_patch = self._patch(["score", "label"], [])
-        with cols_patch, geom_patch:
-            specs = discover_view_output_specs(source, "postgresql://localhost/db")
-
-        assert len(specs) == 1
-        assert specs[0].name == "flat"
-        assert specs[0].partition_by is None
 
 
 # ---------------------------------------------------------------------------
@@ -852,171 +727,6 @@ class TestMortonCodeLocality:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def no_table_geometry():
-    """export_table_to_deltalake looks up the tables' geometry columns in Postgres;
-    these tests use a fake connection string and tables without geometry."""
-    with patch(
-        "materializationengine.workflows.deltalake_export._get_geometry_columns",
-        return_value=[],
-    ) as lookup:
-        yield lookup
-
-
-@pytest.mark.usefixtures("no_table_geometry")
-class TestExportTableToDeltalake:
-    """End-to-end test of export_table_to_deltalake with mocked DB."""
-
-    @patch("deltalake.DeltaTable")
-    @patch("deltalake.write_deltalake")
-    @patch("materializationengine.workflows.deltalake_export.stream_table_to_arrow")
-    def test_end_to_end_export(self, mock_stream, mock_write, _mock_dt):
-        """Full pipeline: stream → buffer → flush → write."""
-        # Simulate two small Arrow batches
-        batch1 = pa.RecordBatch.from_pydict(
-            {
-                "id": [1, 2, 3],
-                "root_id": [100, 200, 300],
-            }
-        )
-        batch2 = pa.RecordBatch.from_pydict(
-            {
-                "id": [4, 5, 6],
-                "root_id": [400, 500, 600],
-            }
-        )
-        mock_stream.return_value = iter([batch1, batch2])
-
-        spec = DeltaLakeOutputSpec(
-            name="test_root_id",
-            partition_by="root_id",
-            partition_strategy="percentile_range",
-            n_partitions=2,
-            bounds=[350],
-        )
-
-        export_table_to_deltalake(
-            connection_string="unused",
-            source=TableSource(annotation_table="synapse"),
-            output_specs=[spec],
-            output_uri_base="gs://bucket/test",
-            flush_threshold_bytes=10 * 1024 * 1024 * 1024,  # huge → single flush
-        )
-
-        # Should have flushed once with all 6 rows
-        assert mock_write.call_count == 1
-        written = pl.from_arrow(mock_write.call_args_list[0][0][1])
-        assert len(written) == 6
-        assert "root_id_partition" in written.columns
-        # Values 100,200,300 ≤ 350 → bucket 0; 400,500,600 > 350 → bucket 1
-        partitions = written.sort("id")["root_id_partition"].to_list()
-        assert partitions == [0, 0, 0, 1, 1, 1]
-
-    @patch("deltalake.DeltaTable")
-    @patch("deltalake.write_deltalake")
-    @patch("materializationengine.workflows.deltalake_export.stream_table_to_arrow")
-    def test_explicit_specs_override_defaults(self, mock_stream, mock_write, _mock_dt):
-        """Passing explicit output_specs should use those, not index-derived ones."""
-        batch = pa.RecordBatch.from_pydict(
-            {
-                "id": [1, 2, 3, 4],
-                "root_id": [10, 20, 30, 40],
-            }
-        )
-        mock_stream.return_value = iter([batch])
-
-        # Explicit spec: hash partition with 2 buckets (not percentile_range)
-        spec = DeltaLakeOutputSpec(
-            name="test_hash",
-            partition_by="root_id",
-            partition_strategy="hash",
-            n_partitions=2,
-        )
-
-        export_table_to_deltalake(
-            connection_string="unused",
-            source=TableSource(annotation_table="test_table"),
-            output_specs=[spec],
-            output_uri_base="gs://bucket/test",
-            flush_threshold_bytes=10 * 1024 * 1024 * 1024,
-        )
-
-        assert mock_write.call_count == 1
-        written = pl.from_arrow(mock_write.call_args_list[0][0][1])
-        assert "root_id_partition" in written.columns
-        # Hash produces buckets 0 or 1
-        assert set(written["root_id_partition"].to_list()).issubset({0, 1})
-
-    @patch("deltalake.DeltaTable")
-    @patch("deltalake.write_deltalake")
-    @patch("materializationengine.workflows.deltalake_export.stream_table_to_arrow")
-    def test_multiple_flushes(self, mock_stream, mock_write, _mock_dt):
-        """With a low flush threshold, data should be written in multiple flushes."""
-        batch1 = pa.RecordBatch.from_pydict({"val": list(range(0, 50))})
-        batch2 = pa.RecordBatch.from_pydict({"val": list(range(50, 100))})
-        mock_stream.return_value = iter([batch1, batch2])
-
-        spec = DeltaLakeOutputSpec(
-            name="test_val_percentile",
-            partition_by="val",
-            partition_strategy="percentile_range",
-            n_partitions=2,
-            bounds=[50],
-        )
-
-        export_table_to_deltalake(
-            connection_string="unused",
-            source=TableSource(annotation_table="t"),
-            output_specs=[spec],
-            output_uri_base="/tmp/test",
-            flush_threshold_bytes=1,  # tiny → flush after every batch
-        )
-
-        # Two batches, each exceeds 1-byte threshold → 2 flushes
-        assert mock_write.call_count == 2
-
-    @patch("deltalake.DeltaTable")
-    @patch("deltalake.write_deltalake")
-    @patch("materializationengine.workflows.deltalake_export.stream_table_to_arrow")
-    def test_every_geometry_column_is_decoded_not_only_the_morton_one(
-        self, mock_stream, mock_write, _mock_dt, no_table_geometry
-    ):
-        """A synapse table has three points but a Morton spec on only one (ctr);
-        pre and post must still come out as x/y/z, not raw WKB."""
-        coords = {"pre_pt_position": (1, 2, 3), "ctr_pt_position": (4, 5, 6), "post_pt_position": (7, 8, 9)}
-        batch = pa.RecordBatch.from_pydict(
-            {"id": [1], **{c: [shapely.to_wkb(shapely.Point(*xyz))] for c, xyz in coords.items()}}
-        )
-        mock_stream.return_value = iter([batch])
-        no_table_geometry.side_effect = lambda conn, name: {
-            "synapses": list(coords), "synapses__seg": []}[name]
-        spec = DeltaLakeOutputSpec(
-            name="ctr_pt_position_morton",
-            partition_by="ctr_pt_position_morton",
-            partition_strategy="uniform_range",
-            n_partitions=2,
-            bounds=[1],
-            source_geometry_column="ctr_pt_position",
-        )
-
-        export_table_to_deltalake(
-            connection_string="unused",
-            source=TableSource(annotation_table="synapses", segmentation_table="synapses__seg"),
-            output_specs=[spec],
-            output_uri_base="gs://bucket/test",
-            flush_threshold_bytes=10 * 1024 * 1024 * 1024,
-        )
-
-        # both physical tables were asked for their geometry columns
-        assert [c.args[1] for c in no_table_geometry.call_args_list] == ["synapses", "synapses__seg"]
-        written = pl.from_arrow(mock_write.call_args_list[0][0][1])
-        for col, (x, y, z) in coords.items():
-            assert col not in written.columns
-            assert written.select(f"{col}_x", f"{col}_y", f"{col}_z").row(0) == (x, y, z)
-        assert "ctr_pt_position_morton" in written.columns
-        assert "pre_pt_position_morton" not in written.columns
-
-
 class TestTableGeometryColumns:
     @patch("materializationengine.workflows.deltalake_export._get_geometry_columns")
     def test_all_geometry_columns_of_every_table_plus_spec_columns(self, lookup):
@@ -1035,7 +745,6 @@ class TestTableGeometryColumns:
 # ===========================================================================
 
 
-@pytest.mark.usefixtures("no_table_geometry")
 class TestOptimizeDeltalake:
     """optimize_deltalake should z-order, apply bloom filters, and vacuum."""
 
@@ -1093,132 +802,6 @@ class TestOptimizeDeltalake:
         mock_dt.optimize.z_order.assert_not_called()
         mock_dt.vacuum.assert_called_once()
 
-    @patch("deltalake.write_deltalake")
-    @patch("deltalake.DeltaTable")
-    @patch("materializationengine.workflows.deltalake_export.stream_table_to_arrow")
-    def test_export_calls_optimize(self, mock_stream, MockDeltaTable, mock_write):
-        """export_table_to_deltalake should call optimize_deltalake for
-        each output spec after writing."""
-        mock_dt = MagicMock()
-        MockDeltaTable.return_value = mock_dt
-
-        batch = pa.RecordBatch.from_pydict({"id": [1, 2], "val": [10, 20]})
-        mock_stream.return_value = iter([batch])
-
-        spec = DeltaLakeOutputSpec(
-            name="test_zorder_bloom",
-            partition_by="val",
-            partition_strategy="hash",
-            n_partitions=2,
-            zorder_columns=["val"],
-            bloom_filter_columns=["id"],
-        )
-
-        export_table_to_deltalake(
-            connection_string="unused",
-            source=TableSource(annotation_table="t"),
-            output_specs=[spec],
-            output_uri_base="/tmp/test",
-        )
-
-        # Should have opened the DeltaTable at the correct URI (uses spec.name)
-        MockDeltaTable.assert_called_once_with("/tmp/test/test_zorder_bloom")
-        # Should have called z_order (not compact) since zorder_columns is set
-        mock_dt.optimize.z_order.assert_called_once()
-        mock_dt.vacuum.assert_called_once()
-
-
-@pytest.mark.usefixtures("no_table_geometry")
-class TestSkipOptimize:
-    """skip_optimize hands the optimize pass to the caller.
-
-    This is the seam the Ray entrypoint uses to fan the per-spec optimizes out
-    across workers instead of running them serially in one pod. The default must
-    stay False so the Celery path is byte-for-byte unchanged.
-    """
-
-    @patch("deltalake.write_deltalake")
-    @patch("deltalake.DeltaTable")
-    @patch("materializationengine.workflows.deltalake_export.stream_table_to_arrow")
-    def test_skip_optimize_does_not_optimize(
-        self, mock_stream, MockDeltaTable, mock_write
-    ):
-        mock_dt = MagicMock()
-        MockDeltaTable.return_value = mock_dt
-        mock_stream.return_value = iter(
-            [pa.RecordBatch.from_pydict({"id": [1, 2], "val": [10, 20]})]
-        )
-        spec = DeltaLakeOutputSpec(
-            name="lake",
-            partition_by="val",
-            partition_strategy="hash",
-            n_partitions=2,
-            zorder_columns=["val"],
-        )
-
-        export_table_to_deltalake(
-            connection_string="unused",
-            source=TableSource(annotation_table="t"),
-            output_specs=[spec],
-            output_uri_base="/tmp/test",
-            skip_optimize=True,
-        )
-
-        # The rows are still written -- only the optimize pass is deferred.
-        assert mock_write.called
-        mock_dt.optimize.z_order.assert_not_called()
-        mock_dt.optimize.compact.assert_not_called()
-        mock_dt.vacuum.assert_not_called()
-
-
-class TestSerialOptimizeRunner:
-    """The default runner preserves the historical serial behaviour."""
-
-    @patch("materializationengine.workflows.deltalake_export.optimize_deltalake")
-    def test_runs_every_spec_in_order(self, mock_optimize):
-        specs = [
-            DeltaLakeOutputSpec(name="a", zorder_columns=["x"]),
-            DeltaLakeOutputSpec(name="b"),
-        ]
-        jobs = [(s, f"gs://bucket/{s.name}") for s in specs]
-        events = []
-
-        _serial_optimize_runner(
-            jobs,
-            {"max_concurrent_tasks": 1, "target_size": None, "max_spill_size": None},
-            lambda name, action: events.append((name, action)),
-        )
-
-        assert [c.args[0] for c in mock_optimize.call_args_list] == [
-            "gs://bucket/a",
-            "gs://bucket/b",
-        ]
-        # z_order for the spec with zorder_columns, compact for the one without,
-        # and a vacuum callback after each.
-        assert events == [
-            ("a", "z_order"),
-            ("a", "vacuum"),
-            ("b", "compact"),
-            ("b", "vacuum"),
-        ]
-        # The per-pod memory compromise is still what the default passes through.
-        assert mock_optimize.call_args_list[0].kwargs["max_concurrent_tasks"] == 1
-
-    @patch("materializationengine.workflows.deltalake_export.optimize_deltalake")
-    def test_forwards_spec_optimize_settings(self, mock_optimize):
-        spec = DeltaLakeOutputSpec(
-            name="a",
-            zorder_columns=["x", "y"],
-            bloom_filter_columns=["id"],
-            bloom_filter_fpp=0.05,
-        )
-        _serial_optimize_runner([(spec, "gs://b/a")], {}, None)
-
-        kwargs = mock_optimize.call_args.kwargs
-        assert kwargs["zorder_columns"] == ["x", "y"]
-        assert kwargs["bloom_filter_columns"] == ["id"]
-        assert kwargs["fpp"] == 0.05
-
 
 class TestRowGroupSize:
     """max_row_group_size: per spec, else DELTALAKE_MAX_ROW_GROUP_SIZE, else delta-rs's default."""
@@ -1274,10 +857,6 @@ class TestRowGroupSize:
         apply_default_row_group_size([spec], None)
         assert spec.max_row_group_size is None
 
-    @patch("materializationengine.workflows.deltalake_export.optimize_deltalake")
-    def test_serial_runner_forwards_the_size(self, mock_optimize):
-        _serial_optimize_runner([(DeltaLakeOutputSpec(name="a", max_row_group_size=8192), "gs://b/a")], {}, None)
-        assert mock_optimize.call_args.kwargs["max_row_group_size"] == 8192
 
     @pytest.mark.parametrize("configured, expected", [("16384", 16384), (None, None)])
     def test_wizard_defaults_include_the_size(self, configured, expected):
@@ -1716,23 +1295,8 @@ class TestProgressPayloadFields:
         assert payload["rows_per_second"] == 292  # rounded to int
 
 
-class TestProgressHeartbeat:
-    """_progress_heartbeat calls write_fn periodically until the block exits."""
-
-    def test_heartbeat_ticks_and_stops(self):
-        from materializationengine.workflows.deltalake_export import (
-            _progress_heartbeat,
-        )
-
-        calls = []
-        with _progress_heartbeat(lambda: calls.append(1), interval=0.05):
-            time.sleep(0.18)  # expect ~3 ticks
-        ticks_at_exit = len(calls)
-
-        assert ticks_at_exit >= 2  # fired periodically while inside the block
-        time.sleep(0.12)
-        # No further ticks after the context exits (thread stopped).
-        assert len(calls) == ticks_at_exit
+class TestExportLog:
+    """The export's capped Redis log, and the progress record that includes it."""
 
     @patch("materializationengine.workflows.deltalake_export._get_redis_client")
     def test_append_deltalake_log(self, mock_redis_client):
@@ -1782,144 +1346,6 @@ class TestProgressHeartbeat:
         assert result["error"] is None
 
 
-# ---------------------------------------------------------------------------
-# export_view_to_deltalake — two-pass (stream-flat then re-partition)
-# ---------------------------------------------------------------------------
-
-
-class TestExportViewToDeltalake:
-    """End-to-end of the two-pass view exporter against a real local Delta
-    Lake, with only the Postgres stream mocked."""
-
-    def _make_batches(self, n_rows, n_batches=3):
-        """Yield real pyarrow RecordBatches: id, score, pt_position (3D WKB)."""
-        per = max(1, n_rows // n_batches)
-        made = 0
-        batches = []
-        i = 0
-        while made < n_rows:
-            count = min(per, n_rows - made)
-            ids = list(range(made, made + count))
-            scores = [float(x) * 1.5 for x in ids]
-            wkb = [
-                shapely.to_wkb(shapely.Point(x % 1000, (x * 2) % 1000, (x * 3) % 1000))
-                for x in ids
-            ]
-            batches.append(
-                pa.RecordBatch.from_arrays(
-                    [
-                        pa.array(ids, type=pa.int64()),
-                        pa.array(scores, type=pa.float64()),
-                        pa.array(wkb, type=pa.binary()),
-                    ],
-                    names=["id", "score", "pt_position"],
-                )
-            )
-            made += count
-            i += 1
-        return batches
-
-    def test_two_pass_flat_and_partitioned(self, tmp_path):
-        from deltalake import DeltaTable
-
-        n_rows = 30
-        batches = self._make_batches(n_rows)
-        output_uri_base = str(tmp_path / "out")
-
-        specs = [
-            DeltaLakeOutputSpec(name="flat"),
-            DeltaLakeOutputSpec(
-                name="id",
-                partition_by="id",
-                partition_strategy="percentile_range",
-                n_partitions=3,
-                zorder_columns=["id"],
-                source_table="my_view",
-            ),
-            DeltaLakeOutputSpec(
-                name="pt_position_morton",
-                partition_by="pt_position_morton",
-                partition_strategy="uniform_range",
-                n_partitions=3,
-                zorder_columns=["pt_position_morton"],
-                source_geometry_column="pt_position",
-                source_table="my_view",
-            ),
-        ]
-
-        with patch(
-            "materializationengine.workflows.deltalake_export.stream_table_to_arrow",
-            return_value=iter(batches),
-        ), patch(
-            "materializationengine.workflows.deltalake_export._get_geometry_columns",
-            return_value=["pt_position"],
-        ), patch(
-            # optimize/compact/vacuum is delta-rs internals — skip for the unit test.
-            "materializationengine.workflows.deltalake_export.optimize_deltalake"
-        ):
-            returned = export_view_to_deltalake(
-                connection_string="postgresql://ignored/db",
-                view_name="my_view",
-                output_specs=specs,
-                output_uri_base=output_uri_base,
-                flush_threshold_bytes=1,  # force a flush per batch
-            )
-
-        # Exact row count comes from streaming, not a COUNT(*).
-        assert returned == n_rows
-
-        # Flat base: decoded geometry, no partition column, all rows.
-        flat = DeltaTable(f"{output_uri_base}/flat")
-        assert flat.count() == n_rows
-        flat_cols = set(flat.schema().to_arrow().names)
-        assert {"id", "score", "pt_position_x", "pt_position_y", "pt_position_z"} <= flat_cols
-        assert "pt_position" not in flat_cols  # WKB dropped after decode
-
-        # id partition: same rows, gains the Hive partition column.
-        id_lake = DeltaTable(f"{output_uri_base}/id")
-        assert id_lake.count() == n_rows
-        assert "id_partition" in set(id_lake.schema().to_arrow().names)
-
-        # morton partition: same rows, morton + partition columns present.
-        morton_lake = DeltaTable(f"{output_uri_base}/pt_position_morton")
-        assert morton_lake.count() == n_rows
-        m_cols = set(morton_lake.schema().to_arrow().names)
-        assert "pt_position_morton_partition" in m_cols
-
-    def test_flat_only_view_no_second_pass(self, tmp_path):
-        from deltalake import DeltaTable
-
-        n_rows = 12
-        batches = self._make_batches(n_rows)
-        output_uri_base = str(tmp_path / "out")
-
-        # A view with no id / geometry → single flat spec.
-        specs = [DeltaLakeOutputSpec(name="flat")]
-
-        with patch(
-            "materializationengine.workflows.deltalake_export.stream_table_to_arrow",
-            return_value=iter(batches),
-        ), patch(
-            "materializationengine.workflows.deltalake_export._get_geometry_columns",
-            return_value=[],
-        ), patch(
-            "materializationengine.workflows.deltalake_export.optimize_deltalake"
-        ):
-            returned = export_view_to_deltalake(
-                connection_string="postgresql://ignored/db",
-                view_name="degree_view",
-                output_specs=specs,
-                output_uri_base=output_uri_base,
-                flush_threshold_bytes=1,
-            )
-
-        assert returned == n_rows
-        flat = DeltaTable(f"{output_uri_base}/flat")
-        assert flat.count() == n_rows
-        # No geometry to decode → original columns preserved, no partition col.
-        cols = set(flat.schema().to_arrow().names)
-        assert "pt_position" in cols  # untouched binary column
-        assert not any(c.endswith("_partition") for c in cols)
 
 
 class TestGeometryTypeRegistrationNotClobbered:
@@ -2228,40 +1654,3 @@ class TestReleaseFreedHeap:
         _release_freed_heap()
         _release_freed_heap()
 
-
-class TestStreamKeepsAnnotationsWithoutSegmentation:
-    """An annotation whose supervoxel lookup produced no segmentation row is still a
-    row of the table (the query api's LEFT JOIN returns it with null ids, and
-    MaterializedMetadata counts it), so the export must keep it. On ltv7 v2253,
-    spine_bigger_test_4 lost 247 such rows to an inner join."""
-
-    def test_left_join_with_and_without_limit(self, mat_metadata):
-        import uuid
-
-        import sqlalchemy as sa
-        from sqlalchemy.engine.url import make_url
-
-        url = make_url(mat_metadata["sql_uri"])
-        base = f"{url.drivername}://{url.username}:{url.password}@{url.host}:{url.port or 5432}"
-        name = f"stream_test_{uuid.uuid4().hex[:8]}"
-        admin = sa.create_engine(f"{base}/postgres", isolation_level="AUTOCOMMIT")
-        with admin.connect() as conn:
-            conn.execute(f"CREATE DATABASE {name}")
-        engine = sa.create_engine(f"{base}/{name}")
-        try:
-            with engine.begin() as conn:
-                conn.execute("CREATE TABLE anno (id bigint PRIMARY KEY, valid boolean)")
-                conn.execute("CREATE TABLE anno__seg (id bigint PRIMARY KEY, pt_root_id bigint)")
-                conn.execute("INSERT INTO anno VALUES (1, true), (2, true), (3, true)")
-                conn.execute("INSERT INTO anno__seg VALUES (1, 10), (3, 30)")
-            source = TableSource(annotation_table="anno", segmentation_table="anno__seg")
-            conn_str = f"postgresql://{url.username}:{url.password}@{url.host}:{url.port or 5432}/{name}"
-            for limit in (None, 10):
-                table = pa.Table.from_batches(list(stream_table_to_arrow(conn_str, source, row_limit=limit)))
-                got = sorted(zip(table.column("id").to_pylist(), table.column("pt_root_id").to_pylist()))
-                assert got == [(1, 10), (2, None), (3, 30)], limit
-        finally:
-            engine.dispose()
-            with admin.connect() as conn:
-                conn.execute(f"DROP DATABASE IF EXISTS {name}")
-            admin.dispose()

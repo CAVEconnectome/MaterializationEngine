@@ -1,6 +1,6 @@
 """Planning one table's export: its specs, partition bounds, size and id ranges.
 
-The same preparation run_deltalake_export does (spec discovery, overrides, the
+The same preparation the export has always done (spec discovery, overrides, the
 deployment's row-group size, the small-table trim, partition counts and bounds), plus the
 size policy and the id ranges. The plan is saved next to the table's lakes
 (<table>/_lake_export/<job_id>.json) before anything is written, and a restarted job
@@ -130,7 +130,8 @@ def resolve_specs(
     output_specs: Optional[Sequence[Dict]] = None,
     spec_overrides: Optional[Dict] = None,
 ) -> List["dx.DeltaLakeOutputSpec"]:
-    """The table's output specs, as run_deltalake_export resolves them."""
+    """The table's output specs: given or discovered, with the overrides, the deployment's
+    row-group size, the small-table trim, and resolved partition counts and bounds."""
     if output_specs is not None:
         specs = [dx.DeltaLakeOutputSpec(**s) for s in output_specs]
     else:

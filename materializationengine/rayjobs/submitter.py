@@ -202,7 +202,7 @@ def submit_rayjob(
 
     Args:
         entrypoint: shell command run on the Ray head, e.g.
-            ``python -m materializationengine.rayjobs.entrypoints.deltalake_export ...``
+            ``python -m materializationengine.rayjobs.entrypoints.lake_export ...``
         name_prefix: becomes ``metadata.generateName``; must be DNS-label safe
             and is truncated so the generated suffix still fits in 63 chars.
         num_workers: ceiling on worker pods. Clamped to the chart's configured

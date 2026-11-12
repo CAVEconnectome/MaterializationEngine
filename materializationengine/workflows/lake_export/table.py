@@ -8,7 +8,7 @@ range is published to every lake that lacks it, by one thread per lake, so each 
 a single committer. optimizing: once every range is in every lake, each lake's partitions
 are planned into optimize tasks by size. finalizing: a sweep of unreferenced files, the
 row count of every lake checked against the frozen database's, the catalog, the planning
-index and the catalog service -- the tail of run_deltalake_export.
+index and the catalog service.
 
 A restarted job (KubeRay retrying the driver, same job_id) resumes: the plan is loaded,
 ranges every lake already has are skipped, and a range only some lakes have is exported
