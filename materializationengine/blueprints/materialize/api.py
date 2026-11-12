@@ -1174,7 +1174,9 @@ class ViewPilotResource(Resource):
         ``rounds`` (default 1), ``duckdb_memory`` (e.g. "24GB"), ``image_tag`` (default
         VIEW_PILOT_IMAGE_TAG: an image built with the views-pilot dependency group),
         ``task_resources`` (Ray options for the Postgres and DuckDB tasks, e.g.
-        {"num_cpus": 8, "memory": 32000000000}; default one CPU, which fits any worker).
+        {"num_cpus": 3}; default one CPU, which fits any worker), ``worker`` (this job's
+        worker size instead of the chart's, e.g. {"cpus": 3, "memory": "11Gi"}: it must
+        fit the worker node pool's nodes).
         ``?workers=`` caps the Ray workers.
         """
         import uuid
@@ -1205,6 +1207,14 @@ class ViewPilotResource(Resource):
                 and set(resources) <= {"num_cpus", "memory", "resources"}
                 and all(isinstance(v, (int, float, dict)) and not isinstance(v, bool) for v in resources.values())):
             return abort(400, "task_resources must be Ray options: num_cpus, memory, resources")
+        worker = body.get("worker") or {}
+        if not isinstance(worker, dict):
+            return abort(400, 'worker must be like {"cpus": 3, "memory": "11Gi"}')
+        cpus, worker_memory = worker.get("cpus"), worker.get("memory")
+        if (set(worker) - {"cpus", "memory"}
+                or (cpus is not None and (not isinstance(cpus, int) or isinstance(cpus, bool) or not 1 <= cpus <= 64))
+                or (worker_memory is not None and not re.fullmatch(r"[0-9]+(Mi|Gi)", str(worker_memory)))):
+            return abort(400, 'worker must be like {"cpus": 3, "memory": "11Gi"}')
         if version == -1:
             version = get_latest_version(datastack_name)
 
@@ -1224,6 +1234,8 @@ class ViewPilotResource(Resource):
                 metadata={"datastack": datastack_name, "version": str(version), "view-pilot": run_id},
                 image_tag=image_tag,
                 env={"RAY_VIEW_PILOT_RESOURCES": json.dumps(resources)} if resources else None,
+                worker_cpus=cpus,
+                worker_memory=worker_memory,
             )
         except RayJobSubmissionError as exc:
             return abort(500, f"failed to submit RayJob: {exc}")

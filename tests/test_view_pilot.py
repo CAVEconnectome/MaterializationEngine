@@ -77,7 +77,7 @@ class TestEndpoint:
             r = client.post(self.URL + "?workers=6", json={
                 "views": ["synapses_pni_2_in_out_degree", "connections_with_nuclei"], "engines": ["duckdb", "daft"],
                 "rounds": 2, "duckdb_memory": "24GB", "image_tag": "vDeltaVersion12-viewpilot",
-                "task_resources": {"num_cpus": 8, "memory": 32000000000}})
+                "task_resources": {"num_cpus": 8, "memory": 32000000000}, "worker": {"cpus": 3, "memory": "11Gi"}})
         assert r.status_code == 200, r.get_data()
         kw = submit.call_args.kwargs
         assert "view_pilot --datastack minnie65_phase3_v1 --version 2253 --run-id " in kw["entrypoint"]
@@ -85,12 +85,14 @@ class TestEndpoint:
         assert "--rounds 2" in kw["entrypoint"] and "--duckdb-memory 24GB" in kw["entrypoint"]
         assert kw["image_tag"] == "vDeltaVersion12-viewpilot" and kw["num_workers"] == 6
         assert json.loads(kw["env"]["RAY_VIEW_PILOT_RESOURCES"]) == {"num_cpus": 8, "memory": 32000000000}
+        assert (kw["worker_cpus"], kw["worker_memory"]) == (3, "11Gi")
         assert r.json["results"] == f"gs://bucket/deltalake/minnie65_phase3_v1/v2253/_pilot/{r.json['run_id']}/results.json"
 
     @pytest.mark.parametrize("body", [
         {}, {"views": "connections"}, {"views": ["a; rm -rf"]}, {"views": ["v"], "engines": ["spark"]},
         {"views": ["v"], "rounds": 0}, {"views": ["v"], "duckdb_memory": "lots"}, {"views": ["v"], "image_tag": "a b"},
         {"views": ["v"], "task_resources": {"num_gpus": 1}}, {"views": ["v"], "task_resources": "big"},
+        {"views": ["v"], "worker": {"cpus": 0}}, {"views": ["v"], "worker": "big"}, {"views": ["v"], "worker": {"memory": "lots"}},
     ])
     def test_bad_requests(self, client, body):
         from unittest import mock

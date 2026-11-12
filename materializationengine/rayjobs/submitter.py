@@ -190,6 +190,8 @@ def submit_rayjob(
     metadata: dict | None = None,
     active_deadline_seconds: int | None = None,
     image_tag: str | None = None,
+    worker_cpus: int | None = None,
+    worker_memory: str | None = None,
 ) -> str:
     """Create a RayJob and return its generated name.
 
@@ -211,6 +213,9 @@ def submit_rayjob(
             337M-row upload needs longer than the 24 h default).
         image_tag: run this tag of the materializationengine image instead of the
             deployment's (e.g. a pilot image with extra dependencies); sidecars keep theirs.
+        worker_cpus, worker_memory: size this job's workers instead of the chart's (one
+            CPU, 3Gi): Ray's num-cpus and the worker container's requests, e.g. 3 and
+            "11Gi" for one worker per 4-vCPU node. Must fit the worker node pool's nodes.
     """
     job = _load_template()
 
@@ -252,6 +257,19 @@ def submit_rayjob(
         # minReplicas stays 0: the in-tree autoscaler grows the group on demand,
         # so a job whose fan-out turns out to be small never pays for the rest.
         worker_groups[0]["replicas"] = 0
+
+    if worker_cpus or worker_memory:
+        for group in worker_groups:
+            if worker_cpus:
+                group.setdefault("rayStartParams", {})["num-cpus"] = str(int(worker_cpus))
+            for container in group["template"]["spec"].get("containers", []):
+                if container.get("name") != "ray-worker":
+                    continue
+                requests = container.setdefault("resources", {}).setdefault("requests", {})
+                if worker_cpus:
+                    requests["cpu"] = str(int(worker_cpus))
+                if worker_memory:
+                    requests["memory"] = str(worker_memory)
 
     if image_tag:
         _apply_image_tag(spec["rayClusterSpec"]["headGroupSpec"]["template"]["spec"], image_tag)

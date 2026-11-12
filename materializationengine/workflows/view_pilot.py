@@ -8,8 +8,10 @@ what deltalake_catalog lists, so a pilot lake is never served or registered:
   through ADBC, as the view export reads a view.
 - duckdb: lake_views.lake_sql over the version's lakes (one copy of each table, from the
   catalog), on one node.
-- daft: the same SQL with daft.sql, on the Ray cluster when one is running; Daft writes
-  the lake itself.
+- daft: the same SQL with daft.sql, on the Ray cluster when one is running.
+
+Every engine's rows are written by the same write_deltalake, so the lakes have the same
+layout (Snappy, delta-rs's row groups) and timings compare the engines, not their writers.
 
 Every lake is then summarised the same way (rows, and an order-independent checksum of
 its rows with floats rounded, as engines sum in different orders), so agreeing checksums
@@ -109,13 +111,23 @@ def build_duckdb(sql: str, lakes: Dict[str, str], out_uri: str, threads: Optiona
 
 
 def build_daft(sql: str, lakes: Dict[str, str], out_uri: str) -> None:
+    """Daft computes (on the Ray cluster when one is running); its result is streamed back
+    and written by the same write_deltalake as the other engines, so every engine's lake has
+    the same layout (Daft's own writer leaves Parquet uncompressed, one row group a file)."""
     import daft
     from daft.session import Session
 
     sess = Session()
     for table, uri in lakes.items():
         sess.create_temp_table(table, daft.read_deltalake(uri))
-    sess.sql(sql).write_deltalake(out_uri, mode="error")
+    df = sess.sql(sql)
+    schema = df.schema().to_pyarrow_schema()
+
+    def batches():
+        for part in df.to_arrow_iter():
+            yield from (part.to_batches() if isinstance(part, pa.Table) else [part])
+
+    _write(pa.RecordBatchReader.from_batches(schema, batches()), out_uri)
 
 
 def summarize(uri: str) -> Dict:

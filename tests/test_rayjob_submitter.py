@@ -132,3 +132,21 @@ class TestFlags:
         assert submitter.ray_upload_enabled()
         monkeypatch.delenv("RAY_UPLOAD")
         assert not submitter.ray_upload_enabled()
+
+
+class TestWorkerSize:
+    def test_sizes_the_ray_worker_not_its_sidecars(self, api, tmp_path):
+        template = yaml.safe_load(yaml.safe_dump(TEMPLATE))
+        group = template["spec"]["rayClusterSpec"]["workerGroupSpecs"][0]
+        group["rayStartParams"] = {"num-cpus": "1"}
+        group["template"]["spec"]["containers"] = [
+            {"name": "ray-worker", "resources": {"requests": {"cpu": "1000m", "memory": "3Gi"}}},
+            {"name": "cloudsql", "resources": {"requests": {"cpu": "100m"}}}]
+        (tmp_path / "rayjob.yaml").write_text(yaml.safe_dump(template))
+        submitter.submit_rayjob("python -m x", "pilot", worker_cpus=3, worker_memory="11Gi")
+        body = api.create_namespaced_custom_object.call_args.kwargs["body"]
+        group = body["spec"]["rayClusterSpec"]["workerGroupSpecs"][0]
+        assert group["rayStartParams"]["num-cpus"] == "3"
+        worker, proxy = group["template"]["spec"]["containers"]
+        assert worker["resources"]["requests"] == {"cpu": "3", "memory": "11Gi"}
+        assert proxy["resources"]["requests"] == {"cpu": "100m"}
