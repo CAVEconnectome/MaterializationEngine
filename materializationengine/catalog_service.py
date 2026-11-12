@@ -14,24 +14,62 @@ and the record of `writing` / `failed` / `deleting` lakes, which the service has
 status for: a lake is registered only once it is `complete`, and deregistered before its
 files are deleted, so the service never lists a lake that is not there.
 
-Off unless CATALOG_SERVICE_URL is set. Calls go out with the service's own token
+Where the service is: CATALOG_SERVICE_URL if set ("" turns registration off), else the
+catalog chart's in-cluster service, if this cluster has one (DEFAULT_URL). Calls go out
+with the service's own token
 (AUTH_TOKEN, else the token file caveclient finds by default, which is how Ray pods,
 mounting cave-secret.json without DAF_CREDENTIALS, get one); it needs `edit` on each
 datastack's dataset.
 """
 
 import logging
+import socket
+import threading
+import time
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 SOURCE = "materialization"
 
+# The catalog chart's service (cave-helm-charts/charts/catalog): catalog-service in the
+# default namespace, its routes under /catalog as the chart's ingress forwards them. The
+# cluster's DNS name reaches it from any namespace (the export's Ray pods run in ray-jobs).
+DEFAULT_URL = "http://catalog-service.default.svc.cluster.local/catalog"
+_RESOLVE_TTL = 300  # seconds a lookup of DEFAULT_URL's host is trusted
+_resolved: Dict[str, tuple] = {}
+_resolved_lock = threading.Lock()
+
+
+def _resolves(url: str) -> bool:
+    """Whether url's host has an address: for DEFAULT_URL, whether this cluster runs the
+    catalog chart at all (no Service, no DNS name). A Service that exists but is down
+    still resolves, so expiry keeps treating it as there and waits for it."""
+    host = urlparse(url).hostname or ""
+    with _resolved_lock:
+        found = _resolved.get(host)
+        if found is not None and time.monotonic() - found[1] < _RESOLVE_TTL:
+            return found[0]
+    try:
+        socket.getaddrinfo(host, None)
+        ok = True
+    except (socket.gaierror, UnicodeError):
+        ok = False
+    with _resolved_lock:
+        _resolved[host] = (ok, time.monotonic())
+    return ok
+
 
 def catalog_url() -> str:
+    """CATALOG_SERVICE_URL if set ("" turns the service off); unset, DEFAULT_URL when this
+    cluster runs the catalog chart; else "" (off)."""
     from materializationengine.utils import get_config_param
 
-    return (get_config_param("CATALOG_SERVICE_URL", "") or "").rstrip("/")
+    configured = get_config_param("CATALOG_SERVICE_URL", None)
+    if configured is not None:
+        return str(configured).rstrip("/")
+    return DEFAULT_URL if _resolves(DEFAULT_URL) else ""
 
 
 def enabled() -> bool:

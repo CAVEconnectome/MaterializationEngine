@@ -116,3 +116,53 @@ class TestDeregister:
         assert sorted(cs.deregister_version("ds", 7)) == sorted([row(spec="id")["uri"], row()["uri"]])
         assert sorted(a["name"] for a in fake.assets.values()) == ["synapses.post_pt_root_id", "synapses_mine"]
         assert [a["mat_version"] for a in fake.assets.values() if a["source"] == "materialization"] == [8]
+
+
+class TestCatalogUrl:
+    """Where the service is: configured, explicitly off, or the in-cluster default when the
+    cluster runs the catalog chart (its DNS name resolves)."""
+
+    @pytest.fixture(autouse=True)
+    def fresh(self, monkeypatch):
+        monkeypatch.setattr(cs, "_resolved", {})
+        monkeypatch.delenv("CATALOG_SERVICE_URL", raising=False)
+
+    def lookups(self, monkeypatch, resolves: bool):
+        import socket
+
+        calls = []
+
+        def getaddrinfo(host, port):
+            calls.append(host)
+            if not resolves:
+                raise socket.gaierror(-2, "Name or service not known")
+            return [("addr",)]
+
+        monkeypatch.setattr(cs.socket, "getaddrinfo", getaddrinfo)
+        return calls
+
+    def test_configured(self, monkeypatch):
+        monkeypatch.setenv("CATALOG_SERVICE_URL", "https://local.cave.com/catalog/")
+        assert cs.catalog_url() == "https://local.cave.com/catalog" and cs.enabled()
+
+    def test_explicitly_off(self, monkeypatch):
+        calls = self.lookups(monkeypatch, resolves=True)
+        monkeypatch.setenv("CATALOG_SERVICE_URL", "")
+        assert cs.catalog_url() == "" and not cs.enabled() and not calls
+
+    def test_unset_uses_the_in_cluster_service_when_deployed(self, monkeypatch):
+        calls = self.lookups(monkeypatch, resolves=True)
+        assert cs.catalog_url() == cs.DEFAULT_URL == "http://catalog-service.default.svc.cluster.local/catalog"
+        assert cs.enabled()
+        assert calls == ["catalog-service.default.svc.cluster.local"]  # looked up once, then cached
+        cs.catalog_url()
+        assert len(calls) == 1
+
+    def test_unset_and_not_deployed_is_off(self, monkeypatch):
+        self.lookups(monkeypatch, resolves=False)
+        assert cs.catalog_url() == "" and not cs.enabled()
+
+    def test_tests_never_look_for_a_service(self):
+        from materializationengine.config import TestConfig
+
+        assert TestConfig.CATALOG_SERVICE_URL == ""

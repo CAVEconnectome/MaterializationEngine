@@ -67,8 +67,9 @@ class BaseConfig:
     SCHEMA_SERVICE_ENDPOINT = f"{GLOBAL_SERVER_URL}/schema/"
     SEGMENTATION_ENDPOINT = f"{GLOBAL_SERVER_URL}/segmentation"
     # The CAVE catalog service (e.g. https://<local server>/catalog) that exported Delta
-    # lakes are registered with; unset, they are not registered.
-    CATALOG_SERVICE_URL = os.environ.get("CATALOG_SERVICE_URL", "")
+    # lakes are registered with. Unset: the catalog chart's in-cluster service, when this
+    # cluster runs one (catalog_service.DEFAULT_URL); "" turns registration off.
+    CATALOG_SERVICE_URL = os.environ.get("CATALOG_SERVICE_URL")
     MASTER_NAME = os.environ.get("MASTER_NAME", None)
     MATERIALIZATION_ROW_CHUNK_SIZE = 500
     QUERY_LIMIT_SIZE = 200000
@@ -311,6 +312,7 @@ class TestConfig(BaseConfig):
     CELERY_RESULT_BACKEND = "redis://"
     MATERIALIZATION_ROW_CHUNK_SIZE = 2
     BEAT_SCHEDULES = []
+    CATALOG_SERVICE_URL = ""  # tests never look for a catalog service
 
 
 class ProductionConfig(BaseConfig):
