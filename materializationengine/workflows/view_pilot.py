@@ -33,6 +33,12 @@ from typing import Dict, List, Optional, Tuple
 import pyarrow as pa
 
 from materializationengine.blueprints.client import lake_views as lv
+from materializationengine.workflows.lake_views_stage import (  # noqa: F401  (the pilot's helpers live there now)
+    _cluster_cpus,
+    _to_delta,
+    _wait_for_cluster,
+    view_definitions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,24 +46,6 @@ ENGINES = ("postgres", "duckdb", "daft")
 EXTRA_ENGINES = ("duckdb_arrow",)  # DuckDB reading the lakes through pyarrow, to compare read paths
 FLOAT_DIGITS = 3
 DUCKDB_EXTENSIONS = "/opt/duckdb_extensions"
-
-
-def view_definitions(engine) -> Tuple[Dict[str, str], Dict[str, List[Dict]]]:
-    """Every view's definition (pg_get_viewdef) and columns ({"name", "type"}), by name."""
-    rows = engine.execute("""
-        SELECT c.relname, pg_get_viewdef(c.oid, true),
-               (SELECT json_agg(json_build_object('name', a.attname, 'type', format_type(a.atttypid, a.atttypmod))
-                                ORDER BY a.attnum)
-                FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped)
-        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'public' AND c.relkind IN ('v', 'm')
-          AND c.relname NOT IN ('geography_columns', 'geometry_columns', 'raster_columns', 'raster_overviews')
-    """).fetchall()
-    defs, cols = {}, {}
-    for name, definition, columns in rows:
-        defs[name] = definition
-        cols[name] = json.loads(columns) if isinstance(columns, str) else columns
-    return defs, cols
 
 
 def version_lakes(aligned_volume: str, datastack: str, version: int) -> Dict[str, Dict]:
@@ -154,56 +142,6 @@ def _attach_lakes(con, lakes: Dict[str, str]) -> None:
         con.execute(f'CREATE VIEW "{table}" AS SELECT * FROM read_parquet([{listed}])')
 
 
-def _to_delta(uri: str, paths: Optional[List[str]] = None, threads: int = 32) -> float:
-    """Make Parquet files written under uri a Delta table; its seconds.
-
-    paths: the files to commit, as the writer reported them. Pass them whenever the writer
-    can retry: a Daft task lost with its worker is run again and writes new files, and the
-    lost task's finished files stay behind, so committing everything under uri counted
-    some rows twice (minnie's connections_with_nuclei: 399M rows for 303M, after a worker
-    was killed mid-build). Without paths, every file under uri (a writer that never
-    retries, e.g. DuckDB's COPY).
-
-    One listing for the files' sizes, every footer read in parallel, and one commit of
-    their add actions (with the statistics Daft's own Delta writer records).
-    convert_to_deltalake reads the footers one at a time: 12-17 s for minnie's
-    connections_with_nuclei whether 4 or 16 workers wrote it."""
-    from concurrent.futures import ThreadPoolExecutor
-
-    import fsspec
-    import pyarrow.parquet as pq
-    from daft.io.delta_lake.delta_lake_write import make_deltalake_add_action
-    from deltalake import Schema
-    from deltalake.transaction import create_table_with_add_actions
-
-    started = time.perf_counter()
-    fs, root = fsspec.core.url_to_fs(uri)
-    listed = {f["name"].rsplit("/", 1)[-1]: f for f in fs.ls(root, detail=True)
-              if f["type"] == "file" and f["name"].endswith(".parquet")}
-    if paths is None:
-        files = list(listed.values())
-    else:
-        names = [p.rstrip("/").rsplit("/", 1)[-1] for p in paths]
-        missing = [n for n in names if n not in listed]
-        if missing:
-            raise ValueError(f"the writer reported {len(missing)} file(s) not under {uri}, e.g. {missing[:3]}")
-        files = [listed[n] for n in dict.fromkeys(names)]
-    if not files:
-        raise ValueError(f"no Parquet files under {uri}")
-
-    def footer(f):
-        with fs.open(f["name"], "rb", block_size=1 << 20) as fh:
-            return pq.ParquetFile(fh).metadata
-
-    with ThreadPoolExecutor(min(threads, len(files))) as pool:
-        metadata = list(pool.map(footer, files))
-    actions = [make_deltalake_add_action(f["name"].rsplit("/", 1)[-1], md, int(f["size"]), {})
-               for f, md in zip(files, metadata)]
-    schema = Schema.from_arrow(metadata[0].schema.to_arrow_schema())
-    create_table_with_add_actions(uri, schema, actions, mode="error")
-    return round(time.perf_counter() - started, 3)
-
-
 def build_duckdb(sql: str, lakes: Dict[str, str], out_uri: str, threads: Optional[int] = None,
                  memory_limit: Optional[str] = None, reader: str = "native") -> Dict:
     """DuckDB on one node. reader "native": DuckDB's own Parquet reader on each lake's files;
@@ -298,24 +236,6 @@ def plan_view(view: str, defs: Dict[str, str], cols: Dict[str, List[Dict]], lake
               pcg: str) -> lv.LakeView:
     lake_cols = {t: lake_columns(row["uri"]) for t, row in lakes.items()}
     return lv.lake_sql(view, defs, lake_cols, pcg, lv.point_names(cols, lake_cols))
-
-
-def _cluster_cpus() -> Optional[float]:
-    try:
-        import ray
-
-        return float(ray.cluster_resources().get("CPU", 0)) if ray.is_initialized() else None
-    except Exception:
-        return None
-
-
-def _wait_for_cluster(cpus: Optional[float], wait: float, timeout: float = 600.0) -> None:
-    """Before a retry: wait, then until the Ray cluster has its CPUs back (a preempted
-    worker's replacement has joined), at most timeout seconds."""
-    time.sleep(wait)
-    deadline = time.monotonic() + timeout
-    while cpus and (_cluster_cpus() or 0) < cpus and time.monotonic() < deadline:
-        time.sleep(10)
 
 
 def _build(engine: str, view: str, out_uri: str, plan, lakes, connection_string, columns,
