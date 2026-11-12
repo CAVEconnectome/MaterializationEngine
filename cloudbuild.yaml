@@ -27,7 +27,7 @@ steps:
     timeout: 1200s
 substitutions:
   # Extra uv dependency groups for the image, e.g. views-pilot (the view pilot's Daft).
-  _EXTRA_GROUPS: ""
+  _EXTRA_GROUPS: "views-pilot"  # view-pilot branch only: revert to "" before merging
 options:
   # 8 vCPUs instead of the default 2: compiling uwsgi, unpacking wheels and compressing
   # layers for the push all run faster.
