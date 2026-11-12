@@ -104,3 +104,30 @@ class TestEndpoint:
                 mock.patch("materializationengine.rayjobs.submit_rayjob") as submit:
             assert client.post(self.URL, json=body).status_code == 400
         submit.assert_not_called()
+
+
+class TestToDelta:
+    def test_commits_what_convert_to_deltalake_would(self, tmp_path):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from deltalake import DeltaTable, convert_to_deltalake
+
+        for name in ("ours", "theirs"):
+            (tmp_path / name).mkdir()
+            for i in range(5):
+                pq.write_table(pa.table({"id": pa.array(range(i * 100, i * 100 + 100 + i), pa.int64()),
+                                         "size": pa.array([float(i)] * (100 + i))}),
+                               tmp_path / name / f"part-{i}.parquet", compression="snappy")
+        assert vp._to_delta(str(tmp_path / "ours")) >= 0
+        convert_to_deltalake(str(tmp_path / "theirs"))
+
+        def facts(uri):
+            adds = pa.table(DeltaTable(uri).get_add_actions(flatten=True)).to_pylist()
+            return sorted((a["path"], a["size_bytes"], a["num_records"], a["min.id"], a["max.id"]) for a in adds)
+
+        assert facts(str(tmp_path / "ours")) == facts(str(tmp_path / "theirs"))
+        assert DeltaTable(str(tmp_path / "ours")).to_pyarrow_table().num_rows == 510
+
+    def test_refuses_an_empty_directory(self, tmp_path):
+        with pytest.raises(ValueError, match="no Parquet files"):
+            vp._to_delta(str(tmp_path))

@@ -14,7 +14,8 @@ what deltalake_catalog lists, so a pilot lake is never served or registered:
 
 Each engine writes Snappy Parquet its own fastest way -- Daft from every worker at once,
 DuckDB a file per thread on its node (then uploaded in parallel), Postgres's rows through
-write_deltalake -- and the files are made a Delta table with convert_to_deltalake. A single
+write_deltalake -- and the files are committed as a Delta table from their footers, read in
+parallel (_to_delta). A single
 writer would funnel a large view (minnie's connections) through one process and hide how
 an engine scales out. results record the convert's seconds, and DuckDB's upload's.
 
@@ -153,12 +154,37 @@ def _attach_lakes(con, lakes: Dict[str, str]) -> None:
         con.execute(f'CREATE VIEW "{table}" AS SELECT * FROM read_parquet([{listed}])')
 
 
-def _to_delta(uri: str) -> float:
-    """Make the Parquet files written under uri a Delta table; its seconds."""
-    from deltalake import convert_to_deltalake
+def _to_delta(uri: str, threads: int = 32) -> float:
+    """Make the Parquet files written under uri a Delta table; its seconds.
+
+    One listing for the files' sizes, every footer read in parallel, and one commit of
+    their add actions (with the statistics Daft's own Delta writer records).
+    convert_to_deltalake reads the footers one at a time: 12-17 s for minnie's
+    connections_with_nuclei whether 4 or 16 workers wrote it."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    import fsspec
+    import pyarrow.parquet as pq
+    from daft.io.delta_lake.delta_lake_write import make_deltalake_add_action
+    from deltalake import Schema
+    from deltalake.transaction import create_table_with_add_actions
 
     started = time.perf_counter()
-    convert_to_deltalake(uri)
+    fs, root = fsspec.core.url_to_fs(uri)
+    files = [f for f in fs.ls(root, detail=True) if f["type"] == "file" and f["name"].endswith(".parquet")]
+    if not files:
+        raise ValueError(f"no Parquet files under {uri}")
+
+    def footer(f):
+        with fs.open(f["name"], "rb", block_size=1 << 20) as fh:
+            return pq.ParquetFile(fh).metadata
+
+    with ThreadPoolExecutor(min(threads, len(files))) as pool:
+        metadata = list(pool.map(footer, files))
+    actions = [make_deltalake_add_action(f["name"].rsplit("/", 1)[-1], md, int(f["size"]), {})
+               for f, md in zip(files, metadata)]
+    schema = Schema.from_arrow(metadata[0].schema.to_arrow_schema())
+    create_table_with_add_actions(uri, schema, actions, mode="error")
     return round(time.perf_counter() - started, 3)
 
 
@@ -215,8 +241,8 @@ def build_duckdb(sql: str, lakes: Dict[str, str], out_uri: str, threads: Optiona
 
 def build_daft(sql: str, lakes: Dict[str, str], out_uri: str) -> Dict:
     """Daft computes and writes Snappy Parquet from every worker (on the Ray cluster when one
-    is running; its write_deltalake can't compress, so Parquet, then convert_to_deltalake).
-    Returns the convert's seconds."""
+    is running; its write_deltalake can't compress, so Parquet, then _to_delta).
+    Returns the commit's seconds."""
     import daft
     from daft.session import Session
 
