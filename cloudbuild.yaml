@@ -20,10 +20,14 @@ steps:
           --platform linux/amd64 \
           --cache-from "type=registry,ref=$$USERNAME/materializationengine:buildcache" \
           --cache-to "type=registry,ref=$$USERNAME/materializationengine:buildcache,mode=max" \
+          --build-arg "EXTRA_GROUPS=${_EXTRA_GROUPS}" \
           --tag "$$USERNAME/materializationengine:$TAG_NAME" \
           --push \
           .
     timeout: 1200s
+substitutions:
+  # Extra uv dependency groups for the image, e.g. views-pilot (the view pilot's Daft).
+  _EXTRA_GROUPS: ""
 options:
   # 8 vCPUs instead of the default 2: compiling uwsgi, unpacking wheels and compressing
   # layers for the push all run faster.

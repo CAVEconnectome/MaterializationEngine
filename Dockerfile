@@ -12,8 +12,12 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/usr/local/
 WORKDIR /app
 COPY uv.lock pyproject.toml ./
+# Extra dependency groups, space separated: e.g. --build-arg EXTRA_GROUPS=views-pilot for
+# the view pilot's image (Daft).
+ARG EXTRA_GROUPS=""
 RUN --mount=type=cache,target=/root/.cache/uv \
-  UV_VENV_ARGS="--system-site-packages" uv sync --frozen --no-install-project --no-default-groups --group deploy
+  UV_VENV_ARGS="--system-site-packages" uv sync --frozen --no-install-project --no-default-groups --group deploy \
+  $(for g in $EXTRA_GROUPS; do printf -- '--group %s ' "$g"; done)
 
 FROM ${BASE_IMAGE}
 # Postgres 18 client (pg_dump/psql for the upload transfer) and pg_repack (table maintenance).

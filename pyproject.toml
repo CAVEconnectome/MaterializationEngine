@@ -97,9 +97,10 @@ profile = [
     "pyinstrument",
 ]
 # Building views from the Delta lakes with Daft on Ray (the view pilot). Not in the image
-# unless built with --group views-pilot.
+# unless built with --group views-pilot. iceberg: daft 0.7.26's writer imports pyiceberg
+# even to write Delta.
 views-pilot = [
-    "daft[ray,deltalake]==0.7.26",
+    "daft[ray,deltalake,iceberg]==0.7.26",
 ]
 
 [tool.uv]

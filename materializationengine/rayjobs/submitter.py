@@ -172,6 +172,16 @@ def _apply_env(pod_spec: dict, container_key: str, env: dict) -> None:
         container["env"] = list(existing.values())
 
 
+def _apply_image_tag(pod_spec: dict, tag: str) -> None:
+    """Retag the materializationengine containers of a pod spec, leaving sidecars alone."""
+    for key in ("containers", "initContainers"):
+        for container in pod_spec.get(key, []):
+            image = container.get("image", "")
+            repo = image.rsplit(":", 1)[0] if ":" in image.rsplit("/", 1)[-1] else image
+            if repo.rsplit("/", 1)[-1] == "materializationengine":
+                container["image"] = f"{repo}:{tag}"
+
+
 def submit_rayjob(
     entrypoint: str,
     name_prefix: str,
@@ -179,6 +189,7 @@ def submit_rayjob(
     env: dict | None = None,
     metadata: dict | None = None,
     active_deadline_seconds: int | None = None,
+    image_tag: str | None = None,
 ) -> str:
     """Create a RayJob and return its generated name.
 
@@ -198,6 +209,8 @@ def submit_rayjob(
             valid label values are recorded as a hash of themselves.
         active_deadline_seconds: overrides the template's activeDeadlineSeconds (a
             337M-row upload needs longer than the 24 h default).
+        image_tag: run this tag of the materializationengine image instead of the
+            deployment's (e.g. a pilot image with extra dependencies); sidecars keep theirs.
     """
     job = _load_template()
 
@@ -239,6 +252,11 @@ def submit_rayjob(
         # minReplicas stays 0: the in-tree autoscaler grows the group on demand,
         # so a job whose fan-out turns out to be small never pays for the rest.
         worker_groups[0]["replicas"] = 0
+
+    if image_tag:
+        _apply_image_tag(spec["rayClusterSpec"]["headGroupSpec"]["template"]["spec"], image_tag)
+        for group in worker_groups:
+            _apply_image_tag(group["template"]["spec"], image_tag)
 
     if env:
         head_spec = spec["rayClusterSpec"]["headGroupSpec"]["template"]["spec"]

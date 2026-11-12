@@ -37,7 +37,7 @@ from materializationengine.info_client import (
     get_relevant_datastack_info,
 )
 from materializationengine.schemas import AnalysisTableSchema, AnalysisVersionSchema
-from materializationengine.utils import check_write_permission
+from materializationengine.utils import check_write_permission, get_config_param
 
 __version__ = "5.37.0"
 
@@ -1158,6 +1158,69 @@ class RegisterDeltalakeVersionResource(Resource):
             datastack_info["aligned_volume"]["name"], datastack_name, version,
             table_name=request.args.get("table_name"))
         return {"version": version, **result}, 200
+
+
+@mat_bp.route(
+    "/materialize/run/view_pilot/datastack/<string:datastack_name>/version/<int(signed=True):version>/"
+)
+class ViewPilotResource(Resource):
+    @auth_requires_dataset_admin(table_arg="datastack_name")
+    @mat_bp.doc("Build views with Postgres, DuckDB and Daft, and compare (one RayJob)", security="apikey")
+    def post(self, datastack_name: str, version: int):
+        """Build each view with each engine into lakes under <version>/_pilot/<run_id>/ and
+        compare them (rayjobs/entrypoints/view_pilot.py).
+
+        JSON body: ``views`` (required), ``engines`` (default postgres, duckdb, daft),
+        ``rounds`` (default 1), ``duckdb_memory`` (e.g. "24GB"), ``image_tag`` (default
+        VIEW_PILOT_IMAGE_TAG: an image built with the views-pilot dependency group).
+        ``?workers=`` caps the Ray workers.
+        """
+        import uuid
+
+        from materializationengine.rayjobs import RayJobSubmissionError, ray_enabled, submit_rayjob
+
+        if not ray_enabled():
+            return abort(501, "Ray is not enabled on this deployment")
+        body = request.json if request.is_json and request.json else {}
+        name = re.compile(r"[A-Za-z0-9_]+")
+        views, engines = body.get("views"), body.get("engines") or ["postgres", "duckdb", "daft"]
+        if not isinstance(views, list) or not views or not all(isinstance(v, str) and name.fullmatch(v) for v in views):
+            return abort(400, "views must be a list of view names")
+        if not isinstance(engines, list) or not set(engines) <= {"postgres", "duckdb", "daft"}:
+            return abort(400, "engines must be a list of postgres, duckdb, daft")
+        rounds = body.get("rounds", 1)
+        if not isinstance(rounds, int) or isinstance(rounds, bool) or not 1 <= rounds <= 10:
+            return abort(400, "rounds must be an integer from 1 to 10")
+        memory = body.get("duckdb_memory")
+        if memory is not None and not re.fullmatch(r"[0-9]+(\.[0-9]+)?\s*[KMGT]i?B", str(memory)):
+            return abort(400, "duckdb_memory must be like 24GB")
+        image_tag = body.get("image_tag") or get_config_param("VIEW_PILOT_IMAGE_TAG", None)
+        if image_tag is not None and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", str(image_tag)):
+            return abort(400, "image_tag is not a valid image tag")
+        if version == -1:
+            version = get_latest_version(datastack_name)
+
+        run_id = uuid.uuid4().hex[:12]
+        entrypoint = (
+            "python -m materializationengine.rayjobs.entrypoints.view_pilot"
+            f" --datastack {shlex.quote(datastack_name)} --version {int(version)} --run-id {run_id}"
+            f" --rounds {rounds} --views {' '.join(views)} --engines {' '.join(engines)}"
+        )
+        if memory:
+            entrypoint += f" --duckdb-memory {shlex.quote(str(memory))}"
+        try:
+            rayjob_name = submit_rayjob(
+                entrypoint=entrypoint,
+                name_prefix=f"mat-view-pilot-v{int(version)}",
+                num_workers=request.args.get("workers", type=int),
+                metadata={"datastack": datastack_name, "version": str(version), "view-pilot": run_id},
+                image_tag=image_tag,
+            )
+        except RayJobSubmissionError as exc:
+            return abort(500, f"failed to submit RayJob: {exc}")
+        output = f"{get_config_param('DELTALAKE_OUTPUT_BUCKET')}/{datastack_name}/v{version}/_pilot/{run_id}"
+        return {"run_id": run_id, "rayjob_name": rayjob_name, "image_tag": image_tag,
+                "results": f"{output}/results.json"}, 200
 
 
 @mat_bp.route("/materialize/ray/job/<string:job_name>/")

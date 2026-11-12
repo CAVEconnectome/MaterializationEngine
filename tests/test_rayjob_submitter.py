@@ -71,6 +71,20 @@ class TestSubmit:
         body = api.create_namespaced_custom_object.call_args.kwargs["body"]
         assert body["spec"]["activeDeadlineSeconds"] == 86400
 
+    def test_image_tag_retags_only_materializationengine(self, api, tmp_path, monkeypatch):
+        template = yaml.safe_load(yaml.safe_dump(TEMPLATE))
+        cluster = template["spec"]["rayClusterSpec"]
+        me, proxy = "docker.io/caveconnectome/materializationengine:vDeltaVersion10", "gcr.io/cloud-sql-proxy:2.23.0"
+        cluster["headGroupSpec"]["template"]["spec"]["containers"] = [{"name": "ray-head", "image": me}]
+        cluster["workerGroupSpecs"][0]["template"]["spec"]["containers"] = [
+            {"name": "w", "image": me}, {"name": "cloudsql", "image": proxy}]
+        (tmp_path / "rayjob.yaml").write_text(yaml.safe_dump(template))
+        submitter.submit_rayjob("python -m x", "pilot", image_tag="vDeltaVersion12-viewpilot")
+        body = api.create_namespaced_custom_object.call_args.kwargs["body"]["spec"]["rayClusterSpec"]
+        pilot = "docker.io/caveconnectome/materializationengine:vDeltaVersion12-viewpilot"
+        assert body["headGroupSpec"]["template"]["spec"]["containers"][0]["image"] == pilot
+        assert [c["image"] for c in body["workerGroupSpecs"][0]["template"]["spec"]["containers"]] == [pilot, proxy]
+
 
 class TestStatus:
     def status(self, job_status, deployment_status):
