@@ -154,8 +154,15 @@ def _attach_lakes(con, lakes: Dict[str, str]) -> None:
         con.execute(f'CREATE VIEW "{table}" AS SELECT * FROM read_parquet([{listed}])')
 
 
-def _to_delta(uri: str, threads: int = 32) -> float:
-    """Make the Parquet files written under uri a Delta table; its seconds.
+def _to_delta(uri: str, paths: Optional[List[str]] = None, threads: int = 32) -> float:
+    """Make Parquet files written under uri a Delta table; its seconds.
+
+    paths: the files to commit, as the writer reported them. Pass them whenever the writer
+    can retry: a Daft task lost with its worker is run again and writes new files, and the
+    lost task's finished files stay behind, so committing everything under uri counted
+    some rows twice (minnie's connections_with_nuclei: 399M rows for 303M, after a worker
+    was killed mid-build). Without paths, every file under uri (a writer that never
+    retries, e.g. DuckDB's COPY).
 
     One listing for the files' sizes, every footer read in parallel, and one commit of
     their add actions (with the statistics Daft's own Delta writer records).
@@ -171,7 +178,16 @@ def _to_delta(uri: str, threads: int = 32) -> float:
 
     started = time.perf_counter()
     fs, root = fsspec.core.url_to_fs(uri)
-    files = [f for f in fs.ls(root, detail=True) if f["type"] == "file" and f["name"].endswith(".parquet")]
+    listed = {f["name"].rsplit("/", 1)[-1]: f for f in fs.ls(root, detail=True)
+              if f["type"] == "file" and f["name"].endswith(".parquet")}
+    if paths is None:
+        files = list(listed.values())
+    else:
+        names = [p.rstrip("/").rsplit("/", 1)[-1] for p in paths]
+        missing = [n for n in names if n not in listed]
+        if missing:
+            raise ValueError(f"the writer reported {len(missing)} file(s) not under {uri}, e.g. {missing[:3]}")
+        files = [listed[n] for n in dict.fromkeys(names)]
     if not files:
         raise ValueError(f"no Parquet files under {uri}")
 
@@ -241,16 +257,17 @@ def build_duckdb(sql: str, lakes: Dict[str, str], out_uri: str, threads: Optiona
 
 def build_daft(sql: str, lakes: Dict[str, str], out_uri: str) -> Dict:
     """Daft computes and writes Snappy Parquet from every worker (on the Ray cluster when one
-    is running; its write_deltalake can't compress, so Parquet, then _to_delta).
-    Returns the commit's seconds."""
+    is running; its write_deltalake can't compress, so Parquet, then _to_delta of exactly the
+    files Daft reports writing: a retried task's orphans are left out). Returns the commit's
+    seconds and the files committed."""
     import daft
     from daft.session import Session
 
     sess = Session()
     for table, uri in lakes.items():
         sess.create_temp_table(table, daft.read_deltalake(uri))
-    sess.sql(sql).write_parquet(out_uri, compression="snappy")
-    return {"convert_seconds": _to_delta(out_uri)}
+    written = sess.sql(sql).write_parquet(out_uri, compression="snappy").to_pydict()["path"]
+    return {"convert_seconds": _to_delta(out_uri, paths=written), "files": len(written)}
 
 
 def summarize(uri: str) -> Dict:

@@ -131,3 +131,21 @@ class TestToDelta:
     def test_refuses_an_empty_directory(self, tmp_path):
         with pytest.raises(ValueError, match="no Parquet files"):
             vp._to_delta(str(tmp_path))
+
+    def test_commits_only_the_files_the_writer_reported(self, tmp_path):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from deltalake import DeltaTable
+
+        for i in range(3):  # part-2 stands for a lost task's orphan
+            pq.write_table(pa.table({"id": pa.array(range(10), pa.int64())}), tmp_path / f"part-{i}.parquet")
+        vp._to_delta(str(tmp_path), paths=[str(tmp_path / "part-0.parquet"), f"file://{tmp_path}/part-1.parquet"])
+        assert DeltaTable(str(tmp_path)).to_pyarrow_table().num_rows == 20
+
+    def test_a_reported_file_that_is_not_there_is_refused(self, tmp_path):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        pq.write_table(pa.table({"id": pa.array([1], pa.int64())}), tmp_path / "part-0.parquet")
+        with pytest.raises(ValueError, match="not under"):
+            vp._to_delta(str(tmp_path), paths=[str(tmp_path / "part-0.parquet"), str(tmp_path / "gone.parquet")])
