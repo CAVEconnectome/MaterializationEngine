@@ -192,6 +192,7 @@ def submit_rayjob(
     image_tag: str | None = None,
     worker_cpus: int | None = None,
     worker_memory: str | None = None,
+    min_workers: int | None = None,
 ) -> str:
     """Create a RayJob and return its generated name.
 
@@ -216,6 +217,9 @@ def submit_rayjob(
         worker_cpus, worker_memory: size this job's workers instead of the chart's (one
             CPU, 3Gi): Ray's num-cpus and the worker container's requests, e.g. 3 and
             "11Gi" for one worker per 4-vCPU node. Must fit the worker node pool's nodes.
+        min_workers: start (and keep) at least this many workers, instead of letting the
+            autoscaler add them on demand: for a job that should run on exactly N
+            workers, e.g. measuring how it scales. Capped at the worker ceiling.
     """
     job = _load_template()
 
@@ -257,6 +261,11 @@ def submit_rayjob(
         # minReplicas stays 0: the in-tree autoscaler grows the group on demand,
         # so a job whose fan-out turns out to be small never pays for the rest.
         worker_groups[0]["replicas"] = 0
+
+    if min_workers:
+        floor = min(int(min_workers), int(worker_groups[0].get("maxReplicas", min_workers)))
+        worker_groups[0]["minReplicas"] = floor
+        worker_groups[0]["replicas"] = floor
 
     if worker_cpus or worker_memory:
         for group in worker_groups:

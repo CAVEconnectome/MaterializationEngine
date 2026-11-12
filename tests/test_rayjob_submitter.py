@@ -150,3 +150,13 @@ class TestWorkerSize:
         worker, proxy = group["template"]["spec"]["containers"]
         assert worker["resources"]["requests"] == {"cpu": "3", "memory": "11Gi"}
         assert proxy["resources"]["requests"] == {"cpu": "100m"}
+
+
+class TestMinWorkers:
+    def test_starts_exactly_n_workers_within_the_ceiling(self, api):
+        submitter.submit_rayjob("python -m x", "pilot", num_workers=16, min_workers=16)
+        group = api.create_namespaced_custom_object.call_args.kwargs["body"]["spec"]["rayClusterSpec"]["workerGroupSpecs"][0]
+        assert (group["minReplicas"], group["replicas"], group["maxReplicas"]) == (16, 16, 16)
+        submitter.submit_rayjob("python -m x", "pilot", num_workers=4, min_workers=10)
+        group = api.create_namespaced_custom_object.call_args.kwargs["body"]["spec"]["rayClusterSpec"]["workerGroupSpecs"][0]
+        assert (group["minReplicas"], group["replicas"], group["maxReplicas"]) == (4, 4, 4)

@@ -12,13 +12,16 @@ what deltalake_catalog lists, so a pilot lake is never served or registered:
   record DuckDB's seconds per operator type.
 - daft: the same SQL with daft.sql, on the Ray cluster when one is running.
 
-Every engine's rows are written by the same write_deltalake, so the lakes have the same
-layout (Snappy, delta-rs's row groups) and timings compare the engines, not their writers.
+Each engine writes Snappy Parquet its own fastest way -- Daft from every worker at once,
+DuckDB a file per thread on its node (then uploaded in parallel), Postgres's rows through
+write_deltalake -- and the files are made a Delta table with convert_to_deltalake. A single
+writer would funnel a large view (minnie's connections) through one process and hide how
+an engine scales out. results record the convert's seconds, and DuckDB's upload's.
 
 Every lake is then summarised the same way (rows, and an order-independent checksum of
 its rows with floats rounded, as engines sum in different orders), so agreeing checksums
-mean the engines built the same view. Timings are for reading, computing and writing the
-flat lake.
+mean the engines built the same view. "seconds" covers reading, computing, writing and
+converting the flat lake.
 """
 
 import json
@@ -130,70 +133,98 @@ def _operator_seconds(profile: Dict) -> Dict[str, float]:
     return out
 
 
+def _attach_lakes(con, lakes: Dict[str, str]) -> None:
+    """Each lake as a DuckDB view over its files, read by DuckDB's own Parquet reader
+    (httpfs, with a token from the pod's credentials, for gs://)."""
+    import os
+
+    from deltalake import DeltaTable
+
+    files = {t: DeltaTable(uri).file_uris() for t, uri in lakes.items()}
+    if any(f.startswith("gs://") for fs in files.values() for f in fs):
+        if os.path.isdir(DUCKDB_EXTENSIONS):  # baked into the image (Dockerfile)
+            con.execute(f"SET extension_directory = '{DUCKDB_EXTENSIONS}'")
+        else:
+            con.execute("INSTALL httpfs")
+        con.execute("LOAD httpfs")
+        con.execute(f"CREATE OR REPLACE SECRET gcs (TYPE gcs, BEARER_TOKEN '{_gcs_token()}')")
+    for table, fs in files.items():
+        listed = ", ".join("'" + f.replace("'", "''") + "'" for f in fs)
+        con.execute(f'CREATE VIEW "{table}" AS SELECT * FROM read_parquet([{listed}])')
+
+
+def _to_delta(uri: str) -> float:
+    """Make the Parquet files written under uri a Delta table; its seconds."""
+    from deltalake import convert_to_deltalake
+
+    started = time.perf_counter()
+    convert_to_deltalake(uri)
+    return round(time.perf_counter() - started, 3)
+
+
 def build_duckdb(sql: str, lakes: Dict[str, str], out_uri: str, threads: Optional[int] = None,
                  memory_limit: Optional[str] = None, reader: str = "native") -> Dict:
-    """DuckDB on one node. reader "native": DuckDB's own Parquet reader on each lake's files
-    (httpfs, with a token from the pod's credentials for gs://); "arrow": the lakes as
-    pyarrow datasets (DeltaTable.to_pyarrow_dataset), read through pyarrow's scanner.
-    Returns DuckDB's seconds per operator type."""
+    """DuckDB on one node. reader "native": DuckDB's own Parquet reader on each lake's files;
+    "arrow": the lakes as pyarrow datasets (DeltaTable.to_pyarrow_dataset). The result is
+    written a file per thread (COPY ... PER_THREAD_OUTPUT), to local disk first for gs://
+    and then uploaded in parallel. Returns DuckDB's seconds per operator type, and the
+    upload's and convert's seconds."""
     import os
     import tempfile
 
     import duckdb
     from deltalake import DeltaTable
 
+    scratch = tempfile.mkdtemp(prefix="view_pilot_")
     con = duckdb.connect()
+    con.execute(f"SET temp_directory = '{os.path.join(scratch, 'spill')}'")  # spill beyond memory_limit
     if threads:
         con.execute(f"SET threads = {int(threads)}")
     if memory_limit:
         con.execute(f"SET memory_limit = '{memory_limit}'")
     if reader == "native":
-        files = {t: DeltaTable(uri).file_uris() for t, uri in lakes.items()}
-        if any(f.startswith("gs://") for fs in files.values() for f in fs):
-            if os.path.isdir(DUCKDB_EXTENSIONS):  # baked into the image (Dockerfile)
-                con.execute(f"SET extension_directory = '{DUCKDB_EXTENSIONS}'")
-            else:
-                con.execute("INSTALL httpfs")
-            con.execute("LOAD httpfs")
-            con.execute(f"CREATE SECRET gcs (TYPE gcs, BEARER_TOKEN '{_gcs_token()}')")
-        for table, fs in files.items():
-            listed = ", ".join("'" + f.replace("'", "''") + "'" for f in fs)
-            con.execute(f'CREATE VIEW "{table}" AS SELECT * FROM read_parquet([{listed}])')
+        _attach_lakes(con, lakes)
     elif reader == "arrow":
         for table, uri in lakes.items():
             con.register(table, DeltaTable(uri).to_pyarrow_dataset())
     else:
         raise ValueError(f"unknown DuckDB reader {reader!r}")
-    profile_path = os.path.join(tempfile.mkdtemp(), "profile.json")
+    remote = out_uri.startswith("gs://")
+    target = os.path.join(scratch, "out") if remote else out_uri
+    profile_path = os.path.join(scratch, "profile.json")
     con.execute("SET enable_profiling = 'json'")
     con.execute(f"SET profiling_output = '{profile_path}'")
-    _write(con.sql(sql).to_arrow_reader(), out_uri)
+    con.execute(f"COPY ({sql}) TO '{target}' (FORMAT parquet, COMPRESSION snappy, PER_THREAD_OUTPUT, "
+                f"ROW_GROUP_SIZE 1048576)")
     con.execute("SET enable_profiling = 'no_output'")
     try:
         with open(profile_path) as fh:
-            return _operator_seconds(json.load(fh))
+            out = {"operator_seconds": _operator_seconds(json.load(fh))}
     except (OSError, ValueError):
-        return {}
+        out = {"operator_seconds": {}}
+    if remote:
+        import gcsfs
+
+        started = time.perf_counter()
+        local = [os.path.join(target, f) for f in sorted(os.listdir(target))]
+        gcsfs.GCSFileSystem().put(local, [f"{out_uri}/{os.path.basename(f)}" for f in local])
+        out["upload_seconds"] = round(time.perf_counter() - started, 3)
+    out["convert_seconds"] = _to_delta(out_uri)
+    return out
 
 
-def build_daft(sql: str, lakes: Dict[str, str], out_uri: str) -> None:
-    """Daft computes (on the Ray cluster when one is running); its result is streamed back
-    and written by the same write_deltalake as the other engines, so every engine's lake has
-    the same layout (Daft's own writer leaves Parquet uncompressed, one row group a file)."""
+def build_daft(sql: str, lakes: Dict[str, str], out_uri: str) -> Dict:
+    """Daft computes and writes Snappy Parquet from every worker (on the Ray cluster when one
+    is running; its write_deltalake can't compress, so Parquet, then convert_to_deltalake).
+    Returns the convert's seconds."""
     import daft
     from daft.session import Session
 
     sess = Session()
     for table, uri in lakes.items():
         sess.create_temp_table(table, daft.read_deltalake(uri))
-    df = sess.sql(sql)
-    schema = df.schema().to_pyarrow_schema()
-
-    def batches():
-        for part in df.to_arrow_iter():
-            yield from (part.to_batches() if isinstance(part, pa.Table) else [part])
-
-    _write(pa.RecordBatchReader.from_batches(schema, batches()), out_uri)
+    sess.sql(sql).write_parquet(out_uri, compression="snappy")
+    return {"convert_seconds": _to_delta(out_uri)}
 
 
 def summarize(uri: str) -> Dict:
@@ -203,11 +234,10 @@ def summarize(uri: str) -> Dict:
     from deltalake import DeltaTable
 
     dt = DeltaTable(uri)
-    dataset = dt.to_pyarrow_dataset()
     con = duckdb.connect()
-    con.register("t", dataset)
+    _attach_lakes(con, {"t": uri})
     terms = []
-    for f in sorted(dataset.schema, key=lambda f: f.name):
+    for f in sorted(dt.to_pyarrow_dataset().schema, key=lambda f: f.name):
         t, c = f.type, f'"{f.name}"'
         if pa.types.is_integer(t) or (pa.types.is_decimal(t) and t.scale == 0):
             terms.append(f"{c}::BIGINT")
@@ -240,11 +270,11 @@ def run_one(engine: str, view: str, out_uri: str, *, plan: Optional[lv.LakeView]
         else:
             uris = {t: lakes[t]["uri"] for t in plan.lakes}
             if engine in ("duckdb", "duckdb_arrow"):
-                result["operator_seconds"] = build_duckdb(
+                result.update(build_duckdb(
                     plan.sql, uris, out_uri, duckdb_threads, duckdb_memory,
-                    reader="arrow" if engine == "duckdb_arrow" else "native")
+                    reader="arrow" if engine == "duckdb_arrow" else "native"))
             elif engine == "daft":
-                build_daft(plan.sql, uris, out_uri)
+                result.update(build_daft(plan.sql, uris, out_uri))
             else:
                 raise ValueError(f"unknown engine {engine!r}")
         result["seconds"] = round(time.perf_counter() - started, 3)
