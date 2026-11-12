@@ -61,6 +61,10 @@ dependencies = [
     "duckdb>=1.1",
     "sqlglot>=25",
     "obstore>=0.6",
+    # The lake export's views stage (workflows/lake_views_stage.py) builds views with Daft
+    # on the export job's Ray cluster. iceberg: daft 0.7.26's writer imports pyiceberg even
+    # to write Parquet; its ray extra must agree with the ray pin above (<2.60).
+    "daft[ray,deltalake,iceberg]==0.7.26",
 ]
 authors = [
     { name = "Forrest Collman", email = "forrestc@alleninstitute.org" },
@@ -95,12 +99,6 @@ lint = [
 profile = [
     "scalene",
     "pyinstrument",
-]
-# Building views from the Delta lakes with Daft on Ray (the view pilot). Not in the image
-# unless built with --group views-pilot. iceberg: daft 0.7.26's writer imports pyiceberg
-# even to write Delta.
-views-pilot = [
-    "daft[ray,deltalake,iceberg]==0.7.26",
 ]
 
 [tool.uv]

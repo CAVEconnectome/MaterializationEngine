@@ -12,10 +12,8 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/usr/local/
 WORKDIR /app
 COPY uv.lock pyproject.toml ./
-# Extra dependency groups, space separated: e.g. --build-arg EXTRA_GROUPS=views-pilot for
-# the view pilot's image (Daft).
-# view-pilot branch only: the default is views-pilot so tag builds get Daft; revert to "" before merging.
-ARG EXTRA_GROUPS="views-pilot"
+# Extra dependency groups, space separated (--build-arg EXTRA_GROUPS="a b"); none by default.
+ARG EXTRA_GROUPS=""
 RUN --mount=type=cache,target=/root/.cache/uv \
   UV_VENV_ARGS="--system-site-packages" uv sync --frozen --no-install-project --no-default-groups --group deploy \
   $(for g in $EXTRA_GROUPS; do printf -- '--group %s ' "$g"; done)
