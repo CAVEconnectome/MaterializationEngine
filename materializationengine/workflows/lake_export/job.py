@@ -79,10 +79,12 @@ def prepare_table(datastack_info: Dict, version: int, request: TableRequest, job
 
 def run_tables(datastack_info: Dict, version: int, requests: Sequence[TableRequest],
                job_id_for: Callable[[str], str], settings: ExportSettings, executor: Executor,
-               max_streams: Optional[int] = None, inputs: Optional[Callable] = None) -> Dict[str, Dict]:
+               max_streams: Optional[int] = None, inputs: Optional[Callable] = None,
+               on_change: Optional[Callable[[Dict[str, Dict]], None]] = None) -> Dict[str, Dict]:
     """Plan every table, then export them together; a table's summary by name.
 
-    A table that cannot be planned is reported failed; the others still run.
+    A table that cannot be planned is reported failed; the others still run. on_change
+    gets every table's summary whenever one's state changes.
     """
     exports, failed = [], {}
     for request in requests:
@@ -94,6 +96,7 @@ def run_tables(datastack_info: Dict, version: int, requests: Sequence[TableReque
             logger.exception("could not plan %s", request.table)
             TableStatus(datastack_info["datastack"], version, request.table, job_id).failed(error)
             failed[request.table] = {"state": "failed", "error": error}
-    scheduler = ExportScheduler(exports, executor, max_streams=max_streams or settings.max_streams,
-                                max_tasks=settings.max_tasks)
+    scheduler = ExportScheduler(
+        exports, executor, max_streams=max_streams or settings.max_streams, max_tasks=settings.max_tasks,
+        on_change=None if on_change is None else (lambda summaries: on_change({**failed, **summaries})))
     return {**failed, **scheduler.run()}

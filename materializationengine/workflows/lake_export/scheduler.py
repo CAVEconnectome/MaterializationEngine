@@ -15,7 +15,7 @@ the RayJob entrypoint passes a Ray executor, which retries a unit lost with its 
 import logging
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from typing import Dict, List, Optional, Protocol, Sequence
+from typing import Callable, Dict, List, Optional, Protocol, Sequence
 
 from materializationengine.workflows.lake_export.table import TERMINAL, TableExport, Unit
 
@@ -58,13 +58,26 @@ class ThreadExecutor:
 
 class ExportScheduler:
     def __init__(self, tables: Sequence[TableExport], executor: Executor, max_streams: int, max_tasks: int,
-                 poll_seconds: float = 0.5, finalize_threads: int = 2):
+                 poll_seconds: float = 0.5, finalize_threads: int = 2,
+                 on_change: Optional[Callable[[Dict[str, Dict]], None]] = None):
         self.tables = list(tables)
         self.executor = executor
         self.max_streams = max(1, int(max_streams))
         self.max_tasks = max(self.max_streams, int(max_tasks))
         self.poll_seconds = poll_seconds
         self.finalize_threads = finalize_threads
+        self.on_change = on_change
+        self._states: Dict[str, str] = {}
+
+    def _report(self) -> None:
+        """on_change with every table's summary, whenever a table's state has changed."""
+        states = {t.table: t.state for t in self.tables}
+        if self.on_change is not None and states != self._states:
+            self._states = states
+            try:
+                self.on_change({t.table: t.summary() for t in self.tables})
+            except Exception:
+                logger.warning("on_change failed", exc_info=True)
 
     def run(self) -> Dict[str, Dict]:
         inflight: Dict = {}  # handle -> (table, unit)
@@ -87,6 +100,7 @@ class ExportScheduler:
                         table.fail(f"finalizing: {type(e).__name__}: {e}")
 
                 self._fill(inflight)
+                self._report()
                 if not inflight and not finalizing and all(t.state in TERMINAL for t in self.tables):
                     break
                 if inflight:
