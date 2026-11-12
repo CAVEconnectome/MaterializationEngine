@@ -208,8 +208,11 @@ class BaseConfig:
     DELTALAKE_RAY_MAX_WORKERS = os.environ.get("DELTALAKE_RAY_MAX_WORKERS")
     DELTALAKE_EXPORT_WORKER_MEMORY_BUDGET_BYTES = os.environ.get("DELTALAKE_EXPORT_WORKER_MEMORY_BUDGET_BYTES")
     # The version export's views stage: "module:function", called once every table of the
-    # version is exported (lake_export/version.py). Unset: no views stage.
-    DELTALAKE_EXPORT_VIEWS_STAGE = os.environ.get("DELTALAKE_EXPORT_VIEWS_STAGE")
+    # version is exported, when the export is asked for views (lake_export/version.py).
+    # Default: Daft building the views from the table lakes; "" turns the stage off.
+    DELTALAKE_EXPORT_VIEWS_STAGE = os.environ.get(
+        "DELTALAKE_EXPORT_VIEWS_STAGE", "materializationengine.workflows.lake_views_stage:build_views"
+    )
 
     if os.environ.get("DAF_CREDENTIALS", None) is not None:
         with open(os.environ.get("DAF_CREDENTIALS"), "r") as f:

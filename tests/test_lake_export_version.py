@@ -148,9 +148,16 @@ class TestVersion:
 class TestStageHook:
     def test_resolve_stage(self):
         assert version_mod.resolve_stage(None) is None
+        assert version_mod.resolve_stage("") is None  # "" turns the stage off
         assert version_mod.resolve_stage("json:dumps").__name__ == "dumps"
         with pytest.raises(ValueError, match="module:function"):
             version_mod.resolve_stage("json.dumps")
+
+    def test_the_default_stage_is_the_views_build(self):
+        from materializationengine.config import BaseConfig
+        from materializationengine.workflows import lake_views_stage
+
+        assert version_mod.resolve_stage(BaseConfig.DELTALAKE_EXPORT_VIEWS_STAGE) is lake_views_stage.build_views
 
     def test_stage_results(self):
         ctx = object()
