@@ -180,15 +180,19 @@ def _views_to_build(datastack: str, registered: List[str]) -> List[str]:
     return list(dict.fromkeys(views))
 
 
-def table_lakes(rows: Iterable[Dict]) -> Dict[str, Dict]:
+def table_lakes(rows: Iterable[Dict], job_id: Optional[str] = None) -> Dict[str, Dict]:
     """One complete lake per table to read a view from: its smallest copy (every copy of a
-    table holds every row)."""
+    table holds every row), preferring the lakes job_id exported (its table jobs are
+    "<job_id>.<table>"), so a view built beside an earlier export reads this export's tables."""
+    def ours(row):
+        return bool(job_id) and str(row.get("job_id") or "").startswith(f"{job_id}.")
+
     best: Dict[str, Dict] = {}
     for row in rows:
         if row.get("status", "complete") != "complete":
             continue
         current = best.get(row["table_name"])
-        if current is None or (row.get("bytes") or 0) < (current.get("bytes") or 0):
+        if current is None or (ours(row), -(row.get("bytes") or 0)) > (ours(current), -(current.get("bytes") or 0)):
             best[row["table_name"]] = row
     return best
 
@@ -278,8 +282,12 @@ def plan_view(ctx, view: str, definitions: Dict[str, str], columns: Dict[str, Li
 
 
 def _copies(ctx, view: str, plan: lv.LakeView) -> List[Tuple[str, Optional[str], str]]:
+    """(spec name, sort key, uri) per copy. The job's name_suffix is appended to each spec
+    name, as the export does for a table's lakes, so a view built beside an earlier export
+    of the version writes beside its lakes."""
     base = f"{ctx.settings.output_bucket}/{ctx.datastack}/v{ctx.version}/{view}"
-    return [(key or FLAT, key, f"{base}/{key or FLAT}") for key in copy_keys(plan.columns)]
+    suffix = getattr(ctx, "name_suffix", None) or ""
+    return [(f"{key or FLAT}{suffix}", key, f"{base}/{key or FLAT}{suffix}") for key in copy_keys(plan.columns)]
 
 
 def _check_targets(ctx, view: str, copies, job_id: str) -> None:
@@ -373,7 +381,7 @@ def build_views(ctx) -> Dict:
     engine = db_manager.get_engine(ctx.aligned_volume)
     definitions, columns = view_definitions(engine)
     views = _views_to_build(ctx.datastack, registered_views(engine, ctx.datastack))
-    lakes = table_lakes(r for r in ctx.lakes if r["table_name"] not in definitions)
+    lakes = table_lakes((r for r in ctx.lakes if r["table_name"] not in definitions), job_id=ctx.job_id)
     attempts = int(get_config_param("DELTALAKE_VIEW_ATTEMPTS", 3))
     row_group_rows = int(get_config_param("DELTALAKE_VIEW_ROW_GROUP_ROWS", 10000))
     try:

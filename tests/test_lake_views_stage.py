@@ -40,11 +40,11 @@ def version(frozen, aligned_volume, tmp_path, monkeypatch):  # noqa: F811
     monkeypatch.setattr(stage, "registered_views", lambda _engine, _ds: list(TARGETS))
     monkeypatch.setattr(stage, "_wait_for_cluster", lambda cpus, wait: None)
 
-    def ctx(job_id="job1"):
+    def ctx(job_id="job1", name_suffix=None):
         return SimpleNamespace(datastack_info={"datastack": "ds", "segmentation_source": f"graphene://x/{PCG}"},
                                datastack="ds", version=7, aligned_volume=av, job_id=job_id,
                                settings=SimpleNamespace(output_bucket=str(bucket)), tables={},
-                               lakes=cat.list_exports(av, "ds", 7))
+                               lakes=cat.list_exports(av, "ds", 7), name_suffix=name_suffix)
 
     return SimpleNamespace(engine=engine, ctx=ctx, bucket=bucket, av=av)
 
@@ -145,7 +145,37 @@ class TestViewsStage:
         assert [r["status"] for r in rows] == ["failed"]
 
 
+class TestNameSuffix:
+    def test_a_suffixed_export_builds_its_views_beside_the_first(self, version):
+        from materializationengine import deltalake_catalog as cat
+
+        assert stage.build_views(version.ctx("job1"))["state"] == "done"
+        second = stage.build_views(version.ctx("job2", name_suffix="__s2"))
+        assert second["state"] == "done", second  # not refused: different lakes
+        recorded = {r["spec_name"]: r for r in cat.list_exports(version.av, "ds", 7, table_name="connections_with_nuclei")}
+        assert set(recorded) == {"pre_pt_root_id", "post_pt_root_id", "pre_pt_root_id__s2", "post_pt_root_id__s2"}
+        suffixed = recorded["post_pt_root_id__s2"]
+        assert suffixed["uri"].endswith("/connections_with_nuclei/post_pt_root_id__s2")
+        assert (suffixed["partition_by"], suffixed["job_id"]) == ("post_pt_root_id", "job2.connections_with_nuclei")
+        first = vp.summarize(recorded["post_pt_root_id"]["uri"])
+        assert vp.summarize(suffixed["uri"])["checksum"] == first["checksum"]  # the first run's lakes are intact
+
+    def test_a_restarted_suffixed_job_resumes(self, version):
+        assert stage.build_views(version.ctx("job2", name_suffix="__s2"))["state"] == "done"
+        again = stage.build_views(version.ctx("job2", name_suffix="__s2"))
+        assert again["state"] == "done" and set(again["detail"]["skipped"]) == set(TARGETS)
+
+
 class TestPieces:
+    def test_the_jobs_own_table_lakes_are_preferred(self):
+        rows = [{"table_name": "t", "spec_name": "id", "bytes": 1, "job_id": "old.t"},
+                {"table_name": "t", "spec_name": "id__s2", "bytes": 9, "job_id": "job2.t"},
+                {"table_name": "u", "spec_name": "id", "bytes": 5, "job_id": "old.u"}]
+        chosen = stage.table_lakes(rows, job_id="job2")
+        assert chosen["t"]["spec_name"] == "id__s2"  # this job's, though bigger
+        assert chosen["u"]["spec_name"] == "id"  # a table this job didn't export: any complete lake
+        assert stage.table_lakes(rows)["t"]["spec_name"] == "id"
+
     def test_copy_keys(self):
         assert stage.copy_keys(["pre_pt_root_id", "n_syn", "post_pt_root_id"]) == ["pre_pt_root_id", "post_pt_root_id"]
         assert stage.copy_keys(["id", "volume"]) == [None]
