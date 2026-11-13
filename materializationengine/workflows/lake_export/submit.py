@@ -39,14 +39,15 @@ def entrypoint(datastack: str, version: int, job_id: str, tables: Optional[Seque
 
 
 def submit(settings: ExportSettings, command: str, name_prefix: str, metadata: Dict,
-           max_streams: Optional[int] = None, num_workers: Optional[int] = None) -> str:
-    """Create the RayJob; its name. num_workers overrides the sizing (?workers=)."""
+           max_streams: Optional[int] = None, num_workers: Optional[int] = None, views: bool = False) -> str:
+    """Create the RayJob; its name. num_workers overrides the sizing (?workers=); views: the
+    job has a views stage, so its cluster may grow to the stage's workers."""
     from materializationengine.rayjobs import submit_rayjob
 
     return submit_rayjob(
         entrypoint=command,
         name_prefix=name_prefix,
-        num_workers=num_workers or settings.workers_for(max_streams),
+        num_workers=num_workers or settings.workers_for(max_streams, views=views),
         metadata=metadata,
         worker_cpus=settings.worker_cpus,
         worker_memory=settings.worker_memory,

@@ -43,6 +43,7 @@ class ExportSettings:
     worker_cpus: int = WORKER_CPUS
     worker_memory: str = WORKER_MEMORY
     max_workers: Optional[int] = None  # default: enough for max_streams
+    views_workers: int = 8  # the views stage's Daft cluster (DELTALAKE_EXPORT_VIEWS_WORKERS)
 
     @classmethod
     def from_config(cls, config: Mapping) -> "ExportSettings":
@@ -68,10 +69,13 @@ class ExportSettings:
             worker_cpus=worker_cpus,
             worker_memory=worker_memory,
             max_workers=_int(config, "DELTALAKE_RAY_MAX_WORKERS", None),
+            views_workers=_int(config, "DELTALAKE_EXPORT_VIEWS_WORKERS", cls.views_workers),
         )
 
-    def workers_for(self, max_streams: Optional[int] = None) -> int:
-        """Workers for a job: DELTALAKE_RAY_MAX_WORKERS, else enough to run its streams."""
+    def workers_for(self, max_streams: Optional[int] = None, views: bool = False) -> int:
+        """Workers for a job: DELTALAKE_RAY_MAX_WORKERS, else enough to run its streams --
+        and, for a job with a views stage, at least the stage's views_workers."""
         if self.max_workers:
             return self.max_workers
-        return max(1, math.ceil((max_streams or self.max_streams) / max(1, self.worker_cpus)))
+        streams = max(1, math.ceil((max_streams or self.max_streams) / max(1, self.worker_cpus)))
+        return max(streams, self.views_workers) if views else streams

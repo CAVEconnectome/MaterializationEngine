@@ -1060,6 +1060,7 @@ class WriteDeltalakeVersionResource(Resource):
                 metadata={"datastack": datastack_name, "version": str(version), "job-id": job_id},
                 max_streams=max_streams,
                 num_workers=request.args.get("workers", type=int),
+                views=views,
             )
         except RayJobSubmissionError as exc:
             return abort(500, f"failed to submit RayJob: {exc}")

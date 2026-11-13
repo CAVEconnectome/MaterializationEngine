@@ -207,6 +207,8 @@ class BaseConfig:
     DELTALAKE_RAY_WORKER_MEMORY = os.environ.get("DELTALAKE_RAY_WORKER_MEMORY")
     DELTALAKE_RAY_MAX_WORKERS = os.environ.get("DELTALAKE_RAY_MAX_WORKERS")
     DELTALAKE_EXPORT_WORKER_MEMORY_BUDGET_BYTES = os.environ.get("DELTALAKE_EXPORT_WORKER_MEMORY_BUDGET_BYTES")
+    # Workers a version export with views keeps for its views stage (Daft), default 8.
+    DELTALAKE_EXPORT_VIEWS_WORKERS = os.environ.get("DELTALAKE_EXPORT_VIEWS_WORKERS")
     # The version export's views stage: "module:function", called once every table of the
     # version is exported, when the export is asked for views (lake_export/version.py).
     # Default: Daft building the views from the table lakes; "" turns the stage off.

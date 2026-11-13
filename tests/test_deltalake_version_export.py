@@ -177,6 +177,15 @@ class TestEndpoint:
         assert "--views" not in entry and "--tables" not in entry
         assert submit.call_args.kwargs["num_workers"] == 8  # 16 streams on 2-CPU workers
 
+    def test_a_job_with_views_may_grow_to_the_stages_workers(self, client):
+        with mock.patch("materializationengine.rayjobs.ray_enabled", return_value=True), \
+                mock.patch("materializationengine.rayjobs.submit_rayjob", return_value="x") as submit, \
+                mock.patch.object(dve, "set_version_status"):
+            client.post(self.URL, json={"views": True})
+            assert submit.call_args.kwargs["num_workers"] == 8  # views_workers, over 4 streams' 2
+            client.post(self.URL, json={})
+            assert submit.call_args.kwargs["num_workers"] == 2
+
     @pytest.mark.parametrize("body", [
         {"tables": "synapses"}, {"max_streams": 0}, {"name_suffix": "a b; rm"},
         {"config": {"defaults": {"bogus": 1}}}, {"include_views": True}, {"views": "yes"},

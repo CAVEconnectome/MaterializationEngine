@@ -145,7 +145,7 @@ def main(argv=None) -> int:
                 # most are, just before the stage needs them all.
                 from ray.autoscaler.sdk import request_resources
 
-                workers = settings.workers_for(args.max_streams)
+                workers = settings.workers_for(args.max_streams, views=True)
                 request_resources(bundles=[{"CPU": settings.worker_cpus}] * workers)
                 logger.info("holding %d worker(s) of %d CPU for the views stage", workers, settings.worker_cpus)
             result = run_version(datastack_info, args.version, args.job_id, requests, settings, executor,
