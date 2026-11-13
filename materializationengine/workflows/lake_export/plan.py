@@ -6,7 +6,8 @@ size policy and the id ranges. The plan is saved next to the table's lakes
 (<table>/_lake_export/<job_id>.json) before anything is written, and a restarted job
 loads it instead of planning again: partition bounds come from a random sample, so a
 second planning would bin the remaining ranges differently from the ones already
-published.
+published. Once the table is complete, <job_id>.done.json replaces the plan, and a
+restarted job skips the table.
 """
 
 import dataclasses
@@ -118,6 +119,35 @@ def delete_plan(plan: TablePlan) -> None:
     from materializationengine.workflows.lake_export import storage
 
     storage.delete_paths(plan.output_uri_base, [plan_path(plan.job_id)])
+
+
+def done_path(job_id: str) -> str:
+    return f"{PLAN_DIR}/{job_id}.done.json"
+
+
+def mark_done(plan: TablePlan, summary: Dict) -> None:
+    """Record that this job completed the table (it replaces the plan), so a restarted job
+    skips the table instead of planning it again -- a new plan's sampled bounds and range
+    edges would not line up with the ranges already published."""
+    import obstore
+
+    from materializationengine.blueprints.client.lake_index import store
+
+    obstore.put(store(plan.output_uri_base), done_path(plan.job_id), json.dumps(summary, default=str).encode())
+    delete_plan(plan)
+
+
+def load_done(output_uri_base: str, job_id: str) -> Optional[Dict]:
+    """What mark_done recorded for this job, or None if it has not completed the table."""
+    import obstore
+
+    from materializationengine.blueprints.client.lake_index import store
+
+    try:
+        raw = bytes(obstore.get(store(output_uri_base), done_path(job_id)).bytes())
+    except FileNotFoundError:
+        return None
+    return json.loads(raw.decode())
 
 
 def resolve_specs(

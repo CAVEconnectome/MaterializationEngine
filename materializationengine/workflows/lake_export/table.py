@@ -26,7 +26,7 @@ from materializationengine import deltalake_catalog as cat
 from materializationengine.workflows import deltalake_export as dx
 from materializationengine.workflows.lake_export import optimize as opt
 from materializationengine.workflows.lake_export import publish as pub
-from materializationengine.workflows.lake_export.plan import TablePlan, delete_plan, published
+from materializationengine.workflows.lake_export.plan import TablePlan, delete_plan, mark_done, published
 from materializationengine.workflows.lake_export.ranges import RangeResult, export_range
 from materializationengine.workflows.lake_export.settings import ExportSettings
 from materializationengine.workflows.lake_export.sizing import plan_optimize
@@ -249,10 +249,10 @@ class TableExport:
         self._finish()
 
     def _finish(self, message: Optional[str] = None) -> None:
-        delete_plan(self.plan)
         self._shutdown()
         self.state = "complete"
         self.timings["finished"] = time.monotonic()
+        mark_done(self.plan, self.summary())
         if message:
             self.status.log(message)
         self.status.complete()

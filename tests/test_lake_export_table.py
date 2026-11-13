@@ -89,7 +89,8 @@ class TestExportTable:
         uri = row["uri"]
         assert DeltaTable(uri).to_pyarrow_table(columns=["id"]).num_rows == frozen["rows"]
         assert storage.list_paths(uri, "_cave_index")  # the planning index
-        assert storage.list_paths(base(tmp_path), planning.PLAN_DIR) == []  # the plan is gone once complete
+        # once complete, the plan is replaced by the job's done marker
+        assert storage.list_paths(base(tmp_path), planning.PLAN_DIR) == [planning.done_path("job1")]
         records, logs = statuses
         final = records[f"deltalake_export:{DATASTACK}:v{VERSION}:{TABLE}:job1"][-1]
         assert final["status"] == "complete" and final["percent_complete"] == 100.0
@@ -178,10 +179,32 @@ class TestExportTable:
         again = run(frozen, tmp_path, settings, job="second")
         assert again["state"] == "failed" and "name_suffix" in again["error"]
         assert lakes(catalog)["id"]["status"] == "complete"  # the first export's row is untouched
-        assert storage.list_paths(base(tmp_path), planning.PLAN_DIR) == []
+        assert planning.plan_path("second") not in storage.list_paths(base(tmp_path), planning.PLAN_DIR)
         beside = run(frozen, tmp_path, settings, job="third", spec_overrides={"name_suffix": "_b"})
         assert beside["state"] == "complete"
         assert set(lakes(catalog)) == {"id", "id_b"}
+
+    def test_a_restart_skips_the_tables_it_completed(self, frozen, catalog, statuses, tmp_path):
+        """KubeRay restarting the driver (e.g. after a failed views stage) must not plan a
+        completed table again: new sampled bounds would not line up with its published ranges."""
+        from deltalake import DeltaTable
+
+        settings = settings_for(tmp_path)
+        first = run(frozen, tmp_path, settings)
+        assert first["state"] == "complete"
+        versions = {name: DeltaTable(row["uri"]).version() for name, row in lakes(catalog).items()}
+
+        submitted = []
+        executor = ThreadExecutor(2)
+        submit = executor.submit
+        executor.submit = lambda unit: submitted.append(unit) or submit(unit)
+        again = run(frozen, tmp_path, settings, executor=executor)
+        assert again["state"] == "complete" and again["resumed"] and again["ranges"] == first["ranges"]
+        assert submitted == []  # nothing streamed or optimized again
+        assert {name: DeltaTable(row["uri"]).version() for name, row in lakes(catalog).items()} == versions
+        records, logs = statuses
+        assert records[f"deltalake_export:{DATASTACK}:v{VERSION}:{TABLE}:job1"][-1]["status"] == "complete"
+        assert "skipped" in logs["job1"][-2]
 
     def test_row_count_mismatch_fails(self, frozen, catalog, statuses, tmp_path):
         summary = run(frozen, tmp_path, settings_for(tmp_path, split=False), row_count=frozen["rows"] + 1)

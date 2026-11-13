@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence
 
-from materializationengine.workflows.lake_export.plan import load_plan, plan_table, save_plan
+from materializationengine.workflows.lake_export.plan import load_done, load_plan, plan_table, save_plan
 from materializationengine.workflows.lake_export.scheduler import ExportScheduler, Executor
 from materializationengine.workflows.lake_export.settings import ExportSettings
 from materializationengine.workflows.lake_export.source import ExportSource, FrozenSource
@@ -66,12 +66,22 @@ def run_tables(datastack_info: Dict, version: int, requests: Sequence[TableReque
                on_change: Optional[Callable[[Dict[str, Dict]], None]] = None) -> Dict[str, Dict]:
     """Plan every table, then export them together; a table's summary by name.
 
-    A table that cannot be planned is reported failed; the others still run. on_change
+    A table this job already completed (a restart) is reported complete without being
+    touched; one that cannot be planned is reported failed; the others still run. on_change
     gets every table's summary whenever one's state changes.
     """
-    exports, failed = [], {}
+    exports, settled = [], {}  # settled: tables done before scheduling (resumed, or unplannable)
     for request in requests:
         job_id = job_id_for(request.table)
+        # a restarted job (KubeRay retrying the driver) skips the tables it completed
+        done = load_done(f"{settings.output_bucket}/{datastack_info['datastack']}/v{version}/{request.table}", job_id)
+        if done is not None:
+            status = TableStatus(datastack_info["datastack"], version, request.table, job_id)
+            status.update(force=True, total_rows=done.get("rows"))
+            status.log(f"Already exported by job {job_id}; skipped")
+            status.complete()
+            settled[request.table] = {**done, "state": "complete", "resumed": True}
+            continue
         try:
             exports.append(prepare_table(datastack_info, version, request, job_id, settings, source=source,
                                          inputs=inputs))
@@ -79,8 +89,8 @@ def run_tables(datastack_info: Dict, version: int, requests: Sequence[TableReque
             error = f"planning: {type(e).__name__}: {e}"
             logger.exception("could not plan %s", request.table)
             TableStatus(datastack_info["datastack"], version, request.table, job_id).failed(error)
-            failed[request.table] = {"state": "failed", "error": error}
+            settled[request.table] = {"state": "failed", "error": error}
     scheduler = ExportScheduler(
         exports, executor, max_streams=max_streams or settings.max_streams, max_tasks=settings.max_tasks,
-        on_change=None if on_change is None else (lambda summaries: on_change({**failed, **summaries})))
-    return {**failed, **scheduler.run()}
+        on_change=None if on_change is None else (lambda summaries: on_change({**settled, **summaries})))
+    return {**settled, **scheduler.run()}
