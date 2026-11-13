@@ -159,7 +159,9 @@ def registered_views(engine, datastack: str) -> List[str]:
     """The datastack's views as users see them: its analysisviews rows."""
     import sqlalchemy as sa
 
-    if not sa.inspect(engine).has_table("analysisviews"):
+    # dialect.has_table, not inspect(engine).has_table: SQLAlchemy is 1.3 here (the lock
+    # file), whose Inspector has no has_table
+    if not engine.dialect.has_table(engine, "analysisviews"):
         return []
     rows = engine.execute(sa.text("SELECT table_name FROM analysisviews WHERE datastack_name = :ds ORDER BY id"),
                           ds=datastack).fetchall()

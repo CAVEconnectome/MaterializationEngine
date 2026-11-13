@@ -170,3 +170,26 @@ class TestThroughTheExportHook:
         result = lev.run_views_stage(version.ctx(), hook)
         assert isinstance(result, lev.StageResult) and result.state == "done" and result.error is None
         assert set(result.detail["built"]) == set(TARGETS)
+
+
+class TestRegisteredViews:
+    """registered_views against a real database (every other test stubs it out, which is how
+    an Inspector.has_table call, SQLAlchemy 1.4+, reached ltv7 under the locked 1.3)."""
+
+    def test_no_analysisviews_table_means_no_views(self, frozen):  # noqa: F811
+        engine, _ = frozen
+        with engine.begin() as conn:
+            conn.execute("DROP TABLE IF EXISTS analysisviews")
+        assert stage.registered_views(engine, "ds") == []
+
+    def test_the_datastacks_views_in_registration_order(self, frozen):  # noqa: F811
+        engine, _ = frozen
+        with engine.begin() as conn:
+            conn.execute("CREATE TABLE analysisviews (id serial PRIMARY KEY, table_name varchar, datastack_name varchar)")
+            conn.execute("INSERT INTO analysisviews (table_name, datastack_name) VALUES "
+                         "('second_built_first', 'ds'), ('other', 'elsewhere'), ('then_this', 'ds')")
+        try:
+            assert stage.registered_views(engine, "ds") == ["second_built_first", "then_this"]
+        finally:
+            with engine.begin() as conn:
+                conn.execute("DROP TABLE analysisviews")
