@@ -160,13 +160,16 @@ def register_lakes(datastack: str, version: int, rows: List[Dict]) -> Dict:
 
 
 def register_version(aligned_volume: str, datastack: str, version: int,
-                     table_name: Optional[str] = None) -> Dict:
+                     table_name: Optional[str] = None, job_id: Optional[str] = None) -> Dict:
     """Register every complete lake the internal catalog has for a version (or one of its
-    tables): what an export does once its lakes check out, and the backfill for lakes
-    exported before the catalog service existed."""
+    tables): the backfill for lakes exported before the catalog service existed. An export
+    passes its job_id, to register only the lakes it wrote -- not an earlier export's
+    beside them (another name_suffix), which may have been deregistered on purpose."""
     from materializationengine import deltalake_catalog as cat
 
     rows = cat.list_exports(aligned_volume, datastack, version, table_name=table_name)
+    if job_id is not None:
+        rows = [r for r in rows if r.get("job_id") == job_id]
     return register_lakes(datastack, version, rows)
 
 

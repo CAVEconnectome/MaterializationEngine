@@ -242,7 +242,7 @@ class TableExport:
             list(pool.map(index, lakes))
         if self.aligned_volume and catalog_service.enabled():
             result = cat.safely(catalog_service.register_version, self.aligned_volume, plan.datastack,
-                                plan.version, self.table)
+                                plan.version, self.table, job_id=plan.job_id)
             if result is not None:
                 self.status.log(f"Catalog service: registered {len(result['registered'])} lake(s)"
                                 + (f", failed {result['failed']}" if result["failed"] else ""))

@@ -99,6 +99,15 @@ class TestRegister:
         assert listed.call_args.args == ("av", "ds", 7) and listed.call_args.kwargs == {"table_name": "synapses"}
         assert [a["name"] for a in fake.assets.values()] == ["synapses.post_pt_root_id"]
 
+    def test_an_export_registers_only_its_own_lakes(self, fake):
+        """An export beside an earlier one (another name_suffix) must not re-register the
+        earlier export's lakes, which may have been deregistered on purpose."""
+        ours, earlier = dict(row(spec="id_e2e"), job_id="j2"), row(spec="id__s8")
+        with mock.patch.object(cat, "list_exports", return_value=[earlier, ours]):
+            result = cs.register_version("av", "ds", 7, table_name="synapses", job_id="j2")
+        assert result["registered"] == [ours["uri"]]
+        assert [a["name"] for a in fake.assets.values()] == ["synapses.id_e2e"]
+
     def test_off_without_a_url(self, monkeypatch):
         monkeypatch.setattr(cs, "catalog_url", lambda: "")
         assert not cs.enabled()

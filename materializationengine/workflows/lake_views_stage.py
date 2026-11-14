@@ -348,7 +348,7 @@ def export_view(ctx, view: str, plan: lv.LakeView, lakes: Dict[str, Dict], attem
         except Exception:
             logger.warning("view %s: no planning index for %s", view, lake["uri"], exc_info=True)
     if catalog_service.enabled():
-        cat.safely(catalog_service.register_version, av, ds, v, view)
+        cat.safely(catalog_service.register_version, av, ds, v, view, job_id=job_id)
     return {"state": "complete", "rows": rows, "copies": built, "reads": sorted(plan.lakes),
             "seconds": round(time.perf_counter() - started, 3), "failed_attempts": failed,
             "orphans_removed": orphans}
