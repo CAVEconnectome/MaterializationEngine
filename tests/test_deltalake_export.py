@@ -12,6 +12,7 @@ import polars as pl
 import pyarrow as pa
 import pytest
 import shapely
+from cavebear import IcebergBucket, PartitionSpec
 
 from materializationengine.workflows.deltalake_export import (
     _DEFAULT_BYTES_PER_ROW,
@@ -25,10 +26,10 @@ from materializationengine.workflows.deltalake_export import (
     _int32_column,
     _partition_indices,
     _release_freed_heap,
+    _spec_derived_columns,
     _write_partitioned_in_groups,
     _validate_identifier,
     add_morton_column,
-    assign_hash_partition,
     assign_partition,
     compute_partition_boundaries,
     compute_uniform_range_bounds,
@@ -101,6 +102,32 @@ class TestDiscoverDefaultOutputSpecs:
         assert specs[1].bloom_filter_columns == []
         assert specs[1].source_geometry_column is None
         assert specs[1].source_table == "synapse"
+
+    def test_integer_columns_use_bucket(self):
+        from sqlalchemy import BigInteger, Integer, String
+
+        indexes = [
+            {"name": "ix_root", "column_names": ["pt_root_id"], "dialect_options": {}},
+            {"name": "ix_tag", "column_names": ["tag"], "dialect_options": {}},
+        ]
+        columns = [
+            {"name": "id", "type": Integer()},
+            {"name": "pt_root_id", "type": BigInteger()},
+            {"name": "tag", "type": String()},
+        ]
+        engine, inspector = self._make_engine(indexes, columns=columns, pk_columns=["id"])
+        with patch(
+            "materializationengine.workflows.deltalake_export.inspect",
+            return_value=inspector,
+        ):
+            specs = discover_default_output_specs(TableSource(annotation_table="t"), engine)
+
+        strategies = {spec.partition_by: spec.partition_strategy for spec in specs}
+        assert strategies == {
+            "id": "bucket",
+            "pt_root_id": "bucket",
+            "tag": "percentile_range",
+        }
 
     def test_spatial_index_produces_morton_spec(self):
         indexes = [
@@ -287,7 +314,7 @@ class TestDiscoverViewOutputSpecs:
         assert {s.name for s in specs} == {"flat", "id", "pt_position_morton"}
         id_spec = next(s for s in specs if s.name == "id")
         assert id_spec.partition_by == "id"
-        assert id_spec.partition_strategy == "percentile_range"
+        assert id_spec.partition_strategy == "bucket"
         assert id_spec.source_table == "my_view"
 
         morton_spec = next(s for s in specs if s.name == "pt_position_morton")
@@ -497,25 +524,74 @@ class TestAssignBucket:
 
 
 # ---------------------------------------------------------------------------
-# assign_hash_partition (supplementary — not in task list but included for
-# completeness since the function was implemented)
+# bucket strategy (Iceberg bucket hash, through cavebear)
 # ---------------------------------------------------------------------------
 
 
-class TestAssignHashBucket:
-    """Hash bucketing: every row gets a bucket in [0, n_partitions)."""
+class TestBucketSpec:
+    """The bucket strategy validates early and computes cavebear buckets."""
 
-    def test_all_buckets_assigned(self):
-        # With enough distinct values, all buckets should be populated
-        df = pl.DataFrame({"val": list(range(1000))})
-        result = assign_hash_partition(df, "val", 4)
-        partitions = result["val_partition"].unique().sort().to_list()
-        assert partitions == [0, 1, 2, 3]
+    def test_hash_is_removed(self):
+        with pytest.raises(ValueError, match='use "bucket"'):
+            DeltaLakeOutputSpec(name="x", partition_by="id", partition_strategy="hash")
 
-    def test_single_partition(self):
-        df = pl.DataFrame({"val": list(range(10))})
-        result = assign_hash_partition(df, "val", 1)
-        assert result["val_partition"].unique().to_list() == [0]
+    @pytest.mark.parametrize("n", [0, 3, 6, 2**31, True])
+    def test_rejects_bad_counts(self, n):
+        with pytest.raises(ValueError, match="power of two"):
+            DeltaLakeOutputSpec(
+                name="x", partition_by="id", partition_strategy="bucket", n_partitions=n
+            )
+
+    @pytest.mark.parametrize("n", ["auto", None, 1, 8, 2**30])
+    def test_accepts_good_counts(self, n):
+        DeltaLakeOutputSpec(
+            name="x", partition_by="id", partition_strategy="bucket", n_partitions=n
+        )
+
+    def test_needs_partition_by_and_no_morton(self):
+        with pytest.raises(ValueError, match="needs partition_by"):
+            DeltaLakeOutputSpec(name="x", partition_strategy="bucket")
+        with pytest.raises(ValueError, match="Morton"):
+            DeltaLakeOutputSpec(
+                name="x",
+                partition_by="pt_position_morton",
+                partition_strategy="bucket",
+                source_geometry_column="pt_position",
+            )
+
+    def test_cavebear_spec(self):
+        spec = DeltaLakeOutputSpec(
+            name="x", partition_by="pt_root_id", partition_strategy="bucket", n_partitions=8
+        )
+        assert spec.cavebear_spec() == PartitionSpec({"pt_root_id": IcebergBucket(8)})
+        assert spec.cavebear_spec().fields[0].name == "pt_root_id_partition"
+        with pytest.raises(ValueError, match="resolve n_partitions"):
+            DeltaLakeOutputSpec(
+                name="x", partition_by="id", partition_strategy="bucket"
+            ).cavebear_spec()
+        assert DeltaLakeOutputSpec(
+            name="x", partition_by="id", partition_strategy="percentile_range"
+        ).cavebear_spec() is None
+
+    def test_derived_column_matches_cavebear(self):
+        ids = [0, 1, 34, 2**63 - 1, 864691135000000000]
+        batch = pa.RecordBatch.from_pydict({"id": pa.array(ids, pa.int64())})
+        spec = DeltaLakeOutputSpec(
+            name="id", partition_by="id", partition_strategy="bucket", n_partitions=16
+        )
+        [(name, array)] = _spec_derived_columns(batch, spec)
+        assert name == "id_partition"
+        assert array.type == pa.int32()
+        # The test vectors of cavebear docs/specs/iceberg_bucket.md, n_buckets = 16.
+        assert array.to_pylist()[:3] == [12, 4, 3]
+        assert array.to_pylist() == [IcebergBucket(16).bucket(v) for v in ids]
+
+    def test_resolve_n_partitions_rounds_up_for_bucket(self):
+        # 3 MiB at a 1 MiB target -> 3 partitions; bucket rounds to 4.
+        args = dict(row_count=3, target_file_size_mb=1, bytes_per_row=1024 * 1024)
+        assert resolve_n_partitions("auto", **args) == 3
+        assert resolve_n_partitions("auto", partition_strategy="bucket", **args) == 4
+        assert resolve_n_partitions(8, partition_strategy="bucket", **args) == 8
 
 
 # ---------------------------------------------------------------------------
@@ -924,11 +1000,11 @@ class TestExportTableToDeltalake:
         )
         mock_stream.return_value = iter([batch])
 
-        # Explicit spec: hash partition with 2 buckets (not percentile_range)
+        # Explicit spec: bucket partition with 2 buckets (not percentile_range)
         spec = DeltaLakeOutputSpec(
-            name="test_hash",
+            name="test_bucket",
             partition_by="root_id",
-            partition_strategy="hash",
+            partition_strategy="bucket",
             n_partitions=2,
         )
 
@@ -943,8 +1019,10 @@ class TestExportTableToDeltalake:
         assert mock_write.call_count == 1
         written = pl.from_arrow(mock_write.call_args_list[0][0][1])
         assert "root_id_partition" in written.columns
-        # Hash produces buckets 0 or 1
-        assert set(written["root_id_partition"].to_list()).issubset({0, 1})
+        # The Iceberg bucket of each root ID, from cavebear.
+        assert written["root_id_partition"].to_list() == [
+            IcebergBucket(2).bucket(v) for v in written["root_id"].to_list()
+        ]
 
     @patch("deltalake.DeltaTable")
     @patch("deltalake.write_deltalake")
@@ -1107,7 +1185,7 @@ class TestOptimizeDeltalake:
         spec = DeltaLakeOutputSpec(
             name="test_zorder_bloom",
             partition_by="val",
-            partition_strategy="hash",
+            partition_strategy="bucket",
             n_partitions=2,
             zorder_columns=["val"],
             bloom_filter_columns=["id"],
@@ -1150,7 +1228,7 @@ class TestSkipOptimize:
         spec = DeltaLakeOutputSpec(
             name="lake",
             partition_by="val",
-            partition_strategy="hash",
+            partition_strategy="bucket",
             n_partitions=2,
             zorder_columns=["val"],
         )
@@ -2226,3 +2304,112 @@ class TestReleaseFreedHeap:
         """No-op off glibc; must never raise, since it runs in a finally block."""
         _release_freed_heap()
         _release_freed_heap()
+
+
+@pytest.mark.usefixtures("no_table_geometry")
+class TestBucketExport:
+    """A bucket export against a real local Delta Lake, with only Postgres mocked."""
+
+    def test_two_flushes_store_the_partition_spec(self, tmp_path):
+        import cavebear
+        from deltalake import DeltaTable
+
+        rng = np.random.default_rng(0)
+        roots = rng.integers(864691135_000_000_000, 864691137_000_000_000, 400)
+        batches = [
+            pa.RecordBatch.from_pydict(
+                {"id": pa.array(range(i, i + 200), pa.int64()), "pt_root_id": roots[i : i + 200]}
+            )
+            for i in (0, 200)
+        ]
+        spec = DeltaLakeOutputSpec(
+            name="pt_root_id",
+            partition_by="pt_root_id",
+            partition_strategy="bucket",
+            n_partitions=8,
+            zorder_columns=["pt_root_id"],
+        )
+        base = str(tmp_path / "out")
+        with patch(
+            "materializationengine.workflows.deltalake_export.stream_table_to_arrow",
+            return_value=iter(batches),
+        ):
+            export_table_to_deltalake(
+                connection_string="unused",
+                source=TableSource(annotation_table="t"),
+                output_specs=[spec],
+                output_uri_base=base,
+                flush_threshold_bytes=1,  # one flush per batch
+            )
+
+        lake = DeltaTable(f"{base}/pt_root_id")
+        # The spec is in the table property after both flushes and the optimize.
+        assert cavebear.partition_spec(lake) == PartitionSpec({"pt_root_id": IcebergBucket(8)})
+        assert lake.metadata().partition_columns == ["pt_root_id_partition"]
+        assert any(entry["operation"] == "OPTIMIZE" for entry in lake.history())
+        table = lake.to_pyarrow_table().sort_by("id")
+        assert table.num_rows == 400
+        assert table.column("pt_root_id_partition").to_pylist() == [
+            IcebergBucket(8).bucket(v) for v in table.column("pt_root_id").to_pylist()
+        ]
+
+    def test_view_bucket_spec(self, tmp_path):
+        import cavebear
+        from deltalake import DeltaTable
+
+        batches = TestExportViewToDeltalake()._make_batches(30)
+        base = str(tmp_path / "out")
+        specs = [
+            DeltaLakeOutputSpec(name="flat"),
+            DeltaLakeOutputSpec(
+                name="id",
+                partition_by="id",
+                partition_strategy="bucket",
+                n_partitions="auto",
+                zorder_columns=["id"],
+                source_table="my_view",
+            ),
+        ]
+        with patch(
+            "materializationengine.workflows.deltalake_export.stream_table_to_arrow",
+            return_value=iter(batches),
+        ), patch(
+            "materializationengine.workflows.deltalake_export._get_geometry_columns",
+            return_value=["pt_position"],
+        ), patch("materializationengine.workflows.deltalake_export.optimize_deltalake"):
+            export_view_to_deltalake(
+                connection_string="postgresql://ignored/db",
+                view_name="my_view",
+                output_specs=specs,
+                output_uri_base=base,
+                flush_threshold_bytes=1,
+            )
+
+        lake = DeltaTable(f"{base}/id")
+        bucket_spec = cavebear.partition_spec(lake)
+        [field] = bucket_spec.fields
+        assert field.name == "id_partition"
+        # "auto" for 30 small rows resolves to one partition, a power of two.
+        assert field.transform.n_buckets == 1
+        assert lake.count() == 30
+
+    def test_write_api_rejects_a_bad_bucket_count(self):
+        """The export endpoint answers 400 before it starts a job."""
+        import inspect
+
+        from flask import Flask
+        from werkzeug.exceptions import BadRequest
+
+        from materializationengine.blueprints.materialize import api as mat_api
+
+        body = {
+            "output_specs": [
+                {"name": "id", "partition_by": "id", "partition_strategy": "bucket", "n_partitions": 6}
+            ]
+        }
+        post = inspect.unwrap(mat_api.WriteDeltalakeResource.post)
+        with Flask(__name__).test_request_context(json=body), patch.object(
+            mat_api, "get_datastack_info", return_value={}
+        ):
+            with pytest.raises(BadRequest, match="power of two"):
+                post(None, "minnie65_phase3_v1", 1, "t")

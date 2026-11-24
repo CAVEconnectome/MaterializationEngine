@@ -232,7 +232,9 @@ class TestRuns:
         assert "DELTA_BINARY_PACKED" in md_.row_group(0).column(0).encodings
         # the log's per-file stats hold each run's window, so readers skip runs on time alone
         stats = DeltaTable(str(table_dir(tmp_path))).get_add_actions(flatten=True)
-        assert stats.column("max.end_time_stamp").to_pylist() == [log._utc(RUN_TS)]
+        # deltalake 1.6 writes timestamp stats in milliseconds, as the Delta protocol specifies
+        run_ms = log._utc(RUN_TS).replace(microsecond=log._utc(RUN_TS).microsecond // 1000 * 1000)
+        assert stats.column("max.end_time_stamp").to_pylist() == [run_ms]
 
     def test_a_time_filter_reads_only_the_runs_in_the_window(self, bucket):
         import polars as pl

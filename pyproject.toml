@@ -44,8 +44,12 @@ dependencies = [
     "cryptography>=44.0.2",
     "kvdbclient[extensions]",
     "adbc-driver-postgresql>=1.11.0",
-    "deltalake>=1.5.0",
+    # cavebear needs deltalake 1.6.
+    "deltalake>=1.6",
     "polars>=1.39.3",
+    # Iceberg bucket partitioning and the cave.partition_spec table property of the
+    # Delta Lake export. Pinned to a commit until cavebear has a release.
+    "cavebear @ git+https://github.com/CAVEconnectome/cavebear@7f7173dc2cff6a99fba66e7e4458ac3555efd791",
     # Creates RayJob CRs from the api. Small, pure-python; needed wherever a job
     # can be submitted, which is the api pods.
     "kubernetes>=31.0.0",

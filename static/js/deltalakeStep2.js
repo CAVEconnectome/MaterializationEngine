@@ -1,3 +1,18 @@
+// The "bucket" strategy is the Iceberg bucket hash (cavebear IcebergBucket). Its
+// partition count must be a power of two in [1, 2**30].
+const MAX_BUCKETS = 2 ** 30;
+
+function isBucketCount(n) {
+  return Number.isInteger(n) && n >= 1 && n <= MAX_BUCKETS && (n & (n - 1)) === 0;
+}
+
+/** The smallest valid bucket count >= n, as IcebergBucket.round_up. */
+function roundUpBuckets(n) {
+  let count = 1;
+  while (count < n && count < MAX_BUCKETS) count *= 2;
+  return count;
+}
+
 document.addEventListener("alpine:init", () => {
   Alpine.data("deltalakeStep2", () => ({
     specs: Alpine.store("dlWizard").state.specs || [],
@@ -165,6 +180,23 @@ document.addEventListener("alpine:init", () => {
       return (spec.bloom_filter_columns || []).includes(col);
     },
 
+    // --- Validation ---
+
+    /** The error message for a spec, or null. Shown under "N Partitions". */
+    specError(spec) {
+      if (spec.partition_strategy !== "bucket") return null;
+      const n = spec.n_partitions;
+      if (n === null || n === undefined || n === "" || n === "auto") return null;
+      if (!isBucketCount(n)) {
+        return "Bucket needs a power of two (1, 2, 4, 8, ...), or leave empty for auto.";
+      }
+      return null;
+    },
+
+    hasErrors() {
+      return this.specs.some((spec) => this.specError(spec) !== null);
+    },
+
     // --- Helpers ---
     syncStore() {
       Alpine.store("dlWizard").state.specs = this.specs;
@@ -211,6 +243,9 @@ document.addEventListener("alpine:init", () => {
             const targetBytes = targetMb * 1024 * 1024;
             const totalBytes = this.rowCount * this.bytesPerRow;
             spec.n_partitions = Math.max(1, Math.ceil(totalBytes / targetBytes));
+            if (spec.partition_strategy === "bucket") {
+              spec.n_partitions = roundUpBuckets(spec.n_partitions);
+            }
           }
         }
 

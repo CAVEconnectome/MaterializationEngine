@@ -77,7 +77,7 @@
                                         @change="syncStore()">
                                     <option value="percentile_range">percentile_range</option>
                                     <option value="uniform_range">uniform_range</option>
-                                    <option value="hash">hash</option>
+                                    <option value="bucket">bucket</option>
                                 </select>
                             </div>
                             <div class="col-md">
@@ -85,9 +85,14 @@
                                 <input type="number" class="form-control form-control-sm"
                                        x-model.number="spec.n_partitions" min="1"
                                        placeholder="auto"
+                                       :class="{ 'is-invalid': specError(spec) }"
                                        :disabled="!spec.partition_by"
                                        @change="syncStore()">
-                                <small class="form-text text-muted">Leave empty to auto-calculate from target file size</small>
+                                <div class="invalid-feedback" x-text="specError(spec)"></div>
+                                <small class="form-text text-muted"
+                                       x-text="spec.partition_strategy === 'bucket'
+                                           ? 'A power of two. Leave empty to auto-calculate from target file size'
+                                           : 'Leave empty to auto-calculate from target file size'"></small>
                             </div>
                             <div class="col-md">
                                 <label class="form-label small fw-semibold text-start d-block">Target File Size (MB)</label>
@@ -200,7 +205,7 @@
             <i class="fas fa-arrow-left me-2"></i>Back
         </button>
 
-        <button class="btn btn-primary" @click="$store.dlWizard.next()">
+        <button class="btn btn-primary" @click="$store.dlWizard.next()" :disabled="hasErrors()">
             Next <i class="fas fa-arrow-right ms-2"></i>
         </button>
     </div>
