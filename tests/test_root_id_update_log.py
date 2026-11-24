@@ -230,11 +230,25 @@ class TestRuns:
         md_ = pq.ParquetFile(path).metadata
         assert [md_.row_group(r).num_rows for r in range(md_.num_row_groups)] == [4, 4, 1]
         assert "DELTA_BINARY_PACKED" in md_.row_group(0).column(0).encodings
-        # the log's per-file stats hold each run's window, so readers skip runs on time alone
+        # the log's per-file stats hold each run's window, so readers skip runs on time alone.
+        # deltalake >= 1.6.4 truncates timestamp stats to milliseconds (delta-rs #4690), so the
+        # max is up to 999 us before the run's end. Readers must widen it: see the next test.
         stats = DeltaTable(str(table_dir(tmp_path))).get_add_actions(flatten=True)
-        # deltalake 1.6 writes timestamp stats in milliseconds, as the Delta protocol specifies
-        run_ms = log._utc(RUN_TS).replace(microsecond=log._utc(RUN_TS).microsecond // 1000 * 1000)
-        assert stats.column("max.end_time_stamp").to_pylist() == [run_ms]
+        assert stats.column("max.end_time_stamp").to_pylist() == [log._utc(RUN_TS).replace(microsecond=123000)]
+
+    def test_a_filter_on_the_run_end_finds_the_run_although_the_stats_are_truncated(self, bucket):
+        # polars < 2.1 compared filters with the truncated max and skipped this file (polars #30194)
+        import datetime
+
+        import polars as pl
+
+        tmp_path, _ = bucket
+        md = metadata()
+        write(md, [1, 2], TASK["a"])
+        log.finalize(md)
+        end, col = log._utc(RUN_TS), pl.col("end_time_stamp")
+        for expr in (col == end, col >= end, col > end - datetime.timedelta(microseconds=200)):
+            assert sorted(pl.scan_delta(str(table_dir(tmp_path))).filter(expr).collect()["id"].to_list()) == [1, 2]
 
     def test_a_time_filter_reads_only_the_runs_in_the_window(self, bucket):
         import polars as pl
