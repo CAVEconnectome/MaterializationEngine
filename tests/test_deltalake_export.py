@@ -1008,14 +1008,20 @@ class TestExportTableToDeltalake:
             n_partitions=2,
         )
 
-        export_table_to_deltalake(
-            connection_string="unused",
-            source=TableSource(annotation_table="test_table"),
-            output_specs=[spec],
-            output_uri_base="gs://bucket/test",
-            flush_threshold_bytes=10 * 1024 * 1024 * 1024,
-        )
+        with patch(
+            "materializationengine.workflows.deltalake_export._create_bucket_lake"
+        ) as mock_create:
+            export_table_to_deltalake(
+                connection_string="unused",
+                source=TableSource(annotation_table="test_table"),
+                output_specs=[spec],
+                output_uri_base="gs://bucket/test",
+                flush_threshold_bytes=10 * 1024 * 1024 * 1024,
+            )
 
+        # The bucket lake is created once, before the write.
+        mock_create.assert_called_once()
+        assert mock_create.call_args[0][0] == "gs://bucket/test/test_bucket"
         assert mock_write.call_count == 1
         written = pl.from_arrow(mock_write.call_args_list[0][0][1])
         assert "root_id_partition" in written.columns
@@ -1170,10 +1176,11 @@ class TestOptimizeDeltalake:
         mock_dt.optimize.z_order.assert_not_called()
         mock_dt.vacuum.assert_called_once()
 
+    @patch("materializationengine.workflows.deltalake_export._create_bucket_lake")
     @patch("deltalake.write_deltalake")
     @patch("deltalake.DeltaTable")
     @patch("materializationengine.workflows.deltalake_export.stream_table_to_arrow")
-    def test_export_calls_optimize(self, mock_stream, MockDeltaTable, mock_write):
+    def test_export_calls_optimize(self, mock_stream, MockDeltaTable, mock_write, _mock_create):
         """export_table_to_deltalake should call optimize_deltalake for
         each output spec after writing."""
         mock_dt = MagicMock()
@@ -1214,11 +1221,12 @@ class TestSkipOptimize:
     stay False so the Celery path is byte-for-byte unchanged.
     """
 
+    @patch("materializationengine.workflows.deltalake_export._create_bucket_lake")
     @patch("deltalake.write_deltalake")
     @patch("deltalake.DeltaTable")
     @patch("materializationengine.workflows.deltalake_export.stream_table_to_arrow")
     def test_skip_optimize_does_not_optimize(
-        self, mock_stream, MockDeltaTable, mock_write
+        self, mock_stream, MockDeltaTable, mock_write, _mock_create
     ):
         mock_dt = MagicMock()
         MockDeltaTable.return_value = mock_dt
@@ -2352,6 +2360,33 @@ class TestBucketExport:
         assert table.column("pt_root_id_partition").to_pylist() == [
             IcebergBucket(8).bucket(v) for v in table.column("pt_root_id").to_pylist()
         ]
+        # The first commit creates the table with the spec, before any data.
+        first = lake.history()[-1]
+        assert first["operation"] == "CREATE TABLE"
+        assert DeltaTable(f"{base}/pt_root_id", version=0).count() == 0
+
+    def test_an_existing_table_is_not_appended_to(self, tmp_path):
+        """The bucket lake is created once, before the first flush, so an existing
+        table at its path fails the export instead of getting rows without a spec."""
+        from deltalake import DeltaTable, write_deltalake
+
+        base = str(tmp_path / "out")
+        # Same columns and partitioning as the export, but no partition spec.
+        existing = pa.table({"id": pa.array([1], pa.int64()), "id_partition": pa.array([0], pa.int32())})
+        write_deltalake(f"{base}/id", existing, partition_by=["id_partition"])
+        batch = pa.RecordBatch.from_pydict({"id": pa.array([1, 2], pa.int64())})
+        spec = DeltaLakeOutputSpec(name="id", partition_by="id", partition_strategy="bucket", n_partitions=2)
+        with patch(
+            "materializationengine.workflows.deltalake_export.stream_table_to_arrow",
+            return_value=iter([batch]),
+        ), pytest.raises(Exception, match="(?i)exist"):
+            export_table_to_deltalake(
+                connection_string="unused",
+                source=TableSource(annotation_table="t"),
+                output_specs=[spec],
+                output_uri_base=base,
+            )
+        assert DeltaTable(f"{base}/id").count() == 1
 
     def test_view_bucket_spec(self, tmp_path):
         import cavebear

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import os
@@ -1550,24 +1551,40 @@ def _spec_partition_by(spec: "DeltaLakeOutputSpec") -> list[str] | None:
 
 
 def _create_bucket_lake(uri: str, schema: pa.Schema, spec: DeltaLakeOutputSpec) -> None:
-    """Create the empty Delta Lake of a ``bucket`` spec, if it does not exist yet.
+    """Create the empty Delta Lake of a ``bucket`` spec. Call it once, before any write.
 
-    ``cavebear.create_delta`` stores the partition spec in the
-    ``cave.partition_spec`` table property, in the first commit of the table. The
-    later ``write_deltalake`` appends keep the property. *schema* is the schema of
-    the data that is written, with the partition column of the spec.
+    The partition spec lives in the custom table property ``cave.partition_spec``.
+    A plain ``write_deltalake`` cannot set a custom property, so
+    ``cavebear.create_delta`` makes the table with it, and every write after that
+    only appends. *schema* is the schema of the written data; partition columns of
+    the spec in it are left out, because ``create_delta`` adds them. It fails if a
+    table exists at *uri*: an export never appends to a table it did not create.
     """
     import cavebear
-    from deltalake import DeltaTable
 
-    if DeltaTable.is_deltatable(uri):
-        return
     bucket_spec = spec.cavebear_spec()
     partition_names = {f.name for f in bucket_spec.fields}
     data_schema = pa.schema([f for f in schema if f.name not in partition_names])
     cavebear.create_delta(uri, data_schema, bucket_spec)
 
 
+def _create_bucket_lakes(
+    first_batch: pa.RecordBatch,
+    output_specs: list[DeltaLakeOutputSpec],
+    output_uri_base: str,
+    geometry_columns: list[str],
+) -> None:
+    """Create the lake of every ``bucket`` spec, from the first streamed batch.
+
+    The schema is that of the decoded batch, as :func:`_flush_buffer` writes it, so
+    the flushes that follow only append.
+    """
+    bucket_specs = [s for s in output_specs if s.partition_strategy == "bucket"]
+    if not bucket_specs:
+        return
+    schema = _decode_geometry_batch(first_batch.slice(0, 1), geometry_columns).schema
+    for spec in bucket_specs:
+        _create_bucket_lake(f"{output_uri_base}/{spec.name}", schema, spec)
 
 
 _malloc_trim = None
@@ -1681,8 +1698,6 @@ def _flush_buffer(
                 ]
             )
             del derived
-            if spec.partition_strategy == "bucket":
-                _create_bucket_lake(uri, table.schema, spec)
             try:
                 _write_partitioned_in_groups(table, uri, part_col, values)
             finally:
@@ -1771,12 +1786,21 @@ def export_table_to_deltalake(
     buffer_bytes = 0
     rows_processed = 0
 
-    for batch in stream_table_to_arrow(
-        connection_string,
-        source,
-        row_limit=row_limit,
-        drop_columns=_DEFAULT_DROP_COLUMNS,
-    ):
+    batches = iter(
+        stream_table_to_arrow(
+            connection_string,
+            source,
+            row_limit=row_limit,
+            drop_columns=_DEFAULT_DROP_COLUMNS,
+        )
+    )
+    # Bucket lakes are created once, from the first batch, before any flush.
+    first = next(batches, None)
+    if first is not None:
+        _create_bucket_lakes(first, output_specs, output_uri_base, geometry_columns)
+        batches = itertools.chain([first], batches)
+
+    for batch in batches:
         buffer.append(batch)
         buffer_bytes += batch.nbytes
         rows_processed += batch.num_rows
@@ -2038,10 +2062,8 @@ def _repartition_view_spec_from_lake(
         bounds = spec.bounds
 
     partition_col = f"{spec.partition_by}_partition"
-    dataset = DeltaTable(base_uri).to_pyarrow_dataset()
-    for batch in dataset.to_batches():
-        if batch.num_rows == 0:
-            continue
+
+    def partitioned(batch: pa.RecordBatch) -> pa.Table:
         df = pl.from_arrow(batch)
         if spec.source_geometry_column is not None:
             df = add_morton_column(df, spec.source_geometry_column)
@@ -2049,9 +2071,18 @@ def _repartition_view_spec_from_lake(
             table = df.to_arrow()
             for name, array in bucket_spec.partition_arrays(table).items():
                 table = table.append_column(name, array)
-            _create_bucket_lake(out_uri, table.schema, spec)
-        else:
-            table = assign_partition(df, spec.partition_by, bounds or []).to_arrow()
+            return table
+        return assign_partition(df, spec.partition_by, bounds or []).to_arrow()
+
+    dataset = DeltaTable(base_uri).to_pyarrow_dataset()
+    tables = (partitioned(b) for b in dataset.to_batches() if b.num_rows)
+    if bucket_spec is not None:
+        # Created once, from the first batch, before any write.
+        first = next(tables, None)
+        if first is not None:
+            _create_bucket_lake(out_uri, first.schema, spec)
+            tables = itertools.chain([first], tables)
+    for table in tables:
         write_deltalake(
             out_uri,
             table,
