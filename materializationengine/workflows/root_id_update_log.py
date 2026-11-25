@@ -21,6 +21,9 @@ every lookup in the run used, shared by every table updated in that run. It is t
 carries its run's window, start_time_stamp (the previous run's lookup time) and end_time_stamp
 (this run's); repeated within a file they cost almost nothing (about 0.1% of the data), and the
 log's per-file min/max of them let any Delta reader skip whole runs without the manifest.
+The Delta log keeps these min/max truncated to milliseconds, so a reader must widen the max
+before it skips a file: deltalake, DuckDB and polars >= 2.1 do. Older polars returns no rows
+for a filter such as end_time_stamp == T.
 
 Each run's rows are sorted by (root_column, id), with id delta-encoded and row groups of
 ROW_GROUP_ROWS, so a reader fetches only the row groups and columns a query needs. Moving a

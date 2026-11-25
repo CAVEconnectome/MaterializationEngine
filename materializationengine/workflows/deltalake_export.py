@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import os
@@ -7,7 +8,7 @@ import re
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -16,6 +17,7 @@ import numpy as np
 import polars as pl
 import pyarrow as pa
 import shapely
+from cavebear import IcebergBucket, PartitionSpec
 
 # Importing geoalchemy2 registers the PostGIS ``geometry`` type in the shared
 # ``PGDialect.ischema_names`` map, so SQLAlchemy's inspector recognizes geometry
@@ -34,7 +36,7 @@ import shapely
 # is ADBC, which streams geometry as WKB bytes regardless of SQLAlchemy types.
 import geoalchemy2  # noqa: F401
 from celery.utils.log import get_task_logger
-from sqlalchemy import inspect, text
+from sqlalchemy import Integer, inspect, text
 from sqlalchemy.engine import Engine
 
 from materializationengine.celery_init import celery
@@ -80,7 +82,7 @@ class TableSource:
 class DeltaLakeOutputSpec:
     name: str
     partition_by: str | None = None
-    partition_strategy: Literal["percentile_range", "uniform_range", "hash"] | None = (
+    partition_strategy: Literal["percentile_range", "uniform_range", "bucket"] | None = (
         None
     )
     n_partitions: int | Literal["auto"] = "auto"
@@ -98,10 +100,47 @@ class DeltaLakeOutputSpec:
     def __post_init__(self):
         if not self.name:
             raise ValueError("DeltaLakeOutputSpec.name must be a non-empty string")
+        if self.partition_strategy == "hash":
+            raise ValueError(
+                'partition_strategy "hash" was removed: use "bucket" '
+                "(the Iceberg bucket hash, with a power-of-two n_partitions)"
+            )
+        if self.partition_strategy == "bucket":
+            if self.partition_by is None:
+                raise ValueError(
+                    f"output spec {self.name!r}: a bucket spec needs partition_by"
+                )
+            if self.source_geometry_column is not None:
+                raise ValueError(
+                    f"output spec {self.name!r}: a Morton column cannot use bucket; "
+                    "use uniform_range"
+                )
+            if self.n_partitions not in ("auto", None):
+                try:
+                    IcebergBucket(self.n_partitions)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"output spec {self.name!r}: bucket n_partitions must be "
+                        f'"auto" or a power of two in [1, 2**30], got {self.n_partitions!r}'
+                    ) from exc
         if self.max_row_group_size is not None:
             if isinstance(self.max_row_group_size, bool) or not isinstance(self.max_row_group_size, int) \
                     or self.max_row_group_size < 1:
                 raise ValueError("DeltaLakeOutputSpec.max_row_group_size must be a positive integer")
+
+    def cavebear_spec(self) -> PartitionSpec | None:
+        """The cavebear partition spec of a ``bucket`` spec, or ``None`` for other strategies.
+
+        The spec has one field, ``{partition_by}_partition``, because an output spec
+        has one partition column. ``n_partitions`` must be resolved first.
+        """
+        if self.partition_strategy != "bucket":
+            return None
+        if not isinstance(self.n_partitions, int):
+            raise ValueError(
+                f"output spec {self.name!r}: resolve n_partitions before writing"
+            )
+        return PartitionSpec({self.partition_by: IcebergBucket(self.n_partitions)})
 
 
 def apply_default_row_group_size(specs: list[DeltaLakeOutputSpec], default: int | None) -> None:
@@ -290,7 +329,10 @@ def discover_default_output_specs(
     without an unnecessary JOIN.
 
     For non-spatial (B-tree) indexes, each indexed column becomes the
-    partition column and z-order column.  For spatial (GiST) indexes,
+    partition column and z-order column.  The primary key and the B-tree
+    columns use the ``bucket`` strategy if they have an integer type (IDs,
+    root IDs, supervoxel IDs), and ``percentile_range`` otherwise, because the
+    Iceberg bucket hash accepts only integers.  For spatial (GiST) indexes,
     at most **one** column is selected using the prefix priority
     ``ctr > post > pre > pt > bb``.  The chosen column is partitioned
     on a Morton code derived from its decoded coordinates, with z-ordering
@@ -306,6 +348,7 @@ def discover_default_output_specs(
         "TIMESTAMPTZ",
     }
     timestamp_columns: set[str] = set()
+    integer_columns: set[str] = set()
     # List of (index_dict, owning_table_name) tuples.
     indexed_entries: list[tuple[dict, str]] = []
 
@@ -319,6 +362,11 @@ def discover_default_output_specs(
                 continue
             if type_str in _timestamp_types:
                 timestamp_columns.add(c["name"])
+            if isinstance(c["type"], Integer):
+                integer_columns.add(c["name"])
+
+    def id_strategy(column: str) -> str:
+        return "bucket" if column in integer_columns else "percentile_range"
 
     specs: list[DeltaLakeOutputSpec] = []
 
@@ -333,7 +381,7 @@ def discover_default_output_specs(
             DeltaLakeOutputSpec(
                 name=pk_col,
                 partition_by=pk_col,
-                partition_strategy="percentile_range",
+                partition_strategy=id_strategy(pk_col),
                 n_partitions="auto",
                 zorder_columns=[pk_col],
                 bloom_filter_columns=[],
@@ -363,7 +411,7 @@ def discover_default_output_specs(
                 DeltaLakeOutputSpec(
                     name=col,
                     partition_by=col,
-                    partition_strategy="percentile_range",
+                    partition_strategy=id_strategy(col),
                     n_partitions="auto",
                     zorder_columns=[col],
                     bloom_filter_columns=[],
@@ -410,8 +458,10 @@ def discover_view_output_specs(
     In addition to ``flat``, columns are inspected to give views the same
     partition quality tables get:
 
-    * If the view has an ``id`` column → a ``percentile_range`` spec on ``id``
-      (mirrors the PK spec emitted for tables).
+    * If the view has an ``id`` column → a ``bucket`` spec on ``id``
+      (mirrors the PK spec emitted for tables).  The view gives no column
+      types here, so ``id`` is taken to be an integer; the write fails with a
+      clear error if it is not.
     * Among PostGIS geometry columns, at most **one** is selected by the prefix
       priority ``ctr > post > pre > pt > bb`` and partitioned on its Morton code
       (``uniform_range``), exactly as the table spatial branch does — so the
@@ -429,7 +479,7 @@ def discover_view_output_specs(
             DeltaLakeOutputSpec(
                 name="id",
                 partition_by="id",
-                partition_strategy="percentile_range",
+                partition_strategy="bucket",
                 n_partitions="auto",
                 zorder_columns=["id"],
                 bloom_filter_columns=[],
@@ -494,11 +544,14 @@ def resolve_n_partitions(
     row_count: int,
     target_file_size_mb: int = 256,
     bytes_per_row: int = _DEFAULT_BYTES_PER_ROW,
+    partition_strategy: str | None = None,
 ) -> int:
     """Return a concrete partition count.
 
     When *n_partitions* is ``"auto"``, compute from *row_count* and the
     target file size heuristic.  Otherwise pass through the explicit value.
+    For the ``bucket`` strategy, an ``"auto"`` count is rounded up to a power
+    of two (``IcebergBucket.round_up``).
 
     For a table-specific estimate of *bytes_per_row*, call
     :func:`estimate_bytes_per_row` and pass the result here.
@@ -509,6 +562,8 @@ def resolve_n_partitions(
     target_bytes = target_file_size_mb * 1024 * 1024
     estimated_total_bytes = row_count * bytes_per_row
     n = max(1, math.ceil(estimated_total_bytes / target_bytes))
+    if partition_strategy == "bucket":
+        n = IcebergBucket.round_up(n)
     return n
 
 
@@ -765,7 +820,7 @@ def resolve_bounds(
       optional sampling (list of N-1 breakpoints stored directly).
     * ``uniform_range`` → :func:`compute_uniform_range_bounds` followed
       by ``np.linspace`` to produce the same N-1 interior breakpoints.
-    * ``hash`` / ``None`` → no-op (hash partitioning doesn't use bounds).
+    * ``bucket`` / ``None`` → no-op (bucket partitioning doesn't use bounds).
 
     If ``spec.bounds`` is already non-``None`` (user-supplied), this
     function is a no-op regardless of strategy.
@@ -778,7 +833,7 @@ def resolve_bounds(
     """
     if spec.bounds is not None:
         return
-    if spec.partition_by is None or spec.partition_strategy in (None, "hash"):
+    if spec.partition_by is None or spec.partition_strategy in (None, "bucket"):
         return
 
     boundary_table = spec.source_table or table_name
@@ -830,7 +885,7 @@ def resolve_all_bounds(
     for spec in specs:
         if spec.bounds is not None:
             continue
-        if spec.partition_by is None or spec.partition_strategy in (None, "hash"):
+        if spec.partition_by is None or spec.partition_strategy in (None, "bucket"):
             continue
         if spec.partition_strategy == "percentile_range":
             table = spec.source_table or default_table
@@ -885,24 +940,6 @@ def assign_partition(
     return table.with_columns(
         partition_series.cast(pl.Utf8).cast(pl.Int32).alias(partition_col)
     )
-
-
-def assign_hash_partition(
-    table: pl.DataFrame,
-    column_name: str,
-    n_partitions: int,
-) -> pl.DataFrame:
-    """Add a ``{column_name}_partition`` column using hash partitioning.
-
-    ``hash(value) % n_partitions`` distributes rows across partitions.
-    """
-    partition_col = f"{column_name}_partition"
-
-    if n_partitions <= 1:
-        return table.with_columns(pl.lit(0).cast(pl.Int32).alias(partition_col))
-
-    partition_expr = (pl.col(column_name).hash() % n_partitions).cast(pl.Int32)
-    return table.with_columns(partition_expr.alias(partition_col))
 
 
 def stream_table_to_arrow(
@@ -1379,7 +1416,17 @@ def _spec_derived_columns(
 
     Returns only the *new* columns rather than a rebuilt batch, so the caller can
     attach them to the decoded batches without copying the batches themselves.
+    A ``bucket`` spec gets its partition column from cavebear, straight from the
+    Arrow batch. A bucket spec has no Morton column (``DeltaLakeOutputSpec``
+    rejects that), so its source column is always in the batch.
     """
+    bucket_spec = spec.cavebear_spec()
+    if bucket_spec is not None:
+        return [
+            (name, _as_array(array))
+            for name, array in bucket_spec.partition_arrays(batch).items()
+        ]
+
     needs_morton = spec.source_geometry_column is not None
     needs_partition = (
         spec.partition_by is not None and spec.partition_strategy is not None
@@ -1407,10 +1454,6 @@ def _spec_derived_columns(
                 )
             else:
                 frame = assign_partition(frame, part_col, spec.bounds)
-            added.append(f"{part_col}_partition")
-        elif spec.partition_strategy == "hash":
-            n = spec.n_partitions if isinstance(spec.n_partitions, int) else 1
-            frame = assign_hash_partition(frame, part_col, n)
             added.append(f"{part_col}_partition")
 
     table = frame.select(added).to_arrow().combine_chunks()
@@ -1499,11 +1542,49 @@ def _spec_partition_by(spec: "DeltaLakeOutputSpec") -> list[str] | None:
     """The ``partition_by`` argument for this spec's ``write_deltalake`` call."""
     if spec.partition_by is None or spec.partition_strategy is None:
         return None
-    if spec.bounds is not None or spec.partition_strategy == "hash":
+    bucket_spec = spec.cavebear_spec()
+    if bucket_spec is not None:
+        return [f.name for f in bucket_spec.fields]
+    if spec.bounds is not None:
         return [f"{spec.partition_by}_partition"]
     return None
 
 
+def _create_bucket_lake(uri: str, schema: pa.Schema, spec: DeltaLakeOutputSpec) -> None:
+    """Create the empty Delta Lake of a ``bucket`` spec. Call it once, before any write.
+
+    The partition spec lives in the custom table property ``cave.partition_spec``.
+    A plain ``write_deltalake`` cannot set a custom property, so
+    ``cavebear.create_delta`` makes the table with it, and every write after that
+    only appends. *schema* is the schema of the written data; partition columns of
+    the spec in it are left out, because ``create_delta`` adds them. It fails if a
+    table exists at *uri*: an export never appends to a table it did not create.
+    """
+    import cavebear
+
+    bucket_spec = spec.cavebear_spec()
+    partition_names = {f.name for f in bucket_spec.fields}
+    data_schema = pa.schema([f for f in schema if f.name not in partition_names])
+    cavebear.create_delta(uri, data_schema, bucket_spec)
+
+
+def _create_bucket_lakes(
+    first_batch: pa.RecordBatch,
+    output_specs: list[DeltaLakeOutputSpec],
+    output_uri_base: str,
+    geometry_columns: list[str],
+) -> None:
+    """Create the lake of every ``bucket`` spec, from the first streamed batch.
+
+    The schema is that of the decoded batch, as :func:`_flush_buffer` writes it, so
+    the flushes that follow only append.
+    """
+    bucket_specs = [s for s in output_specs if s.partition_strategy == "bucket"]
+    if not bucket_specs:
+        return
+    schema = _decode_geometry_batch(first_batch.slice(0, 1), geometry_columns).schema
+    for spec in bucket_specs:
+        _create_bucket_lake(f"{output_uri_base}/{spec.name}", schema, spec)
 
 
 _malloc_trim = None
@@ -1705,12 +1786,21 @@ def export_table_to_deltalake(
     buffer_bytes = 0
     rows_processed = 0
 
-    for batch in stream_table_to_arrow(
-        connection_string,
-        source,
-        row_limit=row_limit,
-        drop_columns=_DEFAULT_DROP_COLUMNS,
-    ):
+    batches = iter(
+        stream_table_to_arrow(
+            connection_string,
+            source,
+            row_limit=row_limit,
+            drop_columns=_DEFAULT_DROP_COLUMNS,
+        )
+    )
+    # Bucket lakes are created once, from the first batch, before any flush.
+    first = next(batches, None)
+    if first is not None:
+        _create_bucket_lakes(first, output_specs, output_uri_base, geometry_columns)
+        batches = itertools.chain([first], batches)
+
+    for batch in batches:
         buffer.append(batch)
         buffer_bytes += batch.nbytes
         rows_processed += batch.num_rows
@@ -1957,7 +2047,12 @@ def _repartition_view_spec_from_lake(
             row_count,
             target_file_size_mb=effective_target,
             bytes_per_row=bytes_per_row,
+            partition_strategy=spec.partition_strategy,
         )
+    bucket_spec = None
+    if spec.partition_strategy == "bucket":
+        spec = replace(spec, n_partitions=n)
+        bucket_spec = spec.cavebear_spec()
 
     if spec.partition_strategy == "percentile_range":
         bounds = _percentile_bounds_from_lake(base_uri, spec.partition_by, n)
@@ -1967,20 +2062,30 @@ def _repartition_view_spec_from_lake(
         bounds = spec.bounds
 
     partition_col = f"{spec.partition_by}_partition"
-    dataset = DeltaTable(base_uri).to_pyarrow_dataset()
-    for batch in dataset.to_batches():
-        if batch.num_rows == 0:
-            continue
+
+    def partitioned(batch: pa.RecordBatch) -> pa.Table:
         df = pl.from_arrow(batch)
         if spec.source_geometry_column is not None:
             df = add_morton_column(df, spec.source_geometry_column)
-        if spec.partition_strategy == "hash":
-            df = assign_hash_partition(df, spec.partition_by, n if isinstance(n, int) else 1)
-        else:
-            df = assign_partition(df, spec.partition_by, bounds or [])
+        if bucket_spec is not None:
+            table = df.to_arrow()
+            for name, array in bucket_spec.partition_arrays(table).items():
+                table = table.append_column(name, array)
+            return table
+        return assign_partition(df, spec.partition_by, bounds or []).to_arrow()
+
+    dataset = DeltaTable(base_uri).to_pyarrow_dataset()
+    tables = (partitioned(b) for b in dataset.to_batches() if b.num_rows)
+    if bucket_spec is not None:
+        # Created once, from the first batch, before any write.
+        first = next(tables, None)
+        if first is not None:
+            _create_bucket_lake(out_uri, first.schema, spec)
+            tables = itertools.chain([first], tables)
+    for table in tables:
         write_deltalake(
             out_uri,
-            df.to_arrow(),
+            table,
             mode="append",
             partition_by=[partition_col],
         )
@@ -2850,6 +2955,7 @@ def run_deltalake_export(
                         row_count,
                         target_file_size_mb=effective_target,
                         bytes_per_row=bytes_per_row,
+                        partition_strategy=spec.partition_strategy,
                     )
 
             resolve_all_bounds(resolved_specs, connection_string, table_name)

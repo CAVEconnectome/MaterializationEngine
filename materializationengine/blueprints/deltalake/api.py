@@ -240,6 +240,7 @@ def discover_specs(datastack_name):
                     cached_data["row_count"],
                     target_file_size_mb=effective_target,
                     bytes_per_row=cached_data["bytes_per_row"],
+                    partition_strategy=spec.get("partition_strategy"),
                 )
         return jsonify(cached_data)
 
@@ -338,6 +339,7 @@ def discover_specs(datastack_name):
                     row_count,
                     target_file_size_mb=effective_target,
                     bytes_per_row=bytes_per_row,
+                    partition_strategy=spec.partition_strategy,
                 )
 
         from dataclasses import asdict
