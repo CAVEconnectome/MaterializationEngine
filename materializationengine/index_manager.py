@@ -42,14 +42,15 @@ class IndexCache:
                     "column_name": index["column_names"][0],
                     "index_name": index_name,
                 }
-                if dialect_options:
-                    if "gist" in dialect_options.values():
-                        indx_map.update(
-                            {
-                                "type": "spatial_index",
-                                "dialect_options": index.get("dialect_options"),
-                            }
-                        )
+                # SQLAlchemy 1.4 reports dialect_options for every index on PostgreSQL 11+
+                # ({"postgresql_include": []}), so look at the access method itself.
+                if dialect_options and dialect_options.get("postgresql_using") == "gist":
+                    indx_map.update(
+                        {
+                            "type": "spatial_index",
+                            "dialect_options": {"postgresql_using": "gist"},
+                        }
+                    )
                 else:
                     indx_map.update({"type": "index", "dialect_options": None})
 

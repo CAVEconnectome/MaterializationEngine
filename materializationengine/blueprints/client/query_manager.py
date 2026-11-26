@@ -14,7 +14,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.sql.selectable import Alias
 from sqlalchemy.sql.schema import Table
 from sqlalchemy.sql.expression import tablesample
-from sqlalchemy.ext.declarative.api import DeclarativeMeta
+from sqlalchemy.orm import DeclarativeMeta
 import datetime
 
 from materializationengine.blueprints.client.cache import get_cached_table_metadata, get_cached_view_metadata
@@ -568,6 +568,9 @@ class QueryManager:
         query_args = []
         column_names = {}
         for table_num, table_name in enumerate(self._selected_columns.keys()):
+            # vox_ratio holds numpy floats; they are converted with float() where they enter the SQL.
+            # SQLAlchemy 1.4 types a literal by its Python class, does not recognise numpy's, and
+            # so rendered the ratio with the integer cast's int(): 0.5 became 0.
             if desired_resolution is not None:
                 vox_ratio = self._voxel_resolutions[table_name] / np.array(
                     desired_resolution
@@ -602,7 +605,7 @@ class QueryManager:
                         ]
                         if vox_ratio is not None:
                             column_args = [
-                                c * r for c, r in zip(column_args, vox_ratio)
+                                c * float(r) for c, r in zip(column_args, vox_ratio)
                             ]
                         column_args = [
                             c.label(column.key + "{}_{}".format(suffix, xyz))
@@ -629,7 +632,7 @@ class QueryManager:
                         ]
                         if vox_ratio is not None:
                             column_args = [
-                                c * r for c, r in zip(column_args, vox_ratio)
+                                c * float(r) for c, r in zip(column_args, vox_ratio)
                             ]
                         column_args = [
                             c.label(column.key + s)

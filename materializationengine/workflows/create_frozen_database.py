@@ -42,7 +42,7 @@ from materializationengine.utils import (
     get_config_param,
 )
 from psycopg2 import sql
-from sqlalchemy import MetaData, create_engine, func
+from sqlalchemy import MetaData, create_engine, func, inspect
 from sqlalchemy.engine import reflection
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import OperationalError
@@ -255,7 +255,7 @@ def create_new_version(
     engine = db_manager.get_engine(aligned_volume)
 
     for table in table_objects:
-        if not engine.dialect.has_table(engine, table):
+        if not inspect(engine).has_table(table):
             Base.metadata.tables[table].create(bind=engine)
 
     with db_manager.session_scope(aligned_volume) as session:
@@ -471,7 +471,7 @@ def update_table_metadata(self, mat_info: List[dict]):
             version_id = (
                 session.query(AnalysisVersion.id)
                 .filter(AnalysisVersion.version == version)
-                .first()
+                .scalar()
             )
             analysis_table = AnalysisTable(
                 aligned_volume=aligned_volume,
@@ -960,7 +960,7 @@ def get_analysis_table(
     anno_schema = get_schema(schema_name)
     flat_schema = create_flattened_schema(anno_schema)
 
-    if not analysis_engine.dialect.has_table(analysis_engine, table_name):
+    if not inspect(analysis_engine).has_table(table_name):
         annotation_dict = create_table_dict(
             table_name=table_name,
             Schema=flat_schema,
