@@ -12,6 +12,7 @@ from flask import (
     request,
     url_for,
 )
+from sqlalchemy import inspect as sqlalchemy_inspect
 from middle_auth_client import auth_required, auth_requires_dataset_admin
 
 from materializationengine.config import as_bool
@@ -301,7 +302,7 @@ def discover_specs(datastack_name):
 
             # Detect segmentation table.
             seg_table_name = build_segmentation_table_name(table_name, pcg_table_name)
-            has_seg_table = engine.dialect.has_table(engine, seg_table_name)
+            has_seg_table = sqlalchemy_inspect(engine).has_table(seg_table_name)
             segmentation_table_name = seg_table_name if has_seg_table else None
 
             source = TableSource(

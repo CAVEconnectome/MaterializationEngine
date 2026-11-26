@@ -17,6 +17,7 @@ for _name in _MOCKED_MODULES:
 try:
     from materializationengine.workflows.ingest_new_annotations import (
         create_missing_segmentation_table,
+        find_ids_with_specified_roots,
         get_annotations_with_missing_supervoxel_ids,
         batch_missing_root_ids_query,
         find_missing_root_ids_workflow,
@@ -38,7 +39,10 @@ finally:
 
 import numpy as np
 from numpy import nan
+from sqlalchemy import text
 from sqlalchemy.orm import Query
+
+from materializationengine.database import db_manager
 
 
 missing_segmentation_data = {
@@ -342,6 +346,40 @@ class TestLookupMissingRootIds:
             mat_metadata, last_modified_time_stamp=None, last_updated_time_stamp=None
         )
         assert table_modified_since_last_update(metadata) is True
+
+
+class TestFindIdsWithSpecifiedRoots:
+    """fix_root_id_workflow runs each returned statement as text, so each has to be complete SQL.
+
+    SQLAlchemy 1.4 compiles an IN list to a placeholder it only expands when it executes the
+    statement itself, so a statement stringified without literal_binds held
+    "IN (__[POSTCOMPILE_pre_pt_root_id_1])", which PostgreSQL rejects.
+    """
+
+    def test_statements_run_and_select_the_rows_with_those_roots(self, test_app, mat_metadata):
+        table = mat_metadata["segmentation_table_name"]
+        engine = db_manager.get_engine(mat_metadata["aligned_volume"])
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(f"SELECT id, pre_pt_root_id, post_pt_root_id FROM {table} WHERE pre_pt_root_id IS NOT NULL")
+            ).fetchall()
+        assert rows, "the segmentation table has no rows with a root id"
+        absent = 1  # no row has this root: the IN list still holds more than one value
+        roots = [int(rows[0][1]), absent]
+
+        queries = find_ids_with_specified_roots(mat_metadata, roots)
+
+        statements = {column: sql for query in queries for column, sql in query.items()}
+        assert sorted(statements) == ["post_pt_root_id", "pre_pt_root_id"]
+        assert statements["pre_pt_root_id"].endswith(f"WHERE {table}.pre_pt_root_id IN ({roots[0]}, {absent})")
+        with engine.connect() as conn:
+            found = {
+                column: sorted(row[0] for row in conn.execute(text(sql)))
+                for column, sql in statements.items()
+            }
+        assert found["pre_pt_root_id"] == sorted(row[0] for row in rows if row[1] in roots)
+        assert found["pre_pt_root_id"], "the pre_pt_root_id statement matched nothing"
+        assert found["post_pt_root_id"] == sorted(row[0] for row in rows if row[2] in roots)
 
 
 MODULE = "materializationengine.workflows.ingest_new_annotations"

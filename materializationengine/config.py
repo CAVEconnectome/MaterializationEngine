@@ -262,7 +262,7 @@ class BaseConfig:
 class DevConfig(BaseConfig):
     ENV = "development"
     # DEBUG = True
-    SQLALCHEMY_DATABASE_URI = "postgres://postgres:materialize@db:5432/materialize"
+    SQLALCHEMY_DATABASE_URI = "postgresql://postgres:materialize@db:5432/materialize"
     REDIS_HOST = os.environ.get("REDIS_HOST")
     REDIS_PORT = os.environ.get("REDIS_PORT")
     REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD")

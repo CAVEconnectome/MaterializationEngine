@@ -2620,7 +2620,7 @@ def run_deltalake_export(
 
             # Detect segmentation table presence.
             seg_table_name = build_segmentation_table_name(table_name, pcg_table_name)
-            has_seg_table = engine.dialect.has_table(engine, seg_table_name)
+            has_seg_table = inspect(engine).has_table(seg_table_name)
             segmentation_table_name = seg_table_name if has_seg_table else None
 
         celery_logger.info(

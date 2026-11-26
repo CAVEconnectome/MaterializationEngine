@@ -440,13 +440,12 @@ def find_ids_with_specified_roots(mat_metadata: dict, specific_root_ids=List[int
                 getattr(SegmentationModel, root_id_column).in_(specific_root_ids)
             )
 
-            compiled_statement = query_columns.statement.compile(engine)
-            params = compiled_statement.params
-            sql_str_with_params = str(compiled_statement).replace("\n", "")
-            for key, value in params.items():
-                sql_str_with_params = sql_str_with_params.replace(f"%({key})s", str(value))
-
-            root_id_queries.append({f"{root_id_column}": sql_str_with_params})
+            # literal_binds, not substituting compiled.params by hand: SQLAlchemy 1.4 compiles an
+            # IN list to a placeholder that it only expands when it executes the statement itself.
+            compiled_statement = query_columns.statement.compile(
+                engine, compile_kwargs={"literal_binds": True}
+            )
+            root_id_queries.append({f"{root_id_column}": str(compiled_statement).replace("\n", "")})
 
         return root_id_queries
 

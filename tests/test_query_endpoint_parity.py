@@ -89,3 +89,44 @@ class TestQueryEndpointParity:
             assert new.headers.get_all(h) == old.headers.get_all(h), h
         if name not in ("no rows",):
             assert len(new_df) > 0
+
+
+# The test table's voxel resolution is [4, 4, 40] (tests/test_data/mat_metadata.json). Positions come
+# back multiplied by table resolution / desired resolution.
+DESIRED_RESOLUTIONS = {
+    "half": ([8, 8, 80], 0.5),
+    "non-integer ratio": ([1.6, 1.6, 16], 2.5),
+    "whole ratio": ([1, 1, 10], 4),
+}
+
+
+class TestQueryDesiredResolution:
+    """desired_resolution scales positions by a ratio that need not be a whole number.
+
+    QueryManager multiplies an integer cast (ST_X(...)::integer) by the ratio and renders it into the
+    SQL as a literal. SQLAlchemy 1.4 renders a literal compared against an integer expression with
+    int(), unless its Python type says otherwise, so a numpy float 0.5 became 0 and 2.5 became 2:
+    the response was still 200, with wrong positions. TestQueryEndpointParity cannot see that, since
+    both of its fetch paths run the same SQL.
+    """
+
+    @pytest.mark.parametrize("use_adbc", [True, False], ids=["adbc", "read_sql"])
+    @pytest.mark.parametrize("name", list(DESIRED_RESOLUTIONS))
+    def test_positions_are_scaled_by_the_resolution_ratio(self, api, use_adbc, name):
+        desired_resolution, ratio = DESIRED_RESOLUTIONS[name]
+        _, native = decode(post(api, use_adbc, {}, {}))
+        response = post(api, use_adbc, {}, {"desired_resolution": desired_resolution})
+        _, scaled = decode(response)
+
+        native = native.sort_values("id").reset_index(drop=True)
+        scaled = scaled.sort_values("id").reset_index(drop=True)
+        assert len(native) > 0 and scaled["id"].tolist() == native["id"].tolist()
+        reported = ",".join(response.headers.get_all("dataframe_resolution")).split(",")
+        assert [float(r) for r in reported] == [float(r) for r in desired_resolution]
+
+        position_columns = [c for c in native.columns if c.endswith(("_position_x", "_position_y", "_position_z"))]
+        assert len(position_columns) == 9, position_columns
+        for column in position_columns:
+            assert (native[column] != 0).all(), f"{column}: a zero position cannot show the scaling"
+            expected = (native[column].astype(float) * ratio).tolist()
+            assert scaled[column].astype(float).tolist() == expected, column

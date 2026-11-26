@@ -1,5 +1,5 @@
 {
-    "postgis_docker_image": "postgis/postgis:13-master",
+    "postgis_docker_image": "postgis/postgis:18-3.6",
     "aligned_volume": "test_aligned_volume",
     "db_host": "127.0.0.1",
     "datastack": "test_aligned_volume",
