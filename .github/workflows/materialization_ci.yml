@@ -36,6 +36,12 @@ jobs:
         ports:
           - 5432:5432
         options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+      # The tests that need a real redis look for it on localhost:6390 and skip without it.
+      redis:
+        image: redis:7
+        ports:
+          - 6390:6379
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
